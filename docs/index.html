@@ -301,7 +301,7 @@
     <nav class="nav">
         <a href="#install">Install</a>
         <a href="#quickstart">Quickstart</a>
-        <a href="#world">World</a>
+        <a href="#world">Client</a>
         <a href="#sandbox">Sandbox</a>
         <a href="#types">Types</a>
     </nav>
@@ -315,25 +315,25 @@
         <section id="install">
             <h2>Installation</h2>
             <div class="install-box">
-                <code>npm install worlds</code>
+                <code>npm install opensandbox</code>
             </div>
             <p>Or link locally during development:</p>
-<pre><code><span class="comment"># In the worlds repo</span>
+<pre><code><span class="comment"># In the opensandbox repo</span>
 npm link
 
 <span class="comment"># In your project</span>
-npm link worlds</code></pre>
+npm link opensandbox</code></pre>
         </section>
 
         <section id="quickstart">
             <h2>Quickstart</h2>
-<pre><code><span class="keyword">import</span> { World } <span class="keyword">from</span> <span class="string">"worlds"</span>
+<pre><code><span class="keyword">import</span> { Client } <span class="keyword">from</span> <span class="string">"opensandbox"</span>
 
 <span class="comment">// Initialize with your API key</span>
-<span class="keyword">const</span> world = <span class="keyword">new</span> <span class="function">World</span>(<span class="string">"ws_your_api_key"</span>)
+<span class="keyword">const</span> client = <span class="keyword">new</span> <span class="function">Client</span>(<span class="string">"ws_your_api_key"</span>)
 
 <span class="comment">// Create a sandbox VM</span>
-<span class="keyword">const</span> result = <span class="keyword">await</span> world.<span class="function">create</span>(<span class="string">"my-sandbox"</span>)
+<span class="keyword">const</span> result = <span class="keyword">await</span> client.<span class="function">create</span>(<span class="string">"my-sandbox"</span>)
 <span class="keyword">if</span> (!result.success) <span class="keyword">throw new</span> <span class="function">Error</span>(result.error)
 
 <span class="keyword">const</span> { sandbox } = result
@@ -358,13 +358,13 @@ npm link worlds</code></pre>
         <div class="divider"></div>
 
         <section id="world">
-            <h2>World</h2>
+            <h2>Client</h2>
             <p>The main entry point. Manages sandbox VMs.</p>
 
-            <h3>new World(api_key, base_url?)</h3>
+            <h3>new Client(api_key, base_url?)</h3>
             <div class="method-card">
                 <div class="method-sig">constructor(api_key: string, base_url?: string)</div>
-                <div class="method-desc">Create a new World client.</div>
+                <div class="method-desc">Create a new client.</div>
                 <div class="params">
                     <div class="param">
                         <span class="param-name">api_key</span>
@@ -379,7 +379,7 @@ npm link worlds</code></pre>
                 </div>
             </div>
 
-            <h3>world.create(name)</h3>
+            <h3>client.create(name)</h3>
             <div class="method-card">
                 <div class="method-sig">async create(name: string): Promise&lt;CreateResult&gt;</div>
                 <div class="method-desc">Create a new sandbox VM.</div>
@@ -397,7 +397,7 @@ npm link worlds</code></pre>
                 </div>
             </div>
 
-            <h3>world.list()</h3>
+            <h3>client.list()</h3>
             <div class="method-card">
                 <div class="method-sig">async list(): Promise&lt;ListResult&gt;</div>
                 <div class="method-desc">List all sandbox VMs.</div>
@@ -408,7 +408,7 @@ npm link worlds</code></pre>
                 </div>
             </div>
 
-            <h3>world.sandbox(name)</h3>
+            <h3>client.sandbox(name)</h3>
             <div class="method-card">
                 <div class="method-sig">sandbox(name: string): Sandbox</div>
                 <div class="method-desc">Get a reference to an existing sandbox by name.</div>
