@@ -1,0 +1,113 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sand-glow: rgba(213, 143, 74, 0.4);
+  --obsidian-deep: #0a0a0a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', monospace;
+  background: var(--obsidian-deep);
+  color: #e5e5e5;
+  margin: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #171717;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #404040;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #525252;
+}
+
+/* Background pattern - subtle grid */
+.bg-grid-pattern {
+  background-image: 
+    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+/* Gradient text */
+.text-gradient {
+  background: linear-gradient(135deg, #d58f4a 0%, #f2dcc3 50%, #d58f4a 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glow effects */
+.glow-sand {
+  box-shadow: 0 0 30px rgba(213, 143, 74, 0.2), 0 0 60px rgba(213, 143, 74, 0.1);
+}
+
+.glow-sand-hover:hover {
+  box-shadow: 0 0 40px rgba(213, 143, 74, 0.3), 0 0 80px rgba(213, 143, 74, 0.15);
+}
+
+/* Card glass effect */
+.glass-card {
+  background: rgba(23, 23, 23, 0.8);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(64, 64, 64, 0.5);
+}
+
+/* Button styles */
+.btn-primary {
+  @apply px-6 py-3 bg-white text-black font-mono font-medium rounded transition-all duration-200;
+  @apply hover:bg-neutral-200;
+  @apply active:scale-[0.98];
+}
+
+.btn-secondary {
+  @apply px-6 py-3 bg-transparent text-neutral-300 font-mono font-medium rounded border border-neutral-700 transition-all duration-200;
+  @apply hover:bg-neutral-800 hover:border-neutral-600;
+  @apply active:scale-[0.98];
+}
+
+/* Input styles */
+.input-field {
+  @apply w-full px-4 py-3 bg-neutral-900 border border-neutral-700 rounded text-neutral-100 placeholder-neutral-500 font-mono;
+  @apply focus:outline-none focus:border-neutral-500 focus:ring-1 focus:ring-neutral-500 transition-all duration-200;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-out forwards;
+}
+
+.animate-fadeIn-delay-1 { animation-delay: 0.1s; opacity: 0; }
+.animate-fadeIn-delay-2 { animation-delay: 0.2s; opacity: 0; }
+.animate-fadeIn-delay-3 { animation-delay: 0.3s; opacity: 0; }
+.animate-fadeIn-delay-4 { animation-delay: 0.4s; opacity: 0; }
+
+/* Selection */
+::selection {
+  background: rgba(255, 255, 255, 0.15);
+}
