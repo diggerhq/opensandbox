@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useAuth } from '@workos-inc/authkit-react'
-import { ArrowRight, Copy, Check, Github } from 'lucide-react'
+import { Copy, Check, Github } from 'lucide-react'
 import { useState } from 'react'
 
 export const Route = createFileRoute('/')({
@@ -46,10 +46,10 @@ function LandingPage() {
               <Github className="w-4 h-4" />
               GitHub
             </a>
-            <a href="#" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
+            <a href="https://docs.opensandbox.dev" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
               Docs
             </a>
-            <a href="#" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
+            <a href="/pricing" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
               Pricing
             </a>
             {isLoading ? (

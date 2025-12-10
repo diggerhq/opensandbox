@@ -5,8 +5,6 @@ import {
   Copy, 
   Check,
   Trash2,
-  Eye,
-  EyeOff,
   Key
 } from 'lucide-react'
 
