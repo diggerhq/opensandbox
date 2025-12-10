@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: World Service API
+  title: OpenSandbox Service API
   description: On-demand sandbox VMs with instant filesystem snapshots
   version: 1.0.0
 

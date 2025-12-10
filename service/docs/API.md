@@ -1,8 +1,8 @@
-# World Service API Documentation
+# OpenSandbox Service API Documentation
 
 ## Overview
 
-World Service provides on-demand sandbox VMs with instant filesystem snapshots. Authentication is service-level — one API key for all operations.
+OpenSandbox Service provides on-demand sandbox VMs with instant filesystem snapshots. Authentication is service-level — one API key for all operations.
 
 **Base URL:** `http://localhost:4000`
 

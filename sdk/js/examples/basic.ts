@@ -6,10 +6,10 @@
 
 import { Client } from "../src/index.js"
 
-const API_KEY = process.env.WORLDS_API_KEY ?? "ws_test_key";
+const API_KEY = process.env.OPENSANDBOX_API_KEY ?? "ws_test_key";
 
 async function main() {
-    console.log("🌍 Worlds SDK - Basic Test\n");
+    console.log("🌍 OpenSandbox SDK - Basic Test\n");
     
     const client = new Client(API_KEY);
 

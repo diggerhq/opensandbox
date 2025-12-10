@@ -1,4 +1,4 @@
-# World Service - Sandbox VM Manager
+# OpenSandbox Service
 
 Multi-runtime sandbox orchestrator with instant Btrfs snapshots.
 
