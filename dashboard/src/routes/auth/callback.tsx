@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useAuth } from '@workos-inc/authkit-react'
 import { useEffect, useState } from 'react'
 
@@ -9,6 +9,7 @@ export const Route = createFileRoute('/auth/callback')({
 function AuthCallback() {
   const { user, isLoading } = useAuth()
   const [error, setError] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   useEffect(() => {
     // Check for error in URL
@@ -21,9 +22,13 @@ function AuthCallback() {
       return
     }
 
-    // If we have a user, redirect to dashboard
+    // If we have a user, redirect to dashboard using client-side navigation
+    // This preserves the session state without a full page reload
     if (!isLoading && user) {
-      window.location.href = '/dashboard'
+      // Small delay to ensure session is fully saved
+      setTimeout(() => {
+        navigate({ to: '/dashboard' })
+      }, 100)
       return
     }
 
@@ -32,11 +37,11 @@ function AuthCallback() {
       const code = params.get('code')
       if (!code) {
         setTimeout(() => {
-          window.location.href = '/'
+          navigate({ to: '/' })
         }, 2000)
       }
     }
-  }, [user, isLoading])
+  }, [user, isLoading, navigate])
 
   if (error) {
     return (
