@@ -31,3 +31,6 @@ dist-ssr
 # TanStack Router generated files
 src/routeTree.gen.ts
 
+# TypeScript build info
+tsconfig.tsbuildinfo
+*.tsbuildinfo
