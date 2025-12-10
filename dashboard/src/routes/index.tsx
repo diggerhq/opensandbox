@@ -46,7 +46,7 @@ function LandingPage() {
               <Github className="w-4 h-4" />
               GitHub
             </a>
-            <a href="https://docs.opensandbox.dev" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
+            <a href="https://docs.opensandbox.ai" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
               Docs
             </a>
             <a href="/pricing" className="text-neutral-400 hover:text-white transition-colors font-mono text-sm">
