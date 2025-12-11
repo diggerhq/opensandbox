@@ -1,15 +1,15 @@
 import Sandbox from "./sandbox.js"
-import type { CreateVMResponse } from "./types.js"
+import type { CreateVMResponse, SnapshotsResult, VMInfo } from "./types.js"
 
 type CreateResult = 
     | { success: true; sandbox: Sandbox }
     | { success: false; error: string };
 
 type ListResult =
-    | { success: true; vms: Array<{ name: string; status: string }> }
+    | { success: true; vms: VMInfo[] }
     | { success: false; error: string };
 
-class World {
+class Client {
     constructor(
         private readonly api_key: string,
         private readonly base_url: string = "http://localhost:4000"
@@ -22,6 +22,31 @@ class World {
         };
     }
 
+    /**
+     * List all snapshots across all VMs for the current user.
+     */
+    async snapshots(): Promise<SnapshotsResult> {
+        try {
+            const response = await fetch(`${this.base_url}/snapshots`, {
+                method: "GET",
+                headers: this.headers,
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                return { success: false, error: data.error ?? `HTTP ${response.status}` };
+            }
+
+            const data = await response.json();
+            return { success: true, snapshots: data.snapshots };
+        } catch (err) {
+            return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
+        }
+    }
+
+    /**
+     * Create a new sandbox VM.
+     */
     async create(name: string): Promise<CreateResult> {
         try {
             const response = await fetch(`${this.base_url}/vms`, {
@@ -44,6 +69,9 @@ class World {
         }
     }
 
+    /**
+     * List all VMs for the current user.
+     */
     async list(): Promise<ListResult> {
         try {
             const response = await fetch(`${this.base_url}/vms`, {
@@ -63,9 +91,12 @@ class World {
         }
     }
 
+    /**
+     * Get a reference to an existing sandbox by name.
+     */
     sandbox(name: string): Sandbox {
         return new Sandbox(name, this.api_key, this.base_url);
     }
 }
 
-export default World
+export default Client

@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenSandbox SDK</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0b;
+            --surface: #141417;
+            --surface-2: #1c1c21;
+            --border: #2a2a32;
+            --text: #e4e4e7;
+            --text-muted: #71717a;
+            --accent: #22d3ee;
+            --accent-dim: #0e7490;
+            --green: #4ade80;
+            --red: #f87171;
+            --yellow: #fbbf24;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 4rem 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 4rem;
+            position: relative;
+        }
+
+        header::before {
+            content: '';
+            position: absolute;
+            top: -100px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 600px;
+            height: 400px;
+            background: radial-gradient(ellipse at center, rgba(34, 211, 238, 0.08) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            font-weight: 700;
+            letter-spacing: -0.03em;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(135deg, var(--text) 0%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .tagline {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 3rem 0 1.5rem;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        h2::before {
+            content: '';
+            width: 4px;
+            height: 1.5rem;
+            background: var(--accent);
+            border-radius: 2px;
+        }
+
+        h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 2rem 0 1rem;
+            color: var(--accent);
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: var(--text-muted);
+        }
+
+        .install-box {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        .install-box code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            color: var(--accent);
+        }
+
+        pre {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            overflow-x: auto;
+            margin: 1rem 0 1.5rem;
+            position: relative;
+        }
+
+        pre code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.7;
+            color: var(--text);
+        }
+
+        .keyword { color: #c792ea; }
+        .string { color: #c3e88d; }
+        .comment { color: #546e7a; }
+        .function { color: #82aaff; }
+        .property { color: #f78c6c; }
+        .type { color: var(--accent); }
+
+        .method-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            transition: border-color 0.2s;
+        }
+
+        .method-card:hover {
+            border-color: var(--accent-dim);
+        }
+
+        .method-sig {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--accent);
+            margin-bottom: 0.75rem;
+        }
+
+        .method-desc {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .params {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .param {
+            display: flex;
+            gap: 1rem;
+            margin: 0.5rem 0;
+            font-size: 0.875rem;
+        }
+
+        .param-name {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--yellow);
+            min-width: 100px;
+        }
+
+        .param-type {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-muted);
+            min-width: 120px;
+        }
+
+        .param-desc {
+            color: var(--text-muted);
+        }
+
+        .returns {
+            margin-top: 0.75rem;
+            font-size: 0.875rem;
+        }
+
+        .returns-label {
+            color: var(--green);
+            font-weight: 500;
+        }
+
+        .type-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.875rem;
+        }
+
+        .type-table th,
+        .type-table td {
+            text-align: left;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .type-table th {
+            color: var(--text-muted);
+            font-weight: 500;
+            background: var(--surface);
+        }
+
+        .type-table td:first-child {
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--accent);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .badge-success {
+            background: rgba(74, 222, 128, 0.15);
+            color: var(--green);
+        }
+
+        .badge-error {
+            background: rgba(248, 113, 113, 0.15);
+            color: var(--red);
+        }
+
+        .nav {
+            position: fixed;
+            top: 2rem;
+            right: 2rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1rem;
+            font-size: 0.875rem;
+        }
+
+        .nav a {
+            display: block;
+            color: var(--text-muted);
+            text-decoration: none;
+            padding: 0.35rem 0;
+            transition: color 0.2s;
+        }
+
+        .nav a:hover {
+            color: var(--accent);
+        }
+
+        @media (max-width: 1200px) {
+            .nav { display: none; }
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--border);
+            margin: 3rem 0;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 4rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <a href="#install">Install</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#world">Client</a>
+        <a href="#sandbox">Sandbox</a>
+        <a href="#types">Types</a>
+    </nav>
+
+    <div class="container">
+        <header>
+            <h1>OpenSandbox SDK</h1>
+            <p class="tagline">Sandbox VMs with instant time-travel snapshots</p>
+        </header>
+
+        <section id="install">
+            <h2>Installation</h2>
+            <div class="install-box">
+                <code>npm install opensandbox</code>
+            </div>
+            <p>Or link locally during development:</p>
+<pre><code><span class="comment"># In the opensandbox repo</span>
+npm link
+
+<span class="comment"># In your project</span>
+npm link opensandbox</code></pre>
+        </section>
+
+        <section id="quickstart">
+            <h2>Quickstart</h2>
+<pre><code><span class="keyword">import</span> { Client } <span class="keyword">from</span> <span class="string">"opensandbox"</span>
+
+<span class="comment">// Initialize with your API key</span>
+<span class="keyword">const</span> client = <span class="keyword">new</span> <span class="function">Client</span>(<span class="string">"ws_your_api_key"</span>)
+
+<span class="comment">// Create a sandbox VM</span>
+<span class="keyword">const</span> result = <span class="keyword">await</span> client.<span class="function">create</span>(<span class="string">"my-sandbox"</span>)
+<span class="keyword">if</span> (!result.success) <span class="keyword">throw new</span> <span class="function">Error</span>(result.error)
+
+<span class="keyword">const</span> { sandbox } = result
+
+<span class="comment">// Run commands (auto-snapshots after each)</span>
+<span class="keyword">const</span> cmd = <span class="keyword">await</span> sandbox.<span class="function">run</span>(<span class="string">"echo 'hello world'"</span>)
+<span class="keyword">if</span> (cmd.success) {
+    console.<span class="function">log</span>(cmd.stdout)     <span class="comment">// "hello world\n"</span>
+    console.<span class="function">log</span>(cmd.snapshot)   <span class="comment">// "cmd_1702147200000"</span>
+}
+
+<span class="comment">// Time travel to any snapshot</span>
+<span class="keyword">const</span> snaps = <span class="keyword">await</span> sandbox.<span class="function">snapshots</span>()
+<span class="keyword">if</span> (snaps.success) {
+    <span class="keyword">await</span> sandbox.<span class="function">restore</span>(snaps.snapshots[<span class="property">0</span>].snapshot_name)
+}
+
+<span class="comment">// Cleanup</span>
+<span class="keyword">await</span> sandbox.<span class="function">destroy</span>()</code></pre>
+        </section>
+
+        <div class="divider"></div>
+
+        <section id="world">
+            <h2>Client</h2>
+            <p>The main entry point. Manages sandbox VMs.</p>
+
+            <h3>new Client(api_key, base_url?)</h3>
+            <div class="method-card">
+                <div class="method-sig">constructor(api_key: string, base_url?: string)</div>
+                <div class="method-desc">Create a new client.</div>
+                <div class="params">
+                    <div class="param">
+                        <span class="param-name">api_key</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">Your API key</span>
+                    </div>
+                    <div class="param">
+                        <span class="param-name">base_url</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">API URL (default: http://localhost:4000)</span>
+                    </div>
+                </div>
+            </div>
+
+            <h3>client.create(name)</h3>
+            <div class="method-card">
+                <div class="method-sig">async create(name: string): Promise&lt;CreateResult&gt;</div>
+                <div class="method-desc">Create a new sandbox VM.</div>
+                <div class="params">
+                    <div class="param">
+                        <span class="param-name">name</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">Unique name for the sandbox</span>
+                    </div>
+                </div>
+                <div class="returns">
+                    <span class="returns-label">Returns:</span> 
+                    <span class="badge badge-success">{ success: true, sandbox }</span> or 
+                    <span class="badge badge-error">{ success: false, error }</span>
+                </div>
+            </div>
+
+            <h3>client.list()</h3>
+            <div class="method-card">
+                <div class="method-sig">async list(): Promise&lt;ListResult&gt;</div>
+                <div class="method-desc">List all sandbox VMs.</div>
+                <div class="returns">
+                    <span class="returns-label">Returns:</span> 
+                    <span class="badge badge-success">{ success: true, vms }</span> or 
+                    <span class="badge badge-error">{ success: false, error }</span>
+                </div>
+            </div>
+
+            <h3>client.sandbox(name)</h3>
+            <div class="method-card">
+                <div class="method-sig">sandbox(name: string): Sandbox</div>
+                <div class="method-desc">Get a reference to an existing sandbox by name.</div>
+                <div class="params">
+                    <div class="param">
+                        <span class="param-name">name</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">Name of existing sandbox</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section id="sandbox">
+            <h2>Sandbox</h2>
+            <p>Represents a single VM instance. Run commands, manage snapshots, and time-travel.</p>
+
+            <h3>sandbox.run(command, timeout?)</h3>
+            <div class="method-card">
+                <div class="method-sig">async run(command: string, timeout?: number): Promise&lt;CommandResult&gt;</div>
+                <div class="method-desc">Execute a shell command. A snapshot is automatically taken after each successful command.</div>
+                <div class="params">
+                    <div class="param">
+                        <span class="param-name">command</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">Shell command to execute</span>
+                    </div>
+                    <div class="param">
+                        <span class="param-name">timeout</span>
+                        <span class="param-type">number</span>
+                        <span class="param-desc">Timeout in seconds (default: 30)</span>
+                    </div>
+                </div>
+                <div class="returns">
+                    <span class="returns-label">Returns:</span> 
+                    <span class="badge badge-success">{ success, stdout, stderr, exitCode, snapshot }</span> or 
+                    <span class="badge badge-error">{ success: false, error }</span>
+                </div>
+            </div>
+
+            <h3>sandbox.snapshots()</h3>
+            <div class="method-card">
+                <div class="method-sig">async snapshots(): Promise&lt;SnapshotsResult&gt;</div>
+                <div class="method-desc">List all snapshots for this sandbox, ordered by creation time.</div>
+                <div class="returns">
+                    <span class="returns-label">Returns:</span> 
+                    <span class="badge badge-success">{ success: true, snapshots }</span> or 
+                    <span class="badge badge-error">{ success: false, error }</span>
+                </div>
+            </div>
+
+            <h3>sandbox.restore(snapshot_name)</h3>
+            <div class="method-card">
+                <div class="method-sig">async restore(snapshot_name: string): Promise&lt;SimpleResult&gt;</div>
+                <div class="method-desc">Restore workspace to a previous snapshot. All snapshots after this point are deleted.</div>
+                <div class="params">
+                    <div class="param">
+                        <span class="param-name">snapshot_name</span>
+                        <span class="param-type">string</span>
+                        <span class="param-desc">Name of snapshot to restore</span>
+                    </div>
+                </div>
+            </div>
+
+            <h3>sandbox.info()</h3>
+            <div class="method-card">
+                <div class="method-sig">async info(): Promise&lt;VMInfoResult&gt;</div>
+                <div class="method-desc">Get detailed information about the VM.</div>
+            </div>
+
+            <h3>sandbox.wipe()</h3>
+            <div class="method-card">
+                <div class="method-sig">async wipe(): Promise&lt;SimpleResult&gt;</div>
+                <div class="method-desc">Clear all files in the workspace without creating a snapshot.</div>
+            </div>
+
+            <h3>sandbox.destroy()</h3>
+            <div class="method-card">
+                <div class="method-sig">async destroy(): Promise&lt;SimpleResult&gt;</div>
+                <div class="method-desc">Delete the VM and all its snapshots permanently.</div>
+            </div>
+        </section>
+
+        <div class="divider"></div>
+
+        <section id="types">
+            <h2>Types</h2>
+            <p>All methods return discriminated unions for type-safe error handling.</p>
+
+            <h3>CommandResult</h3>
+            <table class="type-table">
+                <thead>
+                    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>success</td><td>boolean</td><td>Whether command succeeded</td></tr>
+                    <tr><td>stdout</td><td>string</td><td>Standard output (on success)</td></tr>
+                    <tr><td>stderr</td><td>string</td><td>Standard error (on success)</td></tr>
+                    <tr><td>exitCode</td><td>number</td><td>Exit code (on success)</td></tr>
+                    <tr><td>snapshot</td><td>string</td><td>Snapshot name (on success)</td></tr>
+                    <tr><td>error</td><td>string</td><td>Error message (on failure)</td></tr>
+                </tbody>
+            </table>
+
+            <h3>Snapshot</h3>
+            <table class="type-table">
+                <thead>
+                    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>id</td><td>number</td><td>Snapshot ID</td></tr>
+                    <tr><td>vm_name</td><td>string</td><td>Parent VM name</td></tr>
+                    <tr><td>snapshot_name</td><td>string</td><td>Unique snapshot identifier</td></tr>
+                    <tr><td>command</td><td>string | null</td><td>Command that created this snapshot</td></tr>
+                    <tr><td>created_at</td><td>string</td><td>ISO timestamp</td></tr>
+                </tbody>
+            </table>
+
+            <h3>VMInfo</h3>
+            <table class="type-table">
+                <thead>
+                    <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>id</td><td>number</td><td>VM ID</td></tr>
+                    <tr><td>name</td><td>string</td><td>VM name</td></tr>
+                    <tr><td>status</td><td>string</td><td>Current status (e.g. "running")</td></tr>
+                    <tr><td>agent_port</td><td>number</td><td>Agent communication port</td></tr>
+                    <tr><td>ssh_port</td><td>number</td><td>SSH port</td></tr>
+                    <tr><td>agentHealthy</td><td>boolean</td><td>Whether agent is responding</td></tr>
+                    <tr><td>created_at</td><td>string</td><td>ISO timestamp</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <footer>
+            <p>OpenSandbox SDK &mdash; Built for instant sandbox VMs with time-travel</p>
+        </footer>
+    </div>
+</body>
+</html>
+
+
+
+
+

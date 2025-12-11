@@ -1,7 +1,7 @@
 {
   "name": "opensandbox",
-  "version": "0.1.0",
-  "description": "SDK for World Service sandbox VMs",
+  "version": "1.0.0",
+  "description": "SDK for OpenSandbox VMs",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,12 +16,17 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "example:basic": "tsx examples/basic.ts",
+    "example:time-travel": "tsx examples/time-travel.ts",
+    "example:list": "tsx examples/list-vms.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.9.3"
   }
 }

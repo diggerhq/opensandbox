@@ -1,0 +1,347 @@
+openapi: 3.0.3
+info:
+  title: OpenSandbox Service API
+  description: On-demand sandbox VMs with instant filesystem snapshots
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:4000
+    description: Local development
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+
+  schemas:
+    VM:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        api_key:
+          type: string
+          description: Only returned on creation
+        base_vm:
+          type: string
+        status:
+          type: string
+          enum: [creating, running, stopped, error]
+        agent_port:
+          type: integer
+        ssh_port:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        agentHealthy:
+          type: boolean
+
+    ExecResult:
+      type: object
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer
+        snapshot:
+          type: string
+          description: Name of snapshot taken after command
+
+    Snapshot:
+      type: object
+      properties:
+        id:
+          type: integer
+        vm_name:
+          type: string
+        snapshot_name:
+          type: string
+        command:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  timestamp:
+                    type: string
+
+  /vms:
+    get:
+      summary: List all VMs
+      responses:
+        '200':
+          description: List of VMs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  vms:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VM'
+
+    post:
+      summary: Create a new VM
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Unique name for the VM
+      responses:
+        '201':
+          description: VM created successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/VM'
+                  - type: object
+                    properties:
+                      message:
+                        type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Creation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /vms/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+
+    get:
+      summary: Get VM info
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: VM details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VM'
+        '401':
+          description: API key required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Invalid API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: VM not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Destroy a VM
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: VM destroyed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          description: API key required
+        '403':
+          description: Invalid API key
+        '500':
+          description: Deletion failed
+
+  /vms/{name}/run:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Run a command in the VM
+      description: Executes a shell command and takes a snapshot afterward
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command:
+                  type: string
+                  description: Shell command to execute
+                timeout:
+                  type: integer
+                  default: 30
+                  description: Timeout in seconds
+      responses:
+        '200':
+          description: Command executed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecResult'
+        '400':
+          description: Command required
+        '401':
+          description: API key required
+        '403':
+          description: Invalid API key
+        '500':
+          description: Execution failed
+
+  /vms/{name}/wipe:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Wipe workspace
+      description: Clear all files in the workspace directory
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Workspace wiped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          description: API key required
+        '403':
+          description: Invalid API key
+
+  /vms/{name}/snapshots:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+
+    get:
+      summary: List snapshots
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: List of snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Snapshot'
+        '401':
+          description: API key required
+        '403':
+          description: Invalid API key
+
+  /vms/{name}/snapshots/{snapshot}/restore:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: snapshot
+        in: path
+        required: true
+        schema:
+          type: string
+
+    post:
+      summary: Restore to snapshot
+      description: Instantly restore workspace to a previous state. Deletes all snapshots after the target.
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Restored successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          description: API key required
+        '403':
+          description: Invalid API key
+        '500':
+          description: Restore failed
+
