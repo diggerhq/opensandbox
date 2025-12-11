@@ -35,11 +35,12 @@ interface ActiveVM {
   snapshotsDir: string;
   socketPath: string;
   agentPort: number;
+  tapName: string;
   process?: ReturnType<typeof spawn>;
 }
 
 const activeVMs = new Map<string, ActiveVM>();
-let nextAgentPort = 4000;
+let nextAgentPort = 5000; // Start at 5000 to avoid conflict with service on 4000
 
 export class FirecrackerRuntime implements SandboxRuntime {
   readonly name = "firecracker";
@@ -113,7 +114,9 @@ export class FirecrackerRuntime implements SandboxRuntime {
   }
 
   async createSandbox(config: SandboxConfig): Promise<SandboxInstance> {
-    const id = `fc-${randomUUID().slice(0, 8)}`;
+    const shortId = randomUUID().slice(0, 8);
+    const id = `fc-${shortId}`; // Full id for logging/tracking
+    const tapName = `tap-${shortId}`; // Keep tap name short (max 15 chars for Linux)
     const vmDir = join(this.config.btrfsPath, id);
     const socketPath = join(vmDir, "firecracker.sock");
     const workspaceSubvol = join(vmDir, "workspace");
@@ -158,7 +161,7 @@ export class FirecrackerRuntime implements SandboxRuntime {
         {
           iface_id: "eth0",
           guest_mac: "AA:FC:00:00:00:01",
-          host_dev_name: `fc-${id}-tap`,
+          host_dev_name: tapName,
         },
       ],
     };
@@ -168,9 +171,9 @@ export class FirecrackerRuntime implements SandboxRuntime {
 
     // Setup TAP device for networking
     try {
-      execSync(`sudo ip tuntap add fc-${id}-tap mode tap`);
-      execSync(`sudo ip addr add 172.16.0.1/24 dev fc-${id}-tap`);
-      execSync(`sudo ip link set fc-${id}-tap up`);
+      execSync(`sudo ip tuntap add ${tapName} mode tap`);
+      execSync(`sudo ip addr add 172.16.0.1/24 dev ${tapName}`);
+      execSync(`sudo ip link set ${tapName} up`);
       // Forward agent port
       execSync(`sudo iptables -t nat -A PREROUTING -p tcp --dport ${agentPort} -j DNAT --to-destination 172.16.0.2:3000`);
       execSync(`sudo iptables -A FORWARD -p tcp -d 172.16.0.2 --dport 3000 -j ACCEPT`);
@@ -194,6 +197,7 @@ export class FirecrackerRuntime implements SandboxRuntime {
       snapshotsDir,
       socketPath,
       agentPort,
+      tapName,
       process: fc,
     });
 
@@ -239,7 +243,7 @@ export class FirecrackerRuntime implements SandboxRuntime {
     // Cleanup networking
     try {
       execSync(`sudo iptables -t nat -D PREROUTING -p tcp --dport ${vm.agentPort} -j DNAT --to-destination 172.16.0.2:3000 2>/dev/null || true`);
-      execSync(`sudo ip link delete fc-${id}-tap 2>/dev/null || true`);
+      execSync(`sudo ip link delete ${vm.tapName} 2>/dev/null || true`);
     } catch {}
 
     // Delete Btrfs subvolumes
