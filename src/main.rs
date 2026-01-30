@@ -202,7 +202,7 @@ mod sandbox {
             sandbox_root,
             Some("tmpfs"),
             MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            Some("size=64M,mode=755"),
+            Some("size=2G,mode=755"),  // Large repos need more space
         )
         .map_err(|e| format!("mount tmpfs: {}", e))?;
 
@@ -521,10 +521,10 @@ mod server {
         cwd: String,
     }
 
-    fn default_time() -> u64 { 5000 }
+    fn default_time() -> u64 { 300000 }  // 5 minutes - network operations like git clone need more time
     fn default_mem() -> u64 { 2097152 }  // 2GB - Go programs need lots of virtual address space
-    fn default_nofile() -> u64 { 64 }
-    fn default_fsize() -> u64 { 10240 } // 10MB
+    fn default_nofile() -> u64 { 256 }   // Git operations need more file descriptors
+    fn default_fsize() -> u64 { 1048576 } // 1GB - large repos have big pack files
     fn default_cwd() -> String { "/".to_string() }
 
     #[derive(Serialize)]
