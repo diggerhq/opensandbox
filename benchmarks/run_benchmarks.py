@@ -256,18 +256,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run_benchmarks.py                         # Run all benchmarks
-  python run_benchmarks.py --provider opensandbox  # Only test opensandbox
-  python run_benchmarks.py --only creation         # Only creation benchmark
-  python run_benchmarks.py --iterations 5          # 5 iterations per test
+  python run_benchmarks.py                              # Run all benchmarks (HTTP, gRPC, E2B)
+  python run_benchmarks.py --provider opensandbox       # Test opensandbox with gRPC
+  python run_benchmarks.py --provider opensandbox-http  # Test opensandbox with HTTP only
+  python run_benchmarks.py --provider opensandbox-grpc  # Test opensandbox with gRPC only
+  python run_benchmarks.py --only creation              # Only creation benchmark
+  python run_benchmarks.py --iterations 5               # 5 iterations per test
         """
     )
 
     parser.add_argument(
         "--provider",
-        choices=["opensandbox", "e2b", "all"],
+        choices=["opensandbox", "opensandbox-http", "opensandbox-grpc", "e2b", "all"],
         default="all",
-        help="Which provider to benchmark (default: all)"
+        help="Which provider to benchmark: opensandbox (gRPC), opensandbox-http, opensandbox-grpc, e2b, all (default: all)"
     )
     parser.add_argument(
         "--only",
@@ -297,14 +299,26 @@ Examples:
 
     # Determine which providers to test
     providers = []
-    if args.provider in ["opensandbox", "all"]:
+    opensandbox_providers = ["opensandbox", "opensandbox-http", "opensandbox-grpc"]
+
+    # Check if we need to test any opensandbox variant
+    if args.provider in opensandbox_providers or args.provider == "all":
         if check_opensandbox_available(args.opensandbox_url):
-            providers.append("opensandbox")
-            print(f"✓ OpenSandbox available at {args.opensandbox_url}")
+            if args.provider == "all":
+                # Test both HTTP and gRPC when running all
+                providers.extend(["opensandbox-http", "opensandbox-grpc"])
+                print(f"✓ OpenSandbox available at {args.opensandbox_url} (testing HTTP and gRPC)")
+            elif args.provider == "opensandbox":
+                # Default "opensandbox" uses gRPC
+                providers.append("opensandbox-grpc")
+                print(f"✓ OpenSandbox available at {args.opensandbox_url} (using gRPC)")
+            else:
+                providers.append(args.provider)
+                print(f"✓ OpenSandbox available at {args.opensandbox_url} (using {args.provider})")
         else:
             print(f"✗ OpenSandbox not available at {args.opensandbox_url}")
-            if args.provider == "opensandbox":
-                print("  Start it with: docker compose up --build")
+            if args.provider in opensandbox_providers:
+                print("  Start it with: fly deploy")
                 sys.exit(1)
 
     if args.provider in ["e2b", "all"]:
