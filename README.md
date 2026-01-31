@@ -7,8 +7,9 @@ A Rust implementation of a Linux sandbox that runs commands in isolated environm
 Coding agent creating a PR in an isolated sandbox:
 
 
-https://github.com/user-attachments/assets/57961871-36d4-4ded-adb9-489b5b22a087
-</details>
+https://github.com/user-attachments/assets/d58a8d61-4cad-4430-b93b-acd836322ebb
+
+
 
 ## Features
 
