@@ -1,8 +1,14 @@
 FROM rust:1.83-slim-bookworm AS builder
 
+# Install protobuf compiler for gRPC
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY Cargo.toml ./
+COPY Cargo.toml build.rs ./
 COPY src ./src
+COPY proto ./proto
 
 # Build without Cargo.lock to avoid version mismatch
 RUN cargo build --release
@@ -28,7 +34,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
 COPY --from=builder /app/target/release/isolate /usr/local/bin/isolate
 
 EXPOSE 8080
+EXPOSE 50051
 
-# Default to server mode
+# Default to server mode with both HTTP and gRPC
 ENTRYPOINT ["/usr/local/bin/isolate"]
-CMD ["serve", "--port", "8080"]
+CMD ["serve", "--port", "8080", "--grpc-port", "50051"]

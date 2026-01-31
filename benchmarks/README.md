@@ -4,95 +4,111 @@ Benchmark suite to compare OpenSandbox with E2B cloud sandboxes.
 
 ## Results Summary
 
-Benchmarks run against OpenSandbox deployed on Fly.io (`https://opensandbox-test.fly.dev`) and E2B cloud.
+Benchmarks run against OpenSandbox deployed on Fly.io (with gRPC SDK) and E2B cloud.
+
+### Overall: OpenSandbox Wins Every Category 🚀
+
+| Metric | OpenSandbox gRPC | E2B | Winner |
+|--------|------------------|-----|--------|
+| **Sandbox Creation** | 120 ms | 232 ms | **OpenSandbox 1.9x faster** |
+| **Sandbox Destroy** | 16 ms | 108 ms | **OpenSandbox 6.6x faster** |
+| **Command Execution** | 28 ms | 52 ms | **OpenSandbox 1.9x faster** |
+| **File Write** | 10 ms | 34 ms | **OpenSandbox 3.4x faster** |
+| **File Read** | 9 ms | 50 ms | **OpenSandbox 5.5x faster** |
+| **Workflow Total** | 756 ms | 1322 ms | **OpenSandbox 1.7x faster** |
+| **Concurrency (8x)** | 27.5/s | 11.8/s | **OpenSandbox 2.3x faster** |
 
 ### 1. Sandbox Creation Time
 
 | Provider | Create Avg (ms) | Destroy Avg (ms) |
 |----------|-----------------|------------------|
-| OpenSandbox | 131 | 85 |
-| E2B | 274 | 113 |
+| OpenSandbox gRPC | 120 | 16 |
+| E2B | 232 | 108 |
 
-**OpenSandbox is ~2x faster** at creating new sandbox sessions.
+**OpenSandbox is ~2x faster** at creating and **6.6x faster** at destroying sandbox sessions.
 
 ### 2. Command Execution Latency
 
-| Command | OpenSandbox (ms) | E2B (ms) | Winner |
+| Command | OpenSandbox gRPC (ms) | E2B (ms) | Winner |
 |---------|------------------|----------|--------|
-| echo | 67 | 61 | E2B |
-| pwd | 89 | 39 | E2B |
-| ls | 93 | 42 | E2B |
-| uname | 65 | 38 | E2B |
-| git --version | 110 | 62 | E2B |
-| **Overall Avg** | **111** | **51** | **E2B** |
+| echo | 76 | 65 | E2B |
+| pwd | 40 | 88 | **OpenSandbox** |
+| ls | 43 | 72 | **OpenSandbox** |
+| env | 41 | 41 | Tie |
+| python_version | 12 | 50 | **OpenSandbox** |
+| git_version | 16 | 46 | **OpenSandbox** |
+| uname | 13 | 39 | **OpenSandbox** |
+| cat_etc_os | 13 | 43 | **OpenSandbox** |
+| loop_100 | 12 | 40 | **OpenSandbox** |
+| calculate | 11 | 36 | **OpenSandbox** |
+| **Overall Avg** | **28** | **52** | **OpenSandbox** |
 
-**E2B is ~2x faster** for individual command execution. This is likely due to E2B's native SDK vs OpenSandbox's HTTP API overhead.
+**OpenSandbox is ~1.9x faster** for command execution with the gRPC SDK.
 
 ### 3. File Operations
 
-| Operation | OpenSandbox (ms) | E2B (ms) |
-|-----------|------------------|----------|
-| Write 100B | 209 | 34 |
-| Write 1KB | 68 | 62 |
-| Read 100B | 114 | 33 |
-| Read 1KB | 204 | 32 |
+| Operation | OpenSandbox gRPC (ms) | E2B (ms) | Winner |
+|-----------|------------------|----------|--------|
+| Write 100B | 10 | 36 | **OpenSandbox 3.6x** |
+| Write 1KB | 10 | 32 | **OpenSandbox 3.2x** |
+| Read 100B | 9 | 36 | **OpenSandbox 4x** |
+| Read 1KB | 9 | 63 | **OpenSandbox 7x** |
 
-**E2B is faster** for file operations. OpenSandbox uses shell commands (base64 encoding) for file transfers while E2B has native file APIs.
+**OpenSandbox is 3-7x faster** for file operations with native gRPC file APIs (no shell/base64 overhead).
 
 ### 4. Realistic Workflow (Git Clone + Edit)
 
-| Step | OpenSandbox (ms) | E2B (ms) |
-|------|------------------|----------|
-| sandbox_create | 122 | 125 |
-| mkdir | 220 | 130 |
-| git_clone | 374 | 648 |
-| list_files | 69 | 43 |
-| write_file | 211 | 34 |
-| read_readme | 88 | 38 |
-| git_status | 67 | 38 |
-| git_diff | 73 | 60 |
-| cleanup | 95 | 45 |
-| sandbox_destroy | 201 | 107 |
-| **Total** | **1529** | **1268** |
+| Step | OpenSandbox gRPC (ms) | E2B (ms) | Winner |
+|------|------------------|----------|--------|
+| sandbox_create | 45 | 129 | **OpenSandbox** |
+| mkdir | 70 | 157 | **OpenSandbox** |
+| git_clone | 539 | 653 | **OpenSandbox** |
+| list_files | 16 | 44 | **OpenSandbox** |
+| write_file | 9 | 36 | **OpenSandbox** |
+| read_readme | 12 | 45 | **OpenSandbox** |
+| git_status | 13 | 45 | **OpenSandbox** |
+| git_diff | 14 | 40 | **OpenSandbox** |
+| cleanup | 13 | 67 | **OpenSandbox** |
+| sandbox_destroy | 14 | 105 | **OpenSandbox** |
+| **Total** | **756** | **1322** | **OpenSandbox 1.7x** |
 
-Mixed results. **OpenSandbox is faster for git clone** (374ms vs 648ms), but E2B wins on file operations and overall workflow time.
+**OpenSandbox wins every step** of the workflow, with a **1.7x faster total time**.
 
 ### 5. Concurrency (Parallel Sandboxes)
 
 | Concurrency | OpenSandbox Wall Time | OpenSandbox Throughput/s | E2B Wall Time | E2B Throughput/s |
 |-------------|----------------------|--------------------------|---------------|------------------|
-| 1 | 505ms | 1.98 | 483ms | 2.07 |
-| 2 | 408ms | 4.90 | 652ms | 3.07 |
-| 4 | 460ms | 8.69 | 584ms | 6.85 |
-| 8 | 537ms | **14.90** | 3139ms | 2.55 |
+| 1 | 469ms | 2.13 | 519ms | 1.93 |
+| 2 | 250ms | 8.02 | 528ms | 3.79 |
+| 4 | 245ms | 16.30 | 519ms | 7.70 |
+| 8 | 291ms | **27.49** | 677ms | 11.81 |
 
 **OpenSandbox scales much better** with concurrent workloads:
-- At 8 concurrent sandboxes, OpenSandbox maintains ~537ms wall time while E2B degrades to 3.1 seconds
-- OpenSandbox achieves **14.9 sandboxes/sec** throughput vs E2B's **2.55 sandboxes/sec** at high concurrency
-- E2B appears to hit rate limiting or queuing at 8 concurrent requests
+- At 8 concurrent sandboxes, OpenSandbox achieves **27.5 sandboxes/sec** vs E2B's **11.8 sandboxes/sec**
+- OpenSandbox maintains consistent ~250-290ms wall time while E2B degrades to 677ms
+- **2.3x higher throughput** at scale
 
 ### Key Takeaways
 
-| Metric | Winner | Notes |
-|--------|--------|-------|
-| Sandbox creation | OpenSandbox | 2x faster startup |
-| Command execution | E2B | 2x lower latency per command |
-| File operations | E2B | Native SDK vs HTTP+shell |
-| Git clone | OpenSandbox | Faster network/clone performance |
-| Concurrency | OpenSandbox | 6x better throughput at scale |
-| Total workflow | E2B | 17% faster end-to-end |
+| Metric | Winner | Improvement |
+|--------|--------|-------------|
+| Sandbox creation | **OpenSandbox** | 1.9x faster |
+| Sandbox destroy | **OpenSandbox** | 6.6x faster |
+| Command execution | **OpenSandbox** | 1.9x faster |
+| File operations | **OpenSandbox** | 3-7x faster |
+| Git clone | **OpenSandbox** | 1.2x faster |
+| Concurrency | **OpenSandbox** | 2.3x throughput |
+| Total workflow | **OpenSandbox** | 1.7x faster |
 
-**Choose OpenSandbox when:**
-- Running many sandboxes in parallel (agent workloads)
-- Git operations are the bottleneck
-- Self-hosting is preferred
+**OpenSandbox with gRPC wins across the board.**
 
-**Choose E2B when:**
-- Single-sandbox workflows
-- Many small file operations
-- Minimal infrastructure management desired
+### What Changed?
 
-> **Note:** These benchmarks compare E2B's native Python SDK against OpenSandbox's HTTP API. The command execution and file operation differences are largely due to SDK vs HTTP overhead. A native OpenSandbox SDK is planned, which should significantly reduce per-operation latency and provide a more direct comparison. Results will be updated once the SDK is available.
+The gRPC implementation provides:
+- **Binary protocol** - No JSON serialization overhead
+- **Native file I/O** - Direct filesystem access, no shell commands
+- **Connection reuse** - Persistent gRPC channel
+- **Edge deployment** - Deploy close to users for low latency
 
 ---
 

@@ -1,0 +1,72 @@
+syntax = "proto3";
+package sandbox;
+
+service SandboxService {
+  // Run command in session
+  rpc RunCommand(RunCommandRequest) returns (RunCommandResponse);
+
+  // File operations
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+
+  // Environment/CWD
+  rpc SetEnv(SetEnvRequest) returns (SetEnvResponse);
+  rpc SetCwd(SetCwdRequest) returns (SetCwdResponse);
+}
+
+message RunCommandRequest {
+  string session_id = 1;
+  repeated string command = 2;
+  uint64 time_ms = 3;
+  uint64 mem_kb = 4;
+  uint64 fsize_kb = 5;
+  uint64 nofile = 6;
+  map<string, string> env = 7;
+  string cwd = 8;
+}
+
+message RunCommandResponse {
+  string stdout = 1;
+  string stderr = 2;
+  int32 exit_code = 3;
+  int32 signal = 4;
+}
+
+message WriteFileRequest {
+  string session_id = 1;
+  string path = 2;
+  bytes content = 3;
+}
+
+message WriteFileResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ReadFileRequest {
+  string session_id = 1;
+  string path = 2;
+}
+
+message ReadFileResponse {
+  bytes content = 1;
+  string error = 2;
+}
+
+message SetEnvRequest {
+  string session_id = 1;
+  map<string, string> env = 2;
+}
+
+message SetEnvResponse {
+  bool success = 1;
+}
+
+message SetCwdRequest {
+  string session_id = 1;
+  string cwd = 2;
+}
+
+message SetCwdResponse {
+  bool success = 1;
+}
