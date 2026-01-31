@@ -1,0 +1,360 @@
+{
+  "timestamp": "2026-01-30T17:22:41.494429",
+  "iterations": 3,
+  "providers": {
+    "e2b": {}
+  },
+  "benchmarks": {
+    "creation": {
+      "e2b": {
+        "provider": "e2b",
+        "iterations": 3,
+        "create": {
+          "avg_ms": 274.37,
+          "std_ms": 317.71,
+          "min_ms": 88.18,
+          "max_ms": 641.21,
+          "all_ms": [
+            641.21,
+            88.18,
+            93.72
+          ]
+        },
+        "destroy": {
+          "avg_ms": 112.99,
+          "std_ms": 25.28,
+          "min_ms": 97.54,
+          "max_ms": 142.17,
+          "all_ms": [
+            97.54,
+            99.26,
+            142.17
+          ]
+        },
+        "errors": []
+      }
+    },
+    "commands": {
+      "e2b": {
+        "provider": "e2b",
+        "iterations": 3,
+        "setup_time_ms": 93.6,
+        "teardown_time_ms": 101.4,
+        "total_avg_ms": 50.59,
+        "commands": [
+          {
+            "name": "echo",
+            "command": "echo 'hello world'",
+            "avg_ms": 60.82,
+            "std_ms": 45.83,
+            "min_ms": 33.77,
+            "max_ms": 113.74,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "pwd",
+            "command": "pwd",
+            "avg_ms": 38.5,
+            "std_ms": 3.37,
+            "min_ms": 35.21,
+            "max_ms": 41.94,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "ls",
+            "command": "ls -la /",
+            "avg_ms": 41.5,
+            "std_ms": 3.39,
+            "min_ms": 39.4,
+            "max_ms": 45.42,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "env",
+            "command": "env | head -20",
+            "avg_ms": 42.6,
+            "std_ms": 6.9,
+            "min_ms": 38.22,
+            "max_ms": 50.56,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "python_version",
+            "command": "python3 --version 2>&1 || python --version 2>&1 || echo 'no python'",
+            "avg_ms": 51.92,
+            "std_ms": 23.15,
+            "min_ms": 37.39,
+            "max_ms": 78.61,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "git_version",
+            "command": "git --version",
+            "avg_ms": 61.91,
+            "std_ms": 40.13,
+            "min_ms": 38.5,
+            "max_ms": 108.26,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "uname",
+            "command": "uname -a",
+            "avg_ms": 38.07,
+            "std_ms": 3.04,
+            "min_ms": 35.13,
+            "max_ms": 41.2,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "cat_etc_os",
+            "command": "cat /etc/os-release 2>/dev/null || cat /etc/debian_version 2>/dev/null || echo 'unknown'",
+            "avg_ms": 67.77,
+            "std_ms": 48.69,
+            "min_ms": 38.45,
+            "max_ms": 123.98,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "loop_100",
+            "command": "for i in $(seq 1 100); do echo $i; done | tail -1",
+            "avg_ms": 64.79,
+            "std_ms": 37.86,
+            "min_ms": 38.76,
+            "max_ms": 108.22,
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "calculate",
+            "command": "echo $((12345 * 67890))",
+            "avg_ms": 37.99,
+            "std_ms": 0.55,
+            "min_ms": 37.44,
+            "max_ms": 38.55,
+            "success": 3,
+            "fail": 0
+          }
+        ],
+        "errors": []
+      }
+    },
+    "files": {
+      "e2b": {
+        "provider": "e2b",
+        "iterations": 3,
+        "setup_time_ms": 92.17,
+        "teardown_time_ms": 239.58,
+        "files": [
+          {
+            "name": "tiny",
+            "size_bytes": 100,
+            "write": {
+              "avg_ms": 33.69,
+              "min_ms": 32.94,
+              "max_ms": 34.97,
+              "throughput_kbps": 2.9
+            },
+            "read": {
+              "avg_ms": 33.04,
+              "min_ms": 32.06,
+              "max_ms": 33.98,
+              "throughput_kbps": 2.96
+            },
+            "success": 3,
+            "fail": 0
+          },
+          {
+            "name": "small",
+            "size_bytes": 1024,
+            "write": {
+              "avg_ms": 61.64,
+              "min_ms": 30.98,
+              "max_ms": 120.33,
+              "throughput_kbps": 16.22
+            },
+            "read": {
+              "avg_ms": 31.88,
+              "min_ms": 31.02,
+              "max_ms": 32.66,
+              "throughput_kbps": 31.37
+            },
+            "success": 3,
+            "fail": 0
+          }
+        ],
+        "errors": []
+      }
+    },
+    "workflow": {
+      "e2b": {
+        "provider": "e2b",
+        "iterations": 3,
+        "total_avg_ms": 1268.46,
+        "total_times_ms": [
+          1388.84,
+          1225.63,
+          1190.92
+        ],
+        "steps": {
+          "sandbox_create": {
+            "name": "sandbox_create",
+            "avg_ms": 125.16,
+            "std_ms": 44.56,
+            "min_ms": 92.77,
+            "max_ms": 175.98,
+            "success": 3,
+            "fail": 0
+          },
+          "mkdir": {
+            "name": "mkdir",
+            "avg_ms": 130.0,
+            "std_ms": 30.19,
+            "min_ms": 100.66,
+            "max_ms": 160.97,
+            "success": 3,
+            "fail": 0
+          },
+          "git_clone": {
+            "name": "git_clone",
+            "avg_ms": 648.47,
+            "std_ms": 110.47,
+            "min_ms": 577.13,
+            "max_ms": 775.72,
+            "success": 3,
+            "fail": 0
+          },
+          "list_files": {
+            "name": "list_files",
+            "avg_ms": 42.84,
+            "std_ms": 2.29,
+            "min_ms": 40.91,
+            "max_ms": 45.37,
+            "success": 3,
+            "fail": 0
+          },
+          "write_file": {
+            "name": "write_file",
+            "avg_ms": 33.93,
+            "std_ms": 2.7,
+            "min_ms": 32.06,
+            "max_ms": 37.03,
+            "success": 3,
+            "fail": 0
+          },
+          "read_readme": {
+            "name": "read_readme",
+            "avg_ms": 37.72,
+            "std_ms": 2.0,
+            "min_ms": 35.42,
+            "max_ms": 39.11,
+            "success": 3,
+            "fail": 0
+          },
+          "git_status": {
+            "name": "git_status",
+            "avg_ms": 37.5,
+            "std_ms": 2.09,
+            "min_ms": 35.85,
+            "max_ms": 39.84,
+            "success": 3,
+            "fail": 0
+          },
+          "git_diff": {
+            "name": "git_diff",
+            "avg_ms": 60.28,
+            "std_ms": 38.09,
+            "min_ms": 36.99,
+            "max_ms": 104.24,
+            "success": 3,
+            "fail": 0
+          },
+          "cleanup": {
+            "name": "cleanup",
+            "avg_ms": 45.16,
+            "std_ms": 3.69,
+            "min_ms": 41.45,
+            "max_ms": 48.83,
+            "success": 3,
+            "fail": 0
+          },
+          "sandbox_destroy": {
+            "name": "sandbox_destroy",
+            "avg_ms": 107.23,
+            "std_ms": 12.57,
+            "min_ms": 99.0,
+            "max_ms": 121.7,
+            "success": 3,
+            "fail": 0
+          }
+        },
+        "errors": []
+      }
+    },
+    "concurrency": {
+      "e2b": {
+        "provider": "e2b",
+        "concurrency_levels": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "results": {
+          "1": {
+            "concurrency": 1,
+            "total_wall_time_ms": 482.76,
+            "successful": 1,
+            "failed": 0,
+            "avg_create_ms": 103.86,
+            "avg_command_ms": 273.52,
+            "avg_destroy_ms": 100.06,
+            "avg_total_ms": 477.45,
+            "throughput_per_sec": 2.07
+          },
+          "2": {
+            "concurrency": 2,
+            "total_wall_time_ms": 652.2,
+            "successful": 2,
+            "failed": 0,
+            "avg_create_ms": 184.27,
+            "avg_command_ms": 231.9,
+            "avg_destroy_ms": 120.66,
+            "avg_total_ms": 536.84,
+            "throughput_per_sec": 3.07
+          },
+          "4": {
+            "concurrency": 4,
+            "total_wall_time_ms": 583.93,
+            "successful": 4,
+            "failed": 0,
+            "avg_create_ms": 111.25,
+            "avg_command_ms": 294.38,
+            "avg_destroy_ms": 116.54,
+            "avg_total_ms": 522.18,
+            "throughput_per_sec": 6.85
+          },
+          "8": {
+            "concurrency": 8,
+            "total_wall_time_ms": 3138.83,
+            "successful": 8,
+            "failed": 0,
+            "avg_create_ms": 467.79,
+            "avg_command_ms": 474.69,
+            "avg_destroy_ms": 134.27,
+            "avg_total_ms": 1076.79,
+            "throughput_per_sec": 2.55
+          }
+        },
+        "errors": []
+      }
+    }
+  }
+}
