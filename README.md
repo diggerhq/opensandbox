@@ -23,6 +23,8 @@ Coding agent creating a PR in an isolated sandbox:
 - **Resource limits** - CPU time, memory, file size, open files
 - **Stateful sessions** - files and environment variables persist across requests
 - **HTTP API** - easy integration with any language/tool
+- **gRPC API** - high-performance binary protocol for low-latency operations
+- **Python SDK** - native Python client with async support
 
 ## Quick Start
 
@@ -142,31 +144,38 @@ The sandbox includes:
 ## Architecture
 
 ```
-HTTP Request
-    │
-    ▼
-┌─────────────────┐
-│   Axum Server   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ spawn_blocking  │  (tokio blocking task)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  clone() with   │  CLONE_NEWPID | CLONE_NEWNS
-│  namespaces     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Child Process  │
-│  - chroot       │
-│  - setrlimit    │
-│  - execvpe      │
-└─────────────────┘
+         HTTP Request (8080)              gRPC Request (50051)
+              │                                  │
+              ▼                                  ▼
+      ┌───────────────┐                 ┌───────────────┐
+      │  Axum Server  │                 │ Tonic Server  │
+      └───────┬───────┘                 └───────┬───────┘
+              │                                  │
+              └──────────┬───────────────────────┘
+                         │
+                         ▼
+               ┌─────────────────┐
+               │  Shared State   │  (Sessions, Sandbox roots)
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │ spawn_blocking  │  (tokio blocking task)
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │  clone() with   │  CLONE_NEWPID | CLONE_NEWNS
+               │  namespaces     │
+               └────────┬────────┘
+                        │
+                        ▼
+               ┌─────────────────┐
+               │  Child Process  │
+               │  - chroot       │
+               │  - setrlimit    │
+               │  - execvpe      │
+               └─────────────────┘
 ```
 
 ## Security Notes
@@ -248,18 +257,49 @@ curl https://your-app-name.fly.dev/health
 
 ## Benchmarks
 
-See [benchmarks/](./benchmarks/) for performance comparisons with E2B.
+See [benchmarks/](./benchmarks/) for full performance comparisons with E2B.
 
-**Summary (OpenSandbox on Fly.io vs E2B Cloud):**
+**Summary (OpenSandbox gRPC vs E2B Cloud):**
 
-| Metric | OpenSandbox | E2B | Notes |
-|--------|-------------|-----|-------|
-| Sandbox creation | 131ms | 274ms | OpenSandbox 2x faster |
-| Command execution | 111ms | 51ms | E2B faster (SDK vs HTTP) |
-| Git clone | 374ms | 648ms | OpenSandbox faster |
-| Concurrency (8x) | 14.9/sec | 2.55/sec | OpenSandbox 6x better throughput |
+| Metric | OpenSandbox | E2B | Winner |
+|--------|-------------|-----|--------|
+| Sandbox creation | 120ms | 232ms | **OpenSandbox 1.9x faster** |
+| Command execution | 28ms | 52ms | **OpenSandbox 1.9x faster** |
+| File write | 10ms | 34ms | **OpenSandbox 3.4x faster** |
+| File read | 9ms | 50ms | **OpenSandbox 5.5x faster** |
+| Git clone workflow | 756ms | 1322ms | **OpenSandbox 1.7x faster** |
+| Concurrency (8x) | 27.5/sec | 11.8/sec | **OpenSandbox 2.3x faster** |
 
-OpenSandbox excels at concurrent workloads and git operations. E2B has lower per-command latency due to native SDK (OpenSandbox SDK planned).
+**OpenSandbox wins every category** with the gRPC SDK and edge deployment.
+
+## Python SDK
+
+Install the SDK for high-performance gRPC access:
+
+```bash
+pip install opensandbox  # or: pip install -e sdk/python
+```
+
+Usage:
+
+```python
+from opensandbox import OpenSandbox
+
+async with OpenSandbox("https://your-server.fly.dev") as client:
+    sandbox = await client.create()
+
+    # Run commands (fast - uses gRPC)
+    result = await sandbox.run("echo hello")
+    print(result.stdout)
+
+    # File operations (fast - native, no shell)
+    await sandbox.write_file("/tmp/test.py", "print('hello')")
+    content = await sandbox.read_file_text("/tmp/test.py")
+
+    await sandbox.destroy()
+```
+
+See [sdk/python/README.md](./sdk/python/README.md) for full documentation.
 
 ## Similar Projects & Inspiration
 
