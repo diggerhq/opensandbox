@@ -1,0 +1,36 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - OPENSANDBOX_URL=http://host.docker.internal:8080
+    volumes:
+      - ./src:/app/src
+      - ./run_api.py:/app/run_api.py
+    command: python run_api.py
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  ui:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      - OPENSANDBOX_URL=http://host.docker.internal:8080
+      - API_URL=http://api:8000
+    volumes:
+      - ./src:/app/src
+      - ./run_ui.py:/app/run_ui.py
+    command: streamlit run src/ui/app.py --server.address=0.0.0.0
+    depends_on:
+      api:
+        condition: service_healthy

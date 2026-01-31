@@ -1,3 +1,10 @@
 .cursor
 .DS_Store
 /target
+
+# Python
+__pycache__/
+*.egg-info/
+
+# Temp files
+z,,

@@ -1,0 +1,9 @@
+target/
+.git/
+.gitignore
+*.md
+examples/
+docker-compose.yml
+fly.toml
+.env
+.env.*
