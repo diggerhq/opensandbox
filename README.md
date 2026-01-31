@@ -239,6 +239,21 @@ fly ips allocate-v4 --shared
 curl https://your-app-name.fly.dev/health
 ```
 
+## Benchmarks
+
+See [benchmarks/](./benchmarks/) for performance comparisons with E2B.
+
+**Summary (OpenSandbox on Fly.io vs E2B Cloud):**
+
+| Metric | OpenSandbox | E2B | Notes |
+|--------|-------------|-----|-------|
+| Sandbox creation | 131ms | 274ms | OpenSandbox 2x faster |
+| Command execution | 111ms | 51ms | E2B faster (SDK vs HTTP) |
+| Git clone | 374ms | 648ms | OpenSandbox faster |
+| Concurrency (8x) | 14.9/sec | 2.55/sec | OpenSandbox 6x better throughput |
+
+OpenSandbox excels at concurrent workloads and git operations. E2B has lower per-command latency due to native SDK (OpenSandbox SDK planned).
+
 ## Similar Projects & Inspiration
 
 - [isolate](https://github.com/ioi/isolate) - Sandbox used by the International Olympiad in Informatics (IOI)
