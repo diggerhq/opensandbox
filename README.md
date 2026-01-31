@@ -179,6 +179,60 @@ sudo ./target/release/opensandbox serve --port 8080
 - Expired sessions are cleaned up automatically
 - Each session has its own sandbox directory at `/tmp/sandbox-{id}`
 
+## Deploying to Fly.io
+
+Fly.io runs apps in Firecracker VMs, which provides the necessary privileges for namespace operations.
+
+1. Install the Fly CLI and login:
+```bash
+curl -L https://fly.io/install.sh | sh
+fly auth login
+```
+
+2. Create `fly.toml` in the project root:
+```toml
+app = "opensandbox"
+primary_region = "ord"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[checks]
+  [checks.health]
+    type = "http"
+    port = 8080
+    path = "/health"
+    interval = "10s"
+    timeout = "2s"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2
+```
+
+3. Deploy:
+```bash
+fly launch
+```
+
+4. Allocate a public IP (if not automatically assigned):
+```bash
+fly ips allocate-v4 --shared
+```
+
+5. Test:
+```bash
+curl https://your-app-name.fly.dev/health
+```
+
 ## Similar Projects & Inspiration
 
 - [isolate](https://github.com/ioi/isolate) - Sandbox used by the International Olympiad in Informatics (IOI)
