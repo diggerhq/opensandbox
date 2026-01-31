@@ -178,7 +178,7 @@ if __name__ == "__main__":
     import json
 
     parser = argparse.ArgumentParser(description="Benchmark concurrent sandbox operations")
-    parser.add_argument("--provider", choices=["opensandbox", "e2b"], default="opensandbox")
+    parser.add_argument("--provider", choices=["opensandbox", "opensandbox-http", "opensandbox-grpc", "e2b"], default="opensandbox-grpc")
     parser.add_argument("--opensandbox-url", default="https://opensandbox-test.fly.dev")
 
     args = parser.parse_args()

@@ -1,0 +1,43 @@
+# fly.toml app configuration file generated for opensandbox-test on 2026-01-30T16:08:35-08:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'opensandbox-test'
+primary_region = 'ord'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = 'connections'
+    hard_limit = 25
+    soft_limit = 20
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '10s'
+    method = 'GET'
+    path = '/health'
+
+# Raw TCP for gRPC (no TLS - for benchmarking only)
+[[services]]
+  internal_port = 50051
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 50051
+
+[[vm]]
+  size = 'shared-cpu-2x'
+  memory = '2gb'
+  cpus = 2
+  memory_mb = 2048

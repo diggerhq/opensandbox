@@ -123,7 +123,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Benchmark sandbox creation time")
-    parser.add_argument("--provider", choices=["opensandbox", "e2b"], default="opensandbox")
+    parser.add_argument("--provider", choices=["opensandbox", "opensandbox-http", "opensandbox-grpc", "e2b"], default="opensandbox-grpc")
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--opensandbox-url", default="https://opensandbox-test.fly.dev")
 
