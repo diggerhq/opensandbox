@@ -6,13 +6,8 @@ A Rust implementation of a Linux sandbox that runs commands in isolated environm
 
 Coding agent creating a PR in an isolated sandbox:
 
-[Watch demo video (MP4)](https://github.com/diggerhq/opensandbox/raw/main/demo.mp4)
 
-<details>
-<summary>Click to expand GIF preview</summary>
-
-![Coding agent creating a PR](demo.gif)
-
+https://github.com/user-attachments/assets/57961871-36d4-4ded-adb9-489b5b22a087
 </details>
 
 ## Features
