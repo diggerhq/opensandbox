@@ -2,6 +2,12 @@
 
 A Rust implementation of a Linux sandbox that runs commands in isolated environments with namespace separation, resource limits, and optional stateful sessions.
 
+## Demo
+
+Coding agent creating a PR in an isolated sandbox:
+
+![Coding agent creating a PR](demo.gif)
+
 ## Features
 
 - **PID namespace isolation** - sandboxed processes can't see host processes
