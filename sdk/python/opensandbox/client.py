@@ -29,6 +29,7 @@ class OpenSandbox:
         base_url: str,
         *,
         grpc_port: Optional[int] = None,
+        grpc_insecure: Optional[bool] = None,
         timeout: float = 30.0,
     ):
         """Initialize the OpenSandbox client.
@@ -36,6 +37,8 @@ class OpenSandbox:
         Args:
             base_url: Base URL of the OpenSandbox server (e.g., "https://opensandbox.fly.dev").
             grpc_port: gRPC port (default: 50051). If None, uses 50051.
+            grpc_insecure: Force insecure gRPC even with HTTPS. Useful for Fly.io where
+                          gRPC is exposed as raw TCP. If None, auto-detects from URL scheme.
             timeout: Default timeout for HTTP requests in seconds.
         """
         self._base_url = base_url.rstrip("/")
@@ -47,7 +50,8 @@ class OpenSandbox:
         # Parse the URL to get host for gRPC
         parsed = urlparse(self._base_url)
         self._host = parsed.hostname or "localhost"
-        self._is_secure = parsed.scheme == "https"
+        # Use secure gRPC for HTTPS unless explicitly set to insecure
+        self._grpc_secure = parsed.scheme == "https" and not grpc_insecure
 
     async def _ensure_connected(self) -> None:
         """Ensure HTTP and gRPC connections are established."""
@@ -56,12 +60,12 @@ class OpenSandbox:
 
         if self._grpc_channel is None:
             grpc_target = f"{self._host}:{self._grpc_port}"
-            if self._is_secure:
+            if self._grpc_secure:
                 # Use secure channel for HTTPS
                 credentials = grpc.ssl_channel_credentials()
                 self._grpc_channel = grpc.aio.secure_channel(grpc_target, credentials)
             else:
-                # Use insecure channel for HTTP (local dev)
+                # Use insecure channel for HTTP or when grpc_insecure=True
                 self._grpc_channel = grpc.aio.insecure_channel(grpc_target)
 
     async def create(

@@ -2,8 +2,12 @@ target/
 .git/
 .gitignore
 *.md
-examples/
 docker-compose.yml
 fly.toml
 .env
 .env.*
+
+# Exclude most examples but allow specific ones
+examples/*
+!examples/claude-agent-sdk-test/
+!examples/claude-chat/
