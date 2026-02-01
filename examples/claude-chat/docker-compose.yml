@@ -1,0 +1,37 @@
+services:
+  # OpenSandbox server for isolated code execution
+  opensandbox:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    privileged: true
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Claude Chat web interface
+  chat:
+    build:
+      context: ../..
+      dockerfile: examples/claude-chat/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENSANDBOX_URL=http://opensandbox:8080
+      - OPENSANDBOX_GRPC_PORT=50051
+    depends_on:
+      opensandbox:
+        condition: service_healthy
+    volumes:
+      # Mount for live development
+      - ./app.py:/app/app.py
+      - ./static:/app/static

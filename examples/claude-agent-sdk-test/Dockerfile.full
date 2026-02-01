@@ -1,0 +1,46 @@
+# Dockerfile.full - Build from repo root to include OpenSandbox SDK
+# Usage: docker build -f examples/claude-agent-sdk-test/Dockerfile.full -t claude-sandbox-test .
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (required for Claude Code CLI)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI globally via npm
+RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || \
+    echo "Note: Claude Code npm package not available, will test without it"
+
+# Copy and install the OpenSandbox Python SDK
+COPY sdk/python /app/opensandbox-sdk
+RUN pip install --no-cache-dir /app/opensandbox-sdk
+
+# Install additional Python dependencies
+RUN pip install --no-cache-dir \
+    pytest \
+    pytest-asyncio
+
+# Install Claude Code SDK and E2B for comparison
+RUN pip install --no-cache-dir claude-code-sdk e2b 2>/dev/null || \
+    echo "Note: Some SDKs may not be available"
+
+# Copy test scripts
+COPY examples/claude-agent-sdk-test/*.py ./
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Default command
+CMD ["python", "test_agent.py"]

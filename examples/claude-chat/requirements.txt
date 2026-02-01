@@ -1,0 +1,12 @@
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=12.0
+
+# Claude Agent SDK
+claude-code-sdk>=0.0.25
+
+# OpenSandbox SDK dependencies
+grpcio>=1.60.0
+protobuf>=4.25.0
+httpx>=0.27.0

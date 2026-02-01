@@ -31,6 +31,14 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
     && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Node.js 20.x
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
 COPY --from=builder /app/target/release/isolate /usr/local/bin/isolate
 
 EXPOSE 8080
