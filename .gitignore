@@ -2,6 +2,11 @@
 .DS_Store
 /target
 
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.egg-info/
