@@ -17,6 +17,7 @@ use proto::{
     ReadFileRequest, ReadFileResponse, RunCommandRequest, RunCommandResponse,
     SetCwdRequest, SetCwdResponse, SetEnvRequest, SetEnvResponse,
     WriteFileRequest, WriteFileResponse,
+    WriteFilesRequest, WriteFilesResponse, FileError,
 };
 
 /// gRPC service implementation.
@@ -114,6 +115,51 @@ impl SandboxService for SandboxServiceImpl {
                 error: e,
             })),
         }
+    }
+
+    async fn write_files(
+        &self,
+        request: Request<WriteFilesRequest>,
+    ) -> Result<Response<WriteFilesResponse>, Status> {
+        let req = request.into_inner();
+        info!("gRPC WriteFiles: session={}, count={}", req.session_id, req.files.len());
+
+        // Get sandbox root
+        let sandbox_root = {
+            let mut sessions = self.state.sessions.write().await;
+            let session = sessions
+                .get_mut(&req.session_id)
+                .ok_or_else(|| Status::not_found("Session not found"))?;
+            session.last_used = Instant::now();
+            session.sandbox_root.clone()
+        };
+
+        // Collect files for the blocking task
+        let files: Vec<(String, Vec<u8>)> = req
+            .files
+            .into_iter()
+            .map(|f| (f.path, f.content))
+            .collect();
+
+        let errors = tokio::task::spawn_blocking(move || {
+            let mut errors = Vec::new();
+            for (path, content) in &files {
+                if let Err(e) = sandbox::write_file_in_sandbox(&sandbox_root, path, content) {
+                    errors.push(FileError {
+                        path: path.clone(),
+                        error: e,
+                    });
+                }
+            }
+            errors
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(WriteFilesResponse {
+            success: errors.is_empty(),
+            errors,
+        }))
     }
 
     async fn read_file(

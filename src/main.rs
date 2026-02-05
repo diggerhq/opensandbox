@@ -66,6 +66,11 @@ enum Commands {
         /// gRPC port to listen on
         #[arg(long, default_value = "50051")]
         grpc_port: u16,
+
+        /// Preview domain for sandbox web servers (e.g., "preview.opensandbox.fly.dev")
+        /// When set, sessions will get preview URLs like https://{session-id}.preview.opensandbox.fly.dev
+        #[arg(long)]
+        preview_domain: Option<String>,
     },
 }
 
@@ -85,9 +90,12 @@ async fn main() {
     }
 
     match args.command {
-        Some(Commands::Serve { port, grpc_port }) => {
-            // Create shared state
-            let state = state::AppState::new();
+        Some(Commands::Serve { port, grpc_port, preview_domain }) => {
+            // CLI flag takes priority, then fall back to PREVIEW_DOMAIN env var
+            let preview_domain = preview_domain.or_else(|| std::env::var("PREVIEW_DOMAIN").ok());
+
+            // Create shared state with optional preview domain
+            let state = state::AppState::with_preview_domain(preview_domain);
 
             // Spawn HTTP server
             let http_state = state.clone();

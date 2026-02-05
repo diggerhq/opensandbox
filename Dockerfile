@@ -15,12 +15,15 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 
-# Install dependencies including git and gh CLI
+# Install dependencies including git, gh CLI, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     procps \
     git \
     curl \
+    build-essential \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI

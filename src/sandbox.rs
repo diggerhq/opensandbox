@@ -55,6 +55,123 @@ pub fn run_in_session(sandbox_root: &Path, config: &RunConfig) -> Result<RunResu
     run_in_sandbox(sandbox_root, config)
 }
 
+/// Start a long-running background process in the sandbox.
+/// Unlike `run_in_session`, this does NOT use CLONE_NEWPID so the process
+/// survives after the call returns. Returns the PID of the background process.
+pub fn run_background_in_session(sandbox_root: &Path, config: &RunConfig) -> Result<u32, String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    info!(command = ?config.command, "Starting background process in {:?}", sandbox_root);
+
+    // Build environment
+    let mut env_vars: Vec<(String, String)> = config
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    env_vars.push(("PATH".to_string(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()));
+    env_vars.push(("HOME".to_string(), "/home".to_string()));
+
+    let cwd = if config.cwd.is_empty() || config.cwd == "/" {
+        "/".to_string()
+    } else {
+        config.cwd.clone()
+    };
+
+    // Open a log file in sandbox's /tmp (host path, before chroot) for debugging
+    let log_path = sandbox_root.join("tmp/background.log");
+    let log_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&log_path)
+        .map_err(|e| format!("open background log {}: {}", log_path.display(), e))?;
+    let log_file_err = log_file
+        .try_clone()
+        .map_err(|e| format!("clone log file: {}", e))?;
+
+    // Use pre_exec to chroot into the sandbox after fork but before exec.
+    // This avoids needing the chroot binary (which may not be in PATH) and
+    // avoids CLONE_NEWPID (which kills child processes when parent exits).
+    let sandbox_root_owned = sandbox_root.to_path_buf();
+    let cwd_for_preexec = cwd.clone();
+
+    // Execute the command array directly instead of wrapping in sh -c.
+    // The client may already send ["sh", "-c", "npm run dev"], so wrapping
+    // again would break argument parsing (sh -c npm treats "run" as $0).
+    // pre_exec handles chroot and chdir, so no need for a shell wrapper.
+    if config.command.is_empty() {
+        return Err("empty command".to_string());
+    }
+    let mut cmd = Command::new(&config.command[0]);
+    for arg in &config.command[1..] {
+        cmd.arg(arg);
+    }
+    cmd.env_clear()
+        .envs(env_vars)
+        .stdout(log_file)
+        .stderr(log_file_err)
+        .stdin(std::process::Stdio::null());
+
+    unsafe {
+        cmd.pre_exec(move || {
+            // chroot into sandbox filesystem
+            nix::unistd::chroot(&sandbox_root_owned)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chroot: {}", e)))?;
+            // chdir to working directory
+            nix::unistd::chdir(cwd_for_preexec.as_str())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("chdir: {}", e)))?;
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn()
+        .map_err(|e| format!("spawn background: {}", e))?;
+
+    let pid = child.id();
+    info!(pid = pid, log = %log_path.display(), "Background process started successfully");
+
+    // Wait briefly and check if the process is still alive
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let alive = is_process_alive(pid);
+    info!(pid = pid, alive = alive, "Background process status check");
+
+    if !alive {
+        // Process died immediately - read the log to see why
+        let log_content = fs::read_to_string(&log_path).unwrap_or_default();
+        let truncated = if log_content.len() > 2000 {
+            &log_content[log_content.len() - 2000..]
+        } else {
+            &log_content
+        };
+        info!(pid = pid, "Background process died immediately. Log:\n{}", truncated);
+        return Err(format!(
+            "Background process (pid {}) died immediately. Log output:\n{}",
+            pid, truncated
+        ));
+    }
+
+    Ok(pid)
+}
+
+/// Check if a process is still alive.
+pub fn is_process_alive(pid: u32) -> bool {
+    // kill with signal 0 checks if process exists without sending a signal
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        None, // signal 0
+    )
+    .is_ok()
+}
+
+/// Read the background process log file for a session.
+pub fn read_background_log(sandbox_root: &Path) -> Result<String, String> {
+    let log_path = sandbox_root.join("tmp/background.log");
+    fs::read_to_string(&log_path).map_err(|e| format!("read log: {}", e))
+}
+
 /// Create a new session sandbox directory.
 pub fn create_session_sandbox(session_id: &str) -> Result<PathBuf, String> {
     let sandbox_root = PathBuf::from(format!("/tmp/sandbox-{}", session_id));
@@ -104,6 +221,62 @@ pub fn read_file_in_sandbox(sandbox_root: &Path, path: &str) -> Result<Vec<u8>, 
     let full_path = sandbox_root.join(normalized_path);
 
     fs::read(&full_path).map_err(|e| format!("read file: {}", e))
+}
+
+/// Entry in a directory listing.
+#[derive(Debug, Clone)]
+pub struct SandboxFileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_directory: bool,
+    pub size: u64,
+}
+
+/// List files in a directory within the sandbox filesystem.
+pub fn list_files_in_sandbox(sandbox_root: &Path, path: &str) -> Result<Vec<SandboxFileEntry>, String> {
+    // Normalize the path to be relative to sandbox root
+    let normalized_path = if path.starts_with('/') {
+        path.trim_start_matches('/')
+    } else {
+        path
+    };
+
+    let full_path = if normalized_path.is_empty() {
+        sandbox_root.to_path_buf()
+    } else {
+        sandbox_root.join(normalized_path)
+    };
+
+    let entries = fs::read_dir(&full_path)
+        .map_err(|e| format!("read dir {}: {}", full_path.display(), e))?;
+
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        let metadata = entry.metadata().map_err(|e| format!("metadata: {}", e))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // Compute the path as it appears inside the sandbox (with leading /)
+        let entry_path = if normalized_path.is_empty() {
+            format!("/{}", name)
+        } else if path.starts_with('/') {
+            format!("{}/{}", path.trim_end_matches('/'), name)
+        } else {
+            format!("/{}/{}", normalized_path.trim_end_matches('/'), name)
+        };
+
+        result.push(SandboxFileEntry {
+            name,
+            path: entry_path,
+            is_directory: metadata.is_dir(),
+            size: metadata.len(),
+        });
+    }
+
+    // Sort by name for consistent ordering
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(result)
 }
 
 fn setup_sandbox_dir(sandbox_root: &Path) -> Result<(), String> {

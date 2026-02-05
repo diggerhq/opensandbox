@@ -7,6 +7,7 @@ service SandboxService {
 
   // File operations
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc WriteFiles(WriteFilesRequest) returns (WriteFilesResponse);
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
 
   // Environment/CWD
@@ -69,4 +70,24 @@ message SetCwdRequest {
 
 message SetCwdResponse {
   bool success = 1;
+}
+
+message BulkFileEntry {
+  string path = 1;
+  bytes content = 2;
+}
+
+message WriteFilesRequest {
+  string session_id = 1;
+  repeated BulkFileEntry files = 2;
+}
+
+message WriteFilesResponse {
+  bool success = 1;
+  repeated FileError errors = 2;
+}
+
+message FileError {
+  string path = 1;
+  string error = 2;
 }

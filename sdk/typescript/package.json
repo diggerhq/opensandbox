@@ -1,0 +1,49 @@
+{
+  "name": "@opensandbox/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for OpenSandbox - secure code execution environments",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build",
+    "demo": "npx ts-node -T examples/demo.ts",
+    "quickstart": "npx ts-node -T examples/quickstart.ts",
+    "proto": "grpc_tools_node_protoc --js_out=import_style=commonjs,binary:./src/proto --grpc_out=grpc_js:./src/proto --plugin=protoc-gen-grpc=`which grpc_tools_node_protoc_plugin` -I ../../proto ../../proto/sandbox.proto"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.10.0",
+    "@grpc/proto-loader": "^0.7.0",
+    "google-protobuf": "^3.21.0"
+  },
+  "devDependencies": {
+    "@types/google-protobuf": "^3.15.0",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "sandbox",
+    "opensandbox",
+    "code-execution",
+    "isolation",
+    "container"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/diggerhq/opensandbox"
+  }
+}

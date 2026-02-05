@@ -41,3 +41,7 @@ primary_region = 'ord'
   memory = '2gb'
   cpus = 2
   memory_mb = 2048
+
+
+[env]
+  PREVIEW_DOMAIN = "preview.opensandbox.ai"
