@@ -115,10 +115,13 @@ await sandbox.kill();
 ```python Python
 await sandbox.kill()
 
-# Or use the context manager for automatic cleanup:
-async with Sandbox.create() as sandbox:
-    # sandbox is automatically killed when the block exits
+# Or use try/finally for automatic cleanup:
+sandbox = await Sandbox.create()
+try:
     result = await sandbox.commands.run('whoami')
+finally:
+    await sandbox.kill()
+    await sandbox.close()
 ```
 
 </CodeGroup>

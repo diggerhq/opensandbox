@@ -99,9 +99,10 @@ Deletes a template by name.
 Once built, pass the template name when creating a sandbox:
 
 ```python
-async with Sandbox.create(template='python-ml') as sandbox:
-    result = await sandbox.commands.run(
-        'python3 -c "import numpy; print(numpy.__version__)"'
-    )
-    print(result.stdout)  # 1.24.0
+sandbox = await Sandbox.create(template='python-ml')
+result = await sandbox.commands.run(
+    'python3 -c "import numpy; print(numpy.__version__)"'
+)
+print(result.stdout)  # 1.24.0
+await sandbox.kill()
 ```

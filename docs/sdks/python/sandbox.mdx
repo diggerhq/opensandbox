@@ -43,15 +43,13 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
 
 **Returns:** `Sandbox`
 
-## Async Context Manager
-
-The recommended way to use sandboxes in Python — the sandbox is automatically killed when the block exits:
+## Usage
 
 ```python
-async with Sandbox.create(template='base') as sandbox:
-    result = await sandbox.commands.run('echo "hello"')
-    print(result.stdout)
-# sandbox is automatically killed here
+sandbox = await Sandbox.create(template='base')
+result = await sandbox.commands.run('echo "hello"')
+print(result.stdout)
+await sandbox.kill()
 ```
 
 ## Connecting to an Existing Sandbox

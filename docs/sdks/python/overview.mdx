@@ -32,21 +32,25 @@ import asyncio
 from opensandbox import Sandbox
 
 async def main():
-    async with Sandbox.create(template='base') as sandbox:
-        # Run a command
-        result = await sandbox.commands.run('python3 --version')
-        print(result.stdout)
+    sandbox = await Sandbox.create(template='base')
 
-        # Work with files
-        await sandbox.files.write('/app/main.py', 'print("hello")')
-        output = await sandbox.commands.run('python3 /app/main.py')
-        print(output.stdout)  # hello
+    # Run a command
+    result = await sandbox.commands.run('python3 --version')
+    print(result.stdout)
+
+    # Work with files
+    await sandbox.files.write('/app/main.py', 'print("hello")')
+    output = await sandbox.commands.run('python3 /app/main.py')
+    print(output.stdout)  # hello
+
+    await sandbox.kill()
+    await sandbox.close()
 
 asyncio.run(main())
 ```
 
 <Note>
-  All SDK operations are async. Use `async with` for automatic cleanup, or call `await sandbox.kill()` manually.
+  All SDK operations are async. Call `await sandbox.kill()` to stop the sandbox and `await sandbox.close()` to clean up the HTTP client.
 </Note>
 
 ## Exports
