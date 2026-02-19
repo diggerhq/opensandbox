@@ -81,6 +81,7 @@ Connects to a running sandbox by ID.
 | Property | Type | Description |
 | --- | --- | --- |
 | `sandboxId` | `string` | Unique identifier for the sandbox |
+| `domain` | `string` | Public domain for the sandbox (e.g. `abc123.workers.opensandbox.ai`). HTTP traffic to this domain is routed directly into the sandbox. |
 | `status` | `string` | Current status: `"running"`, `"stopped"`, or `"error"` |
 | `files` | `Filesystem` | [Filesystem](/sdks/typescript/filesystem) operations |
 | `commands` | `Commands` | [Command](/sdks/typescript/commands) execution |

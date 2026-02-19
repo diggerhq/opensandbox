@@ -31,6 +31,13 @@ dist/
 # Compiled binaries
 bin/opensandbox-server
 bin/opensandbox-worker
+opensandbox-worker
+
+# Worker env (secrets)
+worker.env
+
+# Loom demo (private)
+sdks/typescript/examples/loom/
 
 # Media files
 *.mp4

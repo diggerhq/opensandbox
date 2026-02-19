@@ -1,0 +1,12 @@
+{
+    on_demand_tls {
+        ask http://localhost:8080/caddy/check
+    }
+}
+
+https://*.workers.opensandbox.ai {
+    tls {
+        on_demand
+    }
+    reverse_proxy localhost:8080
+}

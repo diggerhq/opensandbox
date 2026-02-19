@@ -8,11 +8,11 @@ Templates let you create reusable sandbox images from Dockerfiles. Pre-install l
 ## Building a Template
 
 ```python
-from opensandbox import Sandbox
+from opensandbox import Template
 
-sandbox = await Sandbox.create()
+templates = Template(api_url, api_key)
 
-template = await sandbox.templates.build('python-ml', """
+template = await templates.build('python-ml', """
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y python3 python3-pip
 RUN pip3 install numpy pandas scikit-learn
@@ -22,7 +22,7 @@ print(template.template_id)  # tpl-abc123
 print(template.status)       # building → ready
 ```
 
-### `await sandbox.templates.build(name, dockerfile)`
+### `await templates.build(name, dockerfile)`
 
 Builds a new template from a Dockerfile.
 
@@ -38,13 +38,13 @@ Builds a new template from a Dockerfile.
 ## Listing Templates
 
 ```python
-templates = await sandbox.templates.list()
+all_templates = await templates.list()
 
-for t in templates:
+for t in all_templates:
     print(f"{t.name} ({t.tag}) — {t.status}")
 ```
 
-### `await sandbox.templates.list()`
+### `await templates.list()`
 
 Returns all templates.
 
@@ -53,11 +53,11 @@ Returns all templates.
 ## Getting a Template
 
 ```python
-template = await sandbox.templates.get('python-ml')
+template = await templates.get('python-ml')
 print(template)
 ```
 
-### `await sandbox.templates.get(name)`
+### `await templates.get(name)`
 
 Gets a template by name.
 
@@ -70,10 +70,10 @@ Gets a template by name.
 ## Deleting a Template
 
 ```python
-await sandbox.templates.delete('python-ml')
+await templates.delete('python-ml')
 ```
 
-### `await sandbox.templates.delete(name)`
+### `await templates.delete(name)`
 
 Deletes a template by name.
 

@@ -8,11 +8,11 @@ Templates let you create reusable sandbox images from Dockerfiles. Pre-install l
 ## Building a Template
 
 ```typescript
-import { Sandbox } from 'opensandbox';
+import { Templates } from 'opensandbox';
 
-const sandbox = await Sandbox.create();
+const templates = new Templates(apiUrl, apiKey);
 
-const template = await sandbox.templates.build('python-ml', `
+const template = await templates.build('python-ml', `
 FROM ubuntu:22.04
 RUN apt-get update && apt-get install -y python3 python3-pip
 RUN pip3 install numpy pandas scikit-learn
@@ -22,7 +22,7 @@ console.log(template.templateID); // tpl-abc123
 console.log(template.status);     // building → ready
 ```
 
-### `sandbox.templates.build(name, dockerfile)`
+### `templates.build(name, dockerfile)`
 
 Builds a new template from a Dockerfile.
 
@@ -38,14 +38,14 @@ Builds a new template from a Dockerfile.
 ## Listing Templates
 
 ```typescript
-const templates = await sandbox.templates.list();
+const allTemplates = await templates.list();
 
-for (const t of templates) {
+for (const t of allTemplates) {
   console.log(`${t.name} (${t.tag}) — ${t.status}`);
 }
 ```
 
-### `sandbox.templates.list()`
+### `templates.list()`
 
 Returns all templates.
 
@@ -54,11 +54,11 @@ Returns all templates.
 ## Getting a Template
 
 ```typescript
-const template = await sandbox.templates.get('python-ml');
+const template = await templates.get('python-ml');
 console.log(template);
 ```
 
-### `sandbox.templates.get(name)`
+### `templates.get(name)`
 
 Gets a template by name.
 
@@ -71,10 +71,10 @@ Gets a template by name.
 ## Deleting a Template
 
 ```typescript
-await sandbox.templates.delete('python-ml');
+await templates.delete('python-ml');
 ```
 
-### `sandbox.templates.delete(name)`
+### `templates.delete(name)`
 
 Deletes a template by name.
 

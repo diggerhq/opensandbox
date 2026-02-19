@@ -84,6 +84,7 @@ Connects to a running sandbox by ID.
 | Property | Type | Description |
 | --- | --- | --- |
 | `sandbox_id` | `str` | Unique identifier for the sandbox |
+| `domain` | `str` | Public domain for the sandbox (e.g. `abc123.workers.opensandbox.ai`). HTTP traffic to this domain is routed directly into the sandbox. |
 | `status` | `str` | Current status: `"running"`, `"stopped"`, or `"error"` |
 | `template` | `str` | Template used to create the sandbox |
 | `files` | `Filesystem` | [Filesystem](/sdks/python/filesystem) operations |

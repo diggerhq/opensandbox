@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenSandbox Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Load kernel modules required by CRIU for checkpoint/restore
+ExecStartPre=/sbin/modprobe inet_diag
+ExecStartPre=/sbin/modprobe tcp_diag
+ExecStartPre=/sbin/modprobe udp_diag
+ExecStartPre=/sbin/modprobe unix_diag
+ExecStartPre=/sbin/modprobe netlink_diag
+ExecStart=/usr/local/bin/opensandbox-worker
+Restart=always
+RestartSec=5
+
+# Secrets and instance-specific config are loaded from an env file.
+# Copy deploy/ec2/worker.env.example to /etc/opensandbox/worker.env
+# and fill in values for your deployment.
+EnvironmentFile=/etc/opensandbox/worker.env
+
+[Install]
+WantedBy=multi-user.target
