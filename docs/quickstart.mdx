@@ -116,12 +116,15 @@ await sandbox.kill();
 await sandbox.kill()
 
 # Or use try/finally for automatic cleanup:
-sandbox = await Sandbox.create()
-try:
-    result = await sandbox.commands.run('whoami')
-finally:
-    await sandbox.kill()
-    await sandbox.close()
+async def main():
+    sandbox = await Sandbox.create()
+    try:
+        result = await sandbox.commands.run('whoami')
+    finally:
+        await sandbox.kill()
+        await sandbox.close()
+
+asyncio.run(main())
 ```
 
 </CodeGroup>

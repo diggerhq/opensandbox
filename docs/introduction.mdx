@@ -56,12 +56,16 @@ await sandbox.kill();
 ```
 
 ```python Python
+import asyncio
 from opensandbox import Sandbox
 
-sandbox = await Sandbox.create(template='base')
-result = await sandbox.commands.run('echo "Hello from OpenSandbox!"')
-print(result.stdout)  # Hello from OpenSandbox!
-await sandbox.kill()
+async def main():
+    sandbox = await Sandbox.create(template='base')
+    result = await sandbox.commands.run('echo "Hello from OpenSandbox!"')
+    print(result.stdout)  # Hello from OpenSandbox!
+    await sandbox.kill()
+
+asyncio.run(main())
 ```
 
 </CodeGroup>
