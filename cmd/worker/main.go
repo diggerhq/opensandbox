@@ -103,6 +103,15 @@ func main() {
 		OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 			log.Printf("opensandbox-worker: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
 				sandboxID, result.CheckpointKey, result.SizeBytes)
+			if store != nil {
+				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
+			}
+		},
+		OnKill: func(sandboxID string) {
+			log.Printf("opensandbox-worker: sandbox %s killed on timeout", sandboxID)
+			if store != nil {
+				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "stopped", nil)
+			}
 		},
 	})
 	defer sbRouter.Close()

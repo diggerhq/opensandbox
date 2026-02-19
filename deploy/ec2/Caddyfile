@@ -1,12 +1,10 @@
-{
-    on_demand_tls {
-        ask http://localhost:8080/caddy/check
-    }
-}
-
-https://*.workers.opensandbox.ai {
+*.workers.opensandbox.ai {
     tls {
-        on_demand
+        dns route53 {
+            access_key_id {env.AWS_ACCESS_KEY_ID}
+            secret_access_key {env.AWS_SECRET_ACCESS_KEY}
+            region us-east-2
+        }
     }
     reverse_proxy localhost:8080
 }

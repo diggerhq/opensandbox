@@ -23,6 +23,9 @@
 
 import { execSync } from "child_process";
 import * as path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const BOLD = "\x1b[1m";
 const GREEN = "\x1b[32m";

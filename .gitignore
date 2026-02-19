@@ -35,6 +35,7 @@ opensandbox-worker
 
 # Worker env (secrets)
 worker.env
+caddy.env
 
 # Loom demo (private)
 sdks/typescript/examples/loom/

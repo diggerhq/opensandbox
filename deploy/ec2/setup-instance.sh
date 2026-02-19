@@ -82,17 +82,21 @@ echo "==> Configuring Redis..."
 echo "    NOTE: Set a Redis password in /etc/redis/redis.conf manually"
 
 # -------------------------------------------------------------------
-# Caddy
+# Caddy (custom build with Route53 DNS module for wildcard certs)
 # -------------------------------------------------------------------
-echo "==> Installing Caddy..."
-sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt-get update
-sudo apt-get install -y caddy
-# Stop the default caddy service — we use our own unit
-sudo systemctl stop caddy
-sudo systemctl disable caddy
+echo "==> Installing Go (needed for xcaddy)..."
+GO_VERSION="1.23.6"
+curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xzf -
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+
+echo "==> Building Caddy with Route53 DNS module..."
+go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+xcaddy build --with github.com/caddy-dns/route53 --output /tmp/caddy-custom
+sudo mv /tmp/caddy-custom /usr/local/bin/caddy
+sudo chmod +x /usr/local/bin/caddy
+
+echo "==> Verifying Caddy has Route53 module..."
+caddy list-modules | grep route53 || { echo "ERROR: Caddy missing route53 module"; exit 1; }
 
 echo "==> Installing Caddy config..."
 sudo mkdir -p /etc/caddy

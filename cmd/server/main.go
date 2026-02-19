@@ -148,9 +148,14 @@ func main() {
 			OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 				log.Printf("opensandbox: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
 					sandboxID, result.CheckpointKey, result.SizeBytes)
-				// Update PG session status if store is available
 				if opts.Store != nil {
 					_ = opts.Store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
+				}
+			},
+			OnKill: func(sandboxID string) {
+				log.Printf("opensandbox: sandbox %s killed on timeout", sandboxID)
+				if opts.Store != nil {
+					_ = opts.Store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "stopped", nil)
 				}
 			},
 		})

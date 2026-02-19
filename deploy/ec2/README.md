@@ -7,7 +7,7 @@
 | Podman | 5.8.0 | Rootful, used for sandbox containers |
 | CRIU | 4.2 | Checkpoint/restore for hibernation |
 | crun | 1.26 | OCI runtime with +CRIU support |
-| Caddy | latest | On-demand TLS for `*.workers.opensandbox.ai` |
+| Caddy | latest | Wildcard TLS for `*.workers.opensandbox.ai` (DNS-01 via Route53) |
 | Redis | 7.0.15 | Local, used for sandbox state/routing |
 | Go worker | custom | `/usr/local/bin/opensandbox-worker` |
 
@@ -17,7 +17,7 @@
 Internet
   |
   v
-Caddy (port 443) -- on-demand TLS for *.workers.opensandbox.ai
+Caddy (port 443) -- wildcard TLS for *.workers.opensandbox.ai (DNS-01 via Route53)
   |
   v
 opensandbox-worker (port 8080) -- HTTP API + gRPC (9090)

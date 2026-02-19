@@ -9,6 +9,7 @@ ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
 Restart=always
 RestartSec=5
 Environment=HOME=/root
+EnvironmentFile=/etc/opensandbox/caddy.env
 
 [Install]
 WantedBy=multi-user.target
