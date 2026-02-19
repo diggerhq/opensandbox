@@ -56,6 +56,7 @@ type RouterConfig struct {
 	WorkerID        string
 	DefaultTimeout  time.Duration
 	OnHibernate     func(sandboxID string, result *HibernateResult)
+	OnKill          func(sandboxID string) // called when a sandbox is killed on timeout (hibernate failed or no checkpoint store)
 }
 
 // SandboxRouter routes sandbox interactions through a state machine,
@@ -70,6 +71,7 @@ type SandboxRouter struct {
 	workerID        string
 	defaultTimeout  time.Duration
 	onHibernate     func(sandboxID string, result *HibernateResult)
+	onKill          func(sandboxID string)
 
 	mu        sync.RWMutex
 	sandboxes map[string]*sandboxEntry
@@ -90,6 +92,7 @@ func NewSandboxRouter(cfg RouterConfig) *SandboxRouter {
 		workerID:        cfg.WorkerID,
 		defaultTimeout:  dt,
 		onHibernate:     cfg.OnHibernate,
+		onKill:          cfg.OnKill,
 		sandboxes:       make(map[string]*sandboxEntry),
 	}
 }
@@ -464,6 +467,9 @@ func (r *SandboxRouter) onTimeout(sandboxID string) {
 			log.Printf("router: hibernate failed for %s, killing: %v", sandboxID, err)
 			_ = r.manager.podman.RemoveContainer(ctx, name, true)
 			r.Unregister(sandboxID)
+			if r.onKill != nil {
+				r.onKill(sandboxID)
+			}
 			return
 		}
 
@@ -484,4 +490,7 @@ func (r *SandboxRouter) onTimeout(sandboxID string) {
 	name := r.manager.ContainerName(sandboxID)
 	_ = r.manager.podman.RemoveContainer(ctx, name, true)
 	r.Unregister(sandboxID)
+	if r.onKill != nil {
+		r.onKill(sandboxID)
+	}
 }
