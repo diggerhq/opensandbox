@@ -127,7 +127,6 @@ export default function Templates() {
                 <th>Name</th>
                 <th>Tag</th>
                 <th>Type</th>
-                <th>Image</th>
                 <th>Created</th>
                 <th style={{ width: 80 }}></th>
               </tr>
@@ -154,9 +153,6 @@ export default function Templates() {
                       {t.isPublic ? 'Built-in' : 'Custom'}
                     </span>
                   </td>
-                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {t.imageRef}
-                  </td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
                     {new Date(t.createdAt).toLocaleString()}
                   </td>
@@ -178,7 +174,7 @@ export default function Templates() {
               ))}
               {(templates ?? []).length === 0 && (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: 32, color: 'var(--text-tertiary)' }}>
+                  <td colSpan={5} style={{ textAlign: 'center', padding: 32, color: 'var(--text-tertiary)' }}>
                     No templates yet
                   </td>
                 </tr>

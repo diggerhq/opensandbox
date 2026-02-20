@@ -63,6 +63,12 @@ export const buildTemplate = (name: string, dockerfile: string) =>
 export const deleteTemplate = (id: string) =>
   apiFetch<void>(`/templates/${id}`, { method: 'DELETE' })
 
+export const getSessionDetail = (sandboxId: string) =>
+  apiFetch<SessionDetail>(`/sessions/${sandboxId}`)
+
+export const getSessionStats = (sandboxId: string) =>
+  apiFetch<SandboxStats>(`/sessions/${sandboxId}/stats`)
+
 export const getOrg = () => apiFetch<Org>('/org')
 
 export const updateOrg = (name: string) =>
@@ -98,10 +104,41 @@ export interface Template {
   orgId?: string
   name: string
   tag: string
-  imageRef: string
   dockerfile?: string
   isPublic: boolean
   createdAt: string
+}
+
+export interface SessionDetail {
+  id: string
+  sandboxId: string
+  template: string
+  status: string
+  startedAt: string
+  stoppedAt?: string
+  errorMsg?: string
+  domain?: string
+  config?: {
+    timeout?: number
+    cpuCount?: number
+    memoryMB?: number
+    networkEnabled?: boolean
+    envs?: Record<string, string>
+  }
+  checkpoint?: {
+    checkpointKey: string
+    sizeBytes: number
+    hibernatedAt: string
+  }
+}
+
+export interface SandboxStats {
+  cpuPercent: number
+  memUsage: number
+  memLimit: number
+  netInput: number
+  netOutput: number
+  pids: number
 }
 
 export interface Org {

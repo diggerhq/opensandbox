@@ -188,6 +188,12 @@ func (m *Manager) HostPort(ctx context.Context, sandboxID string) (int, error) {
 	return port, nil
 }
 
+// Stats returns live CPU/memory stats for a running sandbox.
+func (m *Manager) Stats(ctx context.Context, sandboxID string) (*podman.ContainerStats, error) {
+	name := m.ContainerName(sandboxID)
+	return m.podman.ContainerStats(ctx, name)
+}
+
 // Close is a no-op — timer management now lives in SandboxRouter.
 func (m *Manager) Close() {}
 

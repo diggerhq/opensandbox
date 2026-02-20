@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { getSessions, type Session } from '../api/client'
 
 const statusFilters = ['', 'running', 'stopped', 'hibernated', 'error'] as const
@@ -56,13 +57,13 @@ export default function Sessions() {
             </thead>
             <tbody>
               {(sessions ?? []).map((s: Session) => (
-                <tr key={s.id}>
-                  <td><code>{s.sandboxId}</code></td>
+                <ClickableRow key={s.id} sandboxId={s.sandboxId}>
+                  <td><code style={{ color: 'var(--text-accent)' }}>{s.sandboxId}</code></td>
                   <td>{s.template || 'base'}</td>
                   <td><StatusBadge status={s.status} /></td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{new Date(s.startedAt).toLocaleString()}</td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{s.stoppedAt ? new Date(s.stoppedAt).toLocaleString() : '\u2014'}</td>
-                </tr>
+                </ClickableRow>
               ))}
               {(sessions ?? []).length === 0 && (
                 <tr>
@@ -220,6 +221,20 @@ function LegendItem({ color, label }: { color: string; label: string }) {
       <div style={{ width: 8, height: 8, borderRadius: 2, background: color }} />
       <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{label}</span>
     </div>
+  )
+}
+
+function ClickableRow({ sandboxId, children }: { sandboxId: string; children: React.ReactNode }) {
+  const navigate = useNavigate()
+  return (
+    <tr
+      onClick={() => navigate(`/sessions/${sandboxId}`)}
+      style={{ cursor: 'pointer' }}
+      onMouseOver={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.04)' }}
+      onMouseOut={e => { e.currentTarget.style.background = '' }}
+    >
+      {children}
+    </tr>
   )
 }
 

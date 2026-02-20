@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -36,7 +37,16 @@ func NewGRPCServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs 
 		sandboxDBs:      sandboxDBs,
 		checkpointStore: checkpointStore,
 		builder:         builder,
-		server:          grpc.NewServer(),
+		server: grpc.NewServer(
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+				MinTime:             5 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.KeepaliveParams(keepalive.ServerParameters{
+				Time:    30 * time.Second,
+				Timeout: 10 * time.Second,
+			}),
+		),
 	}
 	pb.RegisterSandboxWorkerServer(s.server, s)
 	return s
@@ -360,5 +370,21 @@ func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateReq
 	return &pb.BuildTemplateResponse{
 		ImageRef: imageRef,
 		BuildLog: buildLog,
+	}, nil
+}
+
+func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {
+	stats, err := s.manager.Stats(ctx, req.SandboxId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandbox stats: %w", err)
+	}
+
+	return &pb.GetSandboxStatsResponse{
+		CpuPercent: stats.CPUPercent,
+		MemUsage:   stats.MemUsage,
+		MemLimit:   stats.MemLimit,
+		NetInput:   stats.NetInput,
+		NetOutput:  stats.NetOutput,
+		Pids:       int32(stats.PIDs),
 	}, nil
 }

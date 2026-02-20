@@ -24,6 +24,8 @@ service SandboxWorker {
   rpc WakeSandbox(WakeSandboxRequest) returns (WakeSandboxResponse);
 
   rpc BuildTemplate(BuildTemplateRequest) returns (BuildTemplateResponse);
+
+  rpc GetSandboxStats(GetSandboxStatsRequest) returns (GetSandboxStatsResponse);
 }
 
 message CreateSandboxRequest {
@@ -182,4 +184,17 @@ message BuildTemplateRequest {
 message BuildTemplateResponse {
   string image_ref = 1;
   string build_log = 2;
+}
+
+message GetSandboxStatsRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxStatsResponse {
+  double cpu_percent = 1;
+  uint64 mem_usage = 2;
+  uint64 mem_limit = 3;
+  uint64 net_input = 4;
+  uint64 net_output = 5;
+  int32 pids = 6;
 }
