@@ -1685,6 +1685,134 @@ func (x *BuildTemplateResponse) GetBuildLog() string {
 	return ""
 }
 
+type GetSandboxStatsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSandboxStatsRequest) Reset() {
+	*x = GetSandboxStatsRequest{}
+	mi := &file_proto_worker_worker_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSandboxStatsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSandboxStatsRequest) ProtoMessage() {}
+
+func (x *GetSandboxStatsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSandboxStatsRequest.ProtoReflect.Descriptor instead.
+func (*GetSandboxStatsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *GetSandboxStatsRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+type GetSandboxStatsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CpuPercent    float64                `protobuf:"fixed64,1,opt,name=cpu_percent,json=cpuPercent,proto3" json:"cpu_percent,omitempty"`
+	MemUsage      uint64                 `protobuf:"varint,2,opt,name=mem_usage,json=memUsage,proto3" json:"mem_usage,omitempty"`
+	MemLimit      uint64                 `protobuf:"varint,3,opt,name=mem_limit,json=memLimit,proto3" json:"mem_limit,omitempty"`
+	NetInput      uint64                 `protobuf:"varint,4,opt,name=net_input,json=netInput,proto3" json:"net_input,omitempty"`
+	NetOutput     uint64                 `protobuf:"varint,5,opt,name=net_output,json=netOutput,proto3" json:"net_output,omitempty"`
+	Pids          int32                  `protobuf:"varint,6,opt,name=pids,proto3" json:"pids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSandboxStatsResponse) Reset() {
+	*x = GetSandboxStatsResponse{}
+	mi := &file_proto_worker_worker_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSandboxStatsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSandboxStatsResponse) ProtoMessage() {}
+
+func (x *GetSandboxStatsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSandboxStatsResponse.ProtoReflect.Descriptor instead.
+func (*GetSandboxStatsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *GetSandboxStatsResponse) GetCpuPercent() float64 {
+	if x != nil {
+		return x.CpuPercent
+	}
+	return 0
+}
+
+func (x *GetSandboxStatsResponse) GetMemUsage() uint64 {
+	if x != nil {
+		return x.MemUsage
+	}
+	return 0
+}
+
+func (x *GetSandboxStatsResponse) GetMemLimit() uint64 {
+	if x != nil {
+		return x.MemLimit
+	}
+	return 0
+}
+
+func (x *GetSandboxStatsResponse) GetNetInput() uint64 {
+	if x != nil {
+		return x.NetInput
+	}
+	return 0
+}
+
+func (x *GetSandboxStatsResponse) GetNetOutput() uint64 {
+	if x != nil {
+		return x.NetOutput
+	}
+	return 0
+}
+
+func (x *GetSandboxStatsResponse) GetPids() int32 {
+	if x != nil {
+		return x.Pids
+	}
+	return 0
+}
+
 var File_proto_worker_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_worker_proto_rawDesc = "" +
@@ -1818,7 +1946,19 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\recr_image_ref\x18\x04 \x01(\tR\vecrImageRef\"Q\n" +
 	"\x15BuildTemplateResponse\x12\x1b\n" +
 	"\timage_ref\x18\x01 \x01(\tR\bimageRef\x12\x1b\n" +
-	"\tbuild_log\x18\x02 \x01(\tR\bbuildLog2\xf7\a\n" +
+	"\tbuild_log\x18\x02 \x01(\tR\bbuildLog\"7\n" +
+	"\x16GetSandboxStatsRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"\xc4\x01\n" +
+	"\x17GetSandboxStatsResponse\x12\x1f\n" +
+	"\vcpu_percent\x18\x01 \x01(\x01R\n" +
+	"cpuPercent\x12\x1b\n" +
+	"\tmem_usage\x18\x02 \x01(\x04R\bmemUsage\x12\x1b\n" +
+	"\tmem_limit\x18\x03 \x01(\x04R\bmemLimit\x12\x1b\n" +
+	"\tnet_input\x18\x04 \x01(\x04R\bnetInput\x12\x1d\n" +
+	"\n" +
+	"net_output\x18\x05 \x01(\x04R\tnetOutput\x12\x12\n" +
+	"\x04pids\x18\x06 \x01(\x05R\x04pids2\xcb\b\n" +
 	"\rSandboxWorker\x12L\n" +
 	"\rCreateSandbox\x12\x1c.worker.CreateSandboxRequest\x1a\x1d.worker.CreateSandboxResponse\x12O\n" +
 	"\x0eDestroySandbox\x12\x1d.worker.DestroySandboxRequest\x1a\x1e.worker.DestroySandboxResponse\x12C\n" +
@@ -1834,7 +1974,8 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\tPTYStream\x12\x10.worker.PTYInput\x1a\x11.worker.PTYOutput(\x010\x01\x12U\n" +
 	"\x10HibernateSandbox\x12\x1f.worker.HibernateSandboxRequest\x1a .worker.HibernateSandboxResponse\x12F\n" +
 	"\vWakeSandbox\x12\x1a.worker.WakeSandboxRequest\x1a\x1b.worker.WakeSandboxResponse\x12L\n" +
-	"\rBuildTemplate\x12\x1c.worker.BuildTemplateRequest\x1a\x1d.worker.BuildTemplateResponseB1Z/github.com/opensandbox/opensandbox/proto/workerb\x06proto3"
+	"\rBuildTemplate\x12\x1c.worker.BuildTemplateRequest\x1a\x1d.worker.BuildTemplateResponse\x12R\n" +
+	"\x0fGetSandboxStats\x12\x1e.worker.GetSandboxStatsRequest\x1a\x1f.worker.GetSandboxStatsResponseB1Z/github.com/opensandbox/opensandbox/proto/workerb\x06proto3"
 
 var (
 	file_proto_worker_worker_proto_rawDescOnce sync.Once
@@ -1849,7 +1990,7 @@ func file_proto_worker_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_worker_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
+var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_proto_worker_worker_proto_goTypes = []any{
 	(ExecOutputChunk_Stream)(0),      // 0: worker.ExecOutputChunk.Stream
 	(*CreateSandboxRequest)(nil),     // 1: worker.CreateSandboxRequest
@@ -1881,13 +2022,15 @@ var file_proto_worker_worker_proto_goTypes = []any{
 	(*WakeSandboxResponse)(nil),      // 27: worker.WakeSandboxResponse
 	(*BuildTemplateRequest)(nil),     // 28: worker.BuildTemplateRequest
 	(*BuildTemplateResponse)(nil),    // 29: worker.BuildTemplateResponse
-	nil,                              // 30: worker.CreateSandboxRequest.EnvsEntry
-	nil,                              // 31: worker.ExecCommandRequest.EnvsEntry
+	(*GetSandboxStatsRequest)(nil),   // 30: worker.GetSandboxStatsRequest
+	(*GetSandboxStatsResponse)(nil),  // 31: worker.GetSandboxStatsResponse
+	nil,                              // 32: worker.CreateSandboxRequest.EnvsEntry
+	nil,                              // 33: worker.ExecCommandRequest.EnvsEntry
 }
 var file_proto_worker_worker_proto_depIdxs = []int32{
-	30, // 0: worker.CreateSandboxRequest.envs:type_name -> worker.CreateSandboxRequest.EnvsEntry
+	32, // 0: worker.CreateSandboxRequest.envs:type_name -> worker.CreateSandboxRequest.EnvsEntry
 	6,  // 1: worker.ListSandboxesResponse.sandboxes:type_name -> worker.GetSandboxResponse
-	31, // 2: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
+	33, // 2: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
 	0,  // 3: worker.ExecOutputChunk.stream:type_name -> worker.ExecOutputChunk.Stream
 	17, // 4: worker.ListDirResponse.entries:type_name -> worker.DirEntry
 	22, // 5: worker.PTYInput.resize:type_name -> worker.PTYResize
@@ -1905,22 +2048,24 @@ var file_proto_worker_worker_proto_depIdxs = []int32{
 	24, // 17: worker.SandboxWorker.HibernateSandbox:input_type -> worker.HibernateSandboxRequest
 	26, // 18: worker.SandboxWorker.WakeSandbox:input_type -> worker.WakeSandboxRequest
 	28, // 19: worker.SandboxWorker.BuildTemplate:input_type -> worker.BuildTemplateRequest
-	2,  // 20: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
-	4,  // 21: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
-	6,  // 22: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
-	8,  // 23: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
-	10, // 24: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
-	11, // 25: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
-	13, // 26: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
-	15, // 27: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
-	18, // 28: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
-	20, // 29: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
-	23, // 30: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
-	25, // 31: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
-	27, // 32: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
-	29, // 33: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
-	20, // [20:34] is the sub-list for method output_type
-	6,  // [6:20] is the sub-list for method input_type
+	30, // 20: worker.SandboxWorker.GetSandboxStats:input_type -> worker.GetSandboxStatsRequest
+	2,  // 21: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
+	4,  // 22: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
+	6,  // 23: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
+	8,  // 24: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
+	10, // 25: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
+	11, // 26: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
+	13, // 27: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
+	15, // 28: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
+	18, // 29: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
+	20, // 30: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
+	23, // 31: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
+	25, // 32: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
+	27, // 33: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
+	29, // 34: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
+	31, // 35: worker.SandboxWorker.GetSandboxStats:output_type -> worker.GetSandboxStatsResponse
+	21, // [21:36] is the sub-list for method output_type
+	6,  // [6:21] is the sub-list for method input_type
 	6,  // [6:6] is the sub-list for extension type_name
 	6,  // [6:6] is the sub-list for extension extendee
 	0,  // [0:6] is the sub-list for field type_name
@@ -1941,7 +2086,7 @@ func file_proto_worker_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_worker_worker_proto_rawDesc), len(file_proto_worker_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   31,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

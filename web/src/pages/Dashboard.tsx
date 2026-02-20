@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
 import { getSessions, type Session } from '../api/client'
 
 export default function Dashboard() {
@@ -104,8 +105,8 @@ export default function Dashboard() {
               </thead>
               <tbody>
                 {all.slice(0, 20).map(s => (
-                  <tr key={s.id}>
-                    <td><code>{s.sandboxId}</code></td>
+                  <ClickableRow key={s.id} sandboxId={s.sandboxId}>
+                    <td><code style={{ color: 'var(--text-accent)' }}>{s.sandboxId}</code></td>
                     <td>{s.template || 'base'}</td>
                     <td><StatusBadge status={s.status} /></td>
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
@@ -114,7 +115,7 @@ export default function Dashboard() {
                     <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
                       {formatDuration(s)}
                     </td>
-                  </tr>
+                  </ClickableRow>
                 ))}
               </tbody>
             </table>
@@ -147,23 +148,26 @@ function StatCard({ label, value, accent }: {
 
 /* ── Sandbox Row ──────────────────────────────────────────── */
 function SandboxRow({ session }: { session: Session }) {
+  const navigate = useNavigate()
   const elapsed = Math.round((Date.now() - new Date(session.startedAt).getTime()) / 1000 / 60)
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '9px 12px', borderRadius: 8,
-      background: 'rgba(255,255,255,0.015)',
-      border: '1px solid rgba(255,255,255,0.035)',
-      transition: 'all 0.15s ease', cursor: 'default',
-    }}
-    onMouseOver={e => {
-      e.currentTarget.style.background = 'rgba(99,102,241,0.05)'
-      e.currentTarget.style.borderColor = 'rgba(99,102,241,0.12)'
-    }}
-    onMouseOut={e => {
-      e.currentTarget.style.background = 'rgba(255,255,255,0.015)'
-      e.currentTarget.style.borderColor = 'rgba(255,255,255,0.035)'
-    }}>
+    <div
+      onClick={() => navigate(`/sessions/${session.sandboxId}`)}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '9px 12px', borderRadius: 8,
+        background: 'rgba(255,255,255,0.015)',
+        border: '1px solid rgba(255,255,255,0.035)',
+        transition: 'all 0.15s ease', cursor: 'pointer',
+      }}
+      onMouseOver={e => {
+        e.currentTarget.style.background = 'rgba(99,102,241,0.05)'
+        e.currentTarget.style.borderColor = 'rgba(99,102,241,0.12)'
+      }}
+      onMouseOut={e => {
+        e.currentTarget.style.background = 'rgba(255,255,255,0.015)'
+        e.currentTarget.style.borderColor = 'rgba(255,255,255,0.035)'
+      }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span className="pulse-dot" style={{
           width: 6, height: 6, borderRadius: '50%',
@@ -182,6 +186,21 @@ function SandboxRow({ session }: { session: Session }) {
         {elapsed}m
       </span>
     </div>
+  )
+}
+
+/* ── Clickable Table Row ──────────────────────────────────── */
+function ClickableRow({ sandboxId, children }: { sandboxId: string; children: React.ReactNode }) {
+  const navigate = useNavigate()
+  return (
+    <tr
+      onClick={() => navigate(`/sessions/${sandboxId}`)}
+      style={{ cursor: 'pointer' }}
+      onMouseOver={e => { e.currentTarget.style.background = 'rgba(99,102,241,0.04)' }}
+      onMouseOut={e => { e.currentTarget.style.background = '' }}
+    >
+      {children}
+    </tr>
   )
 }
 

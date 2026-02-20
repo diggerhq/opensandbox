@@ -33,6 +33,7 @@ const (
 	SandboxWorker_HibernateSandbox_FullMethodName  = "/worker.SandboxWorker/HibernateSandbox"
 	SandboxWorker_WakeSandbox_FullMethodName       = "/worker.SandboxWorker/WakeSandbox"
 	SandboxWorker_BuildTemplate_FullMethodName     = "/worker.SandboxWorker/BuildTemplate"
+	SandboxWorker_GetSandboxStats_FullMethodName   = "/worker.SandboxWorker/GetSandboxStats"
 )
 
 // SandboxWorkerClient is the client API for SandboxWorker service.
@@ -53,6 +54,7 @@ type SandboxWorkerClient interface {
 	HibernateSandbox(ctx context.Context, in *HibernateSandboxRequest, opts ...grpc.CallOption) (*HibernateSandboxResponse, error)
 	WakeSandbox(ctx context.Context, in *WakeSandboxRequest, opts ...grpc.CallOption) (*WakeSandboxResponse, error)
 	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
+	GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error)
 }
 
 type sandboxWorkerClient struct {
@@ -215,6 +217,16 @@ func (c *sandboxWorkerClient) BuildTemplate(ctx context.Context, in *BuildTempla
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxStatsResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_GetSandboxStats_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxWorkerServer is the server API for SandboxWorker service.
 // All implementations must embed UnimplementedSandboxWorkerServer
 // for forward compatibility.
@@ -233,6 +245,7 @@ type SandboxWorkerServer interface {
 	HibernateSandbox(context.Context, *HibernateSandboxRequest) (*HibernateSandboxResponse, error)
 	WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error)
 	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
+	GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error)
 	mustEmbedUnimplementedSandboxWorkerServer()
 }
 
@@ -284,6 +297,9 @@ func (UnimplementedSandboxWorkerServer) WakeSandbox(context.Context, *WakeSandbo
 }
 func (UnimplementedSandboxWorkerServer) BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BuildTemplate not implemented")
+}
+func (UnimplementedSandboxWorkerServer) GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSandboxStats not implemented")
 }
 func (UnimplementedSandboxWorkerServer) mustEmbedUnimplementedSandboxWorkerServer() {}
 func (UnimplementedSandboxWorkerServer) testEmbeddedByValue()                       {}
@@ -540,6 +556,24 @@ func _SandboxWorker_BuildTemplate_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_GetSandboxStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSandboxStatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).GetSandboxStats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_GetSandboxStats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).GetSandboxStats(ctx, req.(*GetSandboxStatsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxWorker_ServiceDesc is the grpc.ServiceDesc for SandboxWorker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -594,6 +628,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BuildTemplate",
 			Handler:    _SandboxWorker_BuildTemplate_Handler,
+		},
+		{
+			MethodName: "GetSandboxStats",
+			Handler:    _SandboxWorker_GetSandboxStats_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

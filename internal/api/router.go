@@ -170,6 +170,16 @@ func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, 
 		dash.GET("/templates", s.dashboardListTemplates)
 		dash.POST("/templates", s.dashboardBuildTemplate)
 		dash.DELETE("/templates/:id", s.dashboardDeleteTemplate)
+
+		// Session detail + stats
+		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
+		dash.GET("/sessions/:sandboxId/stats", s.dashboardGetSessionStats)
+
+		// PTY (terminal)
+		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
+		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)
+		dash.POST("/sessions/:sandboxId/pty/:sessionId/resize", s.dashboardResizePTY)
+		dash.DELETE("/sessions/:sandboxId/pty/:sessionId", s.dashboardKillPTY)
 	}
 
 	// Auto-detect FrontendURL for dev: if web/dist doesn't exist, assume Vite dev on :3000

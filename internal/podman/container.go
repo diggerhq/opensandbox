@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -254,6 +255,117 @@ func parseJSONOutput(output string, dest *[]PSEntry) error {
 		*dest = append(*dest, entry)
 	}
 	return nil
+}
+
+// ContainerStats holds resource usage stats for a running container.
+type ContainerStats struct {
+	CPUPercent float64 `json:"cpuPercent"`
+	MemUsage   uint64  `json:"memUsage"` // bytes
+	MemLimit   uint64  `json:"memLimit"` // bytes
+	NetInput   uint64  `json:"netInput"` // bytes
+	NetOutput  uint64  `json:"netOutput"`// bytes
+	PIDs       int     `json:"pids"`
+}
+
+// podmanStatsEntry matches the JSON output of podman stats --format json.
+// Note: podman outputs pids as a string (e.g. "1") and mem_usage includes both
+// usage and limit combined (e.g. "303.1kB / 536.9MB").
+type podmanStatsEntry struct {
+	CPU      string `json:"cpu_percent"`
+	MemUsage string `json:"mem_usage"` // "usage / limit" combined
+	NetIO    string `json:"net_io"`
+	PIDs     string `json:"pids"` // podman outputs as string
+}
+
+// ContainerStats returns live resource usage stats for a running container.
+func (c *Client) ContainerStats(ctx context.Context, nameOrID string) (*ContainerStats, error) {
+	result, err := c.Run(ctx, "stats", "--no-stream", "--no-reset", "--format", "json", nameOrID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stats for %s: %w", nameOrID, err)
+	}
+	if result.ExitCode != 0 {
+		return nil, fmt.Errorf("podman stats failed (exit %d): %s",
+			result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+
+	output := strings.TrimSpace(result.Stdout)
+	if output == "" {
+		return nil, fmt.Errorf("no stats output for %s", nameOrID)
+	}
+
+	var entries []podmanStatsEntry
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse stats JSON: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no stats entries for %s", nameOrID)
+	}
+
+	e := entries[0]
+	stats := &ContainerStats{}
+
+	// Parse PIDs: podman outputs as string (e.g. "1")
+	if v, err := strconv.Atoi(strings.TrimSpace(e.PIDs)); err == nil {
+		stats.PIDs = v
+	}
+
+	// Parse CPU percent: "12.5%" -> 12.5
+	cpu := strings.TrimSpace(strings.TrimSuffix(e.CPU, "%"))
+	if v, err := strconv.ParseFloat(cpu, 64); err == nil {
+		stats.CPUPercent = v
+	}
+
+	// Parse memory: podman combines usage and limit as "303.1kB / 536.9MB"
+	if parts := strings.SplitN(e.MemUsage, "/", 2); len(parts) == 2 {
+		stats.MemUsage = parseBytes(strings.TrimSpace(parts[0]))
+		stats.MemLimit = parseBytes(strings.TrimSpace(parts[1]))
+	} else {
+		stats.MemUsage = parseBytes(e.MemUsage)
+	}
+
+	// Parse net I/O: "1.2kB / 3.4kB"
+	if parts := strings.SplitN(e.NetIO, "/", 2); len(parts) == 2 {
+		stats.NetInput = parseBytes(strings.TrimSpace(parts[0]))
+		stats.NetOutput = parseBytes(strings.TrimSpace(parts[1]))
+	}
+
+	return stats, nil
+}
+
+// parseBytes converts human-readable byte strings like "45.2MB", "1.5GiB", "512kB" to bytes.
+func parseBytes(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "--" {
+		return 0
+	}
+
+	multipliers := map[string]float64{
+		"B":   1,
+		"kB":  1000,
+		"KB":  1000,
+		"MB":  1000 * 1000,
+		"GB":  1000 * 1000 * 1000,
+		"TB":  1000 * 1000 * 1000 * 1000,
+		"KiB": 1024,
+		"MiB": 1024 * 1024,
+		"GiB": 1024 * 1024 * 1024,
+		"TiB": 1024 * 1024 * 1024 * 1024,
+	}
+
+	for suffix, mult := range multipliers {
+		if strings.HasSuffix(s, suffix) {
+			numStr := strings.TrimSpace(strings.TrimSuffix(s, suffix))
+			if v, err := strconv.ParseFloat(numStr, 64); err == nil {
+				return uint64(v * mult)
+			}
+		}
+	}
+
+	// Try as plain number
+	if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+		return v
+	}
+	return 0
 }
 
 // PullImage pulls a container image.
