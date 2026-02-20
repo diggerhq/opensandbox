@@ -12,11 +12,13 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/podman"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
+	"github.com/opensandbox/opensandbox/internal/template"
 	"github.com/opensandbox/opensandbox/internal/worker"
 )
 
@@ -122,8 +124,22 @@ func main() {
 	defer metricsSrv.Close()
 	log.Println("opensandbox-worker: metrics server started on :9091")
 
+	// Initialize ECR config + template builder for building custom templates
+	var ecrCfg *ecr.Config
+	if cfg.ECRRegistry != "" {
+		ecrCfg = &ecr.Config{
+			Registry:   cfg.ECRRegistry,
+			Repository: cfg.ECRRepository,
+			Region:     cfg.S3Region,
+			AccessKey:  cfg.S3AccessKeyID,
+			SecretKey:  cfg.S3SecretAccessKey,
+		}
+		log.Printf("opensandbox-worker: ECR configured (registry=%s, repo=%s)", cfg.ECRRegistry, cfg.ECRRepository)
+	}
+	builder := template.NewBuilder(client, ecrCfg)
+
 	// Start gRPC server for control plane communication
-	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, sandboxDBMgr, checkpointStore, sbRouter)
+	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, sandboxDBMgr, checkpointStore, sbRouter, builder)
 	grpcAddr := ":9090"
 	log.Printf("opensandbox-worker: starting gRPC server on %s", grpcAddr)
 	go func() {

@@ -128,6 +128,15 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		})
 	}
 
+	// Resolve template image from DB (org-scoped lookup with public fallback)
+	var imageRef string
+	if s.store != nil && hasOrg {
+		tmpl, err := s.store.GetTemplateByName(ctx, orgID, cfg.Template)
+		if err == nil {
+			imageRef = tmpl.ImageRef
+		}
+	}
+
 	// Dispatch via persistent gRPC connection
 	grpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -139,6 +148,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		MemoryMb:       int32(cfg.MemoryMB),
 		CpuCount:       int32(cfg.CpuCount),
 		NetworkEnabled: cfg.NetworkEnabled,
+		ImageRef:       imageRef,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{

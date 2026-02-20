@@ -133,11 +133,18 @@ func (s *Server) dashboardCreateAPIKey(c echo.Context) error {
 	})
 }
 
-// dashboardDeleteAPIKey revokes an API key.
+// dashboardDeleteAPIKey revokes an API key (scoped to the authenticated org).
 func (s *Server) dashboardDeleteAPIKey(c echo.Context) error {
 	if s.store == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{
 			"error": "database not configured",
+		})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"error": "org context required",
 		})
 	}
 
@@ -148,7 +155,7 @@ func (s *Server) dashboardDeleteAPIKey(c echo.Context) error {
 		})
 	}
 
-	if err := s.store.DeleteAPIKey(c.Request().Context(), keyID); err != nil {
+	if err := s.store.DeleteAPIKeyForOrg(c.Request().Context(), keyID, orgID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
 		})
@@ -214,4 +221,66 @@ func (s *Server) dashboardUpdateOrg(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, org)
+}
+
+// dashboardListTemplates returns all templates visible to the authenticated org.
+func (s *Server) dashboardListTemplates(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"error": "org context required",
+		})
+	}
+
+	templates, err := s.store.ListTemplates(c.Request().Context(), orgID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, templates)
+}
+
+// dashboardBuildTemplate builds a new template for the authenticated org.
+func (s *Server) dashboardBuildTemplate(c echo.Context) error {
+	// Delegate to the shared buildTemplate handler (uses same auth context)
+	return s.buildTemplate(c)
+}
+
+// dashboardDeleteTemplate deletes a custom template for the authenticated org.
+func (s *Server) dashboardDeleteTemplate(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"error": "org context required",
+		})
+	}
+
+	templateID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid template ID",
+		})
+	}
+
+	if err := s.store.DeleteTemplateForOrg(c.Request().Context(), templateID, orgID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }

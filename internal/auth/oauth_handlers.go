@@ -108,8 +108,8 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 		name = authResult.User.Email
 	}
 
-	// Determine org name — use organization ID or default
-	orgName := "Default"
+	// Determine org name — use organization ID, or create a personal org per user
+	orgName := authResult.User.Email // personal org keyed by email
 	if authResult.OrganizationID != "" {
 		orgName = authResult.OrganizationID
 	}

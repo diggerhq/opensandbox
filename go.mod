@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.1
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.8
+	github.com/aws/aws-sdk-go-v2/service/ecr v1.55.2
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.96.0
 	github.com/creack/pty v1.1.24
 	github.com/golang-jwt/jwt/v5 v5.2.1

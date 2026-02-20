@@ -52,6 +52,10 @@ type Config struct {
 	S3AccessKeyID     string
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool // true for R2/MinIO
+
+	// ECR for template images
+	ECRRegistry   string // e.g. "086971355112.dkr.ecr.us-east-2.amazonaws.com"
+	ECRRepository string // e.g. "opensandbox-templates"
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -89,6 +93,9 @@ func Load() (*Config, error) {
 		S3AccessKeyID:     os.Getenv("OPENSANDBOX_S3_ACCESS_KEY_ID"),
 		S3SecretAccessKey: os.Getenv("OPENSANDBOX_S3_SECRET_ACCESS_KEY"),
 		S3ForcePathStyle:  os.Getenv("OPENSANDBOX_S3_FORCE_PATH_STYLE") == "true",
+
+		ECRRegistry:   os.Getenv("OPENSANDBOX_ECR_REGISTRY"),
+		ECRRepository: envOrDefault("OPENSANDBOX_ECR_REPOSITORY", "opensandbox-templates"),
 	}
 
 	// Default S3 region to worker region for same-region storage

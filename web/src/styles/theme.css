@@ -213,6 +213,12 @@ body::before {
   border: 1px solid rgba(251, 113, 133, 0.18);
 }
 
+.badge-hibernated {
+  background: rgba(34, 211, 238, 0.10);
+  color: #22d3ee;
+  border: 1px solid rgba(34, 211, 238, 0.18);
+}
+
 /* --- Table --- */
 .data-table {
   width: 100%;

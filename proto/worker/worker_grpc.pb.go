@@ -32,6 +32,7 @@ const (
 	SandboxWorker_PTYStream_FullMethodName         = "/worker.SandboxWorker/PTYStream"
 	SandboxWorker_HibernateSandbox_FullMethodName  = "/worker.SandboxWorker/HibernateSandbox"
 	SandboxWorker_WakeSandbox_FullMethodName       = "/worker.SandboxWorker/WakeSandbox"
+	SandboxWorker_BuildTemplate_FullMethodName     = "/worker.SandboxWorker/BuildTemplate"
 )
 
 // SandboxWorkerClient is the client API for SandboxWorker service.
@@ -51,6 +52,7 @@ type SandboxWorkerClient interface {
 	PTYStream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PTYInput, PTYOutput], error)
 	HibernateSandbox(ctx context.Context, in *HibernateSandboxRequest, opts ...grpc.CallOption) (*HibernateSandboxResponse, error)
 	WakeSandbox(ctx context.Context, in *WakeSandboxRequest, opts ...grpc.CallOption) (*WakeSandboxResponse, error)
+	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
 }
 
 type sandboxWorkerClient struct {
@@ -203,6 +205,16 @@ func (c *sandboxWorkerClient) WakeSandbox(ctx context.Context, in *WakeSandboxRe
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BuildTemplateResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_BuildTemplate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxWorkerServer is the server API for SandboxWorker service.
 // All implementations must embed UnimplementedSandboxWorkerServer
 // for forward compatibility.
@@ -220,6 +232,7 @@ type SandboxWorkerServer interface {
 	PTYStream(grpc.BidiStreamingServer[PTYInput, PTYOutput]) error
 	HibernateSandbox(context.Context, *HibernateSandboxRequest) (*HibernateSandboxResponse, error)
 	WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error)
+	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
 	mustEmbedUnimplementedSandboxWorkerServer()
 }
 
@@ -268,6 +281,9 @@ func (UnimplementedSandboxWorkerServer) HibernateSandbox(context.Context, *Hiber
 }
 func (UnimplementedSandboxWorkerServer) WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WakeSandbox not implemented")
+}
+func (UnimplementedSandboxWorkerServer) BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BuildTemplate not implemented")
 }
 func (UnimplementedSandboxWorkerServer) mustEmbedUnimplementedSandboxWorkerServer() {}
 func (UnimplementedSandboxWorkerServer) testEmbeddedByValue()                       {}
@@ -506,6 +522,24 @@ func _SandboxWorker_WakeSandbox_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_BuildTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BuildTemplateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).BuildTemplate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_BuildTemplate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).BuildTemplate(ctx, req.(*BuildTemplateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxWorker_ServiceDesc is the grpc.ServiceDesc for SandboxWorker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -556,6 +590,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WakeSandbox",
 			Handler:    _SandboxWorker_WakeSandbox_Handler,
+		},
+		{
+			MethodName: "BuildTemplate",
+			Handler:    _SandboxWorker_BuildTemplate_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

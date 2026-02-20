@@ -10,6 +10,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
+	"github.com/opensandbox/opensandbox/internal/template"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -22,17 +23,19 @@ type GRPCServer struct {
 	ptyManager      *sandbox.PTYManager
 	sandboxDBs      *sandbox.SandboxDBManager
 	checkpointStore *storage.CheckpointStore
+	builder         *template.Builder
 	server          *grpc.Server
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
-func NewGRPCServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter) *GRPCServer {
+func NewGRPCServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder) *GRPCServer {
 	s := &GRPCServer{
 		manager:         mgr,
 		router:          router,
 		ptyManager:      ptyMgr,
 		sandboxDBs:      sandboxDBs,
 		checkpointStore: checkpointStore,
+		builder:         builder,
 		server:          grpc.NewServer(),
 	}
 	pb.RegisterSandboxWorkerServer(s.server, s)
@@ -61,6 +64,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		MemoryMB:       int(req.MemoryMb),
 		CpuCount:       int(req.CpuCount),
 		NetworkEnabled: req.NetworkEnabled,
+		ImageRef:       req.ImageRef,
 	}
 
 	sb, err := s.manager.Create(ctx, cfg)
@@ -340,5 +344,21 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	return &pb.WakeSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
+	}, nil
+}
+
+func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateRequest) (*pb.BuildTemplateResponse, error) {
+	if s.builder == nil {
+		return nil, fmt.Errorf("template builder not configured on this worker")
+	}
+
+	imageRef, buildLog, err := s.builder.Build(ctx, req.Dockerfile, req.Name, req.Tag, req.EcrImageRef)
+	if err != nil {
+		return nil, fmt.Errorf("template build failed: %w", err)
+	}
+
+	return &pb.BuildTemplateResponse{
+		ImageRef: imageRef,
+		BuildLog: buildLog,
 	}, nil
 }

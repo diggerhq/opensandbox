@@ -23,6 +23,13 @@ const icons = {
       <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
     </svg>
   ),
+  layers: (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="12 2 2 7 12 12 22 7 12 2" />
+      <polyline points="2 17 12 22 22 17" />
+      <polyline points="2 12 12 17 22 12" />
+    </svg>
+  ),
   gear: (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
@@ -41,6 +48,7 @@ const icons = {
 const navItems = [
   { to: '/', label: 'Dashboard', end: true, icon: icons.grid },
   { to: '/sessions', label: 'Sessions', icon: icons.clock },
+  { to: '/templates', label: 'Templates', icon: icons.layers },
   { to: '/api-keys', label: 'API Keys', icon: icons.key },
   { to: '/settings', label: 'Settings', icon: icons.gear },
 ]

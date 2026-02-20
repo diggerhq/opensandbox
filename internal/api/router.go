@@ -13,6 +13,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -28,7 +29,6 @@ type Server struct {
 	manager    *sandbox.Manager
 	router     *sandbox.SandboxRouter  // routes all sandbox interactions (state machine, auto-wake, rolling timeout)
 	ptyManager *sandbox.PTYManager
-	templates  *templateDeps
 	store      *db.Store               // nil in combined/dev mode without PG
 	jwtIssuer  *auth.JWTIssuer         // nil if JWT not configured
 	mode       string                  // "server", "worker", "combined"
@@ -40,6 +40,7 @@ type Server struct {
 	workerRegistry  *controlplane.RedisWorkerRegistry // nil in combined/worker mode
 	checkpointStore *storage.CheckpointStore          // nil if hibernation not configured
 	sandboxDomain   string                            // base domain for sandbox subdomains
+	ecrConfig       *ecr.Config                       // nil if ECR not configured
 }
 
 // ServerOpts holds optional dependencies for the API server.
@@ -57,6 +58,7 @@ type ServerOpts struct {
 	WorkOSConfig    *auth.WorkOSConfig                // nil if WorkOS not configured
 	WorkerRegistry  *controlplane.RedisWorkerRegistry  // nil in combined/worker mode
 	CheckpointStore *storage.CheckpointStore           // nil if hibernation not configured
+	ECRConfig       *ecr.Config                        // nil if ECR not configured
 }
 
 // NewServer creates a new API server with all routes configured.
@@ -83,6 +85,7 @@ func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, 
 		s.workerRegistry = opts.WorkerRegistry
 		s.checkpointStore = opts.CheckpointStore
 		s.sandboxDomain = opts.SandboxDomain
+		s.ecrConfig = opts.ECRConfig
 	}
 
 	// Global middleware
@@ -164,6 +167,9 @@ func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, 
 		dash.DELETE("/api-keys/:keyId", s.dashboardDeleteAPIKey)
 		dash.GET("/org", s.dashboardGetOrg)
 		dash.PUT("/org", s.dashboardUpdateOrg)
+		dash.GET("/templates", s.dashboardListTemplates)
+		dash.POST("/templates", s.dashboardBuildTemplate)
+		dash.DELETE("/templates/:id", s.dashboardDeleteTemplate)
 	}
 
 	// Auto-detect FrontendURL for dev: if web/dist doesn't exist, assume Vite dev on :3000

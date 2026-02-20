@@ -307,6 +307,42 @@ func FindFreePort() (int, error) {
 	return port, nil
 }
 
+// TagImage tags a local image with a new name/reference.
+func (c *Client) TagImage(ctx context.Context, source, target string) error {
+	result, err := c.Run(ctx, "tag", source, target)
+	if err != nil {
+		return fmt.Errorf("failed to tag image: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("podman tag failed (exit %d): %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// PushImage pushes an image to a remote registry.
+func (c *Client) PushImage(ctx context.Context, imageRef string) error {
+	result, err := c.Run(ctx, "push", imageRef)
+	if err != nil {
+		return fmt.Errorf("failed to push image %s: %w", imageRef, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("podman push failed (exit %d): %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+// LoginRegistry authenticates podman to a container registry.
+func (c *Client) LoginRegistry(ctx context.Context, registry, username, password string) error {
+	result, err := c.Run(ctx, "login", "--username", username, "--password", password, registry)
+	if err != nil {
+		return fmt.Errorf("failed to login to registry %s: %w", registry, err)
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("podman login failed (exit %d): %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
 // Version returns the podman version string.
 func (c *Client) Version(ctx context.Context) (string, error) {
 	result, err := c.Run(ctx, "version", "--format", "{{.Client.Version}}")

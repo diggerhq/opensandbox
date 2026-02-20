@@ -50,7 +50,10 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	}
 
 	image := defaultImage
-	if cfg.Template != "" {
+	if cfg.ImageRef != "" {
+		// DB-resolved ECR URI takes precedence
+		image = cfg.ImageRef
+	} else if cfg.Template != "" {
 		image = resolveTemplateImage(cfg.Template)
 	}
 

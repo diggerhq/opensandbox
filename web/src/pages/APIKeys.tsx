@@ -135,7 +135,7 @@ export default function APIKeys() {
               {(keys ?? []).map((k: APIKey) => (
                 <tr key={k.id}>
                   <td style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{k.name}</td>
-                  <td><code>{k.keyPrefix}\u2026</code></td>
+                  <td><code>{k.keyPrefix}…</code></td>
                   <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
                     {k.lastUsed ? new Date(k.lastUsed).toLocaleString() : 'Never'}
                   </td>

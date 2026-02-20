@@ -6,6 +6,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Sessions from './pages/Sessions'
 import APIKeys from './pages/APIKeys'
+import Templates from './pages/Templates'
 import Settings from './pages/Settings'
 
 export default function App() {
@@ -17,6 +18,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="sessions" element={<Sessions />} />
+            <Route path="templates" element={<Templates />} />
             <Route path="api-keys" element={<APIKeys />} />
             <Route path="settings" element={<Settings />} />
           </Route>
