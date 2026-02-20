@@ -41,6 +41,7 @@ type SandboxConfig struct {
 	MemoryMB   int               `json:"memoryMB,omitempty"`   // default 512
 	Envs       map[string]string `json:"envs,omitempty"`
 	NetworkEnabled bool          `json:"networkEnabled,omitempty"`
+	ImageRef       string            `json:"imageRef,omitempty"`       // resolved ECR URI for custom templates
 }
 
 // SandboxListResponse is the response for listing sandboxes.

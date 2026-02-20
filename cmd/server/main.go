@@ -14,11 +14,11 @@ import (
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/podman"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
-	"github.com/opensandbox/opensandbox/internal/template"
 )
 
 func main() {
@@ -32,9 +32,6 @@ func main() {
 	// Initialize Podman (optional in server mode — no container runtime needed)
 	var mgr *sandbox.Manager
 	var ptyMgr *sandbox.PTYManager
-	var registry *template.Registry
-	var builder *template.Builder
-
 	podmanClient, err := podman.NewClient()
 	if err != nil {
 		if cfg.Mode == "server" {
@@ -59,9 +56,6 @@ func main() {
 			podmanPath, _ := exec.LookPath("podman")
 			ptyMgr = sandbox.NewPTYManager(podmanPath, podmanClient.AuthFile())
 			defer ptyMgr.CloseAll()
-
-			registry = template.NewRegistry()
-			builder = template.NewBuilder(podmanClient, registry)
 		}
 	}
 
@@ -134,6 +128,19 @@ func main() {
 		}
 	}
 
+	// Initialize ECR config for template images (if configured)
+	if cfg.ECRRegistry != "" {
+		ecrCfg := &ecr.Config{
+			Registry:   cfg.ECRRegistry,
+			Repository: cfg.ECRRepository,
+			Region:     cfg.S3Region, // reuse S3 region (same AWS account)
+			AccessKey:  cfg.S3AccessKeyID,
+			SecretKey:  cfg.S3SecretAccessKey,
+		}
+		opts.ECRConfig = ecrCfg
+		log.Printf("opensandbox: ECR configured (registry=%s, repo=%s)", cfg.ECRRegistry, cfg.ECRRepository)
+	}
+
 	// Initialize SandboxRouter for rolling timeouts, auto-wake, and command routing
 	if mgr != nil {
 		workerID := cfg.WorkerID
@@ -192,9 +199,6 @@ func main() {
 
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
-	if registry != nil && builder != nil {
-		server.SetTemplateDeps(registry, builder)
-	}
 
 	// Start NATS sync consumer if both PG and NATS are configured
 	if opts.Store != nil && cfg.NATSURL != "" {

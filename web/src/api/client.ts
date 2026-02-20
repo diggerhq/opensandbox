@@ -52,6 +52,17 @@ export const createAPIKey = (name: string) =>
 export const deleteAPIKey = (keyId: string) =>
   apiFetch<void>(`/api-keys/${keyId}`, { method: 'DELETE' })
 
+export const getTemplates = () => apiFetch<Template[]>('/templates')
+
+export const buildTemplate = (name: string, dockerfile: string) =>
+  apiFetch<Template>('/templates', {
+    method: 'POST',
+    body: JSON.stringify({ name, dockerfile }),
+  })
+
+export const deleteTemplate = (id: string) =>
+  apiFetch<void>(`/templates/${id}`, { method: 'DELETE' })
+
 export const getOrg = () => apiFetch<Org>('/org')
 
 export const updateOrg = (name: string) =>
@@ -79,6 +90,17 @@ export interface APIKey {
   scopes: string[]
   lastUsed?: string
   expiresAt?: string
+  createdAt: string
+}
+
+export interface Template {
+  id: string
+  orgId?: string
+  name: string
+  tag: string
+  imageRef: string
+  dockerfile?: string
+  isPublic: boolean
   createdAt: string
 }
 

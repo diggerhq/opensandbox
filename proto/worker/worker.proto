@@ -22,6 +22,8 @@ service SandboxWorker {
 
   rpc HibernateSandbox(HibernateSandboxRequest) returns (HibernateSandboxResponse);
   rpc WakeSandbox(WakeSandboxRequest) returns (WakeSandboxResponse);
+
+  rpc BuildTemplate(BuildTemplateRequest) returns (BuildTemplateResponse);
 }
 
 message CreateSandboxRequest {
@@ -31,6 +33,7 @@ message CreateSandboxRequest {
   int32 memory_mb = 4;
   int32 cpu_count = 5;
   bool network_enabled = 6;
+  string image_ref = 7;
 }
 
 message CreateSandboxResponse {
@@ -167,4 +170,16 @@ message WakeSandboxRequest {
 message WakeSandboxResponse {
   string sandbox_id = 1;
   string status = 2;
+}
+
+message BuildTemplateRequest {
+  string name = 1;
+  string dockerfile = 2;
+  string tag = 3;
+  string ecr_image_ref = 4;
+}
+
+message BuildTemplateResponse {
+  string image_ref = 1;
+  string build_log = 2;
 }

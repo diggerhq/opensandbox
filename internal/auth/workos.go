@@ -162,8 +162,11 @@ func (w *WorkOSMiddleware) ProvisionOrgAndUser(ctx context.Context, email, name,
 		}, nil
 	}
 
-	// Create org (slug from org name)
-	slug := strings.ToLower(strings.ReplaceAll(orgName, " ", "-"))
+	// Create org (slug from org name — sanitize for emails and special chars)
+	slug := strings.ToLower(orgName)
+	slug = strings.ReplaceAll(slug, "@", "-at-")
+	slug = strings.ReplaceAll(slug, ".", "-")
+	slug = strings.ReplaceAll(slug, " ", "-")
 	org, err := w.store.GetOrgBySlug(ctx, slug)
 	if err != nil {
 		org, err = w.store.CreateOrg(ctx, orgName, slug)

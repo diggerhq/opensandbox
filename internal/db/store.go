@@ -67,6 +67,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{1, "migrations/001_initial.up.sql"},
 		{2, "migrations/002_user_sessions.up.sql"},
 		{3, "migrations/003_checkpoint_hibernation.up.sql"},
+		{4, "migrations/004_seed_templates.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -277,6 +278,18 @@ func (s *Store) ListAPIKeys(ctx context.Context, orgID uuid.UUID) ([]APIKey, err
 func (s *Store) DeleteAPIKey(ctx context.Context, id uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM api_keys WHERE id = $1`, id)
 	return err
+}
+
+// DeleteAPIKeyForOrg deletes an API key only if it belongs to the given org.
+func (s *Store) DeleteAPIKeyForOrg(ctx context.Context, id uuid.UUID, orgID uuid.UUID) error {
+	result, err := s.pool.Exec(ctx, `DELETE FROM api_keys WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("api key not found or not owned by this org")
+	}
+	return nil
 }
 
 // --- Sandbox Session operations ---
@@ -582,4 +595,86 @@ func (s *Store) UpdateSandboxSessionForWake(ctx context.Context, sandboxID, newW
 		 WHERE sandbox_id = $2 AND status = 'hibernated'`,
 		newWorkerID, sandboxID)
 	return err
+}
+
+// --- Template operations ---
+
+// DBTemplate represents a template record in the database.
+type DBTemplate struct {
+	ID         uuid.UUID  `json:"id"`
+	OrgID      *uuid.UUID `json:"orgId,omitempty"`
+	Name       string     `json:"name"`
+	Tag        string     `json:"tag"`
+	ImageRef   string     `json:"imageRef"`
+	Dockerfile *string    `json:"dockerfile,omitempty"`
+	IsPublic   bool       `json:"isPublic"`
+	CreatedAt  time.Time  `json:"createdAt"`
+}
+
+// CreateTemplate inserts a new template record.
+func (s *Store) CreateTemplate(ctx context.Context, orgID *uuid.UUID, name, tag, imageRef string, dockerfile *string, isPublic bool) (*DBTemplate, error) {
+	t := &DBTemplate{}
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO templates (org_id, name, tag, image_ref, dockerfile, is_public)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, org_id, name, tag, image_ref, dockerfile, is_public, created_at`,
+		orgID, name, tag, imageRef, dockerfile, isPublic,
+	).Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create template: %w", err)
+	}
+	return t, nil
+}
+
+// GetTemplateByName finds a template by name, preferring org-specific over public.
+func (s *Store) GetTemplateByName(ctx context.Context, orgID uuid.UUID, name string) (*DBTemplate, error) {
+	t := &DBTemplate{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, tag, image_ref, dockerfile, is_public, created_at
+		 FROM templates
+		 WHERE name = $1 AND (org_id = $2 OR (is_public = true AND org_id IS NULL))
+		 ORDER BY org_id IS NULL ASC
+		 LIMIT 1`,
+		name, orgID,
+	).Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("template %q not found: %w", name, err)
+	}
+	return t, nil
+}
+
+// ListTemplates returns all templates visible to an org (org-specific + public).
+func (s *Store) ListTemplates(ctx context.Context, orgID uuid.UUID) ([]DBTemplate, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, name, tag, image_ref, dockerfile, is_public, created_at
+		 FROM templates
+		 WHERE org_id = $1 OR (is_public = true AND org_id IS NULL)
+		 ORDER BY is_public DESC, name ASC`,
+		orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list templates: %w", err)
+	}
+	defer rows.Close()
+
+	var templates []DBTemplate
+	for rows.Next() {
+		var t DBTemplate
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		templates = append(templates, t)
+	}
+	return templates, nil
+}
+
+// DeleteTemplateForOrg deletes a template only if it belongs to the given org (not public).
+func (s *Store) DeleteTemplateForOrg(ctx context.Context, id uuid.UUID, orgID uuid.UUID) error {
+	result, err := s.pool.Exec(ctx, `DELETE FROM templates WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("template not found or not owned by this org")
+	}
+	return nil
 }
