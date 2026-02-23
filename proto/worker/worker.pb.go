@@ -76,6 +76,7 @@ type CreateSandboxRequest struct {
 	CpuCount       int32                  `protobuf:"varint,5,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
 	NetworkEnabled bool                   `protobuf:"varint,6,opt,name=network_enabled,json=networkEnabled,proto3" json:"network_enabled,omitempty"`
 	ImageRef       string                 `protobuf:"bytes,7,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
+	Port           int32                  `protobuf:"varint,8,opt,name=port,proto3" json:"port,omitempty"` // container port to expose via subdomain (default 80)
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -157,6 +158,13 @@ func (x *CreateSandboxRequest) GetImageRef() string {
 		return x.ImageRef
 	}
 	return ""
+}
+
+func (x *CreateSandboxRequest) GetPort() int32 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
 }
 
 type CreateSandboxResponse struct {
@@ -1817,7 +1825,7 @@ var File_proto_worker_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/worker/worker.proto\x12\x06worker\"\xc1\x02\n" +
+	"\x19proto/worker/worker.proto\x12\x06worker\"\xd5\x02\n" +
 	"\x14CreateSandboxRequest\x12\x1a\n" +
 	"\btemplate\x18\x01 \x01(\tR\btemplate\x12\x18\n" +
 	"\atimeout\x18\x02 \x01(\x05R\atimeout\x12:\n" +
@@ -1825,7 +1833,8 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\tmemory_mb\x18\x04 \x01(\x05R\bmemoryMb\x12\x1b\n" +
 	"\tcpu_count\x18\x05 \x01(\x05R\bcpuCount\x12'\n" +
 	"\x0fnetwork_enabled\x18\x06 \x01(\bR\x0enetworkEnabled\x12\x1b\n" +
-	"\timage_ref\x18\a \x01(\tR\bimageRef\x1a7\n" +
+	"\timage_ref\x18\a \x01(\tR\bimageRef\x12\x12\n" +
+	"\x04port\x18\b \x01(\x05R\x04port\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"N\n" +

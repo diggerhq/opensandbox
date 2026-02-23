@@ -149,6 +149,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		CpuCount:       int32(cfg.CpuCount),
 		NetworkEnabled: cfg.NetworkEnabled,
 		ImageRef:       imageRef,
+		Port:           int32(cfg.Port),
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{

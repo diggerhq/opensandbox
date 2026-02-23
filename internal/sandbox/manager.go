@@ -81,21 +81,25 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	}
 
 	// Always use bridge networking for subdomain proxy access.
-	// Containers get port 80 published to a random host port.
+	// Container port defaults to 80 but can be overridden (e.g., 3000, 8080).
 	ccfg.NetworkMode = "bridge"
-	ccfg.CapAdd = []string{"NET_BIND_SERVICE"} // Allow binding to port 80 inside the container
+
+	containerPort := cfg.Port
+	if containerPort <= 0 {
+		containerPort = 80
+	}
 
 	hostPort, err := podman.FindFreePort()
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate host port for sandbox %s: %w", id, err)
 	}
-	ccfg.Publish = []string{fmt.Sprintf("%d:80/tcp", hostPort)}
+	ccfg.Publish = []string{fmt.Sprintf("%d:%d/tcp", hostPort, containerPort)}
 	ccfg.Labels[labelHostPort] = strconv.Itoa(hostPort)
 
 	// Make /tmp writable for sandbox use
 	ccfg.TmpFS["/tmp"] = "rw,size=100m"
-	// Add a writable home directory
-	ccfg.TmpFS["/home/user"] = "rw,size=200m"
+	// Add a writable workspace directory (default working directory for users)
+	ccfg.TmpFS["/workspace"] = "rw,size=200m"
 
 	if _, err := m.podman.CreateContainer(ctx, ccfg); err != nil {
 		return nil, fmt.Errorf("failed to create sandbox %s: %w", id, err)

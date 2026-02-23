@@ -1,10 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -471,13 +476,6 @@ func (s *Server) dashboardCreatePTY(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = session
-
-	if s.ptyManager == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "terminal not available in server-only mode",
-		})
-	}
 
 	var req types.PTYCreateRequest
 	if err := c.Bind(&req); err != nil {
@@ -486,6 +484,43 @@ func (s *Server) dashboardCreatePTY(c echo.Context) error {
 		})
 	}
 
+	// Server mode: proxy PTY creation to the worker via gRPC
+	if s.ptyManager == nil && s.workerRegistry != nil {
+		grpcClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "worker not available: " + err.Error(),
+			})
+		}
+
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
+		defer cancel()
+
+		grpcResp, err := grpcClient.CreatePTY(ctx, &pb.CreatePTYRequest{
+			SandboxId: sandboxID,
+			Cols:      int32(req.Cols),
+			Rows:      int32(req.Rows),
+			Shell:     req.Shell,
+		})
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to create PTY: " + err.Error(),
+			})
+		}
+
+		return c.JSON(http.StatusCreated, map[string]string{
+			"sessionId": grpcResp.SessionId,
+			"sandboxId": sandboxID,
+		})
+	}
+
+	if s.ptyManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "terminal not available",
+		})
+	}
+
+	// Combined/worker mode: create locally
 	var ptySession *sandbox.PTYSessionHandle
 	routeOp := func(_ context.Context) error {
 		var err error
@@ -519,15 +554,21 @@ func (s *Server) dashboardPTYWebSocket(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = session
+
+	sessionID := c.Param("sessionId")
+
+	// Server mode: proxy WebSocket to the worker's HTTP API
+	if s.ptyManager == nil && s.workerRegistry != nil {
+		return s.dashboardPTYWebSocketRemote(c, sandboxID, sessionID, session)
+	}
 
 	if s.ptyManager == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "terminal not available in server-only mode",
+			"error": "terminal not available",
 		})
 	}
 
-	sessionID := c.Param("sessionId")
+	// Combined/worker mode: connect directly to local PTY
 	ptySession, err := s.ptyManager.GetSession(sessionID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{
@@ -591,18 +632,109 @@ func (s *Server) dashboardPTYWebSocket(c echo.Context) error {
 	return nil
 }
 
-// dashboardResizePTY resizes a PTY session.
-func (s *Server) dashboardResizePTY(c echo.Context) error {
-	_, session, err := s.dashboardResolveSandbox(c)
+// dashboardPTYWebSocketRemote proxies the dashboard WebSocket to the worker's
+// PTY WebSocket endpoint, acting as a transparent bridge.
+func (s *Server) dashboardPTYWebSocketRemote(c echo.Context, sandboxID, sessionID string, session *db.SandboxSession) error {
+	worker := s.workerRegistry.GetWorker(session.WorkerID)
+	if worker == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "worker not available",
+		})
+	}
+
+	// Issue a short-lived JWT for the worker request
+	orgID, _ := auth.GetOrgID(c)
+	token, err := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, session.WorkerID, 5*time.Minute)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to issue token",
+		})
+	}
+
+	// Build the worker WebSocket URL
+	// worker.HTTPAddr is like "http://13.59.48.110:8080"
+	workerURL := strings.Replace(worker.HTTPAddr, "http://", "ws://", 1)
+	workerURL = strings.Replace(workerURL, "https://", "wss://", 1)
+	workerWSURL := fmt.Sprintf("%s/sandboxes/%s/pty/%s", workerURL, sandboxID, sessionID)
+
+	// Add auth token as query param (WebSocket can't set headers easily from browser,
+	// but here we're server→worker so we can use headers)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+token)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
+
+	workerWS, resp, err := dialer.Dial(workerWSURL, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		log.Printf("dashboard: failed to dial worker PTY WebSocket %s (status=%d): %v", workerWSURL, status, err)
+		return c.JSON(http.StatusBadGateway, map[string]string{
+			"error": "failed to connect to worker terminal",
+		})
+	}
+	defer workerWS.Close()
+
+	// Upgrade the dashboard client connection
+	clientWS, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		return err
 	}
-	_ = session
+	defer clientWS.Close()
 
-	if s.ptyManager == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "terminal not available in server-only mode",
-		})
+	// Bidirectional pipe: dashboard ↔ worker
+	done := make(chan struct{}, 2)
+
+	// worker → dashboard
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msgType, msg, err := workerWS.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := clientWS.WriteMessage(msgType, msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	// dashboard → worker
+	go func() {
+		defer func() { done <- struct{}{} }()
+		for {
+			msgType, msg, err := clientWS.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := workerWS.WriteMessage(msgType, msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait for either direction to close
+	<-done
+
+	clientWS.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
+	workerWS.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(time.Second))
+
+	return nil
+}
+
+// dashboardResizePTY resizes a PTY session.
+func (s *Server) dashboardResizePTY(c echo.Context) error {
+	sandboxID, session, err := s.dashboardResolveSandbox(c)
+	if err != nil {
+		return err
 	}
 
 	sessionID := c.Param("sessionId")
@@ -614,6 +746,20 @@ func (s *Server) dashboardResizePTY(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "invalid request body",
+		})
+	}
+
+	// Server mode: proxy resize to the worker via HTTP
+	// The worker doesn't have a dedicated resize gRPC call, so we proxy the HTTP request.
+	if s.ptyManager == nil && s.workerRegistry != nil {
+		return s.proxyWorkerHTTP(c, session, "POST",
+			fmt.Sprintf("/sandboxes/%s/pty/%s/resize", sandboxID, sessionID),
+			req)
+	}
+
+	if s.ptyManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "terminal not available",
 		})
 	}
 
@@ -632,15 +778,20 @@ func (s *Server) dashboardKillPTY(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	_ = session
+
+	sessionID := c.Param("sessionId")
+
+	// Server mode: proxy kill to the worker via HTTP
+	if s.ptyManager == nil && s.workerRegistry != nil {
+		return s.proxyWorkerHTTP(c, session, "DELETE",
+			fmt.Sprintf("/sandboxes/%s/pty/%s", sandboxID, sessionID), nil)
+	}
 
 	if s.ptyManager == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "terminal not available in server-only mode",
+			"error": "terminal not available",
 		})
 	}
-
-	sessionID := c.Param("sessionId")
 
 	routeOp := func(_ context.Context) error {
 		return s.ptyManager.KillSession(sessionID)
@@ -699,4 +850,70 @@ func (s *Server) dashboardResolveSandbox(c echo.Context) (string, *db.SandboxSes
 	}
 
 	return sandboxID, session, nil
+}
+
+// proxyWorkerHTTP proxies an HTTP request to the worker's HTTP API.
+// Used by dashboard PTY resize/kill in server-only mode.
+func (s *Server) proxyWorkerHTTP(c echo.Context, session *db.SandboxSession, method, path string, body interface{}) error {
+	worker := s.workerRegistry.GetWorker(session.WorkerID)
+	if worker == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "worker not available",
+		})
+	}
+
+	// Issue a short-lived JWT for the worker request
+	orgID, _ := auth.GetOrgID(c)
+	sandboxID := c.Param("sandboxId")
+	token, err := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, session.WorkerID, 5*time.Minute)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to issue token",
+		})
+	}
+
+	// Build the worker URL
+	workerBase := strings.TrimRight(worker.HTTPAddr, "/")
+	workerURL, _ := url.JoinPath(workerBase, path)
+
+	var bodyReader io.Reader
+	if body != nil {
+		bodyJSON, err := json.Marshal(body)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to marshal request body",
+			})
+		}
+		bodyReader = bytes.NewReader(bodyJSON)
+	}
+
+	req, err := http.NewRequestWithContext(c.Request().Context(), method, workerURL, bodyReader)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to create request",
+		})
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("dashboard: failed to proxy to worker %s: %v", workerURL, err)
+		return c.JSON(http.StatusBadGateway, map[string]string{
+			"error": "worker request failed",
+		})
+	}
+	defer resp.Body.Close()
+
+	// Forward the worker's response back to the dashboard
+	respBody, _ := io.ReadAll(resp.Body)
+	for k, vals := range resp.Header {
+		for _, v := range vals {
+			c.Response().Header().Add(k, v)
+		}
+	}
+	return c.Blob(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 }

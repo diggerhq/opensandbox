@@ -36,6 +36,7 @@ message CreateSandboxRequest {
   int32 cpu_count = 5;
   bool network_enabled = 6;
   string image_ref = 7;
+  int32 port = 8;  // container port to expose via subdomain (default 80)
 }
 
 message CreateSandboxResponse {

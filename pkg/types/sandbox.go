@@ -28,7 +28,7 @@ type Sandbox struct {
 	ConnectURL string            `json:"connectURL,omitempty"` // Direct worker URL for SDK access
 	Token      string            `json:"token,omitempty"`      // Sandbox-scoped JWT for worker auth
 	Domain     string            `json:"domain,omitempty"`     // Subdomain for web access (e.g., "abc123.workers.opensandbox.dev")
-	HostPort   int               `json:"hostPort,omitempty"`   // Mapped host port for container port 80
+	HostPort   int               `json:"hostPort,omitempty"`   // Mapped host port for the sandbox's container port
 }
 
 // SandboxConfig is the request body for creating a sandbox.
@@ -40,6 +40,7 @@ type SandboxConfig struct {
 	CpuCount   int               `json:"cpuCount,omitempty"`   // default 1
 	MemoryMB   int               `json:"memoryMB,omitempty"`   // default 512
 	Envs       map[string]string `json:"envs,omitempty"`
+	Port       int               `json:"port,omitempty"`       // container port to expose via subdomain (default 80)
 	NetworkEnabled bool          `json:"networkEnabled,omitempty"`
 	ImageRef       string            `json:"imageRef,omitempty"`       // resolved ECR URI for custom templates
 }

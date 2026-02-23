@@ -30,6 +30,9 @@ type ContainerConfig struct {
 }
 
 // DefaultContainerConfig returns a security-hardened container config.
+// We drop ALL capabilities then add back only those needed for normal dev
+// workflows (apt install, pip install, npm, chmod/chown, etc.).
+// Dangerous caps like SYS_ADMIN, SYS_PTRACE, NET_ADMIN remain dropped.
 func DefaultContainerConfig(name, image string) ContainerConfig {
 	return ContainerConfig{
 		Name:        name,
@@ -40,9 +43,23 @@ func DefaultContainerConfig(name, image string) ContainerConfig {
 		CPUs:        "1",
 		PidsLimit:   256,
 		NetworkMode: "none",
-		ReadOnly: false,
-		TmpFS:   map[string]string{},
-		CapDrop:      []string{"ALL"},
+		ReadOnly:    false,
+		TmpFS:       map[string]string{},
+		CapDrop:     []string{"ALL"},
+		CapAdd: []string{
+			"CHOWN",            // chown files (apt, npm)
+			"DAC_OVERRIDE",     // bypass file permission checks (apt, pip)
+			"FOWNER",           // bypass ownership checks on files (apt)
+			"FSETID",           // set SGID bit (apt, dpkg)
+			"KILL",             // send signals to processes
+			"SETGID",           // set group ID (apt, su)
+			"SETUID",           // set user ID (apt, su)
+			"SETPCAP",          // modify process capabilities
+			"SETFCAP",          // set file capabilities (dpkg)
+			"NET_BIND_SERVICE", // bind to ports < 1024 (web servers on port 80)
+			"SYS_CHROOT",       // chroot (dpkg, debootstrap)
+			"AUDIT_WRITE",      // write to audit log (login-related utils)
+		},
 		SecurityOpts: []string{},
 		UserNS:       "",
 		Entrypoint:   []string{"/bin/sleep"},

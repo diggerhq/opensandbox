@@ -24,11 +24,16 @@ func (m *Manager) Exec(ctx context.Context, sandboxID string, cfg types.ProcessC
 
 	command := buildCommand(cfg.Command, cfg.Args)
 
+	cwd := cfg.Cwd
+	if cwd == "" {
+		cwd = "/workspace"
+	}
+
 	result, err := m.podman.ExecInContainer(execCtx, podman.ExecConfig{
 		Container: container,
 		Command:   command,
 		Env:       cfg.Env,
-		Cwd:       cfg.Cwd,
+		Cwd:       cwd,
 	})
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {

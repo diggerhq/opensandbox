@@ -360,6 +360,24 @@ func (s *HTTPServer) killPTY(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (s *HTTPServer) resizePTY(c echo.Context) error {
+	sessionID := c.Param("sessionID")
+
+	var req struct {
+		Cols int `json:"cols"`
+		Rows int `json:"rows"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+
+	if err := s.ptyManager.Resize(sessionID, req.Cols, req.Rows); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	return c.NoContent(http.StatusOK)
+}
+
 // refreshToken issues a fresh 24h JWT for a sandbox.
 // The caller must already be authenticated (existing valid JWT via middleware).
 func (s *HTTPServer) refreshToken(c echo.Context) error {

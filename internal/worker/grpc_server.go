@@ -75,6 +75,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		CpuCount:       int(req.CpuCount),
 		NetworkEnabled: req.NetworkEnabled,
 		ImageRef:       req.ImageRef,
+		Port:           int(req.Port),
 	}
 
 	sb, err := s.manager.Create(ctx, cfg)

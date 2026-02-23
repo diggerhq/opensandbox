@@ -59,6 +59,7 @@ func (pm *PTYManager) CreateSession(sandboxID string, req types.PTYCreateRequest
 	args := []string{
 		"exec", "-it",
 		"--env", "TERM=xterm-256color",
+		"--workdir", "/workspace",
 		containerName,
 		shell,
 	}

@@ -98,6 +98,7 @@ func NewHTTPServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *
 	// PTY
 	api.POST("/sandboxes/:id/pty", s.createPTY)
 	api.GET("/sandboxes/:id/pty/:sessionID", s.ptyWebSocket)
+	api.POST("/sandboxes/:id/pty/:sessionID/resize", s.resizePTY)
 	api.DELETE("/sandboxes/:id/pty/:sessionID", s.killPTY)
 
 	return s
