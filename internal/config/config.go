@@ -1,9 +1,17 @@
 package config
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
+	"strings"
+	"time"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 )
 
 // Config holds all configuration for the opensandbox server.
@@ -56,10 +64,42 @@ type Config struct {
 	// ECR for template images
 	ECRRegistry   string // e.g. "086971355112.dkr.ecr.us-east-2.amazonaws.com"
 	ECRRepository string // e.g. "opensandbox-templates"
+
+	// Sandbox resource defaults (overridable per-sandbox via API)
+	DefaultSandboxMemoryMB int // default RAM per sandbox (MB), default 512
+	DefaultSandboxCPUs     int // default vCPUs per sandbox, default 1
+	DefaultSandboxDiskMB   int // default disk quota per sandbox (MB), 0 = no quota
+
+	// AWS EC2 compute pool (server mode only — for auto-scaling worker machines)
+	EC2AMI             string // Custom AMI with Podman+CRIU pre-installed
+	EC2InstanceType    string // e.g. "c7gd.metal", "r6gd.metal", "r7gd.metal"
+	EC2SubnetID        string // VPC subnet for worker instances
+	EC2SecurityGroupID string // Security group (allow 8080, 9090, 9091)
+	EC2KeyName             string // SSH key pair name (for debugging)
+	EC2WorkerImage         string // Docker image for containerized workers
+	EC2IAMInstanceProfile  string // IAM instance profile for worker instances (Secrets Manager + S3)
+
+	// Autoscaler
+	ScaleCooldownSec int // Cooldown between scale-up actions (seconds), default 300
+
+	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
+	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
+	// Env vars take precedence over secret values (for local overrides).
+	SecretsARN string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
+// If OPENSANDBOX_SECRETS_ARN is set, secrets are fetched from AWS Secrets Manager
+// first, then environment variables are applied on top (env vars take precedence).
 func Load() (*Config, error) {
+	// Fetch secrets from AWS Secrets Manager if configured.
+	// This populates the process environment so subsequent os.Getenv calls pick them up.
+	if arn := os.Getenv("OPENSANDBOX_SECRETS_ARN"); arn != "" {
+		if err := loadSecretsManager(arn); err != nil {
+			return nil, fmt.Errorf("failed to load secrets from %s: %w", arn, err)
+		}
+	}
+
 	cfg := &Config{
 		Port:       8080,
 		APIKey:     os.Getenv("OPENSANDBOX_API_KEY"),
@@ -96,6 +136,22 @@ func Load() (*Config, error) {
 
 		ECRRegistry:   os.Getenv("OPENSANDBOX_ECR_REGISTRY"),
 		ECRRepository: envOrDefault("OPENSANDBOX_ECR_REPOSITORY", "opensandbox-templates"),
+
+		DefaultSandboxMemoryMB: envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB", 512),
+		DefaultSandboxCPUs:     envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_CPUS", 1),
+		DefaultSandboxDiskMB:   envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB", 0),
+
+		EC2AMI:             os.Getenv("OPENSANDBOX_EC2_AMI"),
+		EC2InstanceType:    envOrDefault("OPENSANDBOX_EC2_INSTANCE_TYPE", "c7gd.metal"),
+		EC2SubnetID:        os.Getenv("OPENSANDBOX_EC2_SUBNET_ID"),
+		EC2SecurityGroupID: os.Getenv("OPENSANDBOX_EC2_SECURITY_GROUP_ID"),
+		EC2KeyName:         os.Getenv("OPENSANDBOX_EC2_KEY_NAME"),
+		EC2WorkerImage:         envOrDefault("OPENSANDBOX_EC2_WORKER_IMAGE", "opensandbox-worker:latest"),
+		EC2IAMInstanceProfile:  os.Getenv("OPENSANDBOX_EC2_IAM_INSTANCE_PROFILE"),
+
+		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
+
+		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 	}
 
 	// Default S3 region to worker region for same-region storage
@@ -128,4 +184,52 @@ func envOrDefaultInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// loadSecretsManager fetches a JSON secret from AWS Secrets Manager and sets
+// any values as environment variables (only if not already set, so explicit
+// env vars always win). Uses the default AWS credential chain (IAM instance
+// profile on EC2, or ~/.aws/credentials locally).
+func loadSecretsManager(arn string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Extract region from ARN: arn:aws:secretsmanager:REGION:ACCOUNT:secret:NAME
+	var opts []func(*awsconfig.LoadOptions) error
+	if parts := strings.Split(arn, ":"); len(parts) >= 4 && parts[3] != "" {
+		opts = append(opts, awsconfig.WithRegion(parts[3]))
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return fmt.Errorf("load AWS config: %w", err)
+	}
+
+	client := secretsmanager.NewFromConfig(awsCfg)
+	result, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: &arn,
+	})
+	if err != nil {
+		return fmt.Errorf("GetSecretValue: %w", err)
+	}
+
+	if result.SecretString == nil {
+		return fmt.Errorf("secret %s has no string value", arn)
+	}
+
+	var secrets map[string]string
+	if err := json.Unmarshal([]byte(*result.SecretString), &secrets); err != nil {
+		return fmt.Errorf("parse secret JSON: %w", err)
+	}
+
+	applied := 0
+	for key, value := range secrets {
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+			applied++
+		}
+	}
+
+	log.Printf("config: loaded %d secrets from Secrets Manager (%d keys in secret, env overrides take precedence)", applied, len(secrets))
+	return nil
 }

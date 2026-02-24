@@ -20,6 +20,14 @@ build-server:
 build-worker:
 	CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_WORKER) ./cmd/worker
 
+## build-worker-arm64: Cross-compile worker for Linux ARM64 (Graviton bare-metal)
+build-worker-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_WORKER)-arm64 ./cmd/worker
+
+## build-server-arm64: Cross-compile server for Linux ARM64
+build-server-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_SERVER)-arm64 ./cmd/server
+
 ## --- Local Testing (3 tiers) ---
 
 ## run-dev: Tier 1 - Combined mode, no auth, no PG/NATS (simplest)

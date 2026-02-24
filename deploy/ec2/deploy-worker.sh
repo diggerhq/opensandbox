@@ -13,10 +13,11 @@ SSH_USER="${SSH_USER:-ubuntu}"
 SSH="ssh -i $SSH_KEY $SSH_USER@$WORKER_IP"
 SCP="scp -i $SSH_KEY"
 
-echo "==> Building opensandbox-worker (linux/amd64)..."
+GOARCH="${GOARCH:-arm64}"
+echo "==> Building opensandbox-worker (linux/${GOARCH})..."
 cd "$REPO_ROOT"
-GOOS=linux GOARCH=amd64 go build -o opensandbox-worker ./cmd/worker/
-echo "    Built: opensandbox-worker ($(du -h opensandbox-worker | cut -f1))"
+CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -o opensandbox-worker ./cmd/worker/
+echo "    Built: opensandbox-worker ($(du -h opensandbox-worker | cut -f1), ${GOARCH})"
 
 echo "==> Uploading to $WORKER_IP..."
 $SCP opensandbox-worker "$SSH_USER@$WORKER_IP:/tmp/opensandbox-worker"

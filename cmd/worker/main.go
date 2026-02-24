@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
@@ -43,7 +44,12 @@ func main() {
 	log.Printf("opensandbox-worker: using podman %s", version)
 
 	// Initialize sandbox manager
-	mgr := sandbox.NewManager(client)
+	mgr := sandbox.NewManager(client,
+		sandbox.WithDataDir(cfg.DataDir),
+		sandbox.WithDefaultMemoryMB(cfg.DefaultSandboxMemoryMB),
+		sandbox.WithDefaultCPUs(cfg.DefaultSandboxCPUs),
+		sandbox.WithDefaultDiskMB(cfg.DefaultSandboxDiskMB),
+	)
 	defer mgr.Close()
 
 	// Initialize PTY manager
@@ -77,6 +83,14 @@ func main() {
 			log.Fatalf("failed to initialize checkpoint store: %v", err)
 		}
 		log.Printf("opensandbox-worker: S3 checkpoint store configured (bucket=%s, region=%s)", cfg.S3Bucket, cfg.S3Region)
+
+		// Enable local NVMe checkpoint cache if data dir is configured
+		if cfg.DataDir != "" {
+			cacheDir := filepath.Join(cfg.DataDir, "checkpoints")
+			if err := checkpointStore.SetCacheDir(cacheDir); err != nil {
+				log.Printf("opensandbox-worker: warning: checkpoint cache disabled: %v", err)
+			}
+		}
 	}
 
 	// Initialize PostgreSQL store for checkpoint lookups (auto-wake)
@@ -190,14 +204,17 @@ func main() {
 		grpcAdvertise := grpcAddr
 		if addr := os.Getenv("OPENSANDBOX_GRPC_ADVERTISE"); addr != "" {
 			grpcAdvertise = addr
-		} else if allocID := os.Getenv("FLY_ALLOC_ID"); allocID != "" {
-			grpcAdvertise = allocID + ".vm.opensandbox-worker.internal:9090"
 		}
 
 		hb, err := worker.NewRedisHeartbeat(cfg.RedisURL, cfg.WorkerID, cfg.Region, grpcAdvertise, cfg.HTTPAddr)
 		if err != nil {
 			log.Printf("opensandbox-worker: Redis heartbeat not available: %v", err)
 		} else {
+			// Try to get EC2 instance ID from IMDS for scaler drain/terminate
+			if machineID := worker.GetEC2InstanceID(); machineID != "" {
+				hb.SetMachineID(machineID)
+				log.Printf("opensandbox-worker: EC2 instance ID: %s", machineID)
+			}
 			hb.Start(func() (int, int, float64, float64) {
 				count, _ := mgr.Count(context.Background())
 				cpuPct, memPct := worker.SystemStats()

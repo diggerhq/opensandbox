@@ -9,8 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"time"
+
 	"github.com/opensandbox/opensandbox/internal/api"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/compute"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -50,7 +53,12 @@ func main() {
 		} else {
 			log.Printf("opensandbox: using podman %s", version)
 
-			mgr = sandbox.NewManager(podmanClient)
+			mgr = sandbox.NewManager(podmanClient,
+				sandbox.WithDataDir(cfg.DataDir),
+				sandbox.WithDefaultMemoryMB(cfg.DefaultSandboxMemoryMB),
+				sandbox.WithDefaultCPUs(cfg.DefaultSandboxCPUs),
+				sandbox.WithDefaultDiskMB(cfg.DefaultSandboxDiskMB),
+			)
 			defer mgr.Close()
 
 			podmanPath, _ := exec.LookPath("podman")
@@ -186,8 +194,10 @@ func main() {
 	}
 
 	// Initialize Redis worker registry in server mode
+	var redisRegistry *controlplane.RedisWorkerRegistry
 	if cfg.Mode == "server" && cfg.RedisURL != "" {
-		redisRegistry, err := controlplane.NewRedisWorkerRegistry(cfg.RedisURL)
+		var err error
+		redisRegistry, err = controlplane.NewRedisWorkerRegistry(cfg.RedisURL)
 		if err != nil {
 			log.Fatalf("failed to connect to Redis: %v", err)
 		}
@@ -195,6 +205,35 @@ func main() {
 		defer redisRegistry.Stop()
 		opts.WorkerRegistry = redisRegistry
 		log.Println("opensandbox: Redis worker registry started")
+	}
+
+	// Initialize EC2 compute pool + autoscaler (server mode with AWS configured)
+	if cfg.Mode == "server" && cfg.EC2AMI != "" && redisRegistry != nil {
+		ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
+			Region:             cfg.S3Region, // reuse S3 region (same AWS account)
+			AccessKeyID:        cfg.S3AccessKeyID,
+			SecretAccessKey:    cfg.S3SecretAccessKey,
+			AMI:                cfg.EC2AMI,
+			InstanceType:       cfg.EC2InstanceType,
+			SubnetID:           cfg.EC2SubnetID,
+			SecurityGroupID:    cfg.EC2SecurityGroupID,
+			KeyName:            cfg.EC2KeyName,
+			IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
+			SecretsARN:         cfg.SecretsARN,
+		})
+		if err != nil {
+			log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
+		}
+
+		scaler := controlplane.NewScaler(controlplane.ScalerConfig{
+			Pool:        ec2Pool,
+			Registry:    redisRegistry,
+			WorkerImage: cfg.EC2WorkerImage,
+			Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
+		})
+		scaler.Start()
+		defer scaler.Stop()
+		log.Printf("opensandbox: EC2 autoscaler started (ami=%s, type=%s)", cfg.EC2AMI, cfg.EC2InstanceType)
 	}
 
 	// Create API server

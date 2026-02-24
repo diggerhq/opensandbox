@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -22,8 +24,6 @@ const (
 
 	defaultTimeout  = 300 // 5 minutes
 	defaultImage    = "docker.io/library/ubuntu:22.04"
-	defaultMemoryMB = 1024
-	defaultCPU      = 1
 	maxMemoryMB     = 2048
 	maxCPU          = 4
 )
@@ -31,14 +31,52 @@ const (
 // Manager handles sandbox lifecycle operations (pure container executor).
 // Timer management and state machine logic live in SandboxRouter.
 type Manager struct {
-	podman *podman.Client
+	podman          *podman.Client
+	dataDir         string // base directory for per-sandbox persistent data (workspace, sqlite)
+	defaultMemoryMB int
+	defaultCPU      int
+	defaultDiskMB   int // per-sandbox disk quota (0 = no quota)
+}
+
+// ManagerOption configures a Manager.
+type ManagerOption func(*Manager)
+
+// WithDataDir sets the base directory for per-sandbox persistent data.
+func WithDataDir(dir string) ManagerOption {
+	return func(m *Manager) { m.dataDir = dir }
+}
+
+// WithDefaultMemoryMB sets the default memory per sandbox (in MB).
+func WithDefaultMemoryMB(mb int) ManagerOption {
+	return func(m *Manager) { m.defaultMemoryMB = mb }
+}
+
+// WithDefaultCPUs sets the default vCPU count per sandbox.
+func WithDefaultCPUs(cpus int) ManagerOption {
+	return func(m *Manager) { m.defaultCPU = cpus }
+}
+
+// WithDefaultDiskMB sets the default disk quota per sandbox (in MB). 0 = no quota.
+func WithDefaultDiskMB(mb int) ManagerOption {
+	return func(m *Manager) { m.defaultDiskMB = mb }
 }
 
 // NewManager creates a new sandbox manager.
-func NewManager(client *podman.Client) *Manager {
-	return &Manager{
-		podman: client,
+func NewManager(client *podman.Client, opts ...ManagerOption) *Manager {
+	m := &Manager{
+		podman:          client,
+		defaultMemoryMB: 1024,
+		defaultCPU:      1,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// DataDir returns the base data directory for sandbox storage.
+func (m *Manager) DataDir() string {
+	return m.dataDir
 }
 
 // Create creates a new sandbox container and starts it.
@@ -61,11 +99,11 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 
 	memoryMB := cfg.MemoryMB
 	if memoryMB <= 0 {
-		memoryMB = defaultMemoryMB
+		memoryMB = m.defaultMemoryMB
 	}
 	cpuCount := cfg.CpuCount
 	if cpuCount <= 0 {
-		cpuCount = defaultCPU
+		cpuCount = m.defaultCPU
 	}
 
 	now := time.Now()
@@ -98,10 +136,24 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	ccfg.Publish = []string{fmt.Sprintf("%d:%d/tcp", hostPort, containerPort)}
 	ccfg.Labels[labelHostPort] = strconv.Itoa(hostPort)
 
-	// Make /tmp writable for sandbox use
+	// Make /tmp writable for sandbox use (scratch space, not persisted)
 	ccfg.TmpFS["/tmp"] = "rw,size=100m"
-	// Add a writable workspace directory (default working directory for users)
-	ccfg.TmpFS["/workspace"] = "rw,size=200m"
+
+	// Workspace: bind-mount from host disk if dataDir is configured,
+	// otherwise fall back to tmpfs (e.g., dev mode without NVMe).
+	if m.dataDir != "" {
+		workspaceDir := filepath.Join(m.dataDir, id, "workspace")
+		if err := os.MkdirAll(workspaceDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create workspace dir for sandbox %s: %w", id, err)
+		}
+		ccfg.Volumes = append(ccfg.Volumes, workspaceDir+":/workspace")
+		// Enforce disk quota on the sandbox's data directory (best-effort, requires XFS + prjquota)
+		if m.defaultDiskMB > 0 {
+			m.SetDiskQuota(id, m.defaultDiskMB)
+		}
+	} else {
+		ccfg.TmpFS["/workspace"] = "rw,size=200m"
+	}
 
 	if _, err := m.podman.CreateContainer(ctx, ccfg); err != nil {
 		return nil, fmt.Errorf("failed to create sandbox %s: %w", id, err)
@@ -139,11 +191,15 @@ func (m *Manager) Get(ctx context.Context, id string) (*types.Sandbox, error) {
 	return containerInfoToSandbox(info), nil
 }
 
-// Kill forcefully removes a sandbox.
+// Kill forcefully removes a sandbox and cleans up its on-disk workspace.
 func (m *Manager) Kill(ctx context.Context, id string) error {
 	name := fmt.Sprintf("%s-%s", containerName, id)
 	if err := m.podman.RemoveContainer(ctx, name, true); err != nil {
 		return fmt.Errorf("failed to kill sandbox %s: %w", id, err)
+	}
+	// Clean up persistent workspace directory (best-effort)
+	if m.dataDir != "" {
+		_ = os.RemoveAll(filepath.Join(m.dataDir, id))
 	}
 	return nil
 }

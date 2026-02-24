@@ -100,8 +100,7 @@ Control Plane (Go/Echo)
   ├── Sandbox Router
   └── Compute Pool
         ├── Local (development)
-        ├── Fly.io (production)
-        └── ... (extensible)
+        └── EC2 (production — bare-metal Graviton)
         │ gRPC (internal)
         ▼
 Sandbox Worker (Go)
@@ -143,7 +142,6 @@ Sandbox Worker (Go)
 | `OPENSANDBOX_API_KEY` | (empty) | API key (empty = no auth) |
 | `OPENSANDBOX_WORKER_ADDR` | `localhost:9090` | Worker address |
 | `OPENSANDBOX_MODE` | `combined` | `server`, `worker`, or `combined` |
-| `FLY_API_TOKEN` | (empty) | Fly.io API token (for cloud deployment) |
 
 ## Security
 

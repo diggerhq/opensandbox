@@ -20,6 +20,7 @@ type ContainerConfig struct {
 	NetworkMode    string // "none", "slirp4netns", "bridge"
 	ReadOnly       bool
 	TmpFS          map[string]string // mount -> options
+	Volumes        []string          // bind mounts, e.g. ["/host/path:/container/path"]
 	CapDrop        []string
 	SecurityOpts   []string
 	UserNS         string
@@ -96,6 +97,9 @@ func (c *Client) CreateContainer(ctx context.Context, cfg ContainerConfig) (stri
 	}
 	for mount, opts := range cfg.TmpFS {
 		args = append(args, "--tmpfs", fmt.Sprintf("%s:%s", mount, opts))
+	}
+	for _, vol := range cfg.Volumes {
+		args = append(args, "--volume", vol)
 	}
 	for _, cap := range cfg.CapDrop {
 		args = append(args, "--cap-drop", cap)

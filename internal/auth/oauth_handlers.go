@@ -181,7 +181,7 @@ func (h *OAuthHandlers) HandleMe(c echo.Context) error {
 }
 
 // isSecureRequest returns true if the request is over HTTPS,
-// either directly or via a TLS-terminating proxy (e.g. fly.io).
+// either directly or via a TLS-terminating proxy (e.g. Caddy, ALB).
 func isSecureRequest(c echo.Context) bool {
 	if c.Request().TLS != nil {
 		return true

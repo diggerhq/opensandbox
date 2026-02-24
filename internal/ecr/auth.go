@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 )
@@ -21,19 +22,34 @@ type Config struct {
 }
 
 // IsConfigured returns true if ECR settings are provided.
+// Works with either static credentials or IAM (when AccessKey is empty but Registry+Repository are set).
 func (c *Config) IsConfigured() bool {
-	return c.Registry != "" && c.Repository != "" && c.AccessKey != "" && c.SecretKey != ""
+	return c.Registry != "" && c.Repository != ""
 }
 
 // GetAuthToken retrieves a Docker-compatible auth token from ECR.
 // Returns (username, password) suitable for `podman login`.
+// If AccessKey is empty, uses the default AWS credential chain (IAM instance profile on EC2).
 func GetAuthToken(ctx context.Context, cfg *Config) (string, string, error) {
-	awsCfg := aws.Config{
-		Region:      cfg.Region,
-		Credentials: credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
-	}
+	var client *ecr.Client
 
-	client := ecr.NewFromConfig(awsCfg)
+	if cfg.AccessKey != "" {
+		// Static credentials
+		awsCfg := aws.Config{
+			Region:      cfg.Region,
+			Credentials: credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+		}
+		client = ecr.NewFromConfig(awsCfg)
+	} else {
+		// IAM credential chain
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+			awsconfig.WithRegion(cfg.Region),
+		)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to load AWS config for ECR: %w", err)
+		}
+		client = ecr.NewFromConfig(awsCfg)
+	}
 	output, err := client.GetAuthorizationToken(ctx, &ecr.GetAuthorizationTokenInput{})
 	if err != nil {
 		return "", "", fmt.Errorf("failed to get ECR auth token: %w", err)

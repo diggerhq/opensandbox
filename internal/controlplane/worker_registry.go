@@ -12,6 +12,7 @@ import (
 // WorkerInfo represents a registered worker.
 type WorkerInfo struct {
 	ID           string    `json:"worker_id"`
+	MachineID    string    `json:"machine_id,omitempty"` // EC2 instance ID
 	Region       string    `json:"region"`
 	GRPCAddr     string    `json:"grpc_addr"`
 	HTTPAddr     string    `json:"http_addr"`
@@ -199,6 +200,9 @@ func (r *WorkerRegistry) handleHeartbeat(msg *nats.Msg) {
 		}
 		if hb.HTTPAddr != "" {
 			existing.HTTPAddr = hb.HTTPAddr
+		}
+		if hb.MachineID != "" {
+			existing.MachineID = hb.MachineID
 		}
 	} else {
 		hb.LastSeen = time.Now()
