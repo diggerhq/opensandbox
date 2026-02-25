@@ -22,6 +22,24 @@ func (s *Server) createSandbox(c echo.Context) error {
 		})
 	}
 
+	// Validate and clamp CPU/memory limits
+	if cfg.CpuCount < 0 {
+		cfg.CpuCount = 0
+	}
+	if cfg.CpuCount > 4 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "cpuCount must not exceed 4",
+		})
+	}
+	if cfg.MemoryMB > 2048 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "memoryMB must not exceed 2048",
+		})
+	}
+	if cfg.MemoryMB < 0 {
+		cfg.MemoryMB = 0
+	}
+
 	ctx := c.Request().Context()
 
 	// Check org quota if PG is available
