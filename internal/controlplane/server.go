@@ -123,7 +123,8 @@ func (s *Server) createSandbox(c echo.Context) error {
 	}
 
 	// Call gRPC CreateSandbox on the worker
-	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
+	// Firecracker VM boot + agent readiness can take up to ~35s
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 60*time.Second)
 	defer cancel()
 
 	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))

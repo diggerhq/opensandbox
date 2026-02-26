@@ -15,7 +15,7 @@ import (
 // It exposes the same endpoints as the control plane but authenticates via sandbox-scoped JWTs.
 type HTTPServer struct {
 	echo          *echo.Echo
-	manager       *sandbox.Manager
+	manager       sandbox.Manager
 	ptyManager    *sandbox.PTYManager
 	jwtIssuer     *auth.JWTIssuer
 	sandboxDBs    *sandbox.SandboxDBManager
@@ -24,7 +24,7 @@ type HTTPServer struct {
 }
 
 // NewHTTPServer creates a new worker HTTP server for direct SDK access.
-func NewHTTPServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *auth.JWTIssuer, sandboxDBs *sandbox.SandboxDBManager, sbProxy *proxy.SandboxProxy, sbRouter *sandbox.SandboxRouter, sandboxDomain string) *HTTPServer {
+func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *auth.JWTIssuer, sandboxDBs *sandbox.SandboxDBManager, sbProxy *proxy.SandboxProxy, sbRouter *sandbox.SandboxRouter, sandboxDomain string) *HTTPServer {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true

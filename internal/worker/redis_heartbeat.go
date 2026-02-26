@@ -12,14 +12,15 @@ import (
 
 // redisHeartbeatPayload is the JSON structure published to Redis.
 type redisHeartbeatPayload struct {
-	WorkerID string  `json:"worker_id"`
-	Region   string  `json:"region"`
-	GRPCAddr string  `json:"grpc_addr"`
-	HTTPAddr string  `json:"http_addr"`
-	Capacity int     `json:"capacity"`
-	Current  int     `json:"current"`
-	CPUPct   float64 `json:"cpu_pct"`
-	MemPct   float64 `json:"mem_pct"`
+	WorkerID  string  `json:"worker_id"`
+	MachineID string  `json:"machine_id,omitempty"` // EC2 instance ID (e.g. i-099088f8ac4a34ef3)
+	Region    string  `json:"region"`
+	GRPCAddr  string  `json:"grpc_addr"`
+	HTTPAddr  string  `json:"http_addr"`
+	Capacity  int     `json:"capacity"`
+	Current   int     `json:"current"`
+	CPUPct    float64 `json:"cpu_pct"`
+	MemPct    float64 `json:"mem_pct"`
 }
 
 // RedisHeartbeat publishes periodic heartbeats to Redis for worker discovery.
@@ -27,13 +28,14 @@ type redisHeartbeatPayload struct {
 //  1. SETs worker:{id} with a 30s TTL (auto-expires if worker dies)
 //  2. PUBLISHes to workers:heartbeat for real-time server notification
 type RedisHeartbeat struct {
-	rdb      *redis.Client
-	workerID string
-	region   string
-	grpcAddr string
-	httpAddr string
-	getStats func() (capacity, current int, cpuPct, memPct float64)
-	stop     chan struct{}
+	rdb       *redis.Client
+	workerID  string
+	machineID string
+	region    string
+	grpcAddr  string
+	httpAddr  string
+	getStats  func() (capacity, current int, cpuPct, memPct float64)
+	stop      chan struct{}
 }
 
 // NewRedisHeartbeat creates a new heartbeat publisher.
@@ -62,6 +64,11 @@ func NewRedisHeartbeat(redisURL, workerID, region, grpcAddr, httpAddr string) (*
 	}, nil
 }
 
+// SetMachineID sets the EC2 instance ID for the heartbeat (used by scaler for drain/terminate).
+func (h *RedisHeartbeat) SetMachineID(id string) {
+	h.machineID = id
+}
+
 // Start begins publishing heartbeats every 10 seconds.
 func (h *RedisHeartbeat) Start(getStats func() (int, int, float64, float64)) {
 	h.getStats = getStats
@@ -88,14 +95,15 @@ func (h *RedisHeartbeat) publish() {
 	capacity, current, cpuPct, memPct := h.getStats()
 
 	payload := redisHeartbeatPayload{
-		WorkerID: h.workerID,
-		Region:   h.region,
-		GRPCAddr: h.grpcAddr,
-		HTTPAddr: h.httpAddr,
-		Capacity: capacity,
-		Current:  current,
-		CPUPct:   cpuPct,
-		MemPct:   memPct,
+		WorkerID:  h.workerID,
+		MachineID: h.machineID,
+		Region:    h.region,
+		GRPCAddr:  h.grpcAddr,
+		HTTPAddr:  h.httpAddr,
+		Capacity:  capacity,
+		Current:   current,
+		CPUPct:    cpuPct,
+		MemPct:    memPct,
 	}
 
 	data, err := json.Marshal(payload)

@@ -67,8 +67,7 @@ ASYNC SYNC (background):
 |------|-------------|
 | `internal/metrics/metrics.go` | 14 Prometheus metrics (gauges, counters, histograms) + Echo middleware + standalone /metrics server |
 | `deploy/docker-compose.yml` | PostgreSQL 16 + NATS 2 (JetStream) for local dev |
-| `deploy/fly.toml` | Fly.io control plane deployment config |
-| `deploy/fly-worker.toml` | Fly.io worker deployment (HTTP :8080, gRPC :9090, metrics :9091) |
+| `deploy/ec2/` | EC2 bare-metal deployment (setup, deploy, Caddy, systemd) |
 | `deploy/prometheus/prometheus.yml` | Scrape configs for CP and workers |
 | `deploy/grafana/dashboards/opensandbox-overview.json` | Dashboard: active sandboxes, create latency, utilization, sync lag |
 | `deploy/Dockerfile.server`, `Dockerfile.worker` | Both use CGO_ENABLED=1 (required by go-sqlite3) |
@@ -235,10 +234,9 @@ internal/
     sqlite.go                 — Per-sandbox SQLite
 
   compute/
-    pool.go                   — Pool interface (extended)
-    fly.go                    — Fly.io Machines API
+    pool.go                   — Pool interface
+    ec2.go                    — AWS EC2 bare-metal pool
     local.go                  — Local/dev pool
-    router.go                 — Region-aware routing
 
   config/config.go            — All env var config
   metrics/metrics.go          — Prometheus metrics + Echo middleware
@@ -253,8 +251,7 @@ sdks/
 
 deploy/
   docker-compose.yml          — PG + NATS for local dev
-  fly.toml                    — CP Fly.io config
-  fly-worker.toml             — Worker Fly.io config
+  ec2/                        — EC2 bare-metal deployment
   Dockerfile.server           — CP Docker image
   Dockerfile.worker           — Worker Docker image
   prometheus/prometheus.yml   — Prometheus scrape config

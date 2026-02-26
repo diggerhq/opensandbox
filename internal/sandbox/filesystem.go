@@ -11,7 +11,7 @@ import (
 )
 
 // ReadFile reads a file from inside the sandbox.
-func (m *Manager) ReadFile(ctx context.Context, sandboxID, path string) (string, error) {
+func (m *PodmanManager) ReadFile(ctx context.Context, sandboxID, path string) (string, error) {
 	container := m.ContainerName(sandboxID)
 	content, err := m.podman.ExecSimple(ctx, container, "cat", path)
 	if err != nil {
@@ -21,7 +21,7 @@ func (m *Manager) ReadFile(ctx context.Context, sandboxID, path string) (string,
 }
 
 // WriteFile writes content to a file inside the sandbox.
-func (m *Manager) WriteFile(ctx context.Context, sandboxID, path, content string) error {
+func (m *PodmanManager) WriteFile(ctx context.Context, sandboxID, path, content string) error {
 	container := m.ContainerName(sandboxID)
 
 	// Ensure parent directory exists
@@ -45,7 +45,7 @@ func (m *Manager) WriteFile(ctx context.Context, sandboxID, path, content string
 }
 
 // ListDir lists directory contents inside the sandbox.
-func (m *Manager) ListDir(ctx context.Context, sandboxID, path string) ([]types.EntryInfo, error) {
+func (m *PodmanManager) ListDir(ctx context.Context, sandboxID, path string) ([]types.EntryInfo, error) {
 	container := m.ContainerName(sandboxID)
 
 	// Use a script that outputs machine-parseable format
@@ -96,7 +96,7 @@ func (m *Manager) ListDir(ctx context.Context, sandboxID, path string) ([]types.
 }
 
 // MakeDir creates a directory inside the sandbox.
-func (m *Manager) MakeDir(ctx context.Context, sandboxID, path string) error {
+func (m *PodmanManager) MakeDir(ctx context.Context, sandboxID, path string) error {
 	container := m.ContainerName(sandboxID)
 	_, err := m.podman.ExecSimple(ctx, container, "mkdir", "-p", path)
 	if err != nil {
@@ -106,7 +106,7 @@ func (m *Manager) MakeDir(ctx context.Context, sandboxID, path string) error {
 }
 
 // Remove removes a file or directory inside the sandbox.
-func (m *Manager) Remove(ctx context.Context, sandboxID, path string) error {
+func (m *PodmanManager) Remove(ctx context.Context, sandboxID, path string) error {
 	container := m.ContainerName(sandboxID)
 	_, err := m.podman.ExecSimple(ctx, container, "rm", "-rf", path)
 	if err != nil {
@@ -116,7 +116,7 @@ func (m *Manager) Remove(ctx context.Context, sandboxID, path string) error {
 }
 
 // Exists checks if a path exists inside the sandbox.
-func (m *Manager) Exists(ctx context.Context, sandboxID, path string) (bool, error) {
+func (m *PodmanManager) Exists(ctx context.Context, sandboxID, path string) (bool, error) {
 	container := m.ContainerName(sandboxID)
 	result, err := m.podman.ExecInContainer(ctx, podman.ExecConfig{
 		Container: container,
@@ -129,7 +129,7 @@ func (m *Manager) Exists(ctx context.Context, sandboxID, path string) (bool, err
 }
 
 // Stat returns file info for a path inside the sandbox.
-func (m *Manager) Stat(ctx context.Context, sandboxID, path string) (*types.FileInfo, error) {
+func (m *PodmanManager) Stat(ctx context.Context, sandboxID, path string) (*types.FileInfo, error) {
 	container := m.ContainerName(sandboxID)
 	output, err := m.podman.ExecSimple(ctx, container,
 		"stat", "--format", "%n\t%F\t%s\t%a\t%Y", path)

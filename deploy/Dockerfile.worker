@@ -101,35 +101,12 @@ COPY --from=criu-builder /usr/local/lib/libcriu.so* /usr/local/lib/
 COPY --from=crun-builder /crun/crun /usr/bin/crun
 RUN ldconfig
 
-# Configure podman to use cgroupfs (Fly VMs use cgroup v1 without systemd)
+# Configure podman to use crun
 RUN mkdir -p /etc/containers && \
-    printf '[engine]\ncgroup_manager = "cgroupfs"\nevents_logger = "file"\n' \
+    printf '[engine]\nruntime = "crun"\nevents_logger = "file"\n' \
     > /etc/containers/containers.conf
 
 COPY --from=builder /opensandbox-worker /usr/local/bin/opensandbox-worker
 
-# Entrypoint script fixes cgroup v1 symlinks on Fly.io before starting the worker.
-# Fly VMs mount "cpu,cpuacct" as the real cgroup controller but leave "cpu" as a
-# plain empty directory instead of a symlink. This breaks podman resource limits.
-RUN printf '#!/bin/sh\nset -e\n\
-# Ensure cgroup v1 combined controllers have single-name symlinks.\n\
-# Fly VMs may mount "cpu,cpuacct" without a "cpu" symlink, or leave\n\
-# "cpu" as an empty plain directory. Either case breaks podman.\n\
-fix_cgroup() {\n\
-  combined="/sys/fs/cgroup/$2"\n\
-  single="/sys/fs/cgroup/$1"\n\
-  [ -d "$combined" ] || return 0\n\
-  if [ -L "$single" ]; then return 0; fi\n\
-  rm -rf "$single" 2>/dev/null || true\n\
-  ln -s "$combined" "$single"\n\
-}\n\
-fix_cgroup cpu cpu,cpuacct\n\
-fix_cgroup cpuacct cpu,cpuacct\n\
-fix_cgroup net_cls net_cls,net_prio\n\
-fix_cgroup net_prio net_cls,net_prio\n\
-exec "$@"\n' > /usr/local/bin/worker-entrypoint.sh && \
-    chmod +x /usr/local/bin/worker-entrypoint.sh
-
 EXPOSE 8080 9090 9091
-ENTRYPOINT ["worker-entrypoint.sh"]
 CMD ["opensandbox-worker"]

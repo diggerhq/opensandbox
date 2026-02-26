@@ -597,6 +597,56 @@ func (s *Store) UpdateSandboxSessionForWake(ctx context.Context, sandboxID, newW
 	return err
 }
 
+// ReconcileWorkerSessions marks stale "running" sessions for a worker on startup.
+// Sessions with an active checkpoint are set to "hibernated" (recoverable via wake-on-request).
+// Sessions without a checkpoint are set to "stopped" (VM is gone, no recovery possible).
+// Returns the count of sessions transitioned to each state.
+func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (hibernated, stopped int, err error) {
+	// First: mark sessions that have an active checkpoint as "hibernated"
+	res1, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'hibernated'
+		 WHERE worker_id = $1 AND status = 'running'
+		 AND sandbox_id IN (
+		     SELECT sandbox_id FROM sandbox_checkpoints
+		     WHERE restored_at IS NULL AND expired_at IS NULL
+		 )`, workerID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to reconcile hibernated sessions: %w", err)
+	}
+
+	// Second: mark remaining "running" sessions as "stopped"
+	res2, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'stopped', stopped_at = now(),
+		 error_msg = 'worker restarted'
+		 WHERE worker_id = $1 AND status = 'running'`, workerID)
+	if err != nil {
+		return int(res1.RowsAffected()), 0, fmt.Errorf("failed to reconcile stopped sessions: %w", err)
+	}
+
+	return int(res1.RowsAffected()), int(res2.RowsAffected()), nil
+}
+
+// UpsertWorkspaceBackup creates or updates a workspace-only backup record for a sandbox.
+// Uses checkpoint_key prefix "workspace-backups/" to distinguish from full hibernation checkpoints.
+// Only one workspace backup is kept per sandbox (previous is overwritten).
+func (s *Store) UpsertWorkspaceBackup(ctx context.Context, sandboxID string, orgID uuid.UUID, backupKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) error {
+	// Expire any existing workspace backups for this sandbox
+	_, _ = s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET expired_at = now()
+		 WHERE sandbox_id = $1 AND checkpoint_key LIKE 'workspace-backups/%'
+		 AND expired_at IS NULL AND restored_at IS NULL`, sandboxID)
+
+	// Insert the new backup
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO sandbox_checkpoints (sandbox_id, org_id, checkpoint_key, size_bytes, region, template, sandbox_config)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		sandboxID, orgID, backupKey, sizeBytes, region, template, sandboxConfig)
+	if err != nil {
+		return fmt.Errorf("failed to upsert workspace backup: %w", err)
+	}
+	return nil
+}
+
 // --- Template operations ---
 
 // DBTemplate represents a template record in the database.

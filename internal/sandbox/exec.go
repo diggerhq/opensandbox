@@ -11,7 +11,7 @@ import (
 )
 
 // Exec runs a command inside a sandbox and returns the result.
-func (m *Manager) Exec(ctx context.Context, sandboxID string, cfg types.ProcessConfig) (*types.ProcessResult, error) {
+func (m *PodmanManager) Exec(ctx context.Context, sandboxID string, cfg types.ProcessConfig) (*types.ProcessResult, error) {
 	container := m.ContainerName(sandboxID)
 
 	timeout := cfg.Timeout

@@ -19,14 +19,15 @@ import (
 
 // WorkerEntry represents a worker in the Redis-backed registry.
 type WorkerEntry struct {
-	ID       string  `json:"worker_id"`
-	Region   string  `json:"region"`
-	GRPCAddr string  `json:"grpc_addr"`
-	HTTPAddr string  `json:"http_addr"`
-	Capacity int     `json:"capacity"`
-	Current  int     `json:"current"`
-	CPUPct   float64 `json:"cpu_pct"`
-	MemPct   float64 `json:"mem_pct"`
+	ID        string  `json:"worker_id"`
+	MachineID string  `json:"machine_id,omitempty"` // EC2 instance ID
+	Region    string  `json:"region"`
+	GRPCAddr  string  `json:"grpc_addr"`
+	HTTPAddr  string  `json:"http_addr"`
+	Capacity  int     `json:"capacity"`
+	Current   int     `json:"current"`
+	CPUPct    float64 `json:"cpu_pct"`
+	MemPct    float64 `json:"mem_pct"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -203,6 +204,9 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		if entry.HTTPAddr != "" {
 			existing.HTTPAddr = entry.HTTPAddr
 		}
+		if entry.MachineID != "" {
+			existing.MachineID = entry.MachineID
+		}
 	} else {
 		// New worker
 		r.workers[entry.ID] = &entry
@@ -258,15 +262,16 @@ func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
 	log.Printf("redis_registry: gRPC connection initiated to worker %s at %s", workerID, grpcAddr)
 }
 
-// GetLeastLoadedWorker returns the worker with the most remaining capacity.
-// If region is non-empty, only workers in that region are considered.
+// GetLeastLoadedWorker returns the worker with the best combination of remaining capacity
+// and resource headroom. Workers under heavy resource pressure (CPU > 90% or mem > 90%)
+// are skipped. If region is non-empty, only workers in that region are considered.
 // If no workers match the region, falls back to all workers.
 func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry, pb.SandboxWorkerClient, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var best *WorkerEntry
-	bestRemaining := -1
+	bestScore := -1.0
 
 	// First pass: try workers in the requested region
 	for _, w := range r.workers {
@@ -277,9 +282,16 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 		if remaining <= 0 {
 			continue
 		}
-		if remaining > bestRemaining {
+		// Skip workers under heavy resource pressure
+		if w.CPUPct > 90 || w.MemPct > 90 {
+			continue
+		}
+		// Score: remaining capacity weighted by resource headroom
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+		score := float64(remaining) * resourceScore
+		if score > bestScore {
 			best = w
-			bestRemaining = remaining
+			bestScore = score
 		}
 	}
 
@@ -290,9 +302,14 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 			if remaining <= 0 {
 				continue
 			}
-			if remaining > bestRemaining {
+			if w.CPUPct > 90 || w.MemPct > 90 {
+				continue
+			}
+			resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+			score := float64(remaining) * resourceScore
+			if score > bestScore {
 				best = w
-				bestRemaining = remaining
+				bestScore = score
 			}
 		}
 	}
@@ -355,4 +372,77 @@ func (r *RedisWorkerRegistry) Stop() {
 
 	r.rdb.Close()
 	log.Println("redis_registry: stopped")
+}
+
+// Regions returns all known regions (satisfies ScalerRegistry).
+func (r *RedisWorkerRegistry) Regions() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	regionSet := make(map[string]struct{})
+	for _, w := range r.workers {
+		regionSet[w.Region] = struct{}{}
+	}
+
+	regions := make([]string, 0, len(regionSet))
+	for region := range regionSet {
+		regions = append(regions, region)
+	}
+	return regions
+}
+
+// GetWorkersByRegion returns workers in a region (satisfies ScalerRegistry).
+func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var result []*WorkerInfo
+	for _, w := range r.workers {
+		if w.Region == region {
+			result = append(result, &WorkerInfo{
+				ID:        w.ID,
+				MachineID: w.MachineID,
+				Region:    w.Region,
+				GRPCAddr:  w.GRPCAddr,
+				HTTPAddr:  w.HTTPAddr,
+				Capacity:  w.Capacity,
+				Current:   w.Current,
+				CPUPct:    w.CPUPct,
+				MemPct:    w.MemPct,
+			})
+		}
+	}
+	return result
+}
+
+// RegionResourcePressure returns the maximum CPU and memory usage across all workers in a region (satisfies ScalerRegistry).
+func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem float64) {
+	workers := r.GetWorkersByRegion(region)
+	for _, w := range workers {
+		if w.CPUPct > maxCPU {
+			maxCPU = w.CPUPct
+		}
+		if w.MemPct > maxMem {
+			maxMem = w.MemPct
+		}
+	}
+	return maxCPU, maxMem
+}
+
+// RegionUtilization returns the average utilization for a region (satisfies ScalerRegistry).
+func (r *RedisWorkerRegistry) RegionUtilization(region string) float64 {
+	workers := r.GetWorkersByRegion(region)
+	if len(workers) == 0 {
+		return 0
+	}
+
+	var totalCap, totalCur int
+	for _, w := range workers {
+		totalCap += w.Capacity
+		totalCur += w.Current
+	}
+	if totalCap == 0 {
+		return 0
+	}
+	return float64(totalCur) / float64(totalCap)
 }

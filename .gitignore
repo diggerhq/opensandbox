@@ -29,8 +29,7 @@ node_modules/
 dist/
 
 # Compiled binaries
-bin/opensandbox-server
-bin/opensandbox-worker
+bin/
 opensandbox-worker
 
 # Worker env (secrets)

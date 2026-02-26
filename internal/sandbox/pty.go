@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -12,23 +13,35 @@ import (
 )
 
 // PTYManager manages PTY sessions.
+// Supports both Podman (host-side PTY via podman exec) and Firecracker
+// (agent gRPC + vsock data port) by allowing the session creation function
+// to be overridden.
 type PTYManager struct {
 	podmanPath string
 	authFile   string
 	mu         sync.RWMutex
 	sessions   map[string]*PTYSessionHandle
+
+	// createFunc allows overriding session creation for Firecracker mode.
+	// If nil, defaults to Podman-based PTY via podman exec.
+	createFunc func(sandboxID string, req types.PTYCreateRequest) (*PTYSessionHandle, error)
 }
 
 // PTYSessionHandle holds the state for an active PTY session.
 type PTYSessionHandle struct {
 	ID        string
 	SandboxID string
-	Cmd       *exec.Cmd
-	PTY       *os.File // master side of the pseudo-terminal (read + write)
+	Cmd       *exec.Cmd          // Podman mode only (nil for Firecracker)
+	PTY       io.ReadWriteCloser // PTY I/O stream (*os.File for Podman, net.Conn for Firecracker)
 	Done      chan struct{}
+
+	// onKill is called when the session is killed (Firecracker: sends gRPC PTYKill).
+	onKill func()
+	// onResize is called when the session is resized (Firecracker: sends gRPC PTYResize).
+	onResize func(cols, rows int) error
 }
 
-// NewPTYManager creates a new PTY manager.
+// NewPTYManager creates a new Podman-based PTY manager.
 func NewPTYManager(podmanPath, authFile string) *PTYManager {
 	return &PTYManager{
 		podmanPath: podmanPath,
@@ -37,8 +50,35 @@ func NewPTYManager(podmanPath, authFile string) *PTYManager {
 	}
 }
 
+// NewAgentPTYManager creates a PTY manager that delegates to a custom
+// create function (used by Firecracker mode).
+func NewAgentPTYManager(createFunc func(sandboxID string, req types.PTYCreateRequest) (*PTYSessionHandle, error)) *PTYManager {
+	return &PTYManager{
+		sessions:   make(map[string]*PTYSessionHandle),
+		createFunc: createFunc,
+	}
+}
+
 // CreateSession starts a new PTY session inside a sandbox.
 func (pm *PTYManager) CreateSession(sandboxID string, req types.PTYCreateRequest) (*PTYSessionHandle, error) {
+	// Use override if set (Firecracker mode)
+	if pm.createFunc != nil {
+		handle, err := pm.createFunc(sandboxID, req)
+		if err != nil {
+			return nil, err
+		}
+		pm.mu.Lock()
+		pm.sessions[handle.ID] = handle
+		pm.mu.Unlock()
+		return handle, nil
+	}
+
+	// Default: Podman-based PTY
+	return pm.createPodmanSession(sandboxID, req)
+}
+
+// createPodmanSession creates a PTY session using podman exec.
+func (pm *PTYManager) createPodmanSession(sandboxID string, req types.PTYCreateRequest) (*PTYSessionHandle, error) {
 	sessionID := uuid.New().String()[:8]
 	containerName := fmt.Sprintf("osb-%s", sandboxID)
 
@@ -106,10 +146,19 @@ func (pm *PTYManager) Resize(sessionID string, cols, rows int) error {
 		return fmt.Errorf("PTY session %s not found", sessionID)
 	}
 
-	return ptylib.Setsize(session.PTY, &ptylib.Winsize{
-		Rows: uint16(rows),
-		Cols: uint16(cols),
-	})
+	// Use Firecracker resize if available
+	if session.onResize != nil {
+		return session.onResize(cols, rows)
+	}
+
+	// Podman mode: resize via pty ioctl
+	if f, ok := session.PTY.(*os.File); ok {
+		return ptylib.Setsize(f, &ptylib.Winsize{
+			Rows: uint16(rows),
+			Cols: uint16(cols),
+		})
+	}
+	return fmt.Errorf("resize not supported for this session type")
 }
 
 // GetSession returns a PTY session by ID.
@@ -137,8 +186,13 @@ func (pm *PTYManager) KillSession(sessionID string) error {
 		return fmt.Errorf("PTY session %s not found", sessionID)
 	}
 
+	// Call Firecracker kill callback if set
+	if session.onKill != nil {
+		session.onKill()
+	}
+
 	session.PTY.Close()
-	if session.Cmd.Process != nil {
+	if session.Cmd != nil && session.Cmd.Process != nil {
 		_ = session.Cmd.Process.Kill()
 	}
 	return nil
@@ -150,8 +204,11 @@ func (pm *PTYManager) CloseAll() {
 	defer pm.mu.Unlock()
 
 	for _, session := range pm.sessions {
+		if session.onKill != nil {
+			session.onKill()
+		}
 		session.PTY.Close()
-		if session.Cmd.Process != nil {
+		if session.Cmd != nil && session.Cmd.Process != nil {
 			_ = session.Cmd.Process.Kill()
 		}
 	}

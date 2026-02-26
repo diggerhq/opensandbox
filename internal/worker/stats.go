@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // SystemStats returns current CPU and memory usage percentages.
@@ -57,25 +59,67 @@ func parseMeminfoKB(line string) uint64 {
 	return val
 }
 
+// CPU delta tracking for accurate current-load measurement.
+// Without delta tracking, /proc/stat gives cumulative averages since boot.
+var (
+	cpuPrevTotal uint64
+	cpuPrevIdle  uint64
+	cpuMu        sync.Mutex
+)
+
 func linuxCPUPercent() float64 {
-	// Read /proc/stat for aggregate CPU time
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+
+	total1, idle1 := readProcStat()
+	if total1 == 0 {
+		return 0.0
+	}
+
+	if cpuPrevTotal > 0 {
+		// Delta from previous call (typically ~10s ago from heartbeat interval)
+		dTotal := total1 - cpuPrevTotal
+		dIdle := idle1 - cpuPrevIdle
+		cpuPrevTotal = total1
+		cpuPrevIdle = idle1
+		if dTotal == 0 {
+			return 0.0
+		}
+		return float64(dTotal-dIdle) / float64(dTotal) * 100.0
+	}
+
+	// First call: take two samples 500ms apart to get an initial reading
+	time.Sleep(500 * time.Millisecond)
+	total2, idle2 := readProcStat()
+	cpuPrevTotal = total2
+	cpuPrevIdle = idle2
+
+	dTotal := total2 - total1
+	dIdle := idle2 - idle1
+	if dTotal == 0 {
+		return 0.0
+	}
+	return float64(dTotal-dIdle) / float64(dTotal) * 100.0
+}
+
+// readProcStat reads the aggregate CPU line from /proc/stat and returns total and idle jiffies.
+func readProcStat() (total, idle uint64) {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
-		return 0.0
+		return 0, 0
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	if !scanner.Scan() {
-		return 0.0
+		return 0, 0
 	}
 	line := scanner.Text() // "cpu  user nice system idle iowait irq softirq steal"
 	fields := strings.Fields(line)
 	if len(fields) < 5 || fields[0] != "cpu" {
-		return 0.0
+		return 0, 0
 	}
 
-	var total, idle uint64
 	for i := 1; i < len(fields); i++ {
 		val, _ := strconv.ParseUint(fields[i], 10, 64)
 		total += val
@@ -83,8 +127,5 @@ func linuxCPUPercent() float64 {
 			idle = val
 		}
 	}
-	if total == 0 {
-		return 0.0
-	}
-	return float64(total-idle) / float64(total) * 100.0
+	return total, idle
 }

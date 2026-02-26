@@ -3,14 +3,15 @@
 # Build variables
 BINARY_SERVER = opensandbox-server
 BINARY_WORKER = opensandbox-worker
+BINARY_AGENT = osb-agent
 BUILD_DIR = bin
 
 ## help: Show this help message
 help:
 	@grep -E '^##' $(MAKEFILE_LIST) | sed 's/## //' | column -t -s ':'
 
-## build: Build server and worker binaries
-build: build-server build-worker
+## build: Build server, worker, and agent binaries
+build: build-server build-worker build-agent
 
 ## build-server: Build the control plane server
 build-server:
@@ -19,6 +20,18 @@ build-server:
 ## build-worker: Build the sandbox worker
 build-worker:
 	CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_WORKER) ./cmd/worker
+
+## build-worker-arm64: Cross-compile worker for Linux ARM64 (Graviton bare-metal)
+build-worker-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_WORKER)-arm64 ./cmd/worker
+
+## build-agent: Build the in-VM agent (static binary for Linux ARM64)
+build-agent:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_AGENT) ./cmd/agent
+
+## build-server-arm64: Cross-compile server for Linux ARM64
+build-server-arm64:
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_SERVER)-arm64 ./cmd/server
 
 ## --- Local Testing (3 tiers) ---
 
@@ -179,6 +192,25 @@ proto:
 	protoc --go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		proto/worker/worker.proto
+	protoc --go_out=. --go_opt=paths=source_relative \
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
+		proto/agent/agent.proto
+
+## --- Firecracker ---
+
+## build-rootfs: Build base ext4 rootfs images for Firecracker VMs (requires root)
+build-rootfs:
+	sudo AGENT_BIN=$(BUILD_DIR)/$(BINARY_AGENT) IMAGES_DIR=$(BUILD_DIR)/images ./scripts/build-rootfs.sh all
+
+## download-kernel: Download the Firecracker-compatible ARM64 kernel
+download-kernel:
+	./scripts/download-kernel.sh $(BUILD_DIR)/vmlinux-arm64
+
+## deploy-worker: Deploy worker + agent to EC2 instance (set WORKER_IP=<ip>)
+deploy-worker:
+	./deploy/ec2/deploy-worker.sh
+
+## --- Docker ---
 
 ## docker-server: Build server Docker image
 docker-server:

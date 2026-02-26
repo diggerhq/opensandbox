@@ -44,6 +44,7 @@ interface TestSuite {
 }
 
 const SUITES: TestSuite[] = [
+  { name: "Environment", file: "test-environment.ts", description: "HOME=/workspace, npm/pip cache dirs, dotfiles" },
   { name: "Commands", file: "test-commands.ts", description: "Shell commands, stderr, exit codes, pipes, concurrency" },
   { name: "File Ops", file: "test-file-ops.ts", description: "Large files, special chars, nested dirs, deletion" },
   { name: "Python SDK", file: "test-python-sdk.ts", description: "Python template, stdlib, file ops from Python" },

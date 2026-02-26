@@ -22,13 +22,13 @@ import (
 // to the corresponding sandbox container's published port.
 type SandboxProxy struct {
 	baseDomain string
-	manager    *sandbox.Manager
+	manager    sandbox.Manager
 	router     *sandbox.SandboxRouter
 }
 
 // New creates a new SandboxProxy.
 // baseDomain is the base domain for sandbox subdomains (e.g., "workers.opensandbox.dev" or "localhost").
-func New(baseDomain string, mgr *sandbox.Manager, router *sandbox.SandboxRouter) *SandboxProxy {
+func New(baseDomain string, mgr sandbox.Manager, router *sandbox.SandboxRouter) *SandboxProxy {
 	return &SandboxProxy{
 		baseDomain: baseDomain,
 		manager:    mgr,

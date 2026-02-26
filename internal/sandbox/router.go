@@ -50,7 +50,7 @@ type Middleware func(ctx context.Context, sandboxID string, op string, next func
 
 // RouterConfig holds configuration for the SandboxRouter.
 type RouterConfig struct {
-	Manager         *Manager
+	Manager         Manager
 	CheckpointStore *storage.CheckpointStore // nil disables auto-wake/hibernate
 	Store           *db.Store                // nil disables DB lookups for wake
 	WorkerID        string
@@ -65,7 +65,7 @@ type RouterConfig struct {
 // which ensures the sandbox is running, executes the operation, and
 // resets the rolling idle timeout.
 type SandboxRouter struct {
-	manager         *Manager
+	manager         Manager
 	checkpointStore *storage.CheckpointStore
 	store           *db.Store
 	workerID        string
@@ -268,9 +268,9 @@ func (r *SandboxRouter) Close() {
 	r.sandboxes = make(map[string]*sandboxEntry)
 }
 
-// Manager returns the underlying Manager for direct lifecycle operations
+// GetManager returns the underlying Manager for direct lifecycle operations
 // (create, kill, hibernate, wake) that don't go through routing.
-func (r *SandboxRouter) Manager() *Manager {
+func (r *SandboxRouter) GetManager() Manager {
 	return r.manager
 }
 
@@ -461,11 +461,10 @@ func (r *SandboxRouter) onTimeout(sandboxID string) {
 
 	// Try hibernate if checkpoint store is available
 	if r.checkpointStore != nil {
-		name := r.manager.ContainerName(sandboxID)
 		result, err := r.manager.Hibernate(ctx, sandboxID, r.checkpointStore)
 		if err != nil {
 			log.Printf("router: hibernate failed for %s, killing: %v", sandboxID, err)
-			_ = r.manager.podman.RemoveContainer(ctx, name, true)
+			_ = r.manager.Kill(ctx, sandboxID)
 			r.Unregister(sandboxID)
 			if r.onKill != nil {
 				r.onKill(sandboxID)
@@ -487,8 +486,7 @@ func (r *SandboxRouter) onTimeout(sandboxID string) {
 	}
 
 	// No checkpoint store — just kill
-	name := r.manager.ContainerName(sandboxID)
-	_ = r.manager.podman.RemoveContainer(ctx, name, true)
+	_ = r.manager.Kill(ctx, sandboxID)
 	r.Unregister(sandboxID)
 	if r.onKill != nil {
 		r.onKill(sandboxID)

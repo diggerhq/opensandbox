@@ -1,0 +1,50 @@
+# Python base rootfs for OpenSandbox Firecracker VMs
+# Build: scripts/build-rootfs.sh python
+FROM ubuntu:22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install essential system packages + Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    busybox \
+    ca-certificates \
+    curl \
+    git \
+    iproute2 \
+    iputils-ping \
+    jq \
+    less \
+    nano \
+    net-tools \
+    openssh-client \
+    procps \
+    sudo \
+    tar \
+    unzip \
+    vim-tiny \
+    wget \
+    zip \
+    # Python
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create python3 → python symlink if needed
+RUN which python || ln -s /usr/bin/python3 /usr/bin/python
+
+# Upgrade pip
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
+# Create workspace directory
+RUN mkdir -p /workspace
+
+# Set default working directory
+WORKDIR /workspace
+
+# Default locale
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8

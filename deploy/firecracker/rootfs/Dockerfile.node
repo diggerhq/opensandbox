@@ -1,0 +1,50 @@
+# Node.js base rootfs for OpenSandbox Firecracker VMs
+# Build: scripts/build-rootfs.sh node
+FROM ubuntu:22.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install essential system packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    busybox \
+    ca-certificates \
+    curl \
+    git \
+    iproute2 \
+    iputils-ping \
+    jq \
+    less \
+    nano \
+    net-tools \
+    openssh-client \
+    procps \
+    sudo \
+    tar \
+    unzip \
+    vim-tiny \
+    wget \
+    zip \
+    # Build tools for native npm modules
+    build-essential \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 LTS via NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install common global npm packages
+RUN npm install -g npm@latest
+
+# Create workspace directory
+RUN mkdir -p /workspace
+
+# Set default working directory
+WORKDIR /workspace
+
+# Default locale
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8

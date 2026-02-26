@@ -1,0 +1,194 @@
+syntax = "proto3";
+
+package agent;
+
+option go_package = "github.com/opensandbox/opensandbox/proto/agent";
+
+// SandboxAgent runs inside each Firecracker microVM and handles
+// exec, file ops, PTY, and stats over gRPC via vsock.
+service SandboxAgent {
+  // Exec runs a command and returns the result after completion.
+  rpc Exec(ExecRequest) returns (ExecResponse);
+
+  // ExecStream runs a command and streams stdout/stderr chunks in real time.
+  rpc ExecStream(ExecRequest) returns (stream ExecOutputChunk);
+
+  // Filesystem operations
+  rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
+  rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+  rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  rpc Exists(ExistsRequest) returns (ExistsResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+
+  // Stats returns live resource usage from /proc.
+  rpc Stats(StatsRequest) returns (StatsResponse);
+
+  // Ping verifies the agent is responsive.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // PTY management (data flows over a separate vsock port per session)
+  rpc PTYCreate(PTYCreateRequest) returns (PTYCreateResponse);
+  rpc PTYResize(PTYResizeRequest) returns (PTYResizeResponse);
+  rpc PTYKill(PTYKillRequest) returns (PTYKillResponse);
+
+  // Shutdown gracefully terminates the agent and syncs disks.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+
+  // SyncFS flushes all filesystem buffers without exiting.
+  // Used before snapshot to ensure disk state is consistent.
+  rpc SyncFS(SyncFSRequest) returns (SyncFSResponse);
+}
+
+// --- Exec ---
+
+message ExecRequest {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> envs = 3;
+  string cwd = 4;
+  int32 timeout_seconds = 5; // 0 = default (60s)
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  string stdout = 2;
+  string stderr = 3;
+}
+
+message ExecOutputChunk {
+  enum Stream {
+    STDOUT = 0;
+    STDERR = 1;
+  }
+  Stream stream = 1;
+  bytes data = 2;
+}
+
+// --- Filesystem ---
+
+message ReadFileRequest {
+  string path = 1;
+}
+
+message ReadFileResponse {
+  bytes content = 1;
+}
+
+message WriteFileRequest {
+  string path = 1;
+  bytes content = 2;
+  uint32 mode = 3; // file mode (0 = default 0644)
+}
+
+message WriteFileResponse {}
+
+message ListDirRequest {
+  string path = 1;
+}
+
+message DirEntry {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  string path = 4;
+}
+
+message ListDirResponse {
+  repeated DirEntry entries = 1;
+}
+
+message MakeDirRequest {
+  string path = 1;
+}
+
+message MakeDirResponse {}
+
+message RemoveRequest {
+  string path = 1;
+}
+
+message RemoveResponse {}
+
+message ExistsRequest {
+  string path = 1;
+}
+
+message ExistsResponse {
+  bool exists = 1;
+}
+
+message StatRequest {
+  string path = 1;
+}
+
+message StatResponse {
+  string name = 1;
+  bool is_dir = 2;
+  int64 size = 3;
+  string mode = 4;
+  string mod_time = 5;
+  string path = 6;
+}
+
+// --- Stats ---
+
+message StatsRequest {}
+
+message StatsResponse {
+  double cpu_percent = 1;
+  uint64 mem_usage = 2;   // bytes
+  uint64 mem_limit = 3;   // bytes
+  uint64 net_input = 4;   // bytes
+  uint64 net_output = 5;  // bytes
+  int32 pids = 6;
+}
+
+// --- Ping ---
+
+message PingRequest {}
+
+message PingResponse {
+  string version = 1;
+  int64 uptime_seconds = 2;
+}
+
+// --- PTY ---
+
+message PTYCreateRequest {
+  int32 cols = 1;
+  int32 rows = 2;
+  string shell = 3; // e.g., "/bin/bash" (empty = default)
+}
+
+message PTYCreateResponse {
+  string session_id = 1;
+  uint32 data_port = 2; // vsock port for raw PTY I/O stream
+}
+
+message PTYResizeRequest {
+  string session_id = 1;
+  int32 cols = 2;
+  int32 rows = 3;
+}
+
+message PTYResizeResponse {}
+
+message PTYKillRequest {
+  string session_id = 1;
+}
+
+message PTYKillResponse {}
+
+// --- Shutdown ---
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}
+
+// --- SyncFS ---
+
+message SyncFSRequest {}
+
+message SyncFSResponse {}

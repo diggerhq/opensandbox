@@ -19,7 +19,7 @@ import (
 // GRPCServer implements the SandboxWorker gRPC service for control plane communication.
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
-	manager         *sandbox.Manager
+	manager         sandbox.Manager
 	router          *sandbox.SandboxRouter
 	ptyManager      *sandbox.PTYManager
 	sandboxDBs      *sandbox.SandboxDBManager
@@ -29,7 +29,7 @@ type GRPCServer struct {
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
-func NewGRPCServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder) *GRPCServer {
+func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder) *GRPCServer {
 	s := &GRPCServer{
 		manager:         mgr,
 		router:          router,

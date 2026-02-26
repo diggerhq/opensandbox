@@ -748,6 +748,15 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 }
 
 // listSessions returns session history from PostgreSQL.
+func (s *Server) listWorkers(c echo.Context) error {
+	if s.workerRegistry == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "worker registry not available (server mode only)",
+		})
+	}
+	return c.JSON(http.StatusOK, s.workerRegistry.GetAllWorkers())
+}
+
 func (s *Server) listSessions(c echo.Context) error {
 	if s.store == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{

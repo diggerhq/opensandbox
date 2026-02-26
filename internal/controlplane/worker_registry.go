@@ -12,6 +12,7 @@ import (
 // WorkerInfo represents a registered worker.
 type WorkerInfo struct {
 	ID           string    `json:"worker_id"`
+	MachineID    string    `json:"machine_id,omitempty"` // EC2 instance ID
 	Region       string    `json:"region"`
 	GRPCAddr     string    `json:"grpc_addr"`
 	HTTPAddr     string    `json:"http_addr"`
@@ -106,7 +107,8 @@ func (r *WorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 	return result
 }
 
-// GetLeastLoadedWorker returns the worker with the most remaining capacity in a region.
+// GetLeastLoadedWorker returns the worker with the best combination of remaining capacity
+// and resource headroom in a region. Workers under heavy resource pressure are skipped.
 func (r *WorkerRegistry) GetLeastLoadedWorker(region string) *WorkerInfo {
 	workers := r.GetWorkersByRegion(region)
 	if len(workers) == 0 {
@@ -114,10 +116,22 @@ func (r *WorkerRegistry) GetLeastLoadedWorker(region string) *WorkerInfo {
 	}
 
 	var best *WorkerInfo
+	bestScore := -1.0
 	for _, w := range workers {
 		remaining := w.Capacity - w.Current
-		if best == nil || remaining > (best.Capacity-best.Current) {
+		if remaining <= 0 {
+			continue
+		}
+		// Skip workers under heavy resource pressure
+		if w.CPUPct > 90 || w.MemPct > 90 {
+			continue
+		}
+		// Score: remaining capacity weighted by resource headroom
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+		score := float64(remaining) * resourceScore
+		if score > bestScore {
 			best = w
+			bestScore = score
 		}
 	}
 	return best
@@ -160,6 +174,21 @@ func (r *WorkerRegistry) RegionUtilization(region string) float64 {
 	return float64(totalCur) / float64(totalCap)
 }
 
+// RegionResourcePressure returns the maximum CPU and memory usage across all workers in a region.
+// Used by the scaler to detect resource pressure even when count-based utilization is low.
+func (r *WorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem float64) {
+	workers := r.GetWorkersByRegion(region)
+	for _, w := range workers {
+		if w.CPUPct > maxCPU {
+			maxCPU = w.CPUPct
+		}
+		if w.MemPct > maxMem {
+			maxMem = w.MemPct
+		}
+	}
+	return maxCPU, maxMem
+}
+
 // Regions returns all known regions.
 func (r *WorkerRegistry) Regions() []string {
 	r.mu.RLock()
@@ -199,6 +228,9 @@ func (r *WorkerRegistry) handleHeartbeat(msg *nats.Msg) {
 		}
 		if hb.HTTPAddr != "" {
 			existing.HTTPAddr = hb.HTTPAddr
+		}
+		if hb.MachineID != "" {
+			existing.MachineID = hb.MachineID
 		}
 	} else {
 		hb.LastSeen = time.Now()

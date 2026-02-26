@@ -26,7 +26,7 @@ var errSandboxNotAvailable = map[string]string{
 // Server holds the API server dependencies.
 type Server struct {
 	echo       *echo.Echo
-	manager    *sandbox.Manager
+	manager    sandbox.Manager
 	router     *sandbox.SandboxRouter  // routes all sandbox interactions (state machine, auto-wake, rolling timeout)
 	ptyManager *sandbox.PTYManager
 	store      *db.Store               // nil in combined/dev mode without PG
@@ -54,6 +54,7 @@ type ServerOpts struct {
 	SandboxDBs     *sandbox.SandboxDBManager
 	Router         *sandbox.SandboxRouter             // nil in server-only mode
 	SandboxProxy   *proxy.SandboxProxy               // nil if subdomain routing not configured
+	ControlPlaneProxy *proxy.ControlPlaneProxy        // nil except in server mode (routes subdomains to workers)
 	SandboxDomain  string                             // base domain for sandbox subdomains
 	WorkOSConfig    *auth.WorkOSConfig                // nil if WorkOS not configured
 	WorkerRegistry  *controlplane.RedisWorkerRegistry  // nil in combined/worker mode
@@ -62,7 +63,7 @@ type ServerOpts struct {
 }
 
 // NewServer creates a new API server with all routes configured.
-func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, opts *ServerOpts) *Server {
+func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, opts *ServerOpts) *Server {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -97,6 +98,9 @@ func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, 
 	// Subdomain proxy middleware (before auth — subdomain traffic is public)
 	if opts != nil && opts.SandboxProxy != nil {
 		e.Use(opts.SandboxProxy.Middleware())
+	}
+	if opts != nil && opts.ControlPlaneProxy != nil {
+		e.Use(opts.ControlPlaneProxy.Middleware())
 	}
 
 	// Health check (no auth)
@@ -139,6 +143,9 @@ func NewServer(mgr *sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, 
 	api.GET("/templates", s.listTemplates)
 	api.GET("/templates/:name", s.getTemplate)
 	api.DELETE("/templates/:name", s.deleteTemplate)
+
+	// Workers (server mode only — queries worker registry)
+	api.GET("/workers", s.listWorkers)
 
 	// Session history (requires PG)
 	api.GET("/sessions", s.listSessions)
