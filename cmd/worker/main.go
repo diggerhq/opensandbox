@@ -149,12 +149,44 @@ func main() {
 			defer store.Close()
 			log.Println("opensandbox-worker: PostgreSQL store connected (auto-wake enabled)")
 
-			// Startup reconciliation: mark stale "running" sessions from a previous crash
-			hibernated, stopped, err := store.ReconcileWorkerSessions(ctx, cfg.WorkerID)
+			// Kill orphaned Firecracker processes + TAP devices from previous run
+			fcMgr.CleanupOrphanedProcesses()
+
+			// Local NVMe recovery: scan for sandbox data left from a previous run
+			recoveries := fcMgr.RecoverLocalSandboxes()
+			if len(recoveries) > 0 {
+				snapshotCount, workspaceCount := 0, 0
+				for _, r := range recoveries {
+					session, err := store.GetSandboxSession(ctx, r.SandboxID)
+					if err != nil {
+						log.Printf("opensandbox-worker: no DB session for %s, skipping recovery", r.SandboxID)
+						continue
+					}
+					if r.HasSnapshot {
+						// Full snapshot on NVMe — create checkpoint record so doWake finds local files
+						_, _ = store.CreateCheckpoint(ctx, r.SandboxID, session.OrgID,
+							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
+						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
+						snapshotCount++
+					} else {
+						// Workspace only — create local sentinel checkpoint for cold boot
+						_, _ = store.CreateCheckpoint(ctx, r.SandboxID, session.OrgID,
+							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
+						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
+						workspaceCount++
+					}
+				}
+				if snapshotCount+workspaceCount > 0 {
+					log.Printf("opensandbox-worker: local recovery: %d with snapshot, %d workspace-only", snapshotCount, workspaceCount)
+				}
+			}
+
+			// Mark any remaining stale "running" sessions (no local data) as stopped
+			_, stopped, err := store.ReconcileWorkerSessions(ctx, cfg.WorkerID)
 			if err != nil {
 				log.Printf("opensandbox-worker: warning: session reconciliation failed: %v", err)
-			} else if hibernated+stopped > 0 {
-				log.Printf("opensandbox-worker: reconciled stale sessions: %d hibernated, %d stopped", hibernated, stopped)
+			} else if stopped > 0 {
+				log.Printf("opensandbox-worker: reconciled %d unrecoverable sessions as stopped", stopped)
 			}
 		}
 	}
@@ -277,12 +309,9 @@ func main() {
 		}
 	}
 
-	// Start periodic workspace autosave for crash recovery
-	var autosaver *worker.WorkspaceAutosaver
-	if checkpointStore != nil && store != nil {
-		autosaver = worker.NewWorkspaceAutosaver(mgr, fcMgr, checkpointStore, store, cfg.WorkerID, cfg.Region, 5*time.Minute)
-		autosaver.Start()
-	}
+	// Start periodic SyncFS to keep workspace.ext4 crash-consistent on NVMe
+	autosaver := worker.NewWorkspaceAutosaver(mgr, fcMgr, 5*time.Minute)
+	autosaver.Start()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -297,9 +326,7 @@ func main() {
 	}
 
 	// Stop autosaver before hibernating
-	if autosaver != nil {
-		autosaver.Stop()
-	}
+	autosaver.Stop()
 
 	// 2. Hibernate all running sandboxes for seamless resume
 	if checkpointStore != nil {

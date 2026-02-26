@@ -5,11 +5,13 @@ package firecracker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,17 @@ type VMInstance struct {
 	guestMAC    string             // e.g., "AA:FC:00:00:2d:31"
 	guestCID    uint32             // vsock CID
 	bootArgs    string             // kernel boot args
+}
+
+// SandboxMeta is persisted to sandbox-meta.json in each sandbox directory.
+// It records VM config so that on hard kill recovery, a sandbox can be
+// cold-booted from template + existing workspace without needing DB access.
+type SandboxMeta struct {
+	SandboxID string `json:"sandboxId"`
+	Template  string `json:"template"`
+	CpuCount  int    `json:"cpuCount"`
+	MemoryMB  int    `json:"memoryMB"`
+	GuestPort int    `json:"guestPort"`
 }
 
 // Config holds configuration for the Firecracker Manager.
@@ -347,6 +360,18 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	m.mu.Lock()
 	m.vms[id] = vm
 	m.mu.Unlock()
+
+	// Write sandbox-meta.json for local NVMe recovery after hard kill
+	sbMeta := SandboxMeta{
+		SandboxID: id,
+		Template:  template,
+		CpuCount:  cpus,
+		MemoryMB:  memMB,
+		GuestPort: guestPort,
+	}
+	if metaJSON, err := json.Marshal(sbMeta); err == nil {
+		_ = os.WriteFile(filepath.Join(sandboxDir, "sandbox-meta.json"), metaJSON, 0644)
+	}
 
 	log.Printf("firecracker: created VM %s (template=%s, cpu=%d, mem=%dMB, port=%d→%d, tap=%s, mac=%s)",
 		id, template, cpus, memMB, hostPort, guestPort, netCfg.TAPName, guestMAC)
@@ -823,4 +848,112 @@ func (m *Manager) SyncFS(ctx context.Context, sandboxID string) error {
 		return fmt.Errorf("no agent connection for %s", sandboxID)
 	}
 	return vm.agent.SyncFS(ctx)
+}
+
+// CleanupOrphanedProcesses kills any Firecracker processes and TAP devices
+// left over from a previous worker run. Must be called before RecoverLocalSandboxes
+// so TAP devices are free for re-allocation.
+func (m *Manager) CleanupOrphanedProcesses() {
+	// Kill all firecracker processes not tracked by this manager
+	out, err := exec.Command("pgrep", "-f", "firecracker").Output()
+	if err == nil && len(out) > 0 {
+		count := 0
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line == "" {
+				continue
+			}
+			_ = exec.Command("kill", "-9", line).Run()
+			count++
+		}
+		if count > 0 {
+			log.Printf("firecracker: killed %d orphaned firecracker process(es)", count)
+		}
+	}
+
+	// Clean up orphaned TAP devices (fc-tap0, fc-tap1, ...)
+	out, err = exec.Command("ip", "-o", "link", "show").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			// format: "3: fc-tap0: <flags> ..."
+			tapName := strings.TrimSuffix(fields[1], ":")
+			if strings.HasPrefix(tapName, "fc-") {
+				_ = exec.Command("ip", "link", "del", tapName).Run()
+				log.Printf("firecracker: cleaned up orphaned TAP %s", tapName)
+			}
+		}
+	}
+}
+
+// LocalRecovery describes a sandbox found on disk that can be recovered.
+type LocalRecovery struct {
+	SandboxID   string
+	HasSnapshot bool        // true = full snapshot (mem+vmstate), false = workspace only
+	Meta        SandboxMeta // from sandbox-meta.json or snapshot-meta.json
+}
+
+// RecoverLocalSandboxes scans the sandboxes directory for sandbox data left
+// on NVMe from a previous run. Returns recoverable sandboxes.
+func (m *Manager) RecoverLocalSandboxes() []LocalRecovery {
+	sandboxesDir := filepath.Join(m.cfg.DataDir, "sandboxes")
+	entries, err := os.ReadDir(sandboxesDir)
+	if err != nil {
+		log.Printf("firecracker: no sandboxes dir to scan: %v", err)
+		return nil
+	}
+
+	var recoveries []LocalRecovery
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "sb-") {
+			continue
+		}
+		sandboxID := entry.Name()
+		sandboxDir := filepath.Join(sandboxesDir, sandboxID)
+
+		// Check for full snapshot (graceful shutdown completed)
+		snapshotMetaPath := filepath.Join(sandboxDir, "snapshot", "snapshot-meta.json")
+		if fileExists(filepath.Join(sandboxDir, "snapshot", "mem")) &&
+			fileExists(filepath.Join(sandboxDir, "snapshot", "vmstate")) &&
+			fileExists(snapshotMetaPath) {
+			var snapMeta SnapshotMeta
+			if data, err := os.ReadFile(snapshotMetaPath); err == nil {
+				if json.Unmarshal(data, &snapMeta) == nil {
+					recoveries = append(recoveries, LocalRecovery{
+						SandboxID:   sandboxID,
+						HasSnapshot: true,
+						Meta: SandboxMeta{
+							SandboxID: sandboxID,
+							Template:  snapMeta.Template,
+							CpuCount:  snapMeta.CpuCount,
+							MemoryMB:  snapMeta.MemoryMB,
+							GuestPort: snapMeta.GuestPort,
+						},
+					})
+					continue
+				}
+			}
+		}
+
+		// Check for workspace-only (hard kill, no snapshot)
+		if fileExists(filepath.Join(sandboxDir, "workspace.ext4")) {
+			sbMetaPath := filepath.Join(sandboxDir, "sandbox-meta.json")
+			var meta SandboxMeta
+			if data, err := os.ReadFile(sbMetaPath); err == nil {
+				if json.Unmarshal(data, &meta) == nil {
+					recoveries = append(recoveries, LocalRecovery{
+						SandboxID:   sandboxID,
+						HasSnapshot: false,
+						Meta:        meta,
+					})
+					continue
+				}
+			}
+			// No readable meta — skip (can't determine template)
+			log.Printf("firecracker: skipping %s: workspace exists but no sandbox-meta.json", sandboxID)
+		}
+	}
+	return recoveries
 }

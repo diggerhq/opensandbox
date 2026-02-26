@@ -222,7 +222,17 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	vmstateExists := fileExists(vmstateFile)
 	log.Printf("firecracker: wake %s: checking local files: mem=%s (exists=%v) vmstate=%s (exists=%v)",
 		sandboxID, memFile, memExists, vmstateFile, vmstateExists)
+
+	// Local workspace-only recovery: no snapshot files, just workspace.ext4 on NVMe.
+	// This happens after a hard kill where the worker didn't get to hibernate.
+	isLocalWorkspace := strings.HasPrefix(checkpointKey, "local://")
+
 	if !memExists || !vmstateExists {
+		if isLocalWorkspace {
+			// No snapshot to download — cold boot from local workspace.ext4.
+			log.Printf("firecracker: wake %s: local workspace recovery (no snapshot)", sandboxID)
+			return m.coldBootLocal(ctx, sandboxID, timeout)
+		}
 		log.Printf("firecracker: wake %s: local snapshot missing, downloading from S3 (key=%s)", sandboxID, checkpointKey)
 		if err := os.MkdirAll(sandboxDir, 0755); err != nil {
 			return nil, fmt.Errorf("mkdir sandbox dir: %w", err)
@@ -478,6 +488,193 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	log.Printf("firecracker: woke VM %s (%s, port=%d, tap=%s)",
 		sandboxID, mode, hostPort, netCfg.TAPName)
 
+	return vmToSandbox(vm), nil
+}
+
+// coldBootLocal boots a fresh VM using an existing workspace.ext4 on NVMe.
+// Used for hard kill recovery — processes are lost but /workspace files are preserved.
+func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout int) (*types.Sandbox, error) {
+	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
+	workspacePath := filepath.Join(sandboxDir, "workspace.ext4")
+	rootfsPath := filepath.Join(sandboxDir, "rootfs.ext4")
+
+	if !fileExists(workspacePath) {
+		return nil, fmt.Errorf("workspace not found at %s", workspacePath)
+	}
+
+	// Read sandbox-meta.json for template + config
+	sbMetaPath := filepath.Join(sandboxDir, "sandbox-meta.json")
+	metaJSON, err := os.ReadFile(sbMetaPath)
+	if err != nil {
+		return nil, fmt.Errorf("read sandbox-meta.json: %w", err)
+	}
+	var meta SandboxMeta
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		return nil, fmt.Errorf("parse sandbox-meta.json: %w", err)
+	}
+
+	// Recreate rootfs from template if missing
+	if !fileExists(rootfsPath) {
+		baseImage, err := ResolveBaseImage(m.cfg.ImagesDir, meta.Template)
+		if err != nil {
+			return nil, fmt.Errorf("resolve base image: %w", err)
+		}
+		if err := PrepareRootfs(baseImage, rootfsPath); err != nil {
+			return nil, fmt.Errorf("prepare rootfs: %w", err)
+		}
+		log.Printf("firecracker: cold-boot-local %s: rootfs recreated from template %q", sandboxID, meta.Template)
+	}
+
+	// Allocate fresh network
+	netCfg, err := m.subnets.Allocate()
+	if err != nil {
+		return nil, fmt.Errorf("allocate subnet: %w", err)
+	}
+	if err := CreateTAP(netCfg); err != nil {
+		m.subnets.Release(netCfg.TAPName)
+		return nil, fmt.Errorf("create TAP: %w", err)
+	}
+
+	hostPort, err := FindFreePort()
+	if err != nil {
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+		return nil, fmt.Errorf("find free port: %w", err)
+	}
+	guestPort := meta.GuestPort
+	if guestPort == 0 {
+		guestPort = 80
+	}
+	netCfg.HostPort = hostPort
+	netCfg.GuestPort = guestPort
+
+	if err := AddDNAT(netCfg); err != nil {
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+		return nil, fmt.Errorf("add DNAT: %w", err)
+	}
+
+	cpus := meta.CpuCount
+	if cpus <= 0 {
+		cpus = m.cfg.DefaultCPUs
+	}
+	memMB := meta.MemoryMB
+	if memMB <= 0 {
+		memMB = m.cfg.DefaultMemoryMB
+	}
+
+	vsockPath := filepath.Join(sandboxDir, "vsock.sock")
+	guestCID := m.allocateCID()
+	guestMAC := generateMAC(sandboxID)
+	bootArgs := fmt.Sprintf(
+		"keep_bootcon console=ttyS0 reboot=k panic=1 pci=off "+
+			"ip=%s::%s:%s::eth0:off "+
+			"init=/sbin/init "+
+			"osb.gateway=%s",
+		netCfg.GuestIP, netCfg.HostIP, netCfg.Mask, netCfg.HostIP,
+	)
+
+	apiSockPath := filepath.Join(sandboxDir, "firecracker.sock")
+	os.Remove(apiSockPath)
+	os.Remove(vsockPath)
+
+	logPath := filepath.Join(sandboxDir, "firecracker.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("create log file: %w", err)
+	}
+
+	cmd := exec.Command(m.cfg.FirecrackerBin, "--api-sock", apiSockPath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("start firecracker: %w", err)
+	}
+	logFile.Close()
+
+	fcClient := NewFirecrackerClient(apiSockPath)
+	if err := fcClient.WaitForSocket(5 * time.Second); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("wait for API socket: %w", err)
+	}
+
+	// Configure and start VM
+	if err := fcClient.PutMachineConfig(cpus, memMB); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put machine config: %w", err)
+	}
+	if err := fcClient.PutBootSource(m.cfg.KernelPath, bootArgs); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put boot source: %w", err)
+	}
+	if err := fcClient.PutDrive("rootfs", rootfsPath, true, false); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put rootfs drive: %w", err)
+	}
+	if err := fcClient.PutDrive("workspace", workspacePath, false, false); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put workspace drive: %w", err)
+	}
+	if err := fcClient.PutNetworkInterface("eth0", guestMAC, netCfg.TAPName); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put network interface: %w", err)
+	}
+	if err := fcClient.PutVsock(guestCID, vsockPath); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("put vsock: %w", err)
+	}
+	if err := fcClient.StartInstance(); err != nil {
+		cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("start instance: %w", err)
+	}
+
+	now := time.Now()
+	ttl := time.Duration(timeout) * time.Second
+	if ttl <= 0 {
+		ttl = 300 * time.Second
+	}
+
+	vm := &VMInstance{
+		ID:          sandboxID,
+		Template:    meta.Template,
+		Status:      types.SandboxStatusRunning,
+		StartedAt:   now,
+		EndAt:       now.Add(ttl),
+		CpuCount:    cpus,
+		MemoryMB:    memMB,
+		HostPort:    hostPort,
+		GuestPort:   guestPort,
+		pid:         cmd.Process.Pid,
+		cmd:         cmd,
+		network:     netCfg,
+		vsockPath:   vsockPath,
+		sandboxDir:  sandboxDir,
+		apiSockPath: apiSockPath,
+		fcClient:    fcClient,
+		guestMAC:    guestMAC,
+		guestCID:    guestCID,
+		bootArgs:    bootArgs,
+	}
+
+	agentClient, err := m.waitForAgent(context.Background(), vsockPath, 30*time.Second)
+	if err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("agent not ready after cold boot: %w", err)
+	}
+	vm.agent = agentClient
+
+	m.mu.Lock()
+	m.vms[sandboxID] = vm
+	m.mu.Unlock()
+
+	log.Printf("firecracker: cold-boot-local %s (template=%s, port=%d, tap=%s)", sandboxID, meta.Template, hostPort, netCfg.TAPName)
 	return vmToSandbox(vm), nil
 }
 

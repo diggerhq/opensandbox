@@ -4,12 +4,28 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
+
+// baseEnv returns the current OS environment with HOME replaced to /workspace
+// so tools (npm, pip, git, etc.) use the NVMe-backed workspace for caches.
+func baseEnv() []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "HOME=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env, "HOME=/workspace")
+	return env
+}
 
 // Exec runs a command synchronously and returns stdout/stderr/exit code.
 func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecResponse, error) {
@@ -30,9 +46,8 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		cmd.Dir = "/workspace"
 	}
 
-	// Set environment variables — always set HOME=/workspace so tools
-	// (npm, pip, etc.) use the NVMe-backed workspace for caches.
-	cmd.Env = append(cmd.Environ(), "HOME=/workspace")
+	// Set environment variables with HOME=/workspace
+	cmd.Env = baseEnv()
 	if len(req.Envs) > 0 {
 		cmd.Env = append(cmd.Env, mapToEnv(req.Envs)...)
 	}
@@ -86,7 +101,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 		cmd.Dir = "/workspace"
 	}
 
-	cmd.Env = append(cmd.Environ(), "HOME=/workspace")
+	cmd.Env = baseEnv()
 	if len(req.Envs) > 0 {
 		cmd.Env = append(cmd.Env, mapToEnv(req.Envs)...)
 	}
