@@ -1,18 +1,18 @@
-# opensandbox-sdk
+# opencomputer
 
-Python SDK for [OpenSandbox](https://github.com/diggerhq/opensandbox) — an open-source, E2B-compatible sandbox platform.
+Python SDK for [OpenComputer](https://github.com/diggerhq/opensandbox) — cloud sandbox platform.
 
 ## Install
 
 ```bash
-pip install opensandbox-sdk
+pip install opencomputer
 ```
 
 ## Quick Start
 
 ```python
 import asyncio
-from opensandbox import Sandbox
+from opencomputer import Sandbox
 
 async def main():
     sandbox = await Sandbox.create(template="base")

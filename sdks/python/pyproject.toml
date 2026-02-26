@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "opensandbox-sdk"
+name = "opencomputer"
 version = "0.3.0"
-description = "Python SDK for OpenSandbox - E2B-compatible sandbox platform"
+description = "Python SDK for OpenComputer - cloud sandbox platform"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "OpenSandbox" },
+    { name = "OpenComputer" },
 ]
-keywords = ["sandbox", "opensandbox", "e2b", "cloud", "containers", "code-execution"]
+keywords = ["sandbox", "opencomputer", "cloud", "containers", "code-execution"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -42,5 +42,5 @@ Documentation = "https://github.com/diggerhq/opensandbox/tree/main/sdks/python"
 Issues = "https://github.com/diggerhq/opensandbox/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["opensandbox"]
+packages = ["opencomputer"]
 exclude = ["__pycache__"]

@@ -1,7 +1,7 @@
 {
-  "name": "opensandbox",
+  "name": "@opencomputer/sdk",
   "version": "0.4.0",
-  "description": "TypeScript SDK for OpenSandbox - E2B-compatible sandbox platform",
+  "description": "TypeScript SDK for OpenComputer - cloud sandbox platform",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,13 +22,13 @@
   },
   "keywords": [
     "sandbox",
-    "opensandbox",
+    "opencomputer",
     "e2b",
     "cloud",
     "containers",
     "code-execution"
   ],
-  "author": "OpenSandbox",
+  "author": "OpenComputer",
   "license": "MIT",
   "repository": {
     "type": "git",

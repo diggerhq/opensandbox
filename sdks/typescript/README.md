@@ -1,17 +1,17 @@
-# opensandbox
+# @opencomputer/sdk
 
-TypeScript SDK for [OpenSandbox](https://github.com/diggerhq/opensandbox) — an open-source, E2B-compatible sandbox platform.
+TypeScript SDK for [OpenComputer](https://github.com/diggerhq/opensandbox) — cloud sandbox platform.
 
 ## Install
 
 ```bash
-npm install opensandbox
+npm install @opencomputer/sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { Sandbox } from "opensandbox";
+import { Sandbox } from "@opencomputer/sdk";
 
 const sandbox = await Sandbox.create({ template: "base" });
 

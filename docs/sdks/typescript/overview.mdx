@@ -6,7 +6,7 @@ description: "Full reference for the OpenSandbox TypeScript/JavaScript SDK"
 ## Installation
 
 ```bash
-npm install opensandbox
+npm install @opencomputer/sdk
 ```
 
 ## Overview
@@ -24,7 +24,7 @@ The TypeScript SDK provides five main modules:
 ## Quick Example
 
 ```typescript
-import { Sandbox } from 'opensandbox';
+import { Sandbox } from '@opencomputer/sdk';
 
 // Create a sandbox
 const sandbox = await Sandbox.create({ template: 'base' });
@@ -48,28 +48,28 @@ await sandbox.kill();
 import {
   Sandbox,
   type SandboxOpts,
-} from 'opensandbox';
+} from '@opencomputer/sdk';
 
 // Also available:
 import {
   Filesystem,
   type EntryInfo,
-} from 'opensandbox';
+} from '@opencomputer/sdk';
 
 import {
   Commands,
   type ProcessResult,
   type RunOpts,
-} from 'opensandbox';
+} from '@opencomputer/sdk';
 
 import {
   Pty,
   type PtySession,
   type PtyOpts,
-} from 'opensandbox';
+} from '@opencomputer/sdk';
 
 import {
   Templates,
   type TemplateInfo,
-} from 'opensandbox';
+} from '@opencomputer/sdk';
 ```

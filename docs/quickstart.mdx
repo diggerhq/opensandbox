@@ -12,11 +12,11 @@ Sign up at [app.opencomputer.dev](https://app.opencomputer.dev) and grab your AP
 <CodeGroup>
 
 ```bash npm
-npm install opensandbox
+npm install @opencomputer/sdk
 ```
 
 ```bash pip
-pip install opensandbox-sdk
+pip install opencomputer
 ```
 
 </CodeGroup>
@@ -32,7 +32,7 @@ export OPENSANDBOX_API_KEY="your-api-key"
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from 'opensandbox';
+import { Sandbox } from '@opencomputer/sdk';
 
 const sandbox = await Sandbox.create({
   template: 'base',
@@ -43,7 +43,7 @@ console.log(`Sandbox created: ${sandbox.sandboxId}`);
 ```
 
 ```python Python
-from opensandbox import Sandbox
+from opencomputer import Sandbox
 
 sandbox = await Sandbox.create(template='base', timeout=300)
 print(f"Sandbox created: {sandbox.sandbox_id}")

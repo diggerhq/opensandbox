@@ -8,9 +8,9 @@ from typing import Any
 
 import httpx
 
-from opensandbox.commands import Commands
-from opensandbox.filesystem import Filesystem
-from opensandbox.pty import Pty
+from opencomputer.commands import Commands
+from opencomputer.filesystem import Filesystem
+from opencomputer.pty import Pty
 
 
 @dataclass

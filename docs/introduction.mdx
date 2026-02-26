@@ -31,11 +31,11 @@ OpenSandbox provides first-class SDKs for TypeScript and Python with identical A
 <CodeGroup>
 
 ```bash npm
-npm install opensandbox
+npm install @opencomputer/sdk
 ```
 
 ```bash pip
-pip install opensandbox-sdk
+pip install opencomputer
 ```
 
 </CodeGroup>
@@ -45,7 +45,7 @@ pip install opensandbox-sdk
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from 'opensandbox';
+import { Sandbox } from '@opencomputer/sdk';
 
 const sandbox = await Sandbox.create({ template: 'base' });
 
@@ -57,7 +57,7 @@ await sandbox.kill();
 
 ```python Python
 import asyncio
-from opensandbox import Sandbox
+from opencomputer import Sandbox
 
 async def main():
     sandbox = await Sandbox.create(template='base')

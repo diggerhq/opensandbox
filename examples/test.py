@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, "../sdks/python")
 
-from opensandbox import Sandbox
+from opencomputer import Sandbox
 
 
 async def main():
