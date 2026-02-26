@@ -11,7 +11,7 @@ async def main():
     async with await Sandbox.create(
         template="base",
         timeout=3600,
-        api_url="https://app.opensandbox.ai",
+        api_url="https://app.opencomputer.dev",
     ) as sb:
         print(f"Sandbox created: {sb.sandbox_id}")
 

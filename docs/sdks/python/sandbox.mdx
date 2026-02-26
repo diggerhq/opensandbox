@@ -32,7 +32,7 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
   API key. Falls back to `OPENSANDBOX_API_KEY` env var.
 </ParamField>
 <ParamField body="api_url" type="str | None" default="None">
-  API base URL. Falls back to `OPENSANDBOX_API_URL` env var, then `https://app.opensandbox.ai`.
+  API base URL. Falls back to `OPENSANDBOX_API_URL` env var, then `https://app.opencomputer.dev`.
 </ParamField>
 <ParamField body="envs" type="dict[str, str] | None" default="None">
   Environment variables injected into the sandbox.
@@ -82,7 +82,7 @@ Connects to a running sandbox by ID.
 | Property | Type | Description |
 | --- | --- | --- |
 | `sandbox_id` | `str` | Unique identifier for the sandbox |
-| `domain` | `str` | Public domain for the sandbox (e.g. `abc123.workers.opensandbox.ai`). HTTP traffic to this domain is routed directly into the sandbox. |
+| `domain` | `str` | Public domain for the sandbox (e.g. `abc123.workers.opencomputer.dev`). HTTP traffic to this domain is routed directly into the sandbox. |
 | `status` | `str` | Current status: `"running"`, `"stopped"`, or `"error"` |
 | `template` | `str` | Template used to create the sandbox |
 | `files` | `Filesystem` | [Filesystem](/sdks/python/filesystem) operations |

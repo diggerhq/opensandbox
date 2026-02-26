@@ -5,7 +5,7 @@ async function main() {
   const sb = await Sandbox.create({
     template: "base",
     timeout: 3600,
-    apiUrl: "https://app.opensandbox.ai",
+    apiUrl: "https://app.opencomputer.dev",
   });
   console.log(`Sandbox created: ${sb.sandboxId}`);
 

@@ -95,10 +95,10 @@ async function main() {
     const domains = sandboxes.map(s => s.domain);
     const uniqueDomains = new Set(domains);
     check("All 3 sandboxes got unique domains", uniqueDomains.size === 3);
-    check("All domains end with .workers.opensandbox.ai",
-      domains.every(d => d.endsWith(".workers.opensandbox.ai")));
+    check("All domains end with .workers.opencomputer.dev",
+      domains.every(d => d.endsWith(".workers.opencomputer.dev")));
     check("All domains are subdomains (single level)",
-      domains.every(d => d.split(".workers.opensandbox.ai")[0].indexOf(".") === -1));
+      domains.every(d => d.split(".workers.opencomputer.dev")[0].indexOf(".") === -1));
     console.log();
 
     // ── Test 2: TLS certificate validation ──────────────────────────

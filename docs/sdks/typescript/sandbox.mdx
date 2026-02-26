@@ -34,7 +34,7 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
       API key. Falls back to `OPENSANDBOX_API_KEY` env var.
     </ParamField>
     <ParamField body="apiUrl" type="string" optional>
-      API base URL. Falls back to `OPENSANDBOX_API_URL` env var, then `https://app.opensandbox.ai`.
+      API base URL. Falls back to `OPENSANDBOX_API_URL` env var, then `https://app.opencomputer.dev`.
     </ParamField>
     <ParamField body="envs" type="Record<string, string>" optional>
       Environment variables injected into the sandbox.
@@ -81,7 +81,7 @@ Connects to a running sandbox by ID.
 | Property | Type | Description |
 | --- | --- | --- |
 | `sandboxId` | `string` | Unique identifier for the sandbox |
-| `domain` | `string` | Public domain for the sandbox (e.g. `abc123.workers.opensandbox.ai`). HTTP traffic to this domain is routed directly into the sandbox. |
+| `domain` | `string` | Public domain for the sandbox (e.g. `abc123.workers.opencomputer.dev`). HTTP traffic to this domain is routed directly into the sandbox. |
 | `status` | `string` | Current status: `"running"`, `"stopped"`, or `"error"` |
 | `files` | `Filesystem` | [Filesystem](/sdks/typescript/filesystem) operations |
 | `commands` | `Commands` | [Command](/sdks/typescript/commands) execution |

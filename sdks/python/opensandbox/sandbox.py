@@ -39,7 +39,7 @@ class Sandbox:
         metadata: dict[str, str] | None = None,
     ) -> Sandbox:
         """Create a new sandbox instance."""
-        url = api_url or os.environ.get("OPENSANDBOX_API_URL", "https://app.opensandbox.ai")
+        url = api_url or os.environ.get("OPENSANDBOX_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
         key = api_key or os.environ.get("OPENSANDBOX_API_KEY", "")
 
@@ -98,7 +98,7 @@ class Sandbox:
         api_url: str | None = None,
     ) -> Sandbox:
         """Connect to an existing sandbox."""
-        url = api_url or os.environ.get("OPENSANDBOX_API_URL", "https://app.opensandbox.ai")
+        url = api_url or os.environ.get("OPENSANDBOX_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
         key = api_key or os.environ.get("OPENSANDBOX_API_KEY", "")
 

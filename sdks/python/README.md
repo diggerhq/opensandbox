@@ -36,7 +36,7 @@ asyncio.run(main())
 
 | Parameter  | Env Variable            | Default                 |
 |------------|------------------------|-------------------------|
-| `api_url`  | `OPENSANDBOX_API_URL`  | `https://app.opensandbox.ai` |
+| `api_url`  | `OPENSANDBOX_API_URL`  | `https://app.opencomputer.dev` |
 | `api_key`  | `OPENSANDBOX_API_KEY`  | (none)                  |
 
 ## License

@@ -64,7 +64,7 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxOpts = {}): Promise<Sandbox> {
-    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENSANDBOX_API_URL ?? "https://app.opensandbox.ai");
+    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENSANDBOX_API_URL ?? "https://app.opencomputer.dev");
     const apiKey = opts.apiKey ?? process.env.OPENSANDBOX_API_KEY ?? "";
 
     const body: Record<string, unknown> = {
@@ -95,7 +95,7 @@ export class Sandbox {
   }
 
   static async connect(sandboxId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl"> = {}): Promise<Sandbox> {
-    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENSANDBOX_API_URL ?? "https://app.opensandbox.ai");
+    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENSANDBOX_API_URL ?? "https://app.opencomputer.dev");
     const apiKey = opts.apiKey ?? process.env.OPENSANDBOX_API_KEY ?? "";
 
     const resp = await fetch(`${apiUrl}/sandboxes/${sandboxId}`, {
