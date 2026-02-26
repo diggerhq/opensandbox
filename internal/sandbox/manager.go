@@ -22,8 +22,10 @@ const (
 
 	defaultTimeout  = 300 // 5 minutes
 	defaultImage    = "docker.io/library/ubuntu:22.04"
-	defaultMemoryMB = 512
+	defaultMemoryMB = 1024
 	defaultCPU      = 1
+	maxMemoryMB     = 2048
+	maxCPU          = 4
 )
 
 // Manager handles sandbox lifecycle operations (pure container executor).
