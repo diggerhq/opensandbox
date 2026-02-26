@@ -45,7 +45,7 @@ export default function Login() {
           color: 'var(--text-primary)',
           marginBottom: 8,
         }}>
-          OpenSandbox
+          OpenComputer
         </h1>
 
         <p style={{
@@ -69,7 +69,7 @@ export default function Login() {
             textDecoration: 'none',
           }}
         >
-          Sign in with WorkOS
+          Sign in
         </a>
 
         <div style={{

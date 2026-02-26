@@ -88,7 +88,7 @@ export default function Layout() {
                 fontFamily: 'var(--font-display)',
                 color: 'var(--text-primary)',
                 letterSpacing: '-0.02em',
-              }}>OpenSandbox</div>
+              }}>OpenComputer</div>
               <div style={{
                 fontSize: 9, color: 'var(--text-tertiary)',
                 fontFamily: 'var(--font-mono)',
