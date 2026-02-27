@@ -24,12 +24,22 @@ interface SandboxData {
   templateID?: string;
   connectURL?: string;
   token?: string;
-  domain?: string;
+}
+
+export interface PreviewURLResult {
+  id: string;
+  sandboxId: string;
+  orgId: string;
+  hostname: string;
+  port: number;
+  cfHostnameId?: string;
+  sslStatus: string;
+  authConfig: Record<string, unknown>;
+  createdAt: string;
 }
 
 export class Sandbox {
   readonly sandboxId: string;
-  readonly domain: string;
   readonly files: Filesystem;
   readonly commands: Commands;
   readonly pty: Pty;
@@ -42,7 +52,6 @@ export class Sandbox {
 
   private constructor(data: SandboxData, apiUrl: string, apiKey: string) {
     this.sandboxId = data.sandboxID;
-    this.domain = data.domain || "";
     this._status = data.status;
     this.apiUrl = apiUrl;
     this.apiKey = apiKey;
@@ -194,6 +203,47 @@ export class Sandbox {
 
     if (!resp.ok) {
       throw new Error(`Failed to set timeout: ${resp.status}`);
+    }
+  }
+
+  async createPreviewURL(opts: { port: number; authConfig?: Record<string, unknown> }): Promise<PreviewURLResult> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+      body: JSON.stringify({ port: opts.port, authConfig: opts.authConfig ?? {} }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to create preview URL: ${resp.status} ${text}`);
+    }
+
+    return resp.json();
+  }
+
+  async listPreviewURLs(): Promise<PreviewURLResult[]> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Failed to list preview URLs: ${resp.status}`);
+    }
+
+    return resp.json();
+  }
+
+  async deletePreviewURL(port: number): Promise<void> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview/${port}`, {
+      method: "DELETE",
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(`Failed to delete preview URL: ${resp.status}`);
     }
   }
 }

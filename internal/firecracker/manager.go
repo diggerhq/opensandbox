@@ -749,6 +749,19 @@ func (m *Manager) HostPort(ctx context.Context, sandboxID string) (int, error) {
 	return vm.HostPort, nil
 }
 
+// ContainerAddr returns the VM's guest IP and the requested port as "ip:port".
+// Used by the proxy to route preview URL traffic to a specific port inside the VM.
+func (m *Manager) ContainerAddr(ctx context.Context, sandboxID string, port int) (string, error) {
+	vm, err := m.getVM(sandboxID)
+	if err != nil {
+		return "", err
+	}
+	if vm.network == nil {
+		return "", fmt.Errorf("sandbox %s has no network config", sandboxID)
+	}
+	return fmt.Sprintf("%s:%d", vm.network.GuestIP, port), nil
+}
+
 // DataDir returns the base data directory.
 func (m *Manager) DataDir() string {
 	return m.cfg.DataDir

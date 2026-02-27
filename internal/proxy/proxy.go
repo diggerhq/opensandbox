@@ -3,13 +3,13 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +36,32 @@ func New(baseDomain string, mgr sandbox.Manager, router *sandbox.SandboxRouter) 
 	}
 }
 
+// parsePreviewHostname extracts sandbox ID and port from a preview hostname.
+// Format: "{sandboxID}-p{port}.{anyDomain}" — the first subdomain label encodes both.
+// Returns ("", 0, false) if the hostname doesn't match the preview pattern.
+func parsePreviewHostname(host string) (sandboxID string, port int, ok bool) {
+	// Get the first subdomain label (before the first dot)
+	dot := strings.Index(host, ".")
+	if dot < 0 {
+		return "", 0, false
+	}
+	label := host[:dot]
+
+	// Find last "-p" to split sandboxID and port
+	idx := strings.LastIndex(label, "-p")
+	if idx < 0 {
+		return "", 0, false
+	}
+
+	sandboxID = label[:idx]
+	portStr := label[idx+2:]
+	p, err := strconv.Atoi(portStr)
+	if err != nil || p < 1 || p > 65535 || sandboxID == "" {
+		return "", 0, false
+	}
+	return sandboxID, p, true
+}
+
 // Middleware returns an Echo middleware that intercepts subdomain requests
 // and proxies them to the sandbox container. Non-subdomain requests pass through.
 func (p *SandboxProxy) Middleware() echo.MiddlewareFunc {
@@ -49,29 +75,15 @@ func (p *SandboxProxy) Middleware() echo.MiddlewareFunc {
 				hostOnly = host[:idx]
 			}
 
-			sandboxID, ok := p.extractSandboxID(hostOnly)
+			// Parse preview hostname: {sandboxID}-p{port}.{domain}
+			sandboxID, port, ok := parsePreviewHostname(hostOnly)
 			if !ok {
 				return next(c)
 			}
 
-			return p.doProxy(c, sandboxID)
+			return p.doProxy(c, sandboxID, port)
 		}
 	}
-}
-
-// extractSandboxID parses "{sandboxID}.{baseDomain}" from the host.
-// For baseDomain "localhost", matches "{sandboxID}.localhost".
-// For baseDomain "workers.opensandbox.dev", matches "{sandboxID}.workers.opensandbox.dev".
-func (p *SandboxProxy) extractSandboxID(host string) (string, bool) {
-	suffix := "." + p.baseDomain
-	if !strings.HasSuffix(host, suffix) {
-		return "", false
-	}
-	sandboxID := strings.TrimSuffix(host, suffix)
-	if sandboxID == "" || strings.Contains(sandboxID, ".") {
-		return "", false
-	}
-	return sandboxID, true
 }
 
 // isWebSocketUpgrade returns true if the request is a WebSocket upgrade.
@@ -80,58 +92,50 @@ func isWebSocketUpgrade(r *http.Request) bool {
 		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
 }
 
-// doProxy looks up the sandbox's host port and reverse-proxies the request.
-// If the sandbox is hibernated, it auto-wakes via the router first.
+// doProxy looks up the sandbox's container address for the given port and reverse-proxies
+// the request. If the sandbox is hibernated, it auto-wakes via the router first.
 // WebSocket upgrade requests are handled via raw TCP hijacking.
 // Normal HTTP requests use a buffered reverse proxy with retry logic
 // for transient connection errors after CRIU restore.
-func (p *SandboxProxy) doProxy(c echo.Context, sandboxID string) error {
+func (p *SandboxProxy) doProxy(c echo.Context, sandboxID string, port int) error {
 	ctx := c.Request().Context()
 
 	// Route through the sandbox router for auto-wake and rolling timeout reset
-	var hostPort int
-	var portErr error
+	var addr string
+	var addrErr error
 
 	routeOp := func(ctx context.Context) error {
-		hostPort, portErr = p.manager.HostPort(ctx, sandboxID)
-		return portErr
+		addr, addrErr = p.manager.ContainerAddr(ctx, sandboxID, port)
+		return addrErr
 	}
 
 	if p.router != nil {
 		if err := p.router.Route(ctx, sandboxID, "proxy", routeOp); err != nil {
 			log.Printf("proxy: route failed for sandbox %s: %v", sandboxID, err)
-			return c.JSON(http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("sandbox %s not available: %v", sandboxID, err),
-			})
+			return serveUpstreamUnavailable(c, sandboxID, port)
 		}
 	} else {
 		if err := routeOp(ctx); err != nil {
-			return c.JSON(http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("sandbox %s not available: %v", sandboxID, err),
-			})
+			return serveUpstreamUnavailable(c, sandboxID, port)
 		}
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", hostPort)
-
 	// WebSocket requests need raw TCP hijacking — can't buffer these.
 	if isWebSocketUpgrade(c.Request()) {
-		return p.doWebSocket(c, sandboxID, addr)
+		return p.doWebSocket(c, sandboxID, addr, port)
 	}
 
-	return p.doHTTP(c, sandboxID, addr, hostPort)
+	return p.doHTTP(c, sandboxID, addr, port)
 }
 
 // doWebSocket hijacks the client connection and pipes it to the upstream
 // container over raw TCP, enabling WebSocket (and any other Upgrade) traffic.
-func (p *SandboxProxy) doWebSocket(c echo.Context, sandboxID, addr string) error {
+func (p *SandboxProxy) doWebSocket(c echo.Context, sandboxID, addr string, port int) error {
 	// Dial the upstream container
 	upstream, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		log.Printf("proxy: websocket dial failed for sandbox %s (%s): %v", sandboxID, addr, err)
-		return c.JSON(http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("sandbox %s: upstream unavailable", sandboxID),
-		})
+		return serveUpstreamUnavailable(c, sandboxID, port)
 	}
 	defer upstream.Close()
 
@@ -264,9 +268,7 @@ func (p *SandboxProxy) doHTTP(c echo.Context, sandboxID, addr string, hostPort i
 			}
 			log.Printf("proxy: error proxying to sandbox %s (port %d) after %d attempts: %v",
 				sandboxID, hostPort, attempt+1, proxyErr)
-			return c.JSON(http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("sandbox %s: upstream unavailable", sandboxID),
-			})
+			return serveUpstreamUnavailable(c, sandboxID, hostPort)
 		}
 
 		// Success — flush the recorded response to the real client.
@@ -275,9 +277,7 @@ func (p *SandboxProxy) doHTTP(c echo.Context, sandboxID, addr string, hostPort i
 	}
 
 	// Should not reach here, but just in case.
-	return c.JSON(http.StatusBadGateway, map[string]string{
-		"error": fmt.Sprintf("sandbox %s: upstream unavailable after retries", sandboxID),
-	})
+	return serveUpstreamUnavailable(c, sandboxID, hostPort)
 }
 
 // responseRecorder captures an HTTP response in memory so we can decide

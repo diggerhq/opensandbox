@@ -46,6 +46,7 @@ type Manager interface {
 	// Monitoring
 	Stats(ctx context.Context, sandboxID string) (*SandboxStats, error)
 	HostPort(ctx context.Context, sandboxID string) (int, error)
+	ContainerAddr(ctx context.Context, sandboxID string, port int) (string, error)
 	DataDir() string
 
 	// Sandbox name (for logging/cleanup)

@@ -84,6 +84,10 @@ type Config struct {
 	EC2WorkerImage         string // Docker image for containerized workers
 	EC2IAMInstanceProfile  string // IAM instance profile for worker instances (Secrets Manager + S3)
 
+	// Cloudflare (custom hostname for org sandbox domains)
+	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
+	CFZoneID   string // Cloudflare zone ID for the shared zone (e.g. opencomputer.dev)
+
 	// Autoscaler
 	ScaleCooldownSec int // Cooldown between scale-up actions (seconds), default 300
 
@@ -157,6 +161,9 @@ func Load() (*Config, error) {
 		EC2KeyName:         os.Getenv("OPENSANDBOX_EC2_KEY_NAME"),
 		EC2WorkerImage:         envOrDefault("OPENSANDBOX_EC2_WORKER_IMAGE", "opensandbox-worker:latest"),
 		EC2IAMInstanceProfile:  os.Getenv("OPENSANDBOX_EC2_IAM_INSTANCE_PROFILE"),
+
+		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
+		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
 
 		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
 

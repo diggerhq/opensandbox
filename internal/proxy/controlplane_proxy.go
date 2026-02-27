@@ -50,33 +50,22 @@ func (p *ControlPlaneProxy) Middleware() echo.MiddlewareFunc {
 				hostOnly = host[:idx]
 			}
 
-			sandboxID, ok := p.extractSandboxID(hostOnly)
+			// Parse preview hostname: {sandboxID}-p{port}.{domain}
+			sandboxID, port, ok := parsePreviewHostname(hostOnly)
 			if !ok {
 				return next(c)
 			}
 
-			return p.doProxy(c, sandboxID)
+			return p.doProxy(c, sandboxID, port)
 		}
 	}
-}
-
-// extractSandboxID parses "{sandboxID}.{baseDomain}" from the host.
-func (p *ControlPlaneProxy) extractSandboxID(host string) (string, bool) {
-	suffix := "." + p.baseDomain
-	if !strings.HasSuffix(host, suffix) {
-		return "", false
-	}
-	sandboxID := strings.TrimSuffix(host, suffix)
-	if sandboxID == "" || strings.Contains(sandboxID, ".") {
-		return "", false
-	}
-	return sandboxID, true
 }
 
 // doProxy looks up the worker that owns this sandbox and reverse-proxies to it.
 // If the sandbox is hibernated, it triggers a wake-on-request: picks the least
 // loaded worker, wakes the sandbox via gRPC, updates the DB, then proxies.
-func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string) error {
+// The port is encoded in the preview hostname and passed through to the worker.
+func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) error {
 	ctx := c.Request().Context()
 
 	// Look up which worker owns this sandbox
@@ -92,17 +81,15 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string) error {
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)
 		if err != nil {
 			log.Printf("cp-proxy: wake-on-request failed for sandbox %s: %v", sandboxID, err)
-			return c.JSON(http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("sandbox %s: wake failed: %v", sandboxID, err),
-			})
+			return serveUpstreamUnavailable(c, sandboxID, port)
 		}
 
 		log.Printf("cp-proxy: wake-on-request succeeded for sandbox %s → worker %s (%s)", sandboxID, worker.ID, workerURL)
 
 		if isWebSocketUpgrade(c.Request()) {
-			return p.doWebSocket(c, sandboxID, workerURL)
+			return p.doWebSocket(c, sandboxID, workerURL, port)
 		}
-		return p.doHTTP(c, sandboxID, workerURL)
+		return p.doHTTP(c, sandboxID, workerURL, port)
 	}
 
 	// If the sandbox is stopped/error, return a clear message
@@ -118,24 +105,22 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string) error {
 	worker := p.registry.GetWorker(session.WorkerID)
 	if worker == nil {
 		log.Printf("cp-proxy: sandbox %s session says running on worker %s, but worker not in registry", sandboxID, session.WorkerID)
-		return p.tryRecoverOrFail(c, ctx, sandboxID, session)
+		return p.tryRecoverOrFail(c, ctx, sandboxID, session, port)
 	}
 
 	workerURL := worker.HTTPAddr
 	if workerURL == "" {
-		return c.JSON(http.StatusBadGateway, map[string]string{
-			"error": "worker has no HTTP address",
-		})
+		return serveUpstreamUnavailable(c, sandboxID, port)
 	}
 
-	log.Printf("cp-proxy: routing sandbox %s (worker %s) → %s", sandboxID, session.WorkerID, workerURL)
+	log.Printf("cp-proxy: routing sandbox %s port %d (worker %s) → %s", sandboxID, port, session.WorkerID, workerURL)
 
 	// WebSocket requests need raw TCP hijacking
 	if isWebSocketUpgrade(c.Request()) {
-		return p.doWebSocket(c, sandboxID, workerURL)
+		return p.doWebSocket(c, sandboxID, workerURL, port)
 	}
 
-	return p.doHTTP(c, sandboxID, workerURL)
+	return p.doHTTP(c, sandboxID, workerURL, port)
 }
 
 // tryRecoverOrFail handles the case where a sandbox session says "running" but
@@ -143,7 +128,7 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string) error {
 // from (sandbox may have been hibernated but session not updated). If a checkpoint
 // exists, it wakes the sandbox on a new worker. Otherwise, it marks the session
 // as stopped and returns a clear error.
-func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context, sandboxID string, session *db.SandboxSession) error {
+func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context, sandboxID string, session *db.SandboxSession, port int) error {
 	// Check if there's a checkpoint we can wake from
 	checkpoint, err := p.store.GetActiveCheckpoint(ctx, sandboxID)
 	if err == nil && checkpoint != nil {
@@ -151,17 +136,15 @@ func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)
 		if err != nil {
 			log.Printf("cp-proxy: recovery wake failed for sandbox %s: %v", sandboxID, err)
-			return c.JSON(http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("sandbox %s: recovery wake failed: %v", sandboxID, err),
-			})
+			return serveUpstreamUnavailable(c, sandboxID, port)
 		}
 
 		log.Printf("cp-proxy: recovery wake succeeded for sandbox %s → worker %s (%s)", sandboxID, worker.ID, workerURL)
 
 		if isWebSocketUpgrade(c.Request()) {
-			return p.doWebSocket(c, sandboxID, workerURL)
+			return p.doWebSocket(c, sandboxID, workerURL, port)
 		}
-		return p.doHTTP(c, sandboxID, workerURL)
+		return p.doHTTP(c, sandboxID, workerURL, port)
 	}
 
 	// No checkpoint — sandbox is truly gone. Mark session as stopped.
@@ -221,7 +204,7 @@ func (p *ControlPlaneProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID
 // doHTTP reverse-proxies a normal HTTP request to the worker.
 // If the worker returns a "not found" error for the sandbox (e.g., after worker restart),
 // it marks the session as stopped so future requests get a clean 410.
-func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string) error {
+func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string, port int) error {
 	target, err := url.Parse(workerURL)
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]string{
@@ -243,13 +226,13 @@ func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string) 
 		proxyErr = err
 	}
 
-	// The worker's proxy middleware matches on the Host header,
-	// so we keep the original Host (sb-xxx.workers.opensandbox.ai).
+	// Pass the hostname through as-is — the worker's proxy parses
+	// {sandboxID}-p{port} from the first subdomain label directly.
+	originalHost := c.Request().Host
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme = target.Scheme
 		r.URL.Host = target.Host
-		// Preserve original Host header so the worker's proxy can match the subdomain
-		r.Host = c.Request().Host
+		r.Host = originalHost
 	}
 
 	rec := &responseRecorder{
@@ -259,9 +242,7 @@ func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string) 
 
 	if proxyErr != nil {
 		log.Printf("cp-proxy: error proxying sandbox %s to %s: %v", sandboxID, workerURL, proxyErr)
-		return c.JSON(http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("sandbox %s: worker unavailable", sandboxID),
-		})
+		return serveUpstreamUnavailable(c, sandboxID, port)
 	}
 
 	// If the worker returned a 502 with "not found", the sandbox was lost
@@ -284,7 +265,7 @@ func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string) 
 }
 
 // doWebSocket hijacks the connection and pipes it to the worker.
-func (p *ControlPlaneProxy) doWebSocket(c echo.Context, sandboxID, workerURL string) error {
+func (p *ControlPlaneProxy) doWebSocket(c echo.Context, sandboxID, workerURL string, port int) error {
 	target, err := url.Parse(workerURL)
 	if err != nil {
 		return c.JSON(http.StatusBadGateway, map[string]string{"error": "invalid worker URL"})
@@ -303,9 +284,7 @@ func (p *ControlPlaneProxy) doWebSocket(c echo.Context, sandboxID, workerURL str
 	upstream, err := net.DialTimeout("tcp", workerAddr, 5*time.Second)
 	if err != nil {
 		log.Printf("cp-proxy: websocket dial failed for sandbox %s (%s): %v", sandboxID, workerAddr, err)
-		return c.JSON(http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("sandbox %s: worker unavailable", sandboxID),
-		})
+		return serveUpstreamUnavailable(c, sandboxID, port)
 	}
 	defer upstream.Close()
 
@@ -324,7 +303,7 @@ func (p *ControlPlaneProxy) doWebSocket(c echo.Context, sandboxID, workerURL str
 	}
 	defer clientConn.Close()
 
-	// Forward the original request to the worker (preserving Host header)
+	// Pass original Host through — worker's proxy parses preview hostname directly
 	if err := c.Request().Write(upstream); err != nil {
 		log.Printf("cp-proxy: websocket write request failed for sandbox %s: %v", sandboxID, err)
 		return nil

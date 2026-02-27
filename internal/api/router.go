@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/ecr"
@@ -41,6 +42,7 @@ type Server struct {
 	checkpointStore *storage.CheckpointStore          // nil if hibernation not configured
 	sandboxDomain   string                            // base domain for sandbox subdomains
 	ecrConfig       *ecr.Config                       // nil if ECR not configured
+	cfClient        *cloudflare.Client                // nil if Cloudflare not configured
 }
 
 // ServerOpts holds optional dependencies for the API server.
@@ -60,6 +62,7 @@ type ServerOpts struct {
 	WorkerRegistry  *controlplane.RedisWorkerRegistry  // nil in combined/worker mode
 	CheckpointStore *storage.CheckpointStore           // nil if hibernation not configured
 	ECRConfig       *ecr.Config                        // nil if ECR not configured
+	CFClient        *cloudflare.Client                 // nil if Cloudflare not configured
 }
 
 // NewServer creates a new API server with all routes configured.
@@ -87,6 +90,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.checkpointStore = opts.CheckpointStore
 		s.sandboxDomain = opts.SandboxDomain
 		s.ecrConfig = opts.ECRConfig
+		s.cfClient = opts.CFClient
 	}
 
 	// Global middleware
@@ -122,6 +126,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Hibernation
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
+
+	// Preview URLs (on-demand port-based)
+	api.POST("/sandboxes/:id/preview", s.createPreviewURL)
+	api.GET("/sandboxes/:id/preview", s.listPreviewURLs)
+	api.DELETE("/sandboxes/:id/preview/:port", s.deletePreviewURL)
 
 	// Commands
 	api.POST("/sandboxes/:id/commands", s.runCommand)
@@ -174,6 +183,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.DELETE("/api-keys/:keyId", s.dashboardDeleteAPIKey)
 		dash.GET("/org", s.dashboardGetOrg)
 		dash.PUT("/org", s.dashboardUpdateOrg)
+		dash.PUT("/org/custom-domain", s.dashboardSetCustomDomain)
+		dash.DELETE("/org/custom-domain", s.dashboardDeleteCustomDomain)
+		dash.POST("/org/custom-domain/refresh", s.dashboardRefreshCustomDomain)
 		dash.GET("/templates", s.dashboardListTemplates)
 		dash.POST("/templates", s.dashboardBuildTemplate)
 		dash.DELETE("/templates/:id", s.dashboardDeleteTemplate)

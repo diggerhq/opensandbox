@@ -27,7 +27,6 @@ type Sandbox struct {
 	MachineID  string            `json:"machineID,omitempty"`
 	ConnectURL string            `json:"connectURL,omitempty"` // Direct worker URL for SDK access
 	Token      string            `json:"token,omitempty"`      // Sandbox-scoped JWT for worker auth
-	Domain     string            `json:"domain,omitempty"`     // Subdomain for web access (e.g., "abc123.workers.opensandbox.dev")
 	HostPort   int               `json:"hostPort,omitempty"`   // Mapped host port for the sandbox's container port
 }
 

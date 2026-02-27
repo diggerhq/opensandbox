@@ -59,8 +59,9 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 export default function SessionDetail() {
   const { sandboxId } = useParams<{ sandboxId: string }>()
   const navigate = useNavigate()
-  const [copied, setCopied] = useState(false)
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
   const [showTerminal, setShowTerminal] = useState(false)
+  const [showInternal, setShowInternal] = useState(false)
 
   const { data: session, isLoading } = useQuery({
     queryKey: ['session-detail', sandboxId],
@@ -76,12 +77,10 @@ export default function SessionDetail() {
     retry: false,
   })
 
-  const copyUrl = () => {
-    if (session?.domain) {
-      navigator.clipboard.writeText(`https://${session.domain}`)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
+  const copyUrl = (hostname: string, key: string) => {
+    navigator.clipboard.writeText(`https://${hostname}`)
+    setCopiedUrl(key)
+    setTimeout(() => setCopiedUrl(null), 2000)
   }
 
   if (isLoading) {
@@ -186,38 +185,109 @@ export default function SessionDetail() {
         </div>
       )}
 
-      {/* Live URL */}
-      {session.domain && (session.status === 'running' || session.status === 'hibernated') && (
-        <div className="glass-card animate-in stagger-2" style={{ padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>
-            Live URL
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{
-              flex: 1,
-              background: 'var(--bg-deep)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-sm)',
-              padding: '10px 14px',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 13,
-              color: 'var(--text-accent)',
-            }}>
-              <a
-                href={`https://${session.domain}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ color: 'var(--text-accent)', textDecoration: 'none' }}
-              >
-                https://{session.domain}
-              </a>
+      {/* Preview URLs */}
+      {session.previewUrls && session.previewUrls.length > 0 && (() => {
+        const hasCustom = session.previewUrls.some(u => u.customHostname)
+        return (
+          <div className="glass-card animate-in stagger-2" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}>
+              Preview URLs
             </div>
-            <button className="btn-ghost" onClick={copyUrl} style={{ whiteSpace: 'nowrap' }}>
-              {copied ? '✓ Copied' : 'Copy'}
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {session.previewUrls.map((url) => {
+                const displayHost = url.customHostname || url.hostname
+                return (
+                  <div key={url.id} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <div style={{
+                      minWidth: 60,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: 'var(--text-tertiary)',
+                      fontFamily: 'var(--font-mono)',
+                    }}>
+                      :{url.port}
+                    </div>
+                    <div style={{
+                      flex: 1,
+                      background: 'var(--bg-deep)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '10px 14px',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 13,
+                      color: 'var(--text-accent)',
+                    }}>
+                      <a
+                        href={`https://${displayHost}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: 'var(--text-accent)', textDecoration: 'none' }}
+                      >
+                        https://{displayHost}
+                      </a>
+                    </div>
+                    <button className="btn-ghost" onClick={() => copyUrl(displayHost, `${url.port}`)} style={{ whiteSpace: 'nowrap' }}>
+                      {copiedUrl === `${url.port}` ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Internal URLs toggle — only shown when custom domain URLs are displayed */}
+            {hasCustom && (
+              <div style={{ marginTop: 12 }}>
+                <button
+                  onClick={() => setShowInternal(!showInternal)}
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                    fontSize: 11, color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: 4,
+                  }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ transform: showInternal ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  Internal URLs
+                </button>
+                {showInternal && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                    {session.previewUrls.map((url) => (
+                      <div key={`int-${url.id}`} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <div style={{ minWidth: 60, fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+                          :{url.port}
+                        </div>
+                        <div style={{
+                          flex: 1,
+                          background: 'var(--bg-deep)',
+                          border: '1px solid var(--border-subtle)',
+                          borderRadius: 'var(--radius-sm)',
+                          padding: '8px 12px',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 12,
+                          color: 'var(--text-tertiary)',
+                        }}>
+                          <a
+                            href={`https://${url.hostname}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ color: 'var(--text-tertiary)', textDecoration: 'none' }}
+                          >
+                            https://{url.hostname}
+                          </a>
+                        </div>
+                        <button className="btn-ghost" onClick={() => copyUrl(url.hostname, `int-${url.port}`)} style={{ whiteSpace: 'nowrap', fontSize: 11 }}>
+                          {copiedUrl === `int-${url.port}` ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Details */}
       <div className="glass-card animate-in stagger-3" style={{ padding: 20, marginBottom: 16 }}>

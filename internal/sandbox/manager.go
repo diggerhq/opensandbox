@@ -253,6 +253,23 @@ func (m *PodmanManager) HostPort(ctx context.Context, sandboxID string) (int, er
 	return port, nil
 }
 
+// ContainerAddr returns the container's bridge IP and the requested port as "ip:port".
+// Used by the proxy to route preview URL traffic directly to a specific container port.
+func (m *PodmanManager) ContainerAddr(ctx context.Context, sandboxID string, port int) (string, error) {
+	name := m.ContainerName(sandboxID)
+	info, err := m.podman.InspectContainer(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("sandbox %s not found: %w", sandboxID, err)
+	}
+	// Find bridge IP from network settings
+	for _, net := range info.NetworkSettings.Networks {
+		if net.IPAddress != "" {
+			return fmt.Sprintf("%s:%d", net.IPAddress, port), nil
+		}
+	}
+	return "", fmt.Errorf("sandbox %s has no network IP", sandboxID)
+}
+
 // Stats returns live CPU/memory stats for a running sandbox.
 func (m *PodmanManager) Stats(ctx context.Context, sandboxID string) (*SandboxStats, error) {
 	name := m.ContainerName(sandboxID)

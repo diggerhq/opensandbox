@@ -200,6 +200,11 @@ type ContainerInfo struct {
 		Labels map[string]string `json:"Labels"`
 		Image  string            `json:"Image"`
 	} `json:"Config"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+	} `json:"NetworkSettings"`
 }
 
 // InspectContainer returns detailed info about a container.
