@@ -1,0 +1,62 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/worker/**'
+      - 'cmd/agent/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/deploy-worker.yml'
+  workflow_dispatch:
+
+env:
+  SSH_USER: ubuntu
+  GOARCH: arm64
+
+jobs:
+  deploy:
+    name: Build & Deploy Worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build worker binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build -o bin/opensandbox-worker ./cmd/worker/
+
+      - name: Build agent binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build -o bin/osb-agent ./cmd/agent/
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          ssh-keyscan -H ${{ secrets.WORKER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Upload binaries
+        run: |
+          scp -i ~/.ssh/deploy.pem bin/opensandbox-worker ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }}:/tmp/opensandbox-worker
+          scp -i ~/.ssh/deploy.pem bin/osb-agent ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }}:/tmp/osb-agent
+
+      - name: Install and restart
+        run: |
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }} '
+            sudo mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker
+            sudo chmod +x /usr/local/bin/opensandbox-worker
+            sudo mv /tmp/osb-agent /usr/local/bin/osb-agent
+            sudo chmod +x /usr/local/bin/osb-agent
+            sudo systemctl restart opensandbox-worker
+          '
+
+      - name: Verify deployment
+        run: |
+          sleep 3
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }} 'sudo systemctl is-active opensandbox-worker'
+          echo "Worker deployed successfully!"

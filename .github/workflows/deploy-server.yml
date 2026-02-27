@@ -1,0 +1,102 @@
+name: Deploy Control Plane
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/server/**'
+      - 'internal/**'
+      - 'web/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/deploy-server.yml'
+  workflow_dispatch:
+
+env:
+  SSH_USER: ubuntu
+  GOARCH: amd64
+
+jobs:
+  deploy:
+    name: Build & Deploy Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build server binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build -o bin/opensandbox-server ./cmd/server/
+
+      - name: Build web dashboard
+        run: cd web && npm ci && npm run build
+
+      - name: Package web assets
+        run: tar czf bin/web-dist.tar.gz -C web dist
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
+          chmod 600 ~/.ssh/deploy.pem
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Upload artifacts
+        run: |
+          scp -i ~/.ssh/deploy.pem bin/opensandbox-server ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/opensandbox-server
+          scp -i ~/.ssh/deploy.pem bin/web-dist.tar.gz ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/web-dist.tar.gz
+
+      - name: Install and restart
+        run: |
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
+            sudo mv /tmp/opensandbox-server /usr/local/bin/opensandbox-server
+            sudo chmod +x /usr/local/bin/opensandbox-server
+            sudo mkdir -p /opt/opensandbox/web
+            sudo tar xzf /tmp/web-dist.tar.gz -C /opt/opensandbox/web
+            rm /tmp/web-dist.tar.gz
+            sudo systemctl restart opensandbox-server
+          '
+
+      - name: Pull secrets from AWS Secrets Manager
+        run: |
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
+            SECRETS_ARN=$(grep OPENSANDBOX_SECRETS_ARN /etc/opensandbox/server.env 2>/dev/null | cut -d= -f2-) || true
+            if [ -n "$SECRETS_ARN" ]; then
+              SECRETS_JSON=$(aws --region us-east-2 secretsmanager get-secret-value \
+                --secret-id "$SECRETS_ARN" --query SecretString --output text 2>&1) || {
+                echo "WARNING: Failed to pull secrets, using existing env file."
+                exit 0
+              }
+              echo "$SECRETS_JSON" | python3 -c "
+          import json, sys
+          secrets = json.load(sys.stdin)
+          existing = {}
+          try:
+              with open(\"/etc/opensandbox/server.env\") as f:
+                  for line in f:
+                      line = line.strip()
+                      if line and not line.startswith(\"#\") and \"=\" in line:
+                          k, v = line.split(\"=\", 1)
+                          existing[k] = v
+          except FileNotFoundError:
+              pass
+          existing.update(secrets)
+          with open(\"/tmp/server.env.new\", \"w\") as f:
+              for k, v in existing.items():
+                  f.write(f\"{k}={v}\n\")
+          " && sudo mv /tmp/server.env.new /etc/opensandbox/server.env
+              echo "Secrets merged."
+            fi
+          '
+
+      - name: Verify deployment
+        run: |
+          sleep 3
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} 'sudo systemctl is-active opensandbox-server'
+          echo "Server deployed successfully!"
