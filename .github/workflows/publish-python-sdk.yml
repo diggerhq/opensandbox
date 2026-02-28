@@ -2,8 +2,9 @@ name: Publish Python SDK
 
 on:
   push:
-    tags:
-      - 'py-sdk-v*'
+    branches: [main]
+    paths:
+      - 'sdks/python/**'
   workflow_dispatch:
 
 defaults:
@@ -24,10 +25,25 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
+      - name: Check if version already published
+        id: check
+        run: |
+          LOCAL_VERSION=$(grep '^version' pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          PUBLISHED=$(pip index versions opencomputer-sdk 2>/dev/null | head -1 | sed 's/.*(\(.*\))/\1/' || echo "")
+          if [ "$LOCAL_VERSION" = "$PUBLISHED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Version $LOCAL_VERSION already published, skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing $LOCAL_VERSION (registry has ${PUBLISHED:-nothing})."
+          fi
+
       - name: Build package
+        if: steps.check.outputs.skip == 'false'
         run: uv build
 
       - name: Publish to PyPI
+        if: steps.check.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdks/python/dist/
