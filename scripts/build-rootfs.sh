@@ -2,7 +2,7 @@
 # build-rootfs.sh — Build ext4 rootfs images for Firecracker VMs
 #
 # Usage:
-#   ./scripts/build-rootfs.sh [ubuntu|python|node|all]
+#   ./scripts/build-rootfs.sh [default|ubuntu|python|node|all]
 #   IMAGES_DIR=/data/firecracker/images ./scripts/build-rootfs.sh all
 #
 # Requirements:
@@ -245,16 +245,17 @@ main() {
     for target in "${targets[@]}"; do
         case "$target" in
             all)
+                build_image default
                 build_image ubuntu
                 build_image python
                 build_image node
                 ;;
-            ubuntu|python|node)
+            default|ubuntu|python|node)
                 build_image "$target"
                 ;;
             *)
                 err "Unknown target: $target"
-                echo "Usage: $0 [ubuntu|python|node|all]"
+                echo "Usage: $0 [default|ubuntu|python|node|all]"
                 exit 1
                 ;;
         esac
