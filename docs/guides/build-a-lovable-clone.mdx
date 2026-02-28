@@ -1,0 +1,177 @@
+---
+title: "Build a Lovable Clone"
+description: "Build an open-source AI app builder using OpenComputer sandboxes"
+---
+
+In this guide you'll build a fully functional **Lovable clone** — an AI-powered web app builder where users describe an app in plain English and get a live, running React application in seconds. The entire project is open-source and uses OpenComputer sandboxes as the execution engine.
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/diggerhq/osslovable">
+    Source code for the complete project.
+  </Card>
+  <Card title="Live Demo" icon="globe" href="https://openlovable.cc">
+    Try the running app at openlovable.cc.
+  </Card>
+</CardGroup>
+
+---
+
+## Prerequisites
+
+- **Node.js 20+** installed locally
+- An **Anthropic API key** (for Claude)
+- An **OpenComputer API key**
+
+---
+
+## Step 1: Sign Up for OpenComputer
+
+Go to [app.opencomputer.dev](https://app.opencomputer.dev) and create an account.
+
+## Step 2: Generate an API Token
+
+From the OpenComputer dashboard, generate an API token. You'll use this to authenticate SDK calls that create and manage sandboxes.
+
+## Step 3: (Optional) Add a Custom Domain
+
+If you want deployed apps to be accessible on your own domain (e.g. `*.mycompany.com`) instead of the default OpenComputer hostnames:
+
+1. In the OpenComputer dashboard, add your domain (e.g. `mycompany.com`).
+2. Create a **TXT** record on your domain to verify ownership — the dashboard will show you the exact record to add.
+3. Create a **CNAME** record for `*.mycompany.com` pointing to the value provided by OpenComputer. This routes all subdomain traffic to your sandboxes.
+
+Once verified, preview URLs for your sandboxes will be served under your custom domain.
+
+## Step 4: Set Up the Project
+
+Clone the repository and install dependencies:
+
+```bash
+git clone https://github.com/diggerhq/osslovable.git
+cd osslovable
+npm run install:all
+```
+
+Create a `.env` file at the project root with your API keys:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+OPENCOMPUTER_API_KEY=your-opencomputer-token
+DEPLOY_DOMAIN=mycompany.com  # optional — defaults to openlovable.cc
+```
+
+If you configured a custom domain in Step 3, set `DEPLOY_DOMAIN` to that domain so that deployed apps are served under it (e.g. `https://<id>.mycompany.com`). If you skip this, deploy URLs will use the default `openlovable.cc` domain.
+
+Start the development server:
+
+```bash
+npm run dev
+```
+
+This starts both the Express backend (port 3001) and the Vite frontend (port 5173). Open `http://localhost:5173` in your browser, type a prompt, and watch your app get built.
+
+---
+
+## How It Works
+
+The architecture is straightforward: a React frontend sends a user prompt to an Express backend, which orchestrates Claude and an OpenComputer sandbox to generate, write, and run the code.
+
+### Generation Flow
+
+1. **User submits a prompt** — The frontend sends the prompt to `POST /api/generate`.
+2. **Sandbox is created** — The server calls `Sandbox.create()` from the OpenComputer SDK to spin up an isolated Node.js environment.
+3. **Claude generates code** — The prompt is sent to Claude with a system prompt that instructs it to output complete file contents in a structured XML format (`<file path="...">...</file>`).
+4. **Files are streamed and written** — As Claude streams its response, the server parses file blocks in real-time. Each file is written into the sandbox's filesystem using `sandbox.files.write()`.
+5. **Dev server starts** — Once all files are written, the server runs `npm install` and starts a Vite dev server inside the sandbox.
+6. **Preview URL is returned** — The server calls `sandbox.createPreviewURL({ port: 80 })` to get a public URL, which is sent to the frontend and displayed in an iframe.
+
+### Sandbox as Tool Calls
+
+The key idea is that **every interaction with the sandbox is a tool call** from the server to the OpenComputer SDK. The server uses these SDK methods as its "tools":
+
+```typescript
+import { Sandbox } from "@opencomputer/sdk";
+
+// Create an isolated environment
+const sandbox = await Sandbox.create({ template: "node", timeout: 600 });
+
+// Write files
+await sandbox.files.write("/workspace/src/App.tsx", code);
+
+// Run commands
+await sandbox.commands.run("cd /workspace && npm install");
+
+// Get a public URL
+const preview = await sandbox.createPreviewURL({ port: 80 });
+```
+
+This is a simple but effective pattern: Claude generates the code as text, and the server uses the sandbox SDK to make it real. There are no actual LLM tool-use calls involved — the server orchestrates everything itself.
+
+### Limitations of This Approach
+
+- **No iterative editing** — Claude generates the entire project in one shot. There's no back-and-forth where the LLM can see errors, fix them, and retry. A more robust version would use Claude's tool-use capability to let it write files, run commands, see output, and iterate.
+- **No persistent state** — The development sandbox is ephemeral. If the server restarts, in-memory sandbox references are lost. There's no git history or checkpoint system to restore previous states.
+- **Single-turn only** — Each prompt creates a fresh generation. Follow-up prompts create a new sandbox rather than iterating on the existing code.
+
+---
+
+## Deployment Model
+
+The app includes a **Deploy** button that creates a shareable, publicly accessible URL for the generated app.
+
+### How Deployment Works
+
+1. **A new sandbox is created** — Deployment does _not_ reuse the development sandbox. A fresh sandbox is spun up specifically for the deployed version.
+2. **Files are copied over** — All source files (excluding `node_modules`) are copied from the dev sandbox to the deploy sandbox using the SDK's file APIs.
+3. **Dependencies are installed and the server starts** — The deploy sandbox runs `npm install` and starts the Vite dev server, just like the dev sandbox.
+4. **A fixed deploy URL is created** — The server calls `sandbox.createPreviewURL()` with a custom domain configuration, producing a stable URL (e.g. `https://<id>.openlovable.cc`) that can be shared with others.
+
+```typescript
+const domain = process.env.DEPLOY_DOMAIN || "openlovable.cc";
+const url = await sandbox.createPreviewURL({
+  port: 80,
+  domain,
+  authConfig: {},
+});
+```
+
+### Why a Separate Sandbox?
+
+The deploy sandbox is intentionally separate from the dev sandbox so that:
+
+- The developer can keep iterating in the dev sandbox without affecting the deployed version.
+- The deployed version has a fixed, shareable URL that doesn't change.
+- Each deployment is a clean, reproducible build.
+
+### Hibernation and Wake-Up
+
+OpenComputer sandboxes have a built-in **hibernation model**. When a deployed sandbox receives no traffic, it is automatically hibernated to save resources. When someone visits the deploy URL, the sandbox is woken up on demand. This means:
+
+- **Deploy URLs are persistent** — they continue to work even after the sandbox hibernates.
+- **Cold starts are fast** — sandboxes resume from hibernation in seconds.
+- **No always-on cost** — you're not paying for idle compute.
+
+This makes the deployment model practical for sharing prototypes and demos without running up a large bill.
+
+---
+
+## Limitations and What's Coming
+
+### Current Limitations
+
+- **No version control** — There is no git server backing the sandbox, so there's no way to checkpoint, diff, or roll back changes. If you want to restore a previous version, you'd need to regenerate it.
+- **No secret management** — API keys and environment variables are passed in plain text. There's no built-in mechanism for securely sealing secrets that the sandbox needs at runtime.
+- **Ephemeral dev state** — The development sandbox lives only as long as the server process. A server restart or crash loses all active sandbox references.
+- **Single-turn generation** — The current architecture doesn't support multi-turn conversations where Claude can iterate on its output based on build errors or user feedback.
+- **No private link sharing** — Deploy URLs are either fully public or not accessible at all. There's no way to share a preview link with specific team members or collaborators behind authentication.
+
+### Coming Soon to OpenComputer
+
+OpenComputer is building features that directly address these limitations:
+
+- **Built-in git server** — Each sandbox will have a native git server, enabling checkpoint/restore workflows and git-based deployments. You'll be able to commit the sandbox state at any point, roll back to a previous commit, and deploy from a specific git ref.
+- **Secret sealing** — A secure mechanism for injecting secrets into sandboxes without exposing them in plain text. Sealed secrets will be encrypted at rest and only decrypted inside the sandbox at runtime, making it safe to pass API keys, database credentials, and other sensitive configuration.
+- **In-sandbox agent loop** — Instead of orchestrating the LLM from an external server (where every file write and command execution is a round-trip over the network), the agent loop will run _inside_ the sandbox itself. This dramatically reduces latency — the agent can read files, run commands, and iterate on errors locally without leaving the sandbox. It's also a simpler deployment model: you ship a single sandbox image with the agent baked in, rather than coordinating between an external server and a remote sandbox.
+- **Private link sharing** — The ability to share deploy preview URLs with specific people. You'll be able to grant access to individual team members or collaborators, so preview links aren't fully public but still don't require the recipient to have an OpenComputer account.
+
+These additions will make it possible to build a production-grade app builder with full version history, secure secret handling, and robust deployment pipelines — all on top of OpenComputer sandboxes.

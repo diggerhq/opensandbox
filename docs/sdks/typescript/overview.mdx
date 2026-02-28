@@ -27,7 +27,7 @@ The TypeScript SDK provides five main modules:
 import { Sandbox } from '@opencomputer/sdk';
 
 // Create a sandbox
-const sandbox = await Sandbox.create({ template: 'base' });
+const sandbox = await Sandbox.create({ template: 'default' });
 
 // Run a command
 const result = await sandbox.commands.run('node --version');

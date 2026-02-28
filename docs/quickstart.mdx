@@ -35,7 +35,7 @@ export OPENCOMPUTER_API_KEY="your-api-key"
 import { Sandbox } from '@opencomputer/sdk';
 
 const sandbox = await Sandbox.create({
-  template: 'base',
+  template: 'default',
   timeout: 300,
 });
 
@@ -45,7 +45,7 @@ console.log(`Sandbox created: ${sandbox.sandboxId}`);
 ```python Python
 from opencomputer import Sandbox
 
-sandbox = await Sandbox.create(template='base', timeout=300)
+sandbox = await Sandbox.create(template='default', timeout=300)
 print(f"Sandbox created: {sandbox.sandbox_id}")
 ```
 

@@ -11,7 +11,7 @@ The `Sandbox` class is the main entry point to OpenSandbox. It supports both man
 from opencomputer import Sandbox
 
 sandbox = await Sandbox.create(
-    template='base',
+    template='default',
     timeout=300,
     envs={'NODE_ENV': 'production'},
     metadata={'owner': 'my-agent'},
@@ -22,7 +22,7 @@ sandbox = await Sandbox.create(
 
 Creates a new sandbox and returns a connected `Sandbox` instance.
 
-<ParamField body="template" type="str" default="base">
+<ParamField body="template" type="str" default="default">
   Container template to use.
 </ParamField>
 <ParamField body="timeout" type="int" default="300">
@@ -46,7 +46,7 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
 ## Usage
 
 ```python
-sandbox = await Sandbox.create(template='base')
+sandbox = await Sandbox.create(template='default')
 result = await sandbox.commands.run('echo "hello"')
 print(result.stdout)
 await sandbox.kill()

@@ -44,6 +44,12 @@
       ]
     },
     {
+      "group": "Guides",
+      "pages": [
+        "guides/build-a-lovable-clone"
+      ]
+    },
+    {
       "group": "TypeScript SDK",
       "pages": [
         "sdks/typescript/overview",

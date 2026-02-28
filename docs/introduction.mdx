@@ -47,7 +47,7 @@ pip install opencomputer
 ```typescript TypeScript
 import { Sandbox } from '@opencomputer/sdk';
 
-const sandbox = await Sandbox.create({ template: 'base' });
+const sandbox = await Sandbox.create({ template: 'default' });
 
 const result = await sandbox.commands.run('echo "Hello from OpenSandbox!"');
 console.log(result.stdout); // Hello from OpenSandbox!
@@ -60,7 +60,7 @@ import asyncio
 from opencomputer import Sandbox
 
 async def main():
-    sandbox = await Sandbox.create(template='base')
+    sandbox = await Sandbox.create(template='default')
     result = await sandbox.commands.run('echo "Hello from OpenSandbox!"')
     print(result.stdout)  # Hello from OpenSandbox!
     await sandbox.kill()

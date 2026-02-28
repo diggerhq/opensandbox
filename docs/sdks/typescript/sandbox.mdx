@@ -11,7 +11,7 @@ The `Sandbox` class is the main entry point to OpenSandbox. Use it to create new
 import { Sandbox } from '@opencomputer/sdk';
 
 const sandbox = await Sandbox.create({
-  template: 'base',
+  template: 'default',
   timeout: 300,
   envs: { NODE_ENV: 'production' },
   metadata: { owner: 'my-agent' },
@@ -24,7 +24,7 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
 
 <ParamField body="opts" type="SandboxOpts" optional>
   <Expandable title="properties">
-    <ParamField body="template" type="string" default="base">
+    <ParamField body="template" type="string" default="default">
       Container template to use.
     </ParamField>
     <ParamField body="timeout" type="number" default="300">
