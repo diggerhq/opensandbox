@@ -4,5 +4,5 @@
   <path d="M16 7V25" stroke="white" stroke-width="1.5" opacity="0.5"/>
   <path d="M8 12L24 20" stroke="white" stroke-width="1.5" opacity="0.5"/>
   <path d="M24 12L8 20" stroke="white" stroke-width="1.5" opacity="0.5"/>
-  <text x="40" y="22" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#F8FAFC">OpenSandbox</text>
+  <text x="40" y="22" font-family="system-ui, sans-serif" font-size="16" font-weight="700" fill="#F8FAFC">OpenComputer</text>
 </svg>

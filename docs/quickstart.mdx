@@ -1,6 +1,6 @@
 ---
 title: "Quickstart"
-description: "Get up and running with OpenSandbox in 5 minutes"
+description: "Get up and running with OpenComputer in 5 minutes"
 ---
 
 ## 1. Get Your API Key
@@ -77,11 +77,11 @@ print(result.exit_code)  # 0
 
 ```typescript TypeScript
 // Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenSandbox!');
+await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!');
 
 // Read it back
 const content = await sandbox.files.read('/tmp/hello.txt');
-console.log(content); // Hello from OpenSandbox!
+console.log(content); // Hello from OpenComputer!
 
 // List a directory
 const entries = await sandbox.files.list('/tmp');
@@ -90,11 +90,11 @@ entries.forEach(e => console.log(`${e.isDir ? 'd' : 'f'} ${e.name}`));
 
 ```python Python
 # Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenSandbox!')
+await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!')
 
 # Read it back
 content = await sandbox.files.read('/tmp/hello.txt')
-print(content)  # Hello from OpenSandbox!
+print(content)  # Hello from OpenComputer!
 
 # List a directory
 entries = await sandbox.files.list('/tmp')

@@ -3,11 +3,11 @@ title: "Introduction"
 description: "Secure cloud sandboxes for AI agents and developers"
 ---
 
-# OpenSandbox
+# OpenComputer
 
-OpenSandbox gives you **secure, isolated cloud sandboxes** that spin up in milliseconds. Run untrusted code, build AI agent tooling, or create interactive development environments — all within containerized sandboxes you fully control.
+OpenComputer gives you **secure, isolated cloud sandboxes** that spin up in milliseconds. Run untrusted code, build AI agent tooling, or create interactive development environments — all within containerized sandboxes you fully control.
 
-## Why OpenSandbox?
+## Why OpenComputer?
 
 <CardGroup cols={2}>
   <Card title="Fast Startup" icon="bolt">
@@ -26,7 +26,7 @@ OpenSandbox gives you **secure, isolated cloud sandboxes** that spin up in milli
 
 ## SDKs
 
-OpenSandbox provides first-class SDKs for TypeScript and Python with identical API surfaces.
+OpenComputer provides first-class SDKs for TypeScript and Python with identical API surfaces.
 
 <CodeGroup>
 
@@ -49,8 +49,8 @@ import { Sandbox } from '@opencomputer/sdk';
 
 const sandbox = await Sandbox.create({ template: 'default' });
 
-const result = await sandbox.commands.run('echo "Hello from OpenSandbox!"');
-console.log(result.stdout); // Hello from OpenSandbox!
+const result = await sandbox.commands.run('echo "Hello from OpenComputer!"');
+console.log(result.stdout); // Hello from OpenComputer!
 
 await sandbox.kill();
 ```
@@ -61,8 +61,8 @@ from opencomputer import Sandbox
 
 async def main():
     sandbox = await Sandbox.create(template='default')
-    result = await sandbox.commands.run('echo "Hello from OpenSandbox!"')
-    print(result.stdout)  # Hello from OpenSandbox!
+    result = await sandbox.commands.run('echo "Hello from OpenComputer!"')
+    print(result.stdout)  # Hello from OpenComputer!
     await sandbox.kill()
 
 asyncio.run(main())
