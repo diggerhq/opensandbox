@@ -2,8 +2,9 @@ name: Publish TypeScript SDK
 
 on:
   push:
-    tags:
-      - 'ts-sdk-v*'
+    branches: [main]
+    paths:
+      - 'sdks/typescript/**'
   workflow_dispatch:
 
 defaults:
@@ -28,10 +29,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check if version already published
+        id: check
+        run: |
+          LOCAL_VERSION=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view @opencomputer/sdk version 2>/dev/null || echo "")
+          if [ "$LOCAL_VERSION" = "$PUBLISHED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Version $LOCAL_VERSION already published, skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing $LOCAL_VERSION (registry has ${PUBLISHED:-nothing})."
+          fi
+
       - name: Build
+        if: steps.check.outputs.skip == 'false'
         run: npm run build
 
       - name: Publish
+        if: steps.check.outputs.skip == 'false'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
