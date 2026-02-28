@@ -1,6 +1,6 @@
-import { Filesystem } from "./filesystem";
-import { Commands } from "./commands";
-import { Pty } from "./pty";
+import { Filesystem } from "./filesystem.js";
+import { Commands } from "./commands.js";
+import { Pty } from "./pty.js";
 
 function resolveApiUrl(url: string): string {
   const base = url.replace(/\/+$/, "");
