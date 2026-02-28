@@ -184,11 +184,20 @@ class Sandbox:
         pty_key = self._token or self._api_key
         return Pty(self._ops_client, self.sandbox_id, pty_url, pty_key)
 
-    async def create_preview_url(self, port: int, auth_config: dict | None = None) -> dict:
-        """Create a preview URL targeting a specific container port."""
+    async def create_preview_url(self, port: int, domain: str | None = None, auth_config: dict | None = None) -> dict:
+        """Create a preview URL targeting a specific container port.
+
+        Args:
+            port: The container port to expose (1-65535).
+            domain: Optional custom domain (must be verified on the org).
+            auth_config: Optional auth configuration for the preview URL.
+        """
+        body: dict = {"port": port, "authConfig": auth_config or {}}
+        if domain:
+            body["domain"] = domain
         resp = await self._client.post(
             f"/sandboxes/{self.sandbox_id}/preview",
-            json={"port": port, "authConfig": auth_config or {}},
+            json=body,
         )
         resp.raise_for_status()
         return resp.json()

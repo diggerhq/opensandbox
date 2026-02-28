@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -784,6 +786,7 @@ func (s *Server) createPreviewURL(c echo.Context) error {
 	// Parse request body — port is required
 	var req struct {
 		Port       int             `json:"port"`
+		Domain     string          `json:"domain"`
 		AuthConfig json.RawMessage `json:"authConfig"`
 	}
 	if err := c.Bind(&req); err != nil {
@@ -819,25 +822,71 @@ func (s *Server) createPreviewURL(c echo.Context) error {
 		})
 	}
 
-	// Check for duplicate port
-	existing, err := s.store.GetPreviewURLByPort(ctx, sandboxID, req.Port)
-	if err == nil && existing != nil {
-		return c.JSON(http.StatusConflict, map[string]string{
-			"error": fmt.Sprintf("preview URL already exists for port %d", req.Port),
+	// Look up org for custom domain support
+	org, err := s.store.GetOrg(ctx, orgID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to look up org",
 		})
 	}
+	var customDomain string
+	if org.CustomDomain != nil && *org.CustomDomain != "" {
+		customDomain = *org.CustomDomain
+	}
 
-	// Build hostname: {sandboxID}-p{port}.{baseDomain}
-	hostname := fmt.Sprintf("%s-p%d.%s", sandboxID, req.Port, s.sandboxDomain)
+	// If preview URL already exists for this port, return it
+	existing, err := s.store.GetPreviewURLByPort(ctx, sandboxID, req.Port)
+	if err == nil && existing != nil {
+		return c.JSON(http.StatusOK, previewURLToMap(*existing, customDomain))
+	}
 
-	previewURL, err := s.store.CreatePreviewURL(ctx, sandboxID, orgID, hostname, req.Port, nil, "active", req.AuthConfig)
+	// Determine hostname based on whether a custom domain was requested
+	var hostname string
+	var cfHostnameID *string
+
+	if req.Domain != "" {
+		// Validate the requested domain matches the org's verified custom domain
+		if customDomain == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "org has no custom domain configured",
+			})
+		}
+		if req.Domain != customDomain {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("domain %q does not match org custom domain %q", req.Domain, customDomain),
+			})
+		}
+		if org.DomainVerificationStatus != "active" {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": fmt.Sprintf("custom domain %q is not verified (status: %s)", req.Domain, org.DomainVerificationStatus),
+			})
+		}
+
+		hostname = fmt.Sprintf("%s-p%d.%s", sandboxID, req.Port, req.Domain)
+
+		// Register with Cloudflare if configured
+		if s.cfClient != nil {
+			cfResult, err := s.cfClient.CreateCustomHostnameHTTP(hostname)
+			if err != nil {
+				return c.JSON(http.StatusInternalServerError, map[string]string{
+					"error": "failed to register custom hostname with Cloudflare: " + err.Error(),
+				})
+			}
+			cfHostnameID = &cfResult.ID
+		}
+	} else {
+		// Default: use the platform sandbox domain
+		hostname = fmt.Sprintf("%s-p%d.%s", sandboxID, req.Port, s.sandboxDomain)
+	}
+
+	previewURL, err := s.store.CreatePreviewURL(ctx, sandboxID, orgID, hostname, req.Port, cfHostnameID, "active", req.AuthConfig)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
 		})
 	}
 
-	return c.JSON(http.StatusCreated, previewURL)
+	return c.JSON(http.StatusCreated, previewURLToMap(*previewURL, customDomain))
 }
 
 // listPreviewURLs returns all preview URLs for a sandbox.
@@ -850,17 +899,22 @@ func (s *Server) listPreviewURLs(c echo.Context) error {
 		})
 	}
 
+	orgID, _ := auth.GetOrgID(c)
+	customDomain := s.getOrgCustomDomain(c.Request().Context(), orgID)
+
 	urls, err := s.store.ListPreviewURLs(c.Request().Context(), sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
 		})
 	}
-	if urls == nil {
-		urls = []db.PreviewURL{}
+
+	result := make([]map[string]interface{}, len(urls))
+	for i, u := range urls {
+		result[i] = previewURLToMap(u, customDomain)
 	}
 
-	return c.JSON(http.StatusOK, urls)
+	return c.JSON(http.StatusOK, result)
 }
 
 // deletePreviewURL removes the preview URL for a sandbox on a specific port.
@@ -899,6 +953,41 @@ func (s *Server) deletePreviewURL(c echo.Context) error {
 	_ = s.store.DeletePreviewURL(ctx, previewURL.ID)
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// previewURLToMap converts a PreviewURL to a response map, including customHostname if provided.
+func previewURLToMap(u db.PreviewURL, customDomain string) map[string]interface{} {
+	m := map[string]interface{}{
+		"id":         u.ID,
+		"sandboxId":  u.SandboxID,
+		"orgId":      u.OrgID,
+		"hostname":   u.Hostname,
+		"port":       u.Port,
+		"sslStatus":  u.SSLStatus,
+		"authConfig": u.AuthConfig,
+		"createdAt":  u.CreatedAt,
+	}
+	if u.CFHostnameID != nil {
+		m["cfHostnameId"] = *u.CFHostnameID
+	}
+	if customDomain != "" {
+		if dot := strings.Index(u.Hostname, "."); dot > 0 {
+			m["customHostname"] = u.Hostname[:dot+1] + customDomain
+		}
+	}
+	return m
+}
+
+// getOrgCustomDomain returns the org's custom domain, or "" if none.
+func (s *Server) getOrgCustomDomain(ctx context.Context, orgID uuid.UUID) string {
+	if s.store == nil {
+		return ""
+	}
+	org, err := s.store.GetOrg(ctx, orgID)
+	if err == nil && org.CustomDomain != nil && *org.CustomDomain != "" {
+		return *org.CustomDomain
+	}
+	return ""
 }
 
 // cleanupPreviewURLs removes all preview URLs for a sandbox on kill (best-effort).

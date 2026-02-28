@@ -31,6 +31,7 @@ export interface PreviewURLResult {
   sandboxId: string;
   orgId: string;
   hostname: string;
+  customHostname?: string;
   port: number;
   cfHostnameId?: string;
   sslStatus: string;
@@ -206,14 +207,14 @@ export class Sandbox {
     }
   }
 
-  async createPreviewURL(opts: { port: number; authConfig?: Record<string, unknown> }): Promise<PreviewURLResult> {
+  async createPreviewURL(opts: { port: number; domain?: string; authConfig?: Record<string, unknown> }): Promise<PreviewURLResult> {
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
       },
-      body: JSON.stringify({ port: opts.port, authConfig: opts.authConfig ?? {} }),
+      body: JSON.stringify({ port: opts.port, ...(opts.domain ? { domain: opts.domain } : {}), authConfig: opts.authConfig ?? {} }),
     });
 
     if (!resp.ok) {
