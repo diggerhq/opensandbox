@@ -55,4 +55,13 @@ type Manager interface {
 	// Hibernation
 	Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (*HibernateResult, error)
 	Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (*types.Sandbox, error)
+
+	// SaveAsTemplate snapshots a running sandbox's drives (rootfs + workspace) for use as a
+	// template. The VM is briefly paused during file copy then resumed. Archive upload is async.
+	// Returns the pre-computed storage keys immediately. onReady is called when the async upload finishes (may be nil).
+	SaveAsTemplate(ctx context.Context, sandboxID, templateID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error)
+
+	// TemplateCachePath returns the local path to a cached template drive file (e.g., "rootfs.ext4"),
+	// or "" if the template is not cached locally. Used to skip S3 download when creating from template.
+	TemplateCachePath(templateID, filename string) string
 }

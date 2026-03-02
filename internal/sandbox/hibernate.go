@@ -351,3 +351,13 @@ func dirExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
+
+// SaveAsTemplate is not supported on the Podman backend (Firecracker only).
+func (m *PodmanManager) SaveAsTemplate(_ context.Context, _, _ string, _ *storage.CheckpointStore, _ func()) (string, string, error) {
+	return "", "", fmt.Errorf("save-as-template is only supported on Firecracker backend")
+}
+
+// TemplateCachePath always returns "" on the Podman backend (Firecracker only).
+func (m *PodmanManager) TemplateCachePath(_, _ string) string {
+	return ""
+}

@@ -3,13 +3,21 @@ package worker
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
+	"github.com/opensandbox/opensandbox/internal/sparse"
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/internal/template"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -25,11 +33,12 @@ type GRPCServer struct {
 	sandboxDBs      *sandbox.SandboxDBManager
 	checkpointStore *storage.CheckpointStore
 	builder         *template.Builder
+	store           *db.Store // nil if no DB configured
 	server          *grpc.Server
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
-func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder) *GRPCServer {
+func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder, store *db.Store) *GRPCServer {
 	s := &GRPCServer{
 		manager:         mgr,
 		router:          router,
@@ -37,6 +46,7 @@ func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *
 		sandboxDBs:      sandboxDBs,
 		checkpointStore: checkpointStore,
 		builder:         builder,
+		store:           store,
 		server: grpc.NewServer(
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 				MinTime:             5 * time.Second,
@@ -76,6 +86,16 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		NetworkEnabled: req.NetworkEnabled,
 		ImageRef:       req.ImageRef,
 		Port:           int(req.Port),
+	}
+
+	// Handle sandbox snapshot template: resolve S3 keys to local paths.
+	if req.TemplateRootfsKey != "" && req.TemplateWorkspaceKey != "" {
+		localRootfs, localWorkspace, err := s.resolveTemplateDrives(ctx, req.TemplateRootfsKey, req.TemplateWorkspaceKey)
+		if err != nil {
+			return nil, fmt.Errorf("resolve template drives: %w", err)
+		}
+		cfg.TemplateRootfsKey = "local://" + localRootfs
+		cfg.TemplateWorkspaceKey = "local://" + localWorkspace
 	}
 
 	sb, err := s.manager.Create(ctx, cfg)
@@ -372,6 +392,144 @@ func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateReq
 		ImageRef: imageRef,
 		BuildLog: buildLog,
 	}, nil
+}
+
+func (s *GRPCServer) SaveAsTemplate(ctx context.Context, req *pb.SaveAsTemplateRequest) (*pb.SaveAsTemplateResponse, error) {
+	if s.checkpointStore == nil {
+		return nil, fmt.Errorf("checkpoint store not configured on this worker")
+	}
+
+	templateID := req.TemplateId
+	if _, err := uuid.Parse(templateID); err != nil {
+		return nil, fmt.Errorf("invalid template ID: %w", err)
+	}
+
+	// The onReady callback marks the template as ready in the DB when the async S3 upload completes.
+	var onReady func()
+	if s.store != nil {
+		tid, _ := uuid.Parse(templateID)
+		onReady = func() {
+			if err := s.store.SetTemplateReady(context.Background(), tid); err != nil {
+				log.Printf("grpc: SaveAsTemplate: failed to mark template %s ready: %v", templateID, err)
+			} else {
+				log.Printf("grpc: SaveAsTemplate: template %s is now ready", templateID)
+			}
+		}
+	}
+
+	rootfsKey, workspaceKey, err := s.manager.SaveAsTemplate(ctx, req.SandboxId, templateID, s.checkpointStore, onReady)
+	if err != nil {
+		return nil, fmt.Errorf("save-as-template failed: %w", err)
+	}
+
+	return &pb.SaveAsTemplateResponse{
+		RootfsS3Key:    rootfsKey,
+		WorkspaceS3Key: workspaceKey,
+	}, nil
+}
+
+// resolveTemplateDrives resolves S3 template keys to local file paths.
+// Uses local template cache when available (instant reflink), otherwise downloads from S3.
+func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, workspaceKey string) (localRootfs, localWorkspace string, err error) {
+	templateID := extractTemplateID(rootfsKey)
+	if templateID == "" {
+		return "", "", fmt.Errorf("cannot extract template ID from key: %s", rootfsKey)
+	}
+
+	// Fast path: check local template cache
+	cachedRootfs := s.manager.TemplateCachePath(templateID, "rootfs.ext4")
+	cachedWorkspace := s.manager.TemplateCachePath(templateID, "workspace.ext4")
+	if cachedRootfs != "" && cachedWorkspace != "" {
+		log.Printf("grpc: create from template %s: using local cache", templateID)
+		return cachedRootfs, cachedWorkspace, nil
+	}
+
+	// Slow path: download from S3 and cache locally
+	log.Printf("grpc: create from template %s: downloading from S3 (rootfs=%s, workspace=%s)", templateID, rootfsKey, workspaceKey)
+	return s.downloadAndCacheTemplateDrives(ctx, templateID, rootfsKey, workspaceKey)
+}
+
+// extractTemplateID extracts the template ID from an S3 key like "templates/{id}/rootfs.tar.zst".
+func extractTemplateID(s3Key string) string {
+	parts := strings.Split(s3Key, "/")
+	if len(parts) >= 2 && parts[0] == "templates" {
+		return parts[1]
+	}
+	return ""
+}
+
+// downloadAndCacheTemplateDrives downloads template archives from S3, extracts them,
+// and caches the ext4 drives locally for future use.
+func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templateID, rootfsKey, workspaceKey string) (string, string, error) {
+	if s.checkpointStore == nil {
+		return "", "", fmt.Errorf("checkpoint store not configured")
+	}
+
+	cacheDir := filepath.Join(s.manager.DataDir(), "templates", templateID)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", "", fmt.Errorf("create template cache dir: %w", err)
+	}
+
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+
+	// Download and extract rootfs (tar.zst)
+	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("download rootfs: %w", err)
+	}
+
+	// Download and extract workspace (sparse.zst)
+	if err := downloadAndExtract(ctx, s.checkpointStore, workspaceKey, cachedWorkspace, extractSparseCmd); err != nil {
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("download workspace: %w", err)
+	}
+
+	log.Printf("grpc: template %s: cached locally at %s", templateID, cacheDir)
+	return cachedRootfs, cachedWorkspace, nil
+}
+
+// extractFunc defines how to extract a downloaded archive to a destination path.
+type extractFunc func(archivePath, destPath string) error
+
+// extractArchiveCmd extracts a tar.zst archive to a directory.
+func extractArchiveCmd(archivePath, destDir string) error {
+	cmd := exec.Command("tar", "--zstd", "-xf", archivePath, "-C", destDir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar extract: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// extractSparseCmd extracts a sparse.zst archive to a file using the sparse restore format.
+func extractSparseCmd(archivePath, destPath string) error {
+	return sparse.Restore(archivePath, destPath)
+}
+
+// downloadAndExtract downloads an S3 object to a temp file, extracts it, and removes the temp file.
+func downloadAndExtract(ctx context.Context, store *storage.CheckpointStore, s3Key, dest string, extract extractFunc) error {
+	data, err := store.Download(ctx, s3Key)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", s3Key, err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "osb-template-*")
+	if err != nil {
+		data.Close()
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.ReadFrom(data); err != nil {
+		tmpFile.Close()
+		data.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+	data.Close()
+
+	return extract(tmpPath, dest)
 }
 
 func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {

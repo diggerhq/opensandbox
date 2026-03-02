@@ -456,20 +456,25 @@ func (s *Server) dashboardListTemplates(c echo.Context) error {
 		})
 	}
 
-	// Strip internal image refs from dashboard response
+	// Strip internal fields from dashboard response
 	type safeTemplate struct {
-		ID        uuid.UUID  `json:"id"`
-		OrgID     *uuid.UUID `json:"orgId,omitempty"`
-		Name      string     `json:"name"`
-		Tag       string     `json:"tag"`
-		IsPublic  bool       `json:"isPublic"`
-		CreatedAt time.Time  `json:"createdAt"`
+		ID                 uuid.UUID  `json:"id"`
+		OrgID              *uuid.UUID `json:"orgId,omitempty"`
+		Name               string     `json:"name"`
+		Tag                string     `json:"tag"`
+		IsPublic           bool       `json:"isPublic"`
+		TemplateType       string     `json:"templateType"`
+		CreatedBySandboxID *string    `json:"createdBySandboxId,omitempty"`
+		Status             string     `json:"status"`
+		CreatedAt          time.Time  `json:"createdAt"`
 	}
 	safe := make([]safeTemplate, len(templates))
 	for i, t := range templates {
 		safe[i] = safeTemplate{
 			ID: t.ID, OrgID: t.OrgID, Name: t.Name,
-			Tag: t.Tag, IsPublic: t.IsPublic, CreatedAt: t.CreatedAt,
+			Tag: t.Tag, IsPublic: t.IsPublic,
+			TemplateType: t.TemplateType, CreatedBySandboxID: t.CreatedBySandboxID,
+			Status: t.Status, CreatedAt: t.CreatedAt,
 		}
 	}
 
@@ -511,6 +516,139 @@ func (s *Server) dashboardDeleteTemplate(c echo.Context) error {
 	}
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// dashboardSaveAsTemplate snapshots a running sandbox's drives and creates a new template record.
+// The VM is briefly paused on the worker while drives are copied, then resumed.
+// The S3 upload and template DB record creation happen in the same call (upload is async on the worker).
+func (s *Server) dashboardSaveAsTemplate(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{
+			"error": "org context required",
+		})
+	}
+
+	sandboxID := c.Param("sandboxId")
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{
+			"error": "session not found",
+		})
+	}
+	if session.OrgID != orgID {
+		return c.JSON(http.StatusForbidden, map[string]string{
+			"error": "session does not belong to this organization",
+		})
+	}
+	if session.Status != "running" {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "sandbox must be running to save as template",
+		})
+	}
+
+	var req struct {
+		Name string `json:"name"`
+		Tag  string `json:"tag"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid request body",
+		})
+	}
+	if req.Name == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "name is required",
+		})
+	}
+	if req.Tag == "" {
+		req.Tag = "latest"
+	}
+
+	ctx := c.Request().Context()
+
+	// Reserve a template UUID upfront so the worker can use it for S3 key naming.
+	templateID := uuid.New()
+
+	// Dispatch SaveAsTemplate gRPC call to the worker that owns the sandbox.
+	var rootfsKey, workspaceKey string
+	if s.workerRegistry != nil {
+		grpcClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "worker not available: " + err.Error(),
+			})
+		}
+
+		// Give 2 minutes: SyncFS + pause + file copy + resume (upload is async on the worker)
+		grpcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+
+		resp, err := grpcClient.SaveAsTemplate(grpcCtx, &pb.SaveAsTemplateRequest{
+			SandboxId:  sandboxID,
+			TemplateId: templateID.String(),
+		})
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "save-as-template failed: " + err.Error(),
+			})
+		}
+		rootfsKey = resp.RootfsS3Key
+		workspaceKey = resp.WorkspaceS3Key
+	} else if s.manager != nil {
+		// Combined/worker mode: call directly
+		if s.checkpointStore == nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "checkpoint store not configured",
+			})
+		}
+		onReady := func() {
+			if err := s.store.SetTemplateReady(context.Background(), templateID); err != nil {
+				log.Printf("dashboard: failed to mark template %s ready: %v", templateID, err)
+			} else {
+				log.Printf("dashboard: template %s is now ready", templateID)
+			}
+		}
+		rootfsKey, workspaceKey, err = s.manager.SaveAsTemplate(ctx, sandboxID, templateID.String(), s.checkpointStore, onReady)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "save-as-template failed: " + err.Error(),
+			})
+		}
+	} else {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "no sandbox manager available",
+		})
+	}
+
+	// Create template record in DB (status=processing for sandbox templates)
+	tmpl, err := s.store.CreateSandboxTemplate(ctx, templateID, &orgID, req.Name, req.Tag, rootfsKey, workspaceKey, sandboxID)
+	if err != nil {
+		log.Printf("dashboard: template snapshot succeeded but DB insert failed for sandbox %s: %v", sandboxID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "failed to save template record: " + err.Error(),
+		})
+	}
+
+	// Label the sandbox session with the new template
+	_ = s.store.UpdateSandboxSessionTemplate(ctx, sandboxID, tmpl.ID)
+
+	log.Printf("dashboard: saved sandbox %s as template %s (%s)", sandboxID, tmpl.Name, tmpl.ID)
+
+	return c.JSON(http.StatusCreated, map[string]interface{}{
+		"id":           tmpl.ID,
+		"name":         tmpl.Name,
+		"tag":          tmpl.Tag,
+		"templateType": tmpl.TemplateType,
+		"status":       tmpl.Status,
+		"createdAt":    tmpl.CreatedAt,
+	})
 }
 
 // dashboardGetSession returns detailed info for a single session.

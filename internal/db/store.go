@@ -72,6 +72,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{6, "migrations/006_sandbox_preview_urls.up.sql"},
 		{7, "migrations/007_preview_urls_port.up.sql"},
 		{8, "migrations/008_default_template.up.sql"},
+		{9, "migrations/009_sandbox_templates.up.sql"},
+		{10, "migrations/010_template_status.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -732,42 +734,95 @@ func (s *Store) UpsertWorkspaceBackup(ctx context.Context, sandboxID string, org
 
 // DBTemplate represents a template record in the database.
 type DBTemplate struct {
-	ID         uuid.UUID  `json:"id"`
-	OrgID      *uuid.UUID `json:"orgId,omitempty"`
-	Name       string     `json:"name"`
-	Tag        string     `json:"tag"`
-	ImageRef   string     `json:"imageRef"`
-	Dockerfile *string    `json:"dockerfile,omitempty"`
-	IsPublic   bool       `json:"isPublic"`
-	CreatedAt  time.Time  `json:"createdAt"`
+	ID                 uuid.UUID  `json:"id"`
+	OrgID              *uuid.UUID `json:"orgId,omitempty"`
+	Name               string     `json:"name"`
+	Tag                string     `json:"tag"`
+	ImageRef           string     `json:"-"`
+	Dockerfile         *string    `json:"dockerfile,omitempty"`
+	IsPublic           bool       `json:"isPublic"`
+	TemplateType       string     `json:"templateType"` // "dockerfile" or "sandbox"
+	RootfsS3Key        *string    `json:"-"`
+	WorkspaceS3Key     *string    `json:"-"`
+	CreatedBySandboxID *string    `json:"createdBySandboxId,omitempty"`
+	Status             string     `json:"status"` // "ready" or "processing"
+	CreatedAt          time.Time  `json:"createdAt"`
 }
 
-// CreateTemplate inserts a new template record.
+// templateColumns is the standard column list for template queries.
+const templateColumns = `id, org_id, name, tag, COALESCE(image_ref,''), dockerfile, is_public, template_type, rootfs_s3_key, workspace_s3_key, created_by_sandbox_id, COALESCE(status,'ready'), created_at`
+
+func scanTemplate(row interface{ Scan(...any) error }, t *DBTemplate) error {
+	return row.Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.TemplateType, &t.RootfsS3Key, &t.WorkspaceS3Key, &t.CreatedBySandboxID, &t.Status, &t.CreatedAt)
+}
+
+// CreateTemplate inserts a new dockerfile-based template record.
 func (s *Store) CreateTemplate(ctx context.Context, orgID *uuid.UUID, name, tag, imageRef string, dockerfile *string, isPublic bool) (*DBTemplate, error) {
 	t := &DBTemplate{}
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO templates (org_id, name, tag, image_ref, dockerfile, is_public)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING id, org_id, name, tag, image_ref, dockerfile, is_public, created_at`,
+	err := scanTemplate(s.pool.QueryRow(ctx,
+		`INSERT INTO templates (org_id, name, tag, image_ref, dockerfile, is_public, template_type)
+		 VALUES ($1, $2, $3, $4, $5, $6, 'dockerfile')
+		 RETURNING `+templateColumns,
 		orgID, name, tag, imageRef, dockerfile, isPublic,
-	).Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt)
+	), t)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create template: %w", err)
 	}
 	return t, nil
 }
 
+// CreateSandboxTemplate inserts a new sandbox-snapshot template record (status=processing).
+func (s *Store) CreateSandboxTemplate(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, name, tag, rootfsS3Key, workspaceS3Key, createdBySandboxID string) (*DBTemplate, error) {
+	t := &DBTemplate{}
+	err := scanTemplate(s.pool.QueryRow(ctx,
+		`INSERT INTO templates (id, org_id, name, tag, image_ref, is_public, template_type, rootfs_s3_key, workspace_s3_key, created_by_sandbox_id, status)
+		 VALUES ($1, $2, $3, $4, '', false, 'sandbox', $5, $6, $7, 'processing')
+		 RETURNING `+templateColumns,
+		id, orgID, name, tag, rootfsS3Key, workspaceS3Key, createdBySandboxID,
+	), t)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sandbox template: %w", err)
+	}
+	return t, nil
+}
+
+// SetTemplateReady marks a template as ready for use.
+func (s *Store) SetTemplateReady(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `UPDATE templates SET status = 'ready' WHERE id = $1`, id)
+	return err
+}
+
+// GetTemplateByID finds a template by its UUID.
+func (s *Store) GetTemplateByID(ctx context.Context, id uuid.UUID) (*DBTemplate, error) {
+	t := &DBTemplate{}
+	err := scanTemplate(s.pool.QueryRow(ctx,
+		`SELECT `+templateColumns+` FROM templates WHERE id = $1`, id,
+	), t)
+	if err != nil {
+		return nil, fmt.Errorf("template %s not found: %w", id, err)
+	}
+	return t, nil
+}
+
+// UpdateSandboxSessionTemplate sets the based_on_template_id for a sandbox session.
+func (s *Store) UpdateSandboxSessionTemplate(ctx context.Context, sandboxID string, templateID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET based_on_template_id = $1 WHERE sandbox_id = $2`,
+		templateID, sandboxID)
+	return err
+}
+
 // GetTemplateByName finds a template by name, preferring org-specific over public.
 func (s *Store) GetTemplateByName(ctx context.Context, orgID uuid.UUID, name string) (*DBTemplate, error) {
 	t := &DBTemplate{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, tag, image_ref, dockerfile, is_public, created_at
+	err := scanTemplate(s.pool.QueryRow(ctx,
+		`SELECT `+templateColumns+`
 		 FROM templates
 		 WHERE name = $1 AND (org_id = $2 OR (is_public = true AND org_id IS NULL))
 		 ORDER BY org_id IS NULL ASC
 		 LIMIT 1`,
 		name, orgID,
-	).Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt)
+	), t)
 	if err != nil {
 		return nil, fmt.Errorf("template %q not found: %w", name, err)
 	}
@@ -777,7 +832,7 @@ func (s *Store) GetTemplateByName(ctx context.Context, orgID uuid.UUID, name str
 // ListTemplates returns all templates visible to an org (org-specific + public).
 func (s *Store) ListTemplates(ctx context.Context, orgID uuid.UUID) ([]DBTemplate, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, name, tag, image_ref, dockerfile, is_public, created_at
+		`SELECT `+templateColumns+`
 		 FROM templates
 		 WHERE org_id = $1 OR (is_public = true AND org_id IS NULL)
 		 ORDER BY is_public DESC, name ASC`,
@@ -790,7 +845,7 @@ func (s *Store) ListTemplates(ctx context.Context, orgID uuid.UUID) ([]DBTemplat
 	var templates []DBTemplate
 	for rows.Next() {
 		var t DBTemplate
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.CreatedAt); err != nil {
+		if err := scanTemplate(rows, &t); err != nil {
 			return nil, err
 		}
 		templates = append(templates, t)

@@ -115,6 +115,9 @@ export interface Template {
   tag: string
   dockerfile?: string
   isPublic: boolean
+  templateType?: string
+  createdBySandboxId?: string
+  status?: string
   createdAt: string
 }
 

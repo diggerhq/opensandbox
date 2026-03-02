@@ -152,6 +152,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/templates", s.listTemplates)
 	api.GET("/templates/:name", s.getTemplate)
 	api.DELETE("/templates/:name", s.deleteTemplate)
+	api.POST("/sandboxes/:sandboxId/save-as-template", s.dashboardSaveAsTemplate)
 
 	// Workers (server mode only — queries worker registry)
 	api.GET("/workers", s.listWorkers)
@@ -193,6 +194,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
 		dash.GET("/sessions/:sandboxId/stats", s.dashboardGetSessionStats)
+		dash.POST("/sessions/:sandboxId/save-as-template", s.dashboardSaveAsTemplate)
 
 		// PTY (terminal)
 		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)

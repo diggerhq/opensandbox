@@ -41,7 +41,11 @@ type SandboxConfig struct {
 	Envs       map[string]string `json:"envs,omitempty"`
 	Port       int               `json:"port,omitempty"`       // container port to expose via subdomain (default 80)
 	NetworkEnabled bool          `json:"networkEnabled,omitempty"`
-	ImageRef       string            `json:"imageRef,omitempty"`       // resolved ECR URI for custom templates
+	ImageRef       string        `json:"imageRef,omitempty"`       // resolved ECR URI for custom templates
+	// Sandbox snapshot template: S3 keys for rootfs and workspace drives.
+	// When set, the sandbox boots from these drives instead of the standard base image.
+	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
+	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
 }
 
 // SandboxListResponse is the response for listing sandboxes.

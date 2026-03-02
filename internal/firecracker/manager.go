@@ -153,30 +153,46 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 		return nil, fmt.Errorf("mkdir sandbox dir: %w", err)
 	}
 
-	// Resolve base image
+	// Resolve template name (used for logging and cold-boot recovery)
 	template := cfg.Template
-	if template == "" {
-		template = "ubuntu"
-	}
-	baseImage, err := ResolveBaseImage(m.cfg.ImagesDir, template)
-	if err != nil {
-		os.RemoveAll(sandboxDir)
-		return nil, fmt.Errorf("resolve base image: %w", err)
+	if template == "" || template == "base" {
+		template = "default"
 	}
 
-	// Prepare rootfs (reflink copy)
 	rootfsPath := filepath.Join(sandboxDir, "rootfs.ext4")
-	if err := PrepareRootfs(baseImage, rootfsPath); err != nil {
-		os.RemoveAll(sandboxDir)
-		return nil, fmt.Errorf("prepare rootfs: %w", err)
-	}
-
-	// Create workspace
-	diskMB := m.cfg.DefaultDiskMB
 	workspacePath := filepath.Join(sandboxDir, "workspace.ext4")
-	if err := CreateWorkspace(workspacePath, diskMB); err != nil {
-		os.RemoveAll(sandboxDir)
-		return nil, fmt.Errorf("create workspace: %w", err)
+
+	if cfg.TemplateRootfsKey != "" {
+		// Sandbox snapshot template: gRPC handler extracted template drives to local paths
+		// encoded as "local://<absolute-path>" in TemplateRootfsKey / TemplateWorkspaceKey.
+		srcRootfs := strings.TrimPrefix(cfg.TemplateRootfsKey, "local://")
+		srcWorkspace := strings.TrimPrefix(cfg.TemplateWorkspaceKey, "local://")
+		log.Printf("firecracker: create %s from snapshot template (rootfs=%s, workspace=%s)", id, srcRootfs, srcWorkspace)
+		if err := copyFileReflink(srcRootfs, rootfsPath); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("copy template rootfs: %w", err)
+		}
+		if err := copyFileReflink(srcWorkspace, workspacePath); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("copy template workspace: %w", err)
+		}
+	} else {
+		// Standard base image + fresh workspace
+		baseImage, err := ResolveBaseImage(m.cfg.ImagesDir, template)
+		if err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("resolve base image: %w", err)
+		}
+		if err := PrepareRootfs(baseImage, rootfsPath); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("prepare rootfs: %w", err)
+		}
+
+		diskMB := m.cfg.DefaultDiskMB
+		if err := CreateWorkspace(workspacePath, diskMB); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("create workspace: %w", err)
+		}
 	}
 
 	// Allocate network
@@ -784,6 +800,15 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 // Wake restores a VM from a snapshot.
 func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (*types.Sandbox, error) {
 	return m.doWake(ctx, sandboxID, checkpointKey, checkpointStore, timeout)
+}
+
+// SaveAsTemplate snapshots a running sandbox's drives for use as a template.
+func (m *Manager) SaveAsTemplate(ctx context.Context, sandboxID, templateID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
+	vm, err := m.getVM(sandboxID)
+	if err != nil {
+		return "", "", err
+	}
+	return m.doSaveAsTemplate(ctx, vm, templateID, checkpointStore, onReady)
 }
 
 // getVM retrieves a VM by ID (read-locked).

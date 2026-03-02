@@ -147,26 +147,45 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 
 	// Resolve template image from DB (org-scoped lookup with public fallback)
 	var imageRef string
+	var templateRootfsKey, templateWorkspaceKey string
+	var templateID *uuid.UUID
 	if s.store != nil && hasOrg {
 		tmpl, err := s.store.GetTemplateByName(ctx, orgID, cfg.Template)
 		if err == nil {
 			imageRef = tmpl.ImageRef
+			templateID = &tmpl.ID
+			log.Printf("sandbox: resolved template %q (type=%s, id=%s)", cfg.Template, tmpl.TemplateType, tmpl.ID)
+			// Sandbox-type templates provide S3 drive keys instead of ECR image refs
+			if tmpl.TemplateType == "sandbox" && tmpl.RootfsS3Key != nil && tmpl.WorkspaceS3Key != nil {
+				templateRootfsKey = *tmpl.RootfsS3Key
+				templateWorkspaceKey = *tmpl.WorkspaceS3Key
+				log.Printf("sandbox: using snapshot template drives: rootfs=%s, workspace=%s", templateRootfsKey, templateWorkspaceKey)
+			}
+		} else {
+			log.Printf("sandbox: template %q lookup failed: %v", cfg.Template, err)
 		}
 	}
 
-	// Dispatch via persistent gRPC connection
-	grpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Dispatch via persistent gRPC connection.
+	// Template-based creation needs more time for S3 download + decompression of drives.
+	grpcTimeout := 30 * time.Second
+	if templateRootfsKey != "" {
+		grpcTimeout = 120 * time.Second
+	}
+	grpcCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
 	grpcResp, err := grpcClient.CreateSandbox(grpcCtx, &pb.CreateSandboxRequest{
-		Template:       cfg.Template,
-		Timeout:        int32(cfg.Timeout),
-		Envs:           cfg.Envs,
-		MemoryMb:       int32(cfg.MemoryMB),
-		CpuCount:       int32(cfg.CpuCount),
-		NetworkEnabled: cfg.NetworkEnabled,
-		ImageRef:       imageRef,
-		Port:           int32(cfg.Port),
+		Template:             cfg.Template,
+		Timeout:              int32(cfg.Timeout),
+		Envs:                 cfg.Envs,
+		MemoryMb:             int32(cfg.MemoryMB),
+		CpuCount:             int32(cfg.CpuCount),
+		NetworkEnabled:       cfg.NetworkEnabled,
+		ImageRef:             imageRef,
+		Port:                 int32(cfg.Port),
+		TemplateRootfsKey:    templateRootfsKey,
+		TemplateWorkspaceKey: templateWorkspaceKey,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -194,6 +213,9 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		cfgJSON, _ := json.Marshal(cfg)
 		metadataJSON, _ := json.Marshal(cfg.Metadata)
 		_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, nil, template, region, worker.ID, cfgJSON, metadataJSON)
+		if templateID != nil {
+			_ = s.store.UpdateSandboxSessionTemplate(ctx, grpcResp.SandboxId, *templateID)
+		}
 	}
 
 	resp := map[string]interface{}{
