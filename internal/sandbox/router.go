@@ -345,14 +345,14 @@ func (r *SandboxRouter) discoverAndEnsure(ctx context.Context, sandboxID string)
 		return nil
 	}
 
-	// Check if there's an active checkpoint (meaning it's hibernated)
-	checkpoint, err := r.store.GetActiveCheckpoint(ctx, sandboxID)
+	// Check if there's an active hibernation (meaning it's hibernated)
+	checkpoint, err := r.store.GetActiveHibernation(ctx, sandboxID)
 	if err != nil || checkpoint == nil {
-		// No checkpoint found — sandbox might be running or doesn't exist
+		// No hibernation found — sandbox might be running or doesn't exist
 		return nil
 	}
 
-	// Found a checkpoint — register as hibernated and then ensure running
+	// Found a hibernation — register as hibernated and then ensure running
 	r.MarkHibernated(sandboxID, r.defaultTimeout)
 	return r.ensureRunning(ctx, sandboxID)
 }
@@ -382,9 +382,9 @@ func (r *SandboxRouter) doWake(ctx context.Context, sandboxID string, entry *san
 		return
 	}
 
-	checkpoint, err := r.store.GetActiveCheckpoint(wakeCtx, sandboxID)
+	hibernation, err := r.store.GetActiveHibernation(wakeCtx, sandboxID)
 	if err != nil {
-		wakeErr = fmt.Errorf("no active checkpoint: %w", err)
+		wakeErr = fmt.Errorf("no active hibernation: %w", err)
 		return
 	}
 
@@ -393,14 +393,14 @@ func (r *SandboxRouter) doWake(ctx context.Context, sandboxID string, entry *san
 		timeout = int(r.defaultTimeout.Seconds())
 	}
 
-	sb, err := r.manager.Wake(wakeCtx, sandboxID, checkpoint.CheckpointKey, r.checkpointStore, timeout)
+	sb, err := r.manager.Wake(wakeCtx, sandboxID, hibernation.HibernationKey, r.checkpointStore, timeout)
 	if err != nil {
 		wakeErr = err
 		return
 	}
 
 	// Update DB records
-	_ = r.store.MarkCheckpointRestored(wakeCtx, sandboxID)
+	_ = r.store.MarkHibernationRestored(wakeCtx, sandboxID)
 	_ = r.store.UpdateSandboxSessionForWake(wakeCtx, sandboxID, r.workerID)
 
 	log.Printf("router: auto-woke sandbox %s (status=%s)", sandboxID, sb.Status)
@@ -472,7 +472,7 @@ func (r *SandboxRouter) onTimeout(sandboxID string) {
 			return
 		}
 
-		log.Printf("router: sandbox %s hibernated on timeout (key=%s, size=%d)", sandboxID, result.CheckpointKey, result.SizeBytes)
+		log.Printf("router: sandbox %s hibernated on timeout (key=%s, size=%d)", sandboxID, result.HibernationKey, result.SizeBytes)
 
 		entry.mu.Lock()
 		entry.state = StateHibernated

@@ -163,14 +163,14 @@ func main() {
 						continue
 					}
 					if r.HasSnapshot {
-						// Full snapshot on NVMe — create checkpoint record so doWake finds local files
-						_, _ = store.CreateCheckpoint(ctx, r.SandboxID, session.OrgID,
+						// Full snapshot on NVMe — create hibernation record so doWake finds local files
+						_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
 							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
 						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
 						snapshotCount++
 					} else {
-						// Workspace only — create local sentinel checkpoint for cold boot
-						_, _ = store.CreateCheckpoint(ctx, r.SandboxID, session.OrgID,
+						// Workspace only — create local sentinel hibernation for cold boot
+						_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
 							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
 						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
 						workspaceCount++
@@ -199,13 +199,13 @@ func main() {
 		WorkerID:        cfg.WorkerID,
 		OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 			log.Printf("opensandbox-worker: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
-				sandboxID, result.CheckpointKey, result.SizeBytes)
+				sandboxID, result.HibernationKey, result.SizeBytes)
 			if store != nil {
-				// Create checkpoint record so wake-on-request can find it
+				// Create hibernation record so wake-on-request can find it
 				session, err := store.GetSandboxSession(context.Background(), sandboxID)
 				if err == nil {
-					_, _ = store.CreateCheckpoint(context.Background(), sandboxID, session.OrgID,
-						result.CheckpointKey, result.SizeBytes, session.Region, session.Template, session.Config)
+					_, _ = store.CreateHibernation(context.Background(), sandboxID, session.OrgID,
+						result.HibernationKey, result.SizeBytes, session.Region, session.Template, session.Config)
 				}
 				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
 			}
@@ -346,12 +346,12 @@ func main() {
 					}
 					continue
 				}
-				log.Printf("opensandbox-worker: hibernated %s (key=%s)", r.SandboxID, r.CheckpointKey)
+				log.Printf("opensandbox-worker: hibernated %s (key=%s)", r.SandboxID, r.HibernationKey)
 				if store != nil {
 					session, err := store.GetSandboxSession(context.Background(), r.SandboxID)
 					if err == nil {
-						_, _ = store.CreateCheckpoint(context.Background(), r.SandboxID, session.OrgID,
-							r.CheckpointKey, 0, session.Region, session.Template, session.Config)
+						_, _ = store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
+							r.HibernationKey, 0, session.Region, session.Template, session.Config)
 						_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
 					}
 				}

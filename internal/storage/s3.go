@@ -99,8 +99,8 @@ func (s *CheckpointStore) SetCacheDir(dir string) error {
 	return nil
 }
 
-// CheckpointKey returns the S3 key for a checkpoint archive.
-func CheckpointKey(sandboxID string) string {
+// HibernationKey returns the S3 key for a hibernation archive.
+func HibernationKey(sandboxID string) string {
 	return fmt.Sprintf("checkpoints/%s/%d.tar.zst", sandboxID, time.Now().UnixNano())
 }
 

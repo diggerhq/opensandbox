@@ -64,4 +64,9 @@ type Manager interface {
 	// TemplateCachePath returns the local path to a cached template drive file (e.g., "rootfs.ext4"),
 	// or "" if the template is not cached locally. Used to skip S3 download when creating from template.
 	TemplateCachePath(templateID, filename string) string
+
+	// Checkpointing
+	CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error)
+	RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpointID string) error
+	CheckpointCachePath(checkpointID, filename string) string
 }

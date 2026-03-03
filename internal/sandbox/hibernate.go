@@ -19,9 +19,9 @@ import (
 
 // HibernateResult holds the result of a hibernate operation.
 type HibernateResult struct {
-	SandboxID     string `json:"sandboxId"`
-	CheckpointKey string `json:"checkpointKey"`
-	SizeBytes     int64  `json:"sizeBytes"`
+	SandboxID      string `json:"sandboxId"`
+	HibernationKey string `json:"hibernationKey"`
+	SizeBytes      int64  `json:"sizeBytes"`
 }
 
 // Hibernate checkpoints a running sandbox, uploads to S3, and removes the container.
@@ -34,7 +34,7 @@ func (m *PodmanManager) Hibernate(ctx context.Context, sandboxID string, checkpo
 	m.trimBeforeCheckpoint(ctx, name)
 
 	// 2. Generate S3 key upfront so we can use it for cache path
-	s3Key := storage.CheckpointKey(sandboxID)
+	s3Key := storage.HibernationKey(sandboxID)
 
 	// 3. Checkpoint to local file
 	//    If NVMe cache is enabled, write directly to cache dir (stays after upload).
@@ -104,7 +104,7 @@ func (m *PodmanManager) Hibernate(ctx context.Context, sandboxID string, checkpo
 
 	return &HibernateResult{
 		SandboxID:     sandboxID,
-		CheckpointKey: s3Key,
+		HibernationKey: s3Key,
 		SizeBytes:     sizeBytes,
 	}, nil
 }
@@ -359,5 +359,20 @@ func (m *PodmanManager) SaveAsTemplate(_ context.Context, _, _ string, _ *storag
 
 // TemplateCachePath always returns "" on the Podman backend (Firecracker only).
 func (m *PodmanManager) TemplateCachePath(_, _ string) string {
+	return ""
+}
+
+// CreateCheckpoint is not supported on the Podman backend (Firecracker only).
+func (m *PodmanManager) CreateCheckpoint(_ context.Context, _, _ string, _ *storage.CheckpointStore, _ func()) (string, string, error) {
+	return "", "", fmt.Errorf("checkpoints are only supported on Firecracker backend")
+}
+
+// RestoreFromCheckpoint is not supported on the Podman backend (Firecracker only).
+func (m *PodmanManager) RestoreFromCheckpoint(_ context.Context, _, _ string) error {
+	return fmt.Errorf("checkpoints are only supported on Firecracker backend")
+}
+
+// CheckpointCachePath always returns "" on the Podman backend (Firecracker only).
+func (m *PodmanManager) CheckpointCachePath(_, _ string) string {
 	return ""
 }

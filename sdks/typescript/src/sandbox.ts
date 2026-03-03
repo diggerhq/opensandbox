@@ -26,6 +26,19 @@ interface SandboxData {
   token?: string;
 }
 
+export interface CheckpointInfo {
+  id: string;
+  sandboxId: string;
+  orgId: string;
+  name: string;
+  rootfsS3Key?: string;
+  workspaceS3Key?: string;
+  sandboxConfig: Record<string, unknown>;
+  status: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface PreviewURLResult {
   id: string;
   sandboxId: string;
@@ -204,6 +217,101 @@ export class Sandbox {
 
     if (!resp.ok) {
       throw new Error(`Failed to set timeout: ${resp.status}`);
+    }
+  }
+
+  async createCheckpoint(name: string): Promise<CheckpointInfo> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+      body: JSON.stringify({ name }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to create checkpoint: ${resp.status} ${text}`);
+    }
+
+    return resp.json();
+  }
+
+  async listCheckpoints(): Promise<CheckpointInfo[]> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+
+    if (!resp.ok) {
+      throw new Error(`Failed to list checkpoints: ${resp.status}`);
+    }
+
+    return resp.json();
+  }
+
+  async restoreCheckpoint(checkpointId: string): Promise<void> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints/${checkpointId}/restore`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to restore checkpoint: ${resp.status} ${text}`);
+    }
+
+    // After restore, rebuild ops clients since the VM was rebooted
+    const data: SandboxData = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    }).then((r) => r.json());
+
+    this.connectUrl = data.connectURL || "";
+    this.token = data.token || "";
+    const opsUrl = this.connectUrl || this.apiUrl;
+    const opsKey = this.connectUrl ? "" : this.apiKey;
+    const opsToken = this.connectUrl ? this.token : "";
+    (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
+    (this as any).commands = new Commands(opsUrl, opsKey, this.sandboxId, opsToken);
+    (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
+  }
+
+  static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout"> = {}): Promise<Sandbox> {
+    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENCOMPUTER_API_URL ?? "https://app.opencomputer.dev");
+    const apiKey = opts.apiKey ?? process.env.OPENCOMPUTER_API_KEY ?? "";
+
+    const body: Record<string, unknown> = {};
+    if (opts.timeout != null) body.timeout = opts.timeout;
+
+    const resp = await fetch(`${apiUrl}/sandboxes/from-checkpoint/${checkpointId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { "X-API-Key": apiKey } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to create sandbox from checkpoint: ${resp.status} ${text}`);
+    }
+
+    const data: SandboxData = await resp.json();
+    return new Sandbox(data, apiUrl, apiKey);
+  }
+
+  async deleteCheckpoint(checkpointId: string): Promise<void> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints/${checkpointId}`, {
+      method: "DELETE",
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(`Failed to delete checkpoint: ${resp.status}`);
     }
   }
 

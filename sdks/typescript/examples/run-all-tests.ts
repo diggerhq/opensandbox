@@ -53,6 +53,7 @@ const SUITES: TestSuite[] = [
   { name: "Domain/TLS", file: "test-domain-tls.ts", description: "Subdomains, Let's Encrypt certs, routing isolation" },
   { name: "Concurrent", file: "test-concurrent.ts", description: "5 sandboxes in parallel, isolation, parallel ops" },
   { name: "Hibernation", file: "test-hibernation-stress.ts", description: "Multi-cycle hibernate/wake, large state, auto-wake" },
+  { name: "Checkpoints", file: "test-checkpoints.ts", description: "Create, list, restore, fork, delete checkpoints, limits" },
   { name: "Timeout", file: "test-timeout.ts", slow: true, description: "30s timeout, setTimeout(), rolling timeout (takes ~2min)" },
 ];
 

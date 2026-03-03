@@ -127,6 +127,13 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
 
+	// Checkpoints
+	api.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)
+	api.GET("/sandboxes/:id/checkpoints", s.listCheckpoints)
+	api.POST("/sandboxes/:id/checkpoints/:checkpointId/restore", s.restoreCheckpoint)
+	api.POST("/sandboxes/from-checkpoint/:checkpointId", s.createFromCheckpoint)
+	api.DELETE("/sandboxes/:id/checkpoints/:checkpointId", s.deleteCheckpoint)
+
 	// Preview URLs (on-demand port-based)
 	api.POST("/sandboxes/:id/preview", s.createPreviewURL)
 	api.GET("/sandboxes/:id/preview", s.listPreviewURLs)

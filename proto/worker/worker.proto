@@ -25,6 +25,9 @@ service SandboxWorker {
 
   rpc SaveAsTemplate(SaveAsTemplateRequest) returns (SaveAsTemplateResponse);
 
+  rpc CreateCheckpoint(CreateCheckpointRequest) returns (CreateCheckpointResponse);
+  rpc RestoreCheckpoint(RestoreCheckpointRequest) returns (RestoreCheckpointResponse);
+
   rpc BuildTemplate(BuildTemplateRequest) returns (BuildTemplateResponse);
 
   rpc GetSandboxStats(GetSandboxStatsRequest) returns (GetSandboxStatsResponse);
@@ -213,4 +216,23 @@ message GetSandboxStatsResponse {
   uint64 net_input = 4;
   uint64 net_output = 5;
   int32 pids = 6;
+}
+
+message CreateCheckpointRequest {
+  string sandbox_id = 1;
+  string checkpoint_id = 2;  // UUID assigned by control plane
+}
+
+message CreateCheckpointResponse {
+  string rootfs_s3_key = 1;
+  string workspace_s3_key = 2;
+}
+
+message RestoreCheckpointRequest {
+  string sandbox_id = 1;
+  string checkpoint_id = 2;
+}
+
+message RestoreCheckpointResponse {
+  bool success = 1;
 }

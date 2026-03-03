@@ -338,7 +338,7 @@ func (s *GRPCServer) HibernateSandbox(ctx context.Context, req *pb.HibernateSand
 
 	return &pb.HibernateSandboxResponse{
 		SandboxId:     result.SandboxID,
-		CheckpointKey: result.CheckpointKey,
+		CheckpointKey: result.HibernationKey,
 		SizeBytes:     result.SizeBytes,
 	}, nil
 }
@@ -428,12 +428,108 @@ func (s *GRPCServer) SaveAsTemplate(ctx context.Context, req *pb.SaveAsTemplateR
 	}, nil
 }
 
-// resolveTemplateDrives resolves S3 template keys to local file paths.
-// Uses local template cache when available (instant reflink), otherwise downloads from S3.
+func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpointRequest) (*pb.CreateCheckpointResponse, error) {
+	if s.checkpointStore == nil {
+		return nil, fmt.Errorf("checkpoint store not configured on this worker")
+	}
+
+	checkpointID := req.CheckpointId
+	if _, err := uuid.Parse(checkpointID); err != nil {
+		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
+	}
+
+	// The onReady callback marks the checkpoint as ready in the DB when the async S3 upload completes.
+	var onReady func()
+	if s.store != nil {
+		cpID, _ := uuid.Parse(checkpointID)
+		onReady = func() {
+			if err := s.store.SetCheckpointReady(context.Background(), cpID, "", "", 0); err != nil {
+				log.Printf("grpc: CreateCheckpoint: failed to mark checkpoint %s ready: %v", checkpointID, err)
+			} else {
+				log.Printf("grpc: CreateCheckpoint: checkpoint %s is now ready", checkpointID)
+			}
+		}
+	}
+
+	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, onReady)
+	if err != nil {
+		return nil, fmt.Errorf("create checkpoint failed: %w", err)
+	}
+
+	return &pb.CreateCheckpointResponse{
+		RootfsS3Key:    rootfsKey,
+		WorkspaceS3Key: workspaceKey,
+	}, nil
+}
+
+func (s *GRPCServer) RestoreCheckpoint(ctx context.Context, req *pb.RestoreCheckpointRequest) (*pb.RestoreCheckpointResponse, error) {
+	checkpointID := req.CheckpointId
+	if _, err := uuid.Parse(checkpointID); err != nil {
+		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
+	}
+
+	// Check local cache first; if not available, download from S3
+	cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
+	cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+	if cachedRootfs == "" || cachedWorkspace == "" {
+		// Need to download from S3
+		if s.checkpointStore == nil {
+			return nil, fmt.Errorf("checkpoint not cached locally and no S3 store configured")
+		}
+		log.Printf("grpc: RestoreCheckpoint %s: not cached locally, downloading from S3", checkpointID)
+		rootfsKey := fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", req.SandboxId, checkpointID)
+		workspaceKey := fmt.Sprintf("checkpoints/%s/%s/workspace.sparse.zst", req.SandboxId, checkpointID)
+
+		cacheDir := filepath.Join(s.manager.DataDir(), "checkpoints", checkpointID)
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			return nil, fmt.Errorf("create checkpoint cache dir: %w", err)
+		}
+
+		cachedRootfsPath := filepath.Join(cacheDir, "rootfs.ext4")
+		cachedWorkspacePath := filepath.Join(cacheDir, "workspace.ext4")
+
+		if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
+			os.RemoveAll(cacheDir)
+			return nil, fmt.Errorf("download checkpoint rootfs: %w", err)
+		}
+		if err := downloadAndExtract(ctx, s.checkpointStore, workspaceKey, cachedWorkspacePath, extractSparseCmd); err != nil {
+			os.RemoveAll(cacheDir)
+			return nil, fmt.Errorf("download checkpoint workspace: %w", err)
+		}
+		log.Printf("grpc: RestoreCheckpoint %s: cached locally at %s", checkpointID, cacheDir)
+		_ = cachedRootfsPath // used implicitly by manager.CheckpointCachePath after download
+	}
+
+	if err := s.manager.RestoreFromCheckpoint(ctx, req.SandboxId, checkpointID); err != nil {
+		return nil, fmt.Errorf("restore from checkpoint failed: %w", err)
+	}
+
+	return &pb.RestoreCheckpointResponse{Success: true}, nil
+}
+
+// resolveTemplateDrives resolves S3 template/checkpoint keys to local file paths.
+// Uses local cache when available (instant reflink), otherwise downloads from S3.
+// Handles both template keys (templates/{id}/...) and checkpoint keys (checkpoints/{sandboxID}/{checkpointID}/...).
 func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, workspaceKey string) (localRootfs, localWorkspace string, err error) {
+	// Try checkpoint key format first: checkpoints/{sandboxID}/{checkpointID}/rootfs.tar.zst
+	if checkpointID := extractCheckpointID(rootfsKey); checkpointID != "" {
+		// Fast path: check local checkpoint cache
+		cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
+		cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+		if cachedRootfs != "" && cachedWorkspace != "" {
+			log.Printf("grpc: create from checkpoint %s: using local cache", checkpointID)
+			return cachedRootfs, cachedWorkspace, nil
+		}
+
+		// Slow path: download from S3 and cache locally
+		log.Printf("grpc: create from checkpoint %s: downloading from S3 (rootfs=%s, workspace=%s)", checkpointID, rootfsKey, workspaceKey)
+		return s.downloadAndCacheCheckpointDrives(ctx, checkpointID, rootfsKey, workspaceKey)
+	}
+
+	// Template key format: templates/{id}/rootfs.tar.zst
 	templateID := extractTemplateID(rootfsKey)
 	if templateID == "" {
-		return "", "", fmt.Errorf("cannot extract template ID from key: %s", rootfsKey)
+		return "", "", fmt.Errorf("cannot extract template/checkpoint ID from key: %s", rootfsKey)
 	}
 
 	// Fast path: check local template cache
@@ -454,6 +550,15 @@ func extractTemplateID(s3Key string) string {
 	parts := strings.Split(s3Key, "/")
 	if len(parts) >= 2 && parts[0] == "templates" {
 		return parts[1]
+	}
+	return ""
+}
+
+// extractCheckpointID extracts the checkpoint ID from an S3 key like "checkpoints/{sandboxID}/{checkpointID}/rootfs.tar.zst".
+func extractCheckpointID(s3Key string) string {
+	parts := strings.Split(s3Key, "/")
+	if len(parts) >= 3 && parts[0] == "checkpoints" {
+		return parts[2] // parts[1] is sandboxID, parts[2] is checkpointID
 	}
 	return ""
 }
@@ -486,6 +591,37 @@ func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templat
 	}
 
 	log.Printf("grpc: template %s: cached locally at %s", templateID, cacheDir)
+	return cachedRootfs, cachedWorkspace, nil
+}
+
+// downloadAndCacheCheckpointDrives downloads checkpoint archives from S3, extracts them,
+// and caches the ext4 drives locally for future use.
+func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, checkpointID, rootfsKey, workspaceKey string) (string, string, error) {
+	if s.checkpointStore == nil {
+		return "", "", fmt.Errorf("checkpoint store not configured")
+	}
+
+	cacheDir := filepath.Join(s.manager.DataDir(), "checkpoints", checkpointID)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", "", fmt.Errorf("create checkpoint cache dir: %w", err)
+	}
+
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+
+	// Download and extract rootfs (tar.zst)
+	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("download rootfs: %w", err)
+	}
+
+	// Download and extract workspace (sparse.zst)
+	if err := downloadAndExtract(ctx, s.checkpointStore, workspaceKey, cachedWorkspace, extractSparseCmd); err != nil {
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("download workspace: %w", err)
+	}
+
+	log.Printf("grpc: checkpoint %s: cached locally at %s", checkpointID, cacheDir)
 	return cachedRootfs, cachedWorkspace, nil
 }
 

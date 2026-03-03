@@ -129,10 +129,10 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) 
 // exists, it wakes the sandbox on a new worker. Otherwise, it marks the session
 // as stopped and returns a clear error.
 func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context, sandboxID string, session *db.SandboxSession, port int) error {
-	// Check if there's a checkpoint we can wake from
-	checkpoint, err := p.store.GetActiveCheckpoint(ctx, sandboxID)
+	// Check if there's a hibernation we can wake from
+	checkpoint, err := p.store.GetActiveHibernation(ctx, sandboxID)
 	if err == nil && checkpoint != nil {
-		log.Printf("cp-proxy: sandbox %s has active checkpoint, attempting recovery wake", sandboxID)
+		log.Printf("cp-proxy: sandbox %s has active hibernation, attempting recovery wake", sandboxID)
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)
 		if err != nil {
 			log.Printf("cp-proxy: recovery wake failed for sandbox %s: %v", sandboxID, err)
@@ -147,8 +147,8 @@ func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context
 		return p.doHTTP(c, sandboxID, workerURL, port)
 	}
 
-	// No checkpoint — sandbox is truly gone. Mark session as stopped.
-	log.Printf("cp-proxy: sandbox %s has no checkpoint and worker is gone, marking stopped", sandboxID)
+	// No hibernation — sandbox is truly gone. Mark session as stopped.
+	log.Printf("cp-proxy: sandbox %s has no hibernation and worker is gone, marking stopped", sandboxID)
 	errMsg := "worker lost, sandbox not recoverable"
 	_ = p.store.UpdateSandboxSessionStatus(ctx, sandboxID, "stopped", &errMsg)
 
@@ -161,10 +161,10 @@ func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context
 // is accessed. It picks the least loaded worker, sends a WakeSandbox gRPC call,
 // and updates the DB. Returns the worker entry and its HTTP address for proxying.
 func (p *ControlPlaneProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID string) (*controlplane.WorkerEntry, string, error) {
-	// Look up the active checkpoint
-	checkpoint, err := p.store.GetActiveCheckpoint(ctx, sandboxID)
+	// Look up the active hibernation
+	checkpoint, err := p.store.GetActiveHibernation(ctx, sandboxID)
 	if err != nil {
-		return nil, "", fmt.Errorf("no active checkpoint: %w", err)
+		return nil, "", fmt.Errorf("no active hibernation: %w", err)
 	}
 
 	// Pick the least loaded worker in the same region
@@ -182,15 +182,15 @@ func (p *ControlPlaneProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID
 
 	_, err = grpcClient.WakeSandbox(grpcCtx, &pb.WakeSandboxRequest{
 		SandboxId:     sandboxID,
-		CheckpointKey: checkpoint.CheckpointKey,
+		CheckpointKey: checkpoint.HibernationKey,
 		Timeout:       300, // default 5 min timeout after wake
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("gRPC WakeSandbox failed: %w", err)
 	}
 
-	// Update DB: mark checkpoint restored, update session to running on new worker
-	_ = p.store.MarkCheckpointRestored(ctx, sandboxID)
+	// Update DB: mark hibernation restored, update session to running on new worker
+	_ = p.store.MarkHibernationRestored(ctx, sandboxID)
 	_ = p.store.UpdateSandboxSessionForWake(ctx, sandboxID, worker.ID)
 
 	workerURL := worker.HTTPAddr

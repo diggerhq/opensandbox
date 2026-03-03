@@ -58,14 +58,14 @@ type TimeoutRequest struct {
 	Timeout int `json:"timeout"` // seconds
 }
 
-// CheckpointInfo holds metadata about a hibernated sandbox's checkpoint.
-type CheckpointInfo struct {
-	SandboxID     string    `json:"sandboxId"`
-	CheckpointKey string    `json:"checkpointKey"`
-	SizeBytes     int64     `json:"sizeBytes"`
-	Region        string    `json:"region"`
-	Template      string    `json:"template"`
-	HibernatedAt  time.Time `json:"hibernatedAt"`
+// HibernationInfo holds metadata about a hibernated sandbox.
+type HibernationInfo struct {
+	SandboxID      string    `json:"sandboxId"`
+	HibernationKey string    `json:"hibernationKey"`
+	SizeBytes      int64     `json:"sizeBytes"`
+	Region         string    `json:"region"`
+	Template       string    `json:"template"`
+	HibernatedAt   time.Time `json:"hibernatedAt"`
 }
 
 // WakeRequest is the request body for waking a hibernated sandbox.

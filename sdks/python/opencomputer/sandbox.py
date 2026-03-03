@@ -184,6 +184,126 @@ class Sandbox:
         pty_key = self._token or self._api_key
         return Pty(self._ops_client, self.sandbox_id, pty_url, pty_key)
 
+    async def create_checkpoint(self, name: str) -> dict:
+        """Create a named checkpoint of the running sandbox.
+
+        Args:
+            name: A unique name for this checkpoint.
+
+        Returns:
+            Checkpoint info dict with id, sandboxId, name, status, etc.
+        """
+        resp = await self._client.post(
+            f"/sandboxes/{self.sandbox_id}/checkpoints",
+            json={"name": name},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def list_checkpoints(self) -> list[dict]:
+        """List all checkpoints for this sandbox."""
+        resp = await self._client.get(f"/sandboxes/{self.sandbox_id}/checkpoints")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def restore_checkpoint(self, checkpoint_id: str) -> None:
+        """Restore the sandbox to a previous checkpoint (in-place revert).
+
+        The VM is rebooted from the checkpoint's drives. After restore,
+        internal clients are refreshed automatically.
+
+        Args:
+            checkpoint_id: UUID of the checkpoint to restore.
+        """
+        resp = await self._client.post(
+            f"/sandboxes/{self.sandbox_id}/checkpoints/{checkpoint_id}/restore",
+        )
+        resp.raise_for_status()
+
+        # Refresh connection info since the VM was rebooted
+        info = await self._client.get(f"/sandboxes/{self.sandbox_id}")
+        info.raise_for_status()
+        data = info.json()
+        self._connect_url = data.get("connectURL", "")
+        self._token = data.get("token", "")
+        if self._connect_url and self._token:
+            if self._data_client is not None:
+                await self._data_client.aclose()
+            self._data_client = httpx.AsyncClient(
+                base_url=self._connect_url,
+                headers={"Authorization": f"Bearer {self._token}"},
+                timeout=30.0,
+            )
+
+    @classmethod
+    async def create_from_checkpoint(
+        cls,
+        checkpoint_id: str,
+        timeout: int = 300,
+        api_key: str | None = None,
+        api_url: str | None = None,
+    ) -> Sandbox:
+        """Create a new sandbox from an existing checkpoint (fork).
+
+        Args:
+            checkpoint_id: UUID of the checkpoint to fork from.
+            timeout: Sandbox timeout in seconds (default 300).
+            api_key: API key (or OPENCOMPUTER_API_KEY env var).
+            api_url: API URL (or OPENCOMPUTER_API_URL env var).
+        """
+        url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
+        url = url.rstrip("/")
+        key = api_key or os.environ.get("OPENCOMPUTER_API_KEY", "")
+
+        api_base = url if url.endswith("/api") else f"{url}/api"
+
+        headers = {}
+        if key:
+            headers["X-API-Key"] = key
+
+        client = httpx.AsyncClient(base_url=api_base, headers=headers, timeout=120.0)
+
+        resp = await client.post(
+            f"/sandboxes/from-checkpoint/{checkpoint_id}",
+            json={"timeout": timeout},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        connect_url = data.get("connectURL", "")
+        token = data.get("token", "")
+
+        data_client = None
+        if connect_url and token:
+            data_client = httpx.AsyncClient(
+                base_url=connect_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30.0,
+            )
+
+        return cls(
+            sandbox_id=data["sandboxID"],
+            status=data.get("status", "running"),
+            _api_url=url,
+            _api_key=key,
+            _connect_url=connect_url,
+            _token=token,
+            _client=client,
+            _data_client=data_client,
+        )
+
+    async def delete_checkpoint(self, checkpoint_id: str) -> None:
+        """Delete a checkpoint.
+
+        Args:
+            checkpoint_id: UUID of the checkpoint to delete.
+        """
+        resp = await self._client.delete(
+            f"/sandboxes/{self.sandbox_id}/checkpoints/{checkpoint_id}",
+        )
+        if resp.status_code != 404:
+            resp.raise_for_status()
+
     async def create_preview_url(self, port: int, domain: str | None = None, auth_config: dict | None = None) -> dict:
         """Create a preview URL targeting a specific container port.
 

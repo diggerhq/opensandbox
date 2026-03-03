@@ -147,6 +147,12 @@ func (m *Manager) allocateCID() uint32 {
 // Create launches a new Firecracker microVM.
 func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.Sandbox, error) {
 	id := "sb-" + uuid.New().String()[:8]
+	return m.createWithID(ctx, id, cfg)
+}
+
+// createWithID is the internal implementation of Create that accepts a specific sandbox ID.
+// Used by Create (with a new UUID) and RestoreFromCheckpoint (with the existing ID).
+func (m *Manager) createWithID(ctx context.Context, id string, cfg types.SandboxConfig) (*types.Sandbox, error) {
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", id)
 
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
@@ -562,9 +568,9 @@ func (m *Manager) WaitUploads(timeout time.Duration) {
 
 // HibernateAllResult holds the result of a single VM hibernation during HibernateAll.
 type HibernateAllResult struct {
-	SandboxID     string
-	CheckpointKey string
-	Err           error
+	SandboxID      string
+	HibernationKey string
+	Err            error
 }
 
 // HibernateAll hibernates all running VMs concurrently.
@@ -598,7 +604,7 @@ func (m *Manager) HibernateAll(ctx context.Context, checkpointStore *storage.Che
 				log.Printf("firecracker: HibernateAll: %s failed: %v", sandboxID, err)
 				results = append(results, HibernateAllResult{SandboxID: sandboxID, Err: err})
 			} else {
-				results = append(results, HibernateAllResult{SandboxID: sandboxID, CheckpointKey: result.CheckpointKey})
+				results = append(results, HibernateAllResult{SandboxID: sandboxID, HibernationKey: result.HibernationKey})
 			}
 		}(id)
 	}

@@ -708,14 +708,14 @@ func (s *Server) dashboardGetSession(c echo.Context) error {
 		}
 	}
 
-	// If hibernated, include checkpoint info
+	// If hibernated, include hibernation info
 	if session.Status == "hibernated" {
-		checkpoint, err := s.store.GetActiveCheckpoint(c.Request().Context(), sandboxID)
+		hibernation, err := s.store.GetActiveHibernation(c.Request().Context(), sandboxID)
 		if err == nil {
-			resp["checkpoint"] = map[string]interface{}{
-				"checkpointKey": checkpoint.CheckpointKey,
-				"sizeBytes":     checkpoint.SizeBytes,
-				"hibernatedAt":  checkpoint.HibernatedAt,
+			resp["hibernation"] = map[string]interface{}{
+				"hibernationKey": hibernation.HibernationKey,
+				"sizeBytes":      hibernation.SizeBytes,
+				"hibernatedAt":   hibernation.HibernatedAt,
 			}
 		}
 	}

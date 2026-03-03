@@ -157,7 +157,7 @@ func main() {
 			WorkerID:        workerID,
 			OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 				log.Printf("opensandbox: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
-					sandboxID, result.CheckpointKey, result.SizeBytes)
+					sandboxID, result.HibernationKey, result.SizeBytes)
 				if opts.Store != nil {
 					_ = opts.Store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
 				}

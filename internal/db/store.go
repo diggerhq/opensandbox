@@ -74,6 +74,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{8, "migrations/008_default_template.up.sql"},
 		{9, "migrations/009_sandbox_templates.up.sql"},
 		{10, "migrations/010_template_status.up.sql"},
+		{11, "migrations/011_rename_hibernation.up.sql"},
+		{12, "migrations/012_checkpoints.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -614,14 +616,14 @@ func (s *Store) Pool() *pgxpool.Pool {
 	return s.pool
 }
 
-// --- Checkpoint operations ---
+// --- Hibernation operations ---
 
-// SandboxCheckpoint represents a hibernated sandbox's checkpoint record.
-type SandboxCheckpoint struct {
+// SandboxHibernation represents a hibernated sandbox's record.
+type SandboxHibernation struct {
 	ID             uuid.UUID       `json:"id"`
 	SandboxID      string          `json:"sandboxId"`
 	OrgID          uuid.UUID       `json:"orgId"`
-	CheckpointKey  string          `json:"checkpointKey"`
+	HibernationKey string          `json:"hibernationKey"`
 	SizeBytes      int64           `json:"sizeBytes"`
 	Region         string          `json:"region"`
 	Template       string          `json:"template"`
@@ -631,41 +633,41 @@ type SandboxCheckpoint struct {
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
 }
 
-// CreateCheckpoint inserts a new checkpoint record.
-func (s *Store) CreateCheckpoint(ctx context.Context, sandboxID string, orgID uuid.UUID, checkpointKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxCheckpoint, error) {
-	cp := &SandboxCheckpoint{}
+// CreateHibernation inserts a new hibernation record.
+func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, error) {
+	cp := &SandboxHibernation{}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandbox_checkpoints (sandbox_id, org_id, checkpoint_key, size_bytes, region, template, sandbox_config)
+		`INSERT INTO sandbox_hibernations (sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, sandbox_id, org_id, checkpoint_key, size_bytes, region, template, sandbox_config, hibernated_at`,
-		sandboxID, orgID, checkpointKey, sizeBytes, region, template, sandboxConfig,
-	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.CheckpointKey, &cp.SizeBytes,
+		 RETURNING id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at`,
+		sandboxID, orgID, hibernationKey, sizeBytes, region, template, sandboxConfig,
+	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
 		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create checkpoint: %w", err)
+		return nil, fmt.Errorf("failed to create hibernation: %w", err)
 	}
 	return cp, nil
 }
 
-// GetActiveCheckpoint returns the active (not restored, not expired) checkpoint for a sandbox.
-func (s *Store) GetActiveCheckpoint(ctx context.Context, sandboxID string) (*SandboxCheckpoint, error) {
-	cp := &SandboxCheckpoint{}
+// GetActiveHibernation returns the active (not restored, not expired) hibernation for a sandbox.
+func (s *Store) GetActiveHibernation(ctx context.Context, sandboxID string) (*SandboxHibernation, error) {
+	cp := &SandboxHibernation{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, checkpoint_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at
-		 FROM sandbox_checkpoints
+		`SELECT id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at
+		 FROM sandbox_hibernations
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`, sandboxID,
-	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.CheckpointKey, &cp.SizeBytes,
+	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
 		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt, &cp.RestoredAt, &cp.ExpiredAt)
 	if err != nil {
-		return nil, fmt.Errorf("active checkpoint not found: %w", err)
+		return nil, fmt.Errorf("active hibernation not found: %w", err)
 	}
 	return cp, nil
 }
 
-// MarkCheckpointRestored marks the active checkpoint for a sandbox as restored.
-func (s *Store) MarkCheckpointRestored(ctx context.Context, sandboxID string) error {
+// MarkHibernationRestored marks the active hibernation for a sandbox as restored.
+func (s *Store) MarkHibernationRestored(ctx context.Context, sandboxID string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET restored_at = now()
+		`UPDATE sandbox_hibernations SET restored_at = now()
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`,
 		sandboxID)
 	return err
@@ -685,12 +687,12 @@ func (s *Store) UpdateSandboxSessionForWake(ctx context.Context, sandboxID, newW
 // Sessions without a checkpoint are set to "stopped" (VM is gone, no recovery possible).
 // Returns the count of sessions transitioned to each state.
 func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (hibernated, stopped int, err error) {
-	// First: mark sessions that have an active checkpoint as "hibernated"
+	// First: mark sessions that have an active hibernation as "hibernated"
 	res1, err := s.pool.Exec(ctx,
 		`UPDATE sandbox_sessions SET status = 'hibernated'
 		 WHERE worker_id = $1 AND status = 'running'
 		 AND sandbox_id IN (
-		     SELECT sandbox_id FROM sandbox_checkpoints
+		     SELECT sandbox_id FROM sandbox_hibernations
 		     WHERE restored_at IS NULL AND expired_at IS NULL
 		 )`, workerID)
 	if err != nil {
@@ -710,22 +712,115 @@ func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (h
 }
 
 // UpsertWorkspaceBackup creates or updates a workspace-only backup record for a sandbox.
-// Uses checkpoint_key prefix "workspace-backups/" to distinguish from full hibernation checkpoints.
+// Uses hibernation_key prefix "workspace-backups/" to distinguish from full hibernation records.
 // Only one workspace backup is kept per sandbox (previous is overwritten).
 func (s *Store) UpsertWorkspaceBackup(ctx context.Context, sandboxID string, orgID uuid.UUID, backupKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) error {
 	// Expire any existing workspace backups for this sandbox
 	_, _ = s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET expired_at = now()
-		 WHERE sandbox_id = $1 AND checkpoint_key LIKE 'workspace-backups/%'
+		`UPDATE sandbox_hibernations SET expired_at = now()
+		 WHERE sandbox_id = $1 AND hibernation_key LIKE 'workspace-backups/%'
 		 AND expired_at IS NULL AND restored_at IS NULL`, sandboxID)
 
 	// Insert the new backup
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO sandbox_checkpoints (sandbox_id, org_id, checkpoint_key, size_bytes, region, template, sandbox_config)
+		`INSERT INTO sandbox_hibernations (sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		sandboxID, orgID, backupKey, sizeBytes, region, template, sandboxConfig)
 	if err != nil {
 		return fmt.Errorf("failed to upsert workspace backup: %w", err)
+	}
+	return nil
+}
+
+// --- Checkpoint operations ---
+
+// Checkpoint represents a named checkpoint for a sandbox.
+type Checkpoint struct {
+	ID              uuid.UUID       `json:"id"`
+	SandboxID       string          `json:"sandboxId"`
+	OrgID           uuid.UUID       `json:"orgId"`
+	Name            string          `json:"name"`
+	RootfsS3Key     *string         `json:"rootfsS3Key,omitempty"`
+	WorkspaceS3Key  *string         `json:"workspaceS3Key,omitempty"`
+	SandboxConfig   json.RawMessage `json:"sandboxConfig"`
+	Status          string          `json:"status"`
+	SizeBytes       int64           `json:"sizeBytes"`
+	CreatedAt       time.Time       `json:"createdAt"`
+}
+
+// CreateCheckpoint inserts a new checkpoint record.
+func (s *Store) CreateCheckpoint(ctx context.Context, cp *Checkpoint) error {
+	return s.pool.QueryRow(ctx,
+		`INSERT INTO sandbox_checkpoints (id, sandbox_id, org_id, name, sandbox_config)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING created_at`,
+		cp.ID, cp.SandboxID, cp.OrgID, cp.Name, cp.SandboxConfig,
+	).Scan(&cp.CreatedAt)
+}
+
+// SetCheckpointReady marks a checkpoint as ready after async S3 upload completes.
+func (s *Store) SetCheckpointReady(ctx context.Context, checkpointID uuid.UUID, rootfsKey, workspaceKey string, sizeBytes int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET status = 'ready', rootfs_s3_key = $2, workspace_s3_key = $3, size_bytes = $4
+		 WHERE id = $1`,
+		checkpointID, rootfsKey, workspaceKey, sizeBytes)
+	return err
+}
+
+// GetCheckpoint returns a checkpoint by ID.
+func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Checkpoint, error) {
+	cp := &Checkpoint{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		 FROM sandbox_checkpoints WHERE id = $1`, checkpointID,
+	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint not found: %w", err)
+	}
+	return cp, nil
+}
+
+// ListCheckpoints returns all checkpoints for a sandbox, newest first.
+func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		 FROM sandbox_checkpoints WHERE sandbox_id = $1 ORDER BY created_at DESC`, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var checkpoints []Checkpoint
+	for rows.Next() {
+		var cp Checkpoint
+		if err := rows.Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
+			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt); err != nil {
+			return nil, err
+		}
+		checkpoints = append(checkpoints, cp)
+	}
+	return checkpoints, rows.Err()
+}
+
+// CountCheckpoints returns the number of checkpoints for a sandbox.
+func (s *Store) CountCheckpoints(ctx context.Context, sandboxID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sandbox_checkpoints WHERE sandbox_id = $1`, sandboxID).Scan(&count)
+	return count, err
+}
+
+// DeleteCheckpoint deletes a checkpoint (only if owned by org).
+func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpointID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM sandbox_checkpoints WHERE id = $1 AND org_id = $2`,
+		checkpointID, orgID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("checkpoint not found or not owned by org")
 	}
 	return nil
 }

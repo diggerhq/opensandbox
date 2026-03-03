@@ -191,7 +191,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 
 	return &sandbox.HibernateResult{
 		SandboxID:     sandboxID,
-		CheckpointKey: checkpointKey,
+		HibernationKey: checkpointKey,
 		SizeBytes:     0, // not known yet — archive happens async
 	}, nil
 }
@@ -848,6 +848,215 @@ func (m *Manager) TemplateCachePath(templateID, filename string) string {
 		return p
 	}
 	return ""
+}
+
+// checkpointCacheDir returns the local cache directory for a checkpoint's ext4 drives.
+func (m *Manager) checkpointCacheDir(checkpointID string) string {
+	return filepath.Join(m.cfg.DataDir, "checkpoints", checkpointID)
+}
+
+// CheckpointCachePath returns the local path to a cached checkpoint drive, or "" if not cached.
+func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
+	p := filepath.Join(m.checkpointCacheDir(checkpointID), filename)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return ""
+}
+
+// CreateCheckpoint snapshots a running sandbox's drives (rootfs + workspace) for later restore.
+// The VM is briefly paused (~10-50ms) during file copy then resumed. Archive upload is async.
+// Returns the pre-computed S3 keys immediately. onReady is called when the async upload finishes.
+func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
+	vm, err := m.getVM(sandboxID)
+	if err != nil {
+		return "", "", err
+	}
+
+	t0 := time.Now()
+
+	rootfsKey = fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", sandboxID, checkpointID)
+	workspaceKey = fmt.Sprintf("checkpoints/%s/%s/workspace.sparse.zst", sandboxID, checkpointID)
+
+	srcRootfs := filepath.Join(vm.sandboxDir, "rootfs.ext4")
+	srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.ext4")
+
+	// Cache checkpoint drives locally for fast restore
+	cacheDir := m.checkpointCacheDir(checkpointID)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return "", "", fmt.Errorf("create checkpoint cache dir: %w", err)
+	}
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+
+	// Step 1: SyncFS (agent stays alive)
+	if vm.agent != nil {
+		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if syncErr := vm.agent.SyncFS(syncCtx); syncErr != nil {
+			log.Printf("firecracker: CreateCheckpoint %s: SyncFS warning: %v", vm.ID, syncErr)
+		}
+		cancel()
+	}
+
+	// Step 2: Close gRPC connection (vsock must be inactive before pause)
+	if vm.agent != nil {
+		vm.agent.Close()
+		vm.agent = nil
+	}
+
+	// Step 3: Pause the VM
+	if err = vm.fcClient.PauseVM(); err != nil {
+		if agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 5*time.Second); reconnErr == nil {
+			vm.agent = agent
+		}
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("pause VM for checkpoint: %w", err)
+	}
+	log.Printf("firecracker: CreateCheckpoint %s/%s: VM paused (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
+
+	// Step 4: Copy drive files while VM is paused (drives are stable)
+	copyErr := copyFileReflink(srcRootfs, cachedRootfs)
+	if copyErr == nil {
+		copyErr = copyFileReflink(srcWorkspace, cachedWorkspace)
+		if copyErr != nil {
+			os.Remove(cachedRootfs)
+		}
+	}
+
+	// Step 5: Resume the VM regardless of copy result
+	resumeErr := vm.fcClient.ResumeVM()
+	if resumeErr != nil {
+		log.Printf("firecracker: CreateCheckpoint %s: CRITICAL: resume failed: %v", vm.ID, resumeErr)
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("resume VM after checkpoint: %w", resumeErr)
+	}
+	log.Printf("firecracker: CreateCheckpoint %s/%s: VM resumed (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
+
+	if copyErr != nil {
+		if agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 10*time.Second); reconnErr == nil {
+			vm.agent = agent
+		}
+		os.RemoveAll(cacheDir)
+		return "", "", fmt.Errorf("copy drives for checkpoint: %w", copyErr)
+	}
+
+	// Step 6: Reconnect agent
+	agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 10*time.Second)
+	if reconnErr != nil {
+		log.Printf("firecracker: CreateCheckpoint %s: agent reconnect failed: %v (VM still running)", vm.ID, reconnErr)
+	} else {
+		vm.agent = agent
+	}
+
+	// Step 7: Async compress + upload to S3
+	m.uploadWg.Add(1)
+	go func() {
+		defer m.uploadWg.Done()
+
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+
+		t1 := time.Now()
+		if err := compressAndUploadFile(uploadCtx, cachedRootfs, rootfsKey, checkpointStore); err != nil {
+			log.Printf("firecracker: checkpoint %s: rootfs upload failed: %v", checkpointID, err)
+			return
+		}
+		log.Printf("firecracker: checkpoint %s: rootfs uploaded (%dms)", checkpointID, time.Since(t1).Milliseconds())
+
+		t2 := time.Now()
+		if err := sparseCompressAndUpload(uploadCtx, cachedWorkspace, workspaceKey, checkpointStore); err != nil {
+			log.Printf("firecracker: checkpoint %s: workspace upload failed: %v", checkpointID, err)
+			return
+		}
+		log.Printf("firecracker: checkpoint %s: ready (%dms, total=%dms)", checkpointID, time.Since(t2).Milliseconds(), time.Since(t0).Milliseconds())
+		if onReady != nil {
+			onReady()
+		}
+	}()
+
+	return rootfsKey, workspaceKey, nil
+}
+
+// RestoreFromCheckpoint reverts a running sandbox to a checkpoint.
+// The current VM is killed, drives are replaced with checkpoint copies, and a new VM is cold booted.
+// The sandbox ID stays the same.
+func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpointID string) error {
+	vm, err := m.getVM(sandboxID)
+	if err != nil {
+		return err
+	}
+
+	cacheDir := m.checkpointCacheDir(checkpointID)
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+
+	// Verify checkpoint files exist locally
+	if _, err := os.Stat(cachedRootfs); err != nil {
+		return fmt.Errorf("checkpoint rootfs not found locally: %w", err)
+	}
+	if _, err := os.Stat(cachedWorkspace); err != nil {
+		return fmt.Errorf("checkpoint workspace not found locally: %w", err)
+	}
+
+	// Step 1: SyncFS (best effort — save current state in case needed)
+	if vm.agent != nil {
+		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = vm.agent.SyncFS(syncCtx)
+		cancel()
+		vm.agent.Close()
+		vm.agent = nil
+	}
+
+	// Step 2: Kill the current Firecracker process
+	if vm.cmd != nil && vm.cmd.Process != nil {
+		_ = vm.cmd.Process.Kill()
+		_ = vm.cmd.Wait()
+	}
+
+	// Step 2b: Clean up socket files so the new VM can bind
+	_ = os.Remove(vm.vsockPath)
+	if vm.apiSockPath != "" {
+		_ = os.Remove(vm.apiSockPath)
+	}
+
+	// Step 3: Save VM config before removing from map
+	template := vm.Template
+	cpuCount := vm.CpuCount
+	memoryMB := vm.MemoryMB
+	guestPort := vm.GuestPort
+
+	// Step 4: Clean up network
+	if vm.network != nil {
+		RemoveDNAT(vm.network)
+		DeleteTAP(vm.network.TAPName)
+		m.subnets.Release(vm.network.TAPName)
+	}
+
+	// Step 5: Remove old VM from tracking
+	m.mu.Lock()
+	delete(m.vms, sandboxID)
+	m.mu.Unlock()
+
+	// Step 6: Cold boot a fresh VM using checkpoint drives
+	// Pass checkpoint cache paths as template keys so createWithID copies them
+	// instead of creating fresh drives from the base image.
+	cfg := types.SandboxConfig{
+		Template:             template,
+		CpuCount:             cpuCount,
+		MemoryMB:             memoryMB,
+		Port:                 guestPort,
+		NetworkEnabled:       true,
+		TemplateRootfsKey:    "local://" + cachedRootfs,
+		TemplateWorkspaceKey: "local://" + cachedWorkspace,
+	}
+
+	sb, err := m.createWithID(ctx, sandboxID, cfg)
+	if err != nil {
+		return fmt.Errorf("cold boot after checkpoint restore: %w", err)
+	}
+	log.Printf("firecracker: RestoreFromCheckpoint %s/%s: VM cold booted (status=%s)", sandboxID, checkpointID, sb.Status)
+
+	return nil
 }
 
 // copyFileReflink copies a file using cp --reflink=auto (instant on XFS reflink, fallback to full copy).

@@ -33,6 +33,8 @@ const (
 	SandboxWorker_HibernateSandbox_FullMethodName  = "/worker.SandboxWorker/HibernateSandbox"
 	SandboxWorker_WakeSandbox_FullMethodName       = "/worker.SandboxWorker/WakeSandbox"
 	SandboxWorker_SaveAsTemplate_FullMethodName    = "/worker.SandboxWorker/SaveAsTemplate"
+	SandboxWorker_CreateCheckpoint_FullMethodName  = "/worker.SandboxWorker/CreateCheckpoint"
+	SandboxWorker_RestoreCheckpoint_FullMethodName = "/worker.SandboxWorker/RestoreCheckpoint"
 	SandboxWorker_BuildTemplate_FullMethodName     = "/worker.SandboxWorker/BuildTemplate"
 	SandboxWorker_GetSandboxStats_FullMethodName   = "/worker.SandboxWorker/GetSandboxStats"
 )
@@ -55,6 +57,8 @@ type SandboxWorkerClient interface {
 	HibernateSandbox(ctx context.Context, in *HibernateSandboxRequest, opts ...grpc.CallOption) (*HibernateSandboxResponse, error)
 	WakeSandbox(ctx context.Context, in *WakeSandboxRequest, opts ...grpc.CallOption) (*WakeSandboxResponse, error)
 	SaveAsTemplate(ctx context.Context, in *SaveAsTemplateRequest, opts ...grpc.CallOption) (*SaveAsTemplateResponse, error)
+	CreateCheckpoint(ctx context.Context, in *CreateCheckpointRequest, opts ...grpc.CallOption) (*CreateCheckpointResponse, error)
+	RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*RestoreCheckpointResponse, error)
 	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
 	GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error)
 }
@@ -219,6 +223,26 @@ func (c *sandboxWorkerClient) SaveAsTemplate(ctx context.Context, in *SaveAsTemp
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) CreateCheckpoint(ctx context.Context, in *CreateCheckpointRequest, opts ...grpc.CallOption) (*CreateCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateCheckpointResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_CreateCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxWorkerClient) RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*RestoreCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestoreCheckpointResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_RestoreCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxWorkerClient) BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BuildTemplateResponse)
@@ -257,6 +281,8 @@ type SandboxWorkerServer interface {
 	HibernateSandbox(context.Context, *HibernateSandboxRequest) (*HibernateSandboxResponse, error)
 	WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error)
 	SaveAsTemplate(context.Context, *SaveAsTemplateRequest) (*SaveAsTemplateResponse, error)
+	CreateCheckpoint(context.Context, *CreateCheckpointRequest) (*CreateCheckpointResponse, error)
+	RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*RestoreCheckpointResponse, error)
 	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
 	GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error)
 	mustEmbedUnimplementedSandboxWorkerServer()
@@ -310,6 +336,12 @@ func (UnimplementedSandboxWorkerServer) WakeSandbox(context.Context, *WakeSandbo
 }
 func (UnimplementedSandboxWorkerServer) SaveAsTemplate(context.Context, *SaveAsTemplateRequest) (*SaveAsTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SaveAsTemplate not implemented")
+}
+func (UnimplementedSandboxWorkerServer) CreateCheckpoint(context.Context, *CreateCheckpointRequest) (*CreateCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateCheckpoint not implemented")
+}
+func (UnimplementedSandboxWorkerServer) RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*RestoreCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestoreCheckpoint not implemented")
 }
 func (UnimplementedSandboxWorkerServer) BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BuildTemplate not implemented")
@@ -572,6 +604,42 @@ func _SandboxWorker_SaveAsTemplate_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_CreateCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).CreateCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_CreateCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).CreateCheckpoint(ctx, req.(*CreateCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxWorker_RestoreCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestoreCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).RestoreCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_RestoreCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).RestoreCheckpoint(ctx, req.(*RestoreCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxWorker_BuildTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BuildTemplateRequest)
 	if err := dec(in); err != nil {
@@ -662,6 +730,14 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SaveAsTemplate",
 			Handler:    _SandboxWorker_SaveAsTemplate_Handler,
+		},
+		{
+			MethodName: "CreateCheckpoint",
+			Handler:    _SandboxWorker_CreateCheckpoint_Handler,
+		},
+		{
+			MethodName: "RestoreCheckpoint",
+			Handler:    _SandboxWorker_RestoreCheckpoint_Handler,
 		},
 		{
 			MethodName: "BuildTemplate",
