@@ -66,16 +66,20 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	memFile := filepath.Join(snapshotDir, "mem")
 	vmstateFile := filepath.Join(snapshotDir, "vmstate")
 
-	// Step 1: Sync filesystems inside the VM (agent stays alive for snapshot)
+	// Step 1: Sync filesystems inside the VM (agent stays alive for snapshot).
+	// Use exec-based sync because syscall.Sync() from PID 1 doesn't reliably flush
+	// dirty pages to virtio-blk after snapshot restore.
 	if vm.agent != nil {
-		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := vm.agent.SyncFS(syncCtx)
+		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
+			Command: "sync",
+		})
 		cancel()
-		if err != nil {
-			log.Printf("firecracker: SyncFS warning for %s: %v", vm.ID, err)
+		if syncErr != nil {
+			log.Printf("firecracker: hibernate %s: exec sync failed: %v", vm.ID, syncErr)
 		}
 	}
-	log.Printf("firecracker: hibernate %s: syncfs done (%dms)", vm.ID, time.Since(t0).Milliseconds())
+	log.Printf("firecracker: hibernate %s: guest sync done (%dms)", vm.ID, time.Since(t0).Milliseconds())
 
 	// Step 2: Close gRPC connection — vsock must be inactive before snapshot
 	if vm.agent != nil {
@@ -749,13 +753,18 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
 	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
 
-	// Step 1: SyncFS (agent stays alive — only the gRPC connection needs to be closed for pause)
+	// Step 1: Flush guest filesystem data to disk.
+	// Use exec-based sync because syscall.Sync() from PID 1 doesn't reliably flush
+	// dirty pages to virtio-blk after snapshot restore.
 	if vm.agent != nil {
-		syncCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		if syncErr := vm.agent.SyncFS(syncCtx); syncErr != nil {
-			log.Printf("firecracker: SaveAsTemplate %s: SyncFS warning: %v", vm.ID, syncErr)
-		}
+		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
+			Command: "sync",
+		})
 		cancel()
+		if syncErr != nil {
+			log.Printf("firecracker: SaveAsTemplate %s: exec sync warning: %v", vm.ID, syncErr)
+		}
 	}
 
 	// Step 2: Close gRPC connection (vsock must be inactive before Firecracker pause)
@@ -775,7 +784,15 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 	}
 	log.Printf("firecracker: SaveAsTemplate %s: VM paused (%dms)", vm.ID, time.Since(t0).Milliseconds())
 
-	// Step 4: Copy drive files while VM is paused (drives are stable)
+	// Step 4: Host-side fsync as insurance — guest sync should have already flushed.
+	for _, drivePath := range []string{srcRootfs, srcWorkspace} {
+		if f, err := os.OpenFile(drivePath, os.O_RDWR, 0); err == nil {
+			f.Sync()
+			f.Close()
+		}
+	}
+
+	// Step 4b: Copy drive files while VM is paused (drives are stable)
 	copyErr := copyFileReflink(srcRootfs, cachedRootfs)
 	if copyErr == nil {
 		copyErr = copyFileReflink(srcWorkspace, cachedWorkspace)
@@ -900,12 +917,26 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
 	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
 
-	// Step 1: Flush workspace data to disk (required for cold boot forks that don't use memory snapshot).
-	// SyncFS ensures the ext4 filesystem is consistent on disk before we copy it.
+	// Step 1: Flush guest filesystem data to disk (required for cold boot forks that don't use memory snapshot).
+	// We run `sync` as a subprocess because syscall.Sync() from PID 1 (the agent) doesn't reliably
+	// flush dirty pages to the virtio-blk device after snapshot restore. Running sync as a child
+	// process works correctly and ensures all dirty pages are written to the host file.
 	if vm.agent != nil {
-		if syncErr := vm.agent.SyncFS(ctx); syncErr != nil {
-			log.Printf("firecracker: CreateCheckpoint %s: SyncFS failed: %v (unflushed data may be lost in cold boot forks)", vm.ID, syncErr)
+		tSync1 := time.Now()
+		syncCtx, syncCancel := context.WithTimeout(ctx, 10*time.Second)
+		resp, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
+			Command: "sync",
+		})
+		syncCancel()
+		if syncErr != nil {
+			log.Printf("firecracker: CreateCheckpoint %s/%s: exec sync failed: %v", vm.ID, checkpointID, syncErr)
+		} else if resp.ExitCode != 0 {
+			log.Printf("firecracker: CreateCheckpoint %s/%s: exec sync exit code %d: %s", vm.ID, checkpointID, resp.ExitCode, resp.Stderr)
+		} else {
+			log.Printf("firecracker: CreateCheckpoint %s/%s: guest sync completed (%dms)", vm.ID, checkpointID, time.Since(tSync1).Milliseconds())
 		}
+	} else {
+		log.Printf("firecracker: CreateCheckpoint %s/%s: WARNING: vm.agent is nil, guest sync SKIPPED!", vm.ID, checkpointID)
 	}
 
 	// Step 2: Close gRPC connection (vsock must be inactive before pause)
@@ -924,14 +955,41 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	}
 	log.Printf("firecracker: CreateCheckpoint %s/%s: VM paused (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
 
-	// Memory snapshot is intentionally skipped during checkpoint. Firecracker's CreateSnapshot
-	// dumps the full VM memory to disk while the VM is paused, which takes 15-100+ seconds
-	// (1GB RAM = 1GB sequential write). This is unacceptable — the sandbox is completely
-	// unresponsive during the pause. Instead, checkpoints only capture drive state via reflink
-	// (sub-millisecond), and forks/restores use cold boot (~500ms). The trade-off is worth it:
-	// ~2ms pause vs 15-100s pause, at the cost of cold boot (~500ms) instead of warm restore (~150ms).
+	// Step 4: Create memory snapshot to tmpfs (/dev/shm) for fast write.
+	// Writing to tmpfs avoids NVMe fsync overhead (the main bottleneck: 15-100s on disk).
+	// Tmpfs writes are memory-bandwidth limited (~30-100ms for 1GB) since they're just memcpy.
+	// The memory file is moved from tmpfs to the checkpoint cache dir in the background after resume.
+	snapshotDir := filepath.Join(cacheDir, "snapshot")
+	if mkdirErr := os.MkdirAll(snapshotDir, 0755); mkdirErr != nil {
+		log.Printf("firecracker: CreateCheckpoint %s: mkdir snapshot dir failed: %v", vm.ID, mkdirErr)
+	}
+	vmstateFile := filepath.Join(snapshotDir, "vmstate")
+	tmpfsMemFile := fmt.Sprintf("/dev/shm/fc-snap-%s-%s.mem", sandboxID, checkpointID)
+	finalMemFile := filepath.Join(snapshotDir, "mem")
 
-	// Step 4: Copy drive files while VM is paused (drives are stable via reflink, sub-ms)
+	var snapshotErr error
+	tSnap := time.Now()
+	if err := vm.fcClient.CreateSnapshot(vmstateFile, tmpfsMemFile); err != nil {
+		log.Printf("firecracker: CreateCheckpoint %s/%s: memory snapshot failed: %v (will fall back to cold boot restore)", vm.ID, checkpointID, err)
+		snapshotErr = err
+		// Clean up partial snapshot files
+		os.Remove(tmpfsMemFile)
+		os.Remove(vmstateFile)
+		os.RemoveAll(snapshotDir)
+	} else {
+		log.Printf("firecracker: CreateCheckpoint %s/%s: memory snapshot to tmpfs (%dms)", vm.ID, checkpointID, time.Since(tSnap).Milliseconds())
+	}
+
+	// Step 5: Host-side fsync as insurance — guest sync should have already flushed
+	// all dirty pages via Firecracker pwrite, but this ensures XFS CoW block allocation.
+	for _, drivePath := range []string{srcRootfs, srcWorkspace} {
+		if f, err := os.OpenFile(drivePath, os.O_RDWR, 0); err == nil {
+			f.Sync()
+			f.Close()
+		}
+	}
+
+	// Step 5b: Copy drive files while VM is paused (drives are stable via reflink, sub-ms)
 	copyErr := copyFileReflink(srcRootfs, cachedRootfs)
 	if copyErr == nil {
 		copyErr = copyFileReflink(srcWorkspace, cachedWorkspace)
@@ -940,16 +998,19 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		}
 	}
 
-	// Step 5: Resume the VM regardless of copy result
+	// Step 6: Resume the VM regardless of copy/snapshot result
 	resumeErr := vm.fcClient.ResumeVM()
 	if resumeErr != nil {
 		log.Printf("firecracker: CreateCheckpoint %s: CRITICAL: resume failed: %v", vm.ID, resumeErr)
+		os.Remove(tmpfsMemFile)
 		os.RemoveAll(cacheDir)
 		return "", "", fmt.Errorf("resume VM after checkpoint: %w", resumeErr)
 	}
-	log.Printf("firecracker: CreateCheckpoint %s/%s: VM resumed (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
+	pauseDuration := time.Since(t0)
+	log.Printf("firecracker: CreateCheckpoint %s/%s: VM resumed, total pause=%dms", vm.ID, checkpointID, pauseDuration.Milliseconds())
 
 	if copyErr != nil {
+		os.Remove(tmpfsMemFile)
 		if agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 10*time.Second); reconnErr == nil {
 			vm.agent = agent
 		}
@@ -957,7 +1018,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("copy drives for checkpoint: %w", copyErr)
 	}
 
-	// Step 6: Reconnect agent
+	// Step 7: Reconnect agent
 	agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 10*time.Second)
 	if reconnErr != nil {
 		log.Printf("firecracker: CreateCheckpoint %s: agent reconnect failed: %v (VM still running)", vm.ID, reconnErr)
@@ -965,7 +1026,37 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		vm.agent = agent
 	}
 
-	// Step 7: Async compress + upload to S3
+	// Step 8: Write snapshot metadata + move mem from tmpfs (background)
+	// If memory snapshot succeeded, write metadata and move the mem file
+	// from /dev/shm to the checkpoint cache dir. This happens after resume
+	// so it doesn't contribute to pause duration.
+	hasSnapshot := snapshotErr == nil
+
+	if hasSnapshot {
+		// Write snapshot metadata (needed for warm restore)
+		meta := &SnapshotMeta{
+			SandboxID:     vm.ID,
+			Network:       vm.network,
+			GuestCID:      vm.guestCID,
+			GuestMAC:      vm.guestMAC,
+			BootArgs:      vm.bootArgs,
+			RootfsPath:    filepath.Join(vm.sandboxDir, "rootfs.ext4"),
+			WorkspacePath: filepath.Join(vm.sandboxDir, "workspace.ext4"),
+			VsockPath:     vm.vsockPath,
+			CpuCount:      vm.CpuCount,
+			MemoryMB:      vm.MemoryMB,
+			Template:      vm.Template,
+			GuestPort:     vm.GuestPort,
+		}
+		metaJSON, _ := json.MarshalIndent(meta, "", "  ")
+		if writeErr := os.WriteFile(filepath.Join(snapshotDir, "snapshot-meta.json"), metaJSON, 0644); writeErr != nil {
+			log.Printf("firecracker: CreateCheckpoint %s: write snapshot meta failed: %v", vm.ID, writeErr)
+			hasSnapshot = false
+			os.Remove(tmpfsMemFile)
+		}
+	}
+
+	// Step 9: Async move mem from tmpfs + compress + upload to S3
 	m.uploadWg.Add(1)
 	go func() {
 		defer m.uploadWg.Done()
@@ -974,6 +1065,23 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 				log.Printf("firecracker: checkpoint %s: upload goroutine panic: %v", checkpointID, r)
 			}
 		}()
+
+		// Move memory file from tmpfs to checkpoint cache (frees tmpfs RAM)
+		if hasSnapshot {
+			tMove := time.Now()
+			if moveErr := os.Rename(tmpfsMemFile, finalMemFile); moveErr != nil {
+				// Rename across filesystems (tmpfs→xfs) won't work, fall back to copy+delete
+				if cpErr := copyFile(tmpfsMemFile, finalMemFile); cpErr != nil {
+					log.Printf("firecracker: checkpoint %s: move mem from tmpfs failed: %v", checkpointID, cpErr)
+					os.Remove(tmpfsMemFile)
+				} else {
+					os.Remove(tmpfsMemFile)
+					log.Printf("firecracker: checkpoint %s: mem copied from tmpfs (%dms)", checkpointID, time.Since(tMove).Milliseconds())
+				}
+			} else {
+				log.Printf("firecracker: checkpoint %s: mem moved from tmpfs (%dms)", checkpointID, time.Since(tMove).Milliseconds())
+			}
+		}
 
 		uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
@@ -1285,6 +1393,16 @@ func (m *Manager) coldBootRestoreFromCheckpoint(ctx context.Context, vm *VMInsta
 // copyFileReflink copies a file using cp --reflink=auto (instant on XFS reflink, fallback to full copy).
 func copyFileReflink(src, dst string) error {
 	cmd := exec.Command("cp", "--reflink=auto", src, dst)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cp %s → %s: %w (%s)", src, dst, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// copyFile copies a file using standard cp (no reflink). Used for cross-filesystem
+// copies like tmpfs → xfs where os.Rename doesn't work.
+func copyFile(src, dst string) error {
+	cmd := exec.Command("cp", src, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cp %s → %s: %w (%s)", src, dst, err, strings.TrimSpace(string(out)))
 	}

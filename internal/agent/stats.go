@@ -3,10 +3,10 @@ package agent
 import (
 	"bufio"
 	"context"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/opensandbox/opensandbox/proto/agent"
@@ -182,14 +182,10 @@ func (s *Server) SyncFS(ctx context.Context, req *pb.SyncFSRequest) (*pb.SyncFSR
 	return &pb.SyncFSResponse{}, nil
 }
 
-// syncFS calls sync(2) to flush all filesystems.
+// syncFS calls sync(2) to flush all filesystem buffers.
+// This syncs ALL mounted filesystems (rootfs + workspace), ensuring dirty pages
+// are written to their backing ext4 images before snapshot/checkpoint.
 func syncFS() error {
-	f, err := os.Open("/")
-	if err != nil {
-		return fmt.Errorf("open /: %w", err)
-	}
-	defer f.Close()
-	// sync(2) — we use SyncFileRange isn't available on all filesystems,
-	// just use Sync on the root fd which triggers global sync
-	return f.Sync()
+	syscall.Sync()
+	return nil
 }

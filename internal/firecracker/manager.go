@@ -441,7 +441,7 @@ func (m *Manager) waitForAgent(ctx context.Context, vsockPath string, timeout ti
 		client, err := NewAgentClient(vsockPath)
 		if err != nil {
 			lastErr = err
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
@@ -451,7 +451,7 @@ func (m *Manager) waitForAgent(ctx context.Context, vsockPath string, timeout ti
 		if err != nil {
 			client.Close()
 			lastErr = err
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 

@@ -52,6 +52,10 @@ func main() {
 	defer fcMgr.Close()
 	log.Println("opensandbox-worker: Firecracker VM manager initialized")
 
+	// Clean up orphaned Firecracker processes + TAP devices BEFORE starting golden snapshot.
+	// Must run first to avoid killing the golden snapshot VM (race condition).
+	fcMgr.CleanupOrphanedProcesses()
+
 	// Prepare golden snapshot for fast default VM creation (~500ms vs ~2s cold boot)
 	go func() {
 		if err := fcMgr.PrepareGoldenSnapshot(); err != nil {
@@ -155,9 +159,6 @@ func main() {
 		} else {
 			defer store.Close()
 			log.Println("opensandbox-worker: PostgreSQL store connected (auto-wake enabled)")
-
-			// Kill orphaned Firecracker processes + TAP devices from previous run
-			fcMgr.CleanupOrphanedProcesses()
 
 			// Local NVMe recovery: scan for sandbox data left from a previous run
 			recoveries := fcMgr.RecoverLocalSandboxes()
