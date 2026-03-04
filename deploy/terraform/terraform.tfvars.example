@@ -1,0 +1,20 @@
+# Required
+environment   = "dev"        # "dev" or "prod"
+aws_region    = "us-east-1"
+key_pair_name = "my-key-pair"
+api_key       = "change-me-to-a-secure-key"
+jwt_secret    = "change-me-to-a-secure-secret"
+
+# Optional overrides
+# project_name         = "opensandbox"
+# vpc_cidr             = "10.0.0.0/16"
+# server_instance_type = "t3.medium"      # prod only
+# worker_instance_type = "c5.metal"
+# dev_host_instance_type = "c5.metal"     # dev only
+# db_instance_class    = "db.t4g.micro"   # prod only
+# redis_node_type      = "cache.t4g.micro" # prod only
+# acm_certificate_arn  = ""               # prod: set for HTTPS (from terraform-dns output)
+# domain_name          = ""               # prod: your domain (from terraform-dns output)
+# hosted_zone_id       = ""               # prod: Route 53 zone for alias record
+# ami_id               = ""               # leave empty for latest Ubuntu 24.04 LTS
+# server_image_tag     = "latest"

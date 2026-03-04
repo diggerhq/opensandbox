@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenSandbox Server (Control Plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/opensandbox-server
+Restart=always
+RestartSec=5
+EnvironmentFile=/etc/opensandbox/server.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,338 @@
+name: Preview Environment — Deploy
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  TF_DIR: deploy/terraform
+  SSH_USER: ubuntu
+  REMOTE_DIR: /home/ubuntu/opensandbox
+
+jobs:
+  deploy:
+    name: Deploy Preview Environment
+    # Run if: /deploy-preview comment on a PR, OR push to a PR (synchronize)
+    if: >-
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/deploy-preview')) ||
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'synchronize')
+    runs-on: ubuntu-latest
+    steps:
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket',
+            });
+
+      - name: Get PR details
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let pr;
+            if (context.eventName === 'issue_comment') {
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.issue.number,
+              });
+              pr = data;
+            } else {
+              pr = context.payload.pull_request;
+            }
+            core.setOutput('number', pr.number);
+            core.setOutput('ref', pr.head.ref);
+            core.setOutput('sha', pr.head.sha);
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Check if preview environment exists
+        if: github.event_name == 'pull_request'
+        id: check_env
+        run: |
+          if aws s3 ls "s3://${{ secrets.TF_STATE_BUCKET }}/pr-${{ steps.pr.outputs.number }}/terraform.tfstate" 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No preview environment found for PR ${{ steps.pr.outputs.number }}, skipping update."
+          fi
+
+      - name: Skip if no existing environment
+        if: >-
+          github.event_name == 'pull_request' &&
+          steps.check_env.outputs.exists != 'true'
+        run: |
+          echo "::notice::No preview environment exists for this PR. Comment /deploy-preview to create one."
+          exit 0
+
+      - name: Checkout PR branch
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.ref }}
+
+      - name: Setup Terraform
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=pr-${{ steps.pr.outputs.number }}/terraform.tfstate" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=us-east-1"
+
+      - name: Terraform Apply
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply -auto-approve \
+            -var="environment=dev-pr-${{ steps.pr.outputs.number }}" \
+            -var="key_pair_name=${{ secrets.KEY_PAIR_NAME || 'opensandbox-dev' }}" \
+            -var="api_key=pr-${{ steps.pr.outputs.number }}-key" \
+            -var="jwt_secret=pr-${{ steps.pr.outputs.number }}-jwt"
+
+      - name: Get instance IP
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        id: tf_output
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          DEV_IP=$(terraform output -raw dev_host_public_ip)
+          echo "dev_ip=$DEV_IP" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PREVIEW_SSH_PRIVATE_KEY }}" > ~/.ssh/preview.pem
+          chmod 600 ~/.ssh/preview.pem
+          for i in 1 2 3 4 5; do
+            ssh-keyscan -H ${{ steps.tf_output.outputs.dev_ip }} >> ~/.ssh/known_hosts 2>/dev/null && break
+            echo "Waiting for SSH to become available (attempt $i)..."
+            sleep 15
+          done
+
+      - name: Wait for instance to be ready
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/preview.pem \
+                ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "echo ready" 2>/dev/null; then
+              echo "Instance is ready"
+              break
+            fi
+            echo "Waiting for instance... (attempt $i/30)"
+            sleep 10
+          done
+
+      - name: Provision instance (idempotent)
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} \
+            "if command -v firecracker &>/dev/null; then echo 'Already provisioned, skipping'; else echo 'First deploy — running setup...'; fi"
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} \
+            'sudo bash -s' < deploy/ec2/setup-single-host.sh
+
+      - name: Rsync repo to instance
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          rsync -az --delete \
+            -e "ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem" \
+            --exclude='.git' \
+            --exclude='bin/' \
+            --exclude='node_modules/' \
+            --exclude='web/dist/' \
+            --exclude='.claude/' \
+            ./ ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }}:${{ env.REMOTE_DIR }}/
+
+      - name: Build binaries on instance
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
+              export PATH=\$PATH:/usr/local/go/bin
+              cd ${{ env.REMOTE_DIR }}
+              mkdir -p bin
+              echo 'Building opensandbox-server...'
+              CGO_ENABLED=0 go build -o bin/opensandbox-server ./cmd/server/
+              echo 'Building opensandbox-worker...'
+              CGO_ENABLED=0 go build -o bin/opensandbox-worker ./cmd/worker/
+              echo 'Building osb-agent...'
+              CGO_ENABLED=0 go build -o bin/osb-agent ./cmd/agent/
+              sudo cp bin/opensandbox-server /usr/local/bin/opensandbox-server
+              sudo cp bin/opensandbox-worker /usr/local/bin/opensandbox-worker
+              sudo cp bin/osb-agent /usr/local/bin/osb-agent
+              sudo chmod +x /usr/local/bin/opensandbox-server /usr/local/bin/opensandbox-worker /usr/local/bin/osb-agent
+              echo 'Binaries installed'
+            "
+
+      - name: Build rootfs (idempotent)
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
+              if [ -f /data/firecracker/images/default.ext4 ]; then
+                echo 'Rootfs already exists, skipping'
+              else
+                export PATH=\$PATH:/usr/local/go/bin
+                cd ${{ env.REMOTE_DIR }}
+                echo 'Building rootfs with Docker...'
+                sudo bash ./deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default
+              fi
+            "
+
+      - name: Install env files and restart services
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
+              sudo bash ${{ env.REMOTE_DIR }}/deploy/ec2/setup-dev-env.sh 'pr-${{ steps.pr.outputs.number }}-key'
+              sudo systemctl restart opensandbox-server
+              sudo systemctl restart opensandbox-worker
+              echo 'Services restarted'
+            "
+
+      - name: Wait for services and seed database
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          sleep 5
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
+              API_KEY='pr-${{ steps.pr.outputs.number }}-key'
+              for i in \$(seq 1 15); do
+                sudo docker exec postgres psql -U opensandbox -d opensandbox -q -c 'SELECT 1 FROM orgs LIMIT 0' 2>/dev/null && break
+                echo 'Waiting for migrations...'
+                sleep 2
+              done
+              sudo docker exec postgres psql -U opensandbox -d opensandbox -q -c \"
+                INSERT INTO orgs (name, slug) VALUES ('PR ${{ steps.pr.outputs.number }}', 'pr-${{ steps.pr.outputs.number }}') ON CONFLICT (slug) DO NOTHING;
+                INSERT INTO api_keys (org_id, key_hash, key_prefix, name)
+                SELECT id, encode(sha256('\${API_KEY}'::bytea), 'hex'), '\${API_KEY}', 'PR Key'
+                FROM orgs WHERE slug = 'pr-${{ steps.pr.outputs.number }}'
+                ON CONFLICT (key_hash) DO NOTHING;
+              \" && echo 'Database seeded' || echo 'WARNING: Seed failed'
+            "
+
+      - name: Health check
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        run: |
+          sleep 3
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
+            ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} \
+            "curl -sf http://localhost:8080/health > /dev/null 2>&1 && echo 'Server health: OK' || echo 'Server health: waiting...'"
+
+      - name: Comment on PR
+        if: >-
+          github.event_name == 'issue_comment' ||
+          steps.check_env.outputs.exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ip = '${{ steps.tf_output.outputs.dev_ip }}';
+            const prNumber = ${{ steps.pr.outputs.number }};
+            const apiKey = `pr-${prNumber}-key`;
+            const isUpdate = '${{ github.event_name }}' === 'pull_request';
+            const body = [
+              `## Preview Environment ${isUpdate ? 'Updated' : 'Ready'}`,
+              ``,
+              `| Resource | Value |`,
+              `|----------|-------|`,
+              `| **Server URL** | \`http://${ip}:8080\` |`,
+              `| **API Key** | \`${apiKey}\` |`,
+              `| **Environment** | \`dev-pr-${prNumber}\` |`,
+              `| **Commit** | \`${{ steps.pr.outputs.sha }}\` |`,
+              ``,
+              `### Quick test`,
+              `\`\`\`bash`,
+              `curl -X POST http://${ip}:8080/api/sandboxes \\`,
+              `  -H 'Content-Type: application/json' \\`,
+              `  -H 'X-API-Key: ${apiKey}' \\`,
+              `  -d '{"templateID":"default"}'`,
+              `\`\`\``,
+              ``,
+              `### SSH access`,
+              `\`\`\`bash`,
+              `ssh -i ~/.ssh/opensandbox-dev.pem ubuntu@${ip}`,
+              `\`\`\``,
+              ``,
+              `> Comment \`/destroy-preview\` or close the PR to tear down this environment.`,
+            ].join('\n');
+
+            // Find and update existing comment, or create new one
+            const marker = '## Preview Environment';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }

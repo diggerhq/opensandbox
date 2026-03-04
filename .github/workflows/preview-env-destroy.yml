@@ -1,0 +1,105 @@
+name: Preview Environment — Destroy
+
+on:
+  pull_request:
+    types: [closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  TF_DIR: deploy/terraform
+
+jobs:
+  destroy:
+    name: Destroy Preview Environment
+    if: >-
+      (github.event_name == 'pull_request' && github.event.action == 'closed') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/destroy-preview'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine PR number
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber;
+            if (context.eventName === 'pull_request') {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              prNumber = context.payload.issue.number;
+            }
+            core.setOutput('number', prNumber);
+
+      - name: React to comment
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes',
+            });
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=pr-${{ steps.pr.outputs.number }}/terraform.tfstate" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=us-east-1"
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform destroy -auto-approve \
+            -var="environment=dev-pr-${{ steps.pr.outputs.number }}" \
+            -var="key_pair_name=${{ secrets.KEY_PAIR_NAME || 'opensandbox-dev' }}" \
+            -var="api_key=pr-${{ steps.pr.outputs.number }}-key" \
+            -var="jwt_secret=pr-${{ steps.pr.outputs.number }}-jwt"
+
+      - name: Clean up state from S3
+        run: |
+          aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}/pr-${{ steps.pr.outputs.number }}/" --recursive || true
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = ${{ steps.pr.outputs.number }};
+            const body = [
+              `## Preview Environment Destroyed`,
+              ``,
+              `The preview environment \`dev-pr-${prNumber}\` has been torn down.`,
+              `All AWS resources for this environment have been cleaned up.`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
