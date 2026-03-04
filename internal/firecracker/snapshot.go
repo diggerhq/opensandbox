@@ -1179,25 +1179,22 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	sandboxDir := vm.sandboxDir
 	endAt := vm.EndAt
 
-	// Step 1: Close agent on current VM
+	// Step 1: Close agent + kill VM + clean up
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
 	}
-
-	// Step 2: Kill the current Firecracker process
 	if vm.cmd != nil && vm.cmd.Process != nil {
 		_ = vm.cmd.Process.Kill()
 		_ = vm.cmd.Wait()
 	}
-
-	// Step 3: Clean up sockets
 	_ = os.Remove(vm.vsockPath)
 	if vm.apiSockPath != "" {
 		_ = os.Remove(vm.apiSockPath)
 	}
+	log.Printf("firecracker: warmRestore %s: killed (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
-	// Step 4: Reflink copy checkpoint drives to sandbox dir (same absolute paths baked into vmstate)
+	// Step 2: Reflink copy checkpoint drives to sandbox dir (same absolute paths baked into vmstate)
 	rootfsPath := filepath.Join(sandboxDir, "rootfs.ext4")
 	workspacePath := filepath.Join(sandboxDir, "workspace.ext4")
 	if err := copyFileReflink(filepath.Join(cacheDir, "rootfs.ext4"), rootfsPath); err != nil {
@@ -1206,8 +1203,9 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	if err := copyFileReflink(filepath.Join(cacheDir, "workspace.ext4"), workspacePath); err != nil {
 		return fmt.Errorf("copy checkpoint workspace: %w", err)
 	}
+	log.Printf("firecracker: warmRestore %s: drives copied (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
-	// Step 5: Release old network and reclaim the same TAP name (baked into vmstate)
+	// Step 3: Release old network and reclaim the same TAP name (baked into vmstate)
 	if vm.network != nil {
 		RemoveDNAT(vm.network)
 		DeleteTAP(vm.network.TAPName)
@@ -1241,7 +1239,9 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 		return fmt.Errorf("add DNAT: %w", err)
 	}
 
-	// Step 6: Start fresh Firecracker process (snapshot mode — no config needed)
+	log.Printf("firecracker: warmRestore %s: network ready (%dms)", sandboxID, time.Since(t0).Milliseconds())
+
+	// Step 4: Start fresh Firecracker process (snapshot mode — no config needed)
 	apiSockPath := filepath.Join(sandboxDir, "firecracker.sock")
 	vsockPath := meta.VsockPath
 	_ = os.Remove(apiSockPath)
@@ -1272,7 +1272,9 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 		return fmt.Errorf("wait for API socket: %w", err)
 	}
 
-	// Step 7: Load snapshot — VM resumes exactly where it was paused during checkpoint
+	log.Printf("firecracker: warmRestore %s: FC started (%dms)", sandboxID, time.Since(t0).Milliseconds())
+
+	// Step 5: Load snapshot — VM resumes exactly where it was paused during checkpoint
 	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
@@ -1282,7 +1284,7 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 
 	log.Printf("firecracker: RestoreFromCheckpoint %s/%s: snapshot loaded (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 
-	// Step 8: Wait for agent (should be near-instant — agent was running when snapshot was taken)
+	// Step 6: Wait for agent (should be near-instant — agent was running when snapshot was taken)
 	agentClient, err := m.waitForAgent(context.Background(), vsockPath, 10*time.Second)
 	if err != nil {
 		cmd.Process.Kill()

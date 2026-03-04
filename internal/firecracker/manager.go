@@ -434,13 +434,21 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 
 // waitForAgent polls the agent via gRPC until it responds or times out.
 func (m *Manager) waitForAgent(ctx context.Context, vsockPath string, timeout time.Duration) (*AgentClient, error) {
-	deadline := time.Now().Add(timeout)
+	t0 := time.Now()
+	deadline := t0.Add(timeout)
 	var lastErr error
+	attempts := 0
 
 	for time.Now().Before(deadline) {
+		attempts++
+		tAttempt := time.Now()
 		client, err := NewAgentClient(vsockPath)
 		if err != nil {
 			lastErr = err
+			if attempts <= 3 || attempts%10 == 0 {
+				log.Printf("firecracker: waitForAgent: attempt %d dial failed (%dms): %v",
+					attempts, time.Since(tAttempt).Milliseconds(), err)
+			}
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
@@ -451,14 +459,20 @@ func (m *Manager) waitForAgent(ctx context.Context, vsockPath string, timeout ti
 		if err != nil {
 			client.Close()
 			lastErr = err
+			if attempts <= 3 || attempts%10 == 0 {
+				log.Printf("firecracker: waitForAgent: attempt %d ping failed (%dms): %v",
+					attempts, time.Since(tAttempt).Milliseconds(), err)
+			}
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
+		log.Printf("firecracker: waitForAgent: connected on attempt %d (%dms total)",
+			attempts, time.Since(t0).Milliseconds())
 		return client, nil
 	}
 
-	return nil, fmt.Errorf("agent not ready after %v: %v", timeout, lastErr)
+	return nil, fmt.Errorf("agent not ready after %v (%d attempts): %v", timeout, attempts, lastErr)
 }
 
 // Get returns sandbox info by ID.
