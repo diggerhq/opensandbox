@@ -106,10 +106,10 @@ func (c *vsockConn) Read(p []byte) (int, error) {
 
 // Close closes the gRPC connection.
 func (c *AgentClient) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
+	if c == nil || c.conn == nil {
+		return nil
 	}
-	return nil
+	return c.conn.Close()
 }
 
 // Ping verifies the agent is responsive.

@@ -924,39 +924,14 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	}
 	log.Printf("firecracker: CreateCheckpoint %s/%s: VM paused (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
 
-	// Step 3: Create memory snapshot (best-effort — enables warm restore, captures dirty page cache)
-	snapshotDir := filepath.Join(cacheDir, "snapshot")
-	if mkErr := os.MkdirAll(snapshotDir, 0755); mkErr != nil {
-		log.Printf("firecracker: CreateCheckpoint %s/%s: mkdir snapshot dir failed: %v (warm restore will be unavailable)", vm.ID, checkpointID, mkErr)
-	} else {
-		memFile := filepath.Join(snapshotDir, "mem")
-		vmstateFile := filepath.Join(snapshotDir, "vmstate")
-		if snapErr := vm.fcClient.CreateSnapshot(vmstateFile, memFile); snapErr != nil {
-			log.Printf("firecracker: CreateCheckpoint %s/%s: memory snapshot failed: %v (warm restore will be unavailable)", vm.ID, checkpointID, snapErr)
-			os.RemoveAll(snapshotDir)
-		} else {
-			// Write snapshot metadata (reuse SnapshotMeta from hibernate)
-			meta := &SnapshotMeta{
-				SandboxID:     vm.ID,
-				Network:       vm.network,
-				GuestCID:      vm.guestCID,
-				GuestMAC:      vm.guestMAC,
-				BootArgs:      vm.bootArgs,
-				RootfsPath:    filepath.Join(vm.sandboxDir, "rootfs.ext4"),
-				WorkspacePath: filepath.Join(vm.sandboxDir, "workspace.ext4"),
-				VsockPath:     vm.vsockPath,
-				CpuCount:      vm.CpuCount,
-				MemoryMB:      vm.MemoryMB,
-				Template:      vm.Template,
-				GuestPort:     vm.GuestPort,
-			}
-			metaJSON, _ := json.Marshal(meta)
-			_ = os.WriteFile(filepath.Join(snapshotDir, "snapshot-meta.json"), metaJSON, 0644)
-			log.Printf("firecracker: CreateCheckpoint %s/%s: memory snapshot captured (%dms)", vm.ID, checkpointID, time.Since(t0).Milliseconds())
-		}
-	}
+	// Memory snapshot is intentionally skipped during checkpoint. Firecracker's CreateSnapshot
+	// dumps the full VM memory to disk while the VM is paused, which takes 15-100+ seconds
+	// (1GB RAM = 1GB sequential write). This is unacceptable — the sandbox is completely
+	// unresponsive during the pause. Instead, checkpoints only capture drive state via reflink
+	// (sub-millisecond), and forks/restores use cold boot (~500ms). The trade-off is worth it:
+	// ~2ms pause vs 15-100s pause, at the cost of cold boot (~500ms) instead of warm restore (~150ms).
 
-	// Step 4: Copy drive files while VM is paused (drives are stable)
+	// Step 4: Copy drive files while VM is paused (drives are stable via reflink, sub-ms)
 	copyErr := copyFileReflink(srcRootfs, cachedRootfs)
 	if copyErr == nil {
 		copyErr = copyFileReflink(srcWorkspace, cachedWorkspace)

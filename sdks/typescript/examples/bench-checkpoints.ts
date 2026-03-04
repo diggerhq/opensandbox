@@ -134,11 +134,11 @@ async function main() {
         // Write in 1GB chunks for large payloads
         const chunks = Math.ceil(payloadMB / 1024);
         for (let i = 0; i < chunks; i++) {
-          await sandbox.commands.run(`dd if=/dev/urandom of=/workspace/payload-${i}.bin bs=1M count=1024 2>/dev/null`, { timeout: 300 });
+          await sandbox.commands.run(`dd if=/dev/zero of=/workspace/payload-${i}.bin bs=1M count=1024 2>/dev/null`, { timeout: 300 });
           dim(`  chunk ${i + 1}/${chunks} written`);
         }
       } else {
-        await sandbox.commands.run(`dd if=/dev/urandom of=/workspace/payload.bin bs=1M count=${payloadMB} 2>/dev/null`, { timeout: 120 });
+        await sandbox.commands.run(`dd if=/dev/zero of=/workspace/payload.bin bs=1M count=${payloadMB} 2>/dev/null`, { timeout: 300 });
       }
     });
     await sandbox.commands.run("echo bench-state > /workspace/marker.txt");
