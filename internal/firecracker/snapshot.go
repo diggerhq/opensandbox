@@ -939,6 +939,20 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		log.Printf("firecracker: CreateCheckpoint %s/%s: WARNING: vm.agent is nil, guest sync SKIPPED!", vm.ID, checkpointID)
 	}
 
+	// Step 1b: Bring eth0 down to drain virtio-net queues. This makes the snapshot
+	// portable across TAP backends — warm forks get a new TAP and the guest kernel
+	// resumes with clean virtqueues instead of stale descriptors from the old TAP.
+	// Without this, forks under network load can hit virtqueue corruption
+	// ("output.0:id 0 is not a head!") and guest kernel soft lockups.
+	// Established connections are already lost on fork (new IP), so no downside.
+	if vm.agent != nil {
+		_, _ = vm.agent.Exec(ctx, &pb.ExecRequest{
+			Command:        "/bin/sh",
+			Args:           []string{"-c", "ip link set eth0 down"},
+			TimeoutSeconds: 5,
+		})
+	}
+
 	// Step 2: Close gRPC connection (vsock must be inactive before pause)
 	if vm.agent != nil {
 		vm.agent.Close()
@@ -1293,7 +1307,12 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 		return fmt.Errorf("agent not ready after warm restore: %w", err)
 	}
 
-	// Step 9: Register restored VM in tracking map
+	// Step 7: Bring eth0 back up (snapshot drains virtqueues by taking eth0 down)
+	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
+		log.Printf("firecracker: warmRestore %s: network reconfig failed: %v (VM still running, network may not work)", sandboxID, err)
+	}
+
+	// Step 8: Register restored VM in tracking map
 	newVM := &VMInstance{
 		ID:          sandboxID,
 		Template:    meta.Template,
