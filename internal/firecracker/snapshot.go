@@ -318,23 +318,13 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	meta.WorkspacePath = workspacePath
 	meta.VsockPath = filepath.Join(sandboxDir, filepath.Base(meta.VsockPath))
 
-	// Step 5: Try snapshot restore (fast path) or cold boot (cross-worker fallback).
-	//
-	// Snapshot restore requires the exact same TAP name (baked into vmstate).
-	// If the TAP name is already taken (cross-worker wake), fall back to cold boot:
-	// boot a fresh VM with the restored rootfs + workspace. Processes won't survive
-	// but filesystem state (user files, installed packages) is preserved.
-	snapshotRestore := true
-	netCfg, err := m.subnets.AllocateSpecific(meta.Network.TAPName)
+	// Step 5: Allocate network and restore via snapshot.
+	// We always allocate a fresh TAP and patch the vmstate to reference it.
+	// Combined with eth0 drain at snapshot time, this makes snapshots fully
+	// portable across TAP backends — no more cold boot fallback needed.
+	netCfg, err := m.subnets.Allocate()
 	if err != nil {
-		// TAP name collision — fall back to cold boot
-		log.Printf("firecracker: wake %s: TAP %s unavailable (%v), falling back to cold boot",
-			sandboxID, meta.Network.TAPName, err)
-		snapshotRestore = false
-		netCfg, err = m.subnets.Allocate()
-		if err != nil {
-			return nil, fmt.Errorf("allocate subnet for cold boot: %w", err)
-		}
+		return nil, fmt.Errorf("allocate subnet: %w", err)
 	}
 	if err := CreateTAP(netCfg); err != nil {
 		m.subnets.Release(netCfg.TAPName)
@@ -390,62 +380,28 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("wait for API socket: %w", err)
 	}
 
-	if snapshotRestore {
-		// Hot restore: load snapshot, VM resumes exactly where it was paused
-		if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
-			cmd.Process.Kill()
-			cmd.Wait()
-			m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("load snapshot: %w", err)
-		}
-		log.Printf("firecracker: wake %s: snapshot restored (hot)", sandboxID)
-	} else {
-		// Cold boot: configure + boot fresh VM with restored drives.
-		// Filesystem state is preserved but running processes are not.
-		guestCID := m.allocateCID()
-		guestMAC := generateMAC(sandboxID)
-		bootArgs := fmt.Sprintf(
-			"keep_bootcon console=ttyS0 reboot=k panic=1 pci=off "+
-				"ip=%s::%s:%s::eth0:off "+
-				"init=/sbin/init "+
-				"osb.gateway=%s",
-			netCfg.GuestIP, netCfg.HostIP, netCfg.Mask, netCfg.HostIP,
-		)
-		meta.GuestCID = guestCID
-		meta.GuestMAC = guestMAC
-		meta.BootArgs = bootArgs
-
-		if err := fcClient.PutMachineConfig(meta.CpuCount, meta.MemoryMB); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put machine config: %w", err)
-		}
-		if err := fcClient.PutBootSource(m.cfg.KernelPath, bootArgs); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put boot source: %w", err)
-		}
-		if err := fcClient.PutDrive("rootfs", rootfsPath, true, false); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put rootfs drive: %w", err)
-		}
-		if err := fcClient.PutDrive("workspace", workspacePath, false, false); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put workspace drive: %w", err)
-		}
-		if err := fcClient.PutNetworkInterface("eth0", guestMAC, netCfg.TAPName); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put network interface: %w", err)
-		}
-		if err := fcClient.PutVsock(guestCID, vsockPath); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: put vsock: %w", err)
-		}
-		if err := fcClient.StartInstance(); err != nil {
-			cmd.Process.Kill(); cmd.Wait(); m.cleanupVM(netCfg, "")
-			return nil, fmt.Errorf("cold boot: start instance: %w", err)
-		}
-		log.Printf("firecracker: wake %s: cold boot complete (cross-worker migration, tap=%s)",
-			sandboxID, netCfg.TAPName)
+	// Patch vmstate to reference the new TAP name, sandbox dir paths, and CID.
+	oldTAP := ""
+	if meta.Network != nil {
+		oldTAP = meta.Network.TAPName
 	}
+	newCID := m.allocateCID()
+	if err := patchVMStateBinary(vmstateFile, meta.SandboxID, sandboxID, oldTAP, netCfg.TAPName, meta.GuestCID, newCID); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("patch vmstate: %w", err)
+	}
+	meta.GuestCID = newCID
+
+	// Load snapshot — VM resumes exactly where it was paused
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, "")
+		return nil, fmt.Errorf("load snapshot: %w", err)
+	}
+	log.Printf("firecracker: wake %s: snapshot restored (tap=%s)", sandboxID, netCfg.TAPName)
 
 	now := time.Now()
 	ttl := time.Duration(timeout) * time.Second
@@ -485,17 +441,18 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 	vm.agent = agentClient
 
+	// Reconfigure guest network (snapshot has eth0 down from drain)
+	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
+		log.Printf("firecracker: wake %s: network reconfig failed: %v (VM still running, network may not work)", sandboxID, err)
+	}
+
 	// Register VM
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
 
-	mode := "snapshot restore"
-	if !snapshotRestore {
-		mode = "cold boot (cross-worker)"
-	}
-	log.Printf("firecracker: woke VM %s (%s, port=%d, tap=%s)",
-		sandboxID, mode, hostPort, netCfg.TAPName)
+	log.Printf("firecracker: woke VM %s (snapshot restore, port=%d, tap=%s)",
+		sandboxID, hostPort, netCfg.TAPName)
 
 	return vmToSandbox(vm), nil
 }
@@ -1203,18 +1160,33 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	if err := copyFileReflink(filepath.Join(cacheDir, "workspace.ext4"), workspacePath); err != nil {
 		return fmt.Errorf("copy checkpoint workspace: %w", err)
 	}
-	log.Printf("firecracker: warmRestore %s: drives copied (%dms)", sandboxID, time.Since(t0).Milliseconds())
+	// Copy snapshot files (mem + vmstate) to sandbox dir so we don't corrupt the cache
+	newSnapshotDir := filepath.Join(sandboxDir, "snapshot")
+	if err := os.MkdirAll(newSnapshotDir, 0755); err != nil {
+		return fmt.Errorf("mkdir snapshot dir: %w", err)
+	}
+	memFile = filepath.Join(newSnapshotDir, "mem")
+	vmstateFile = filepath.Join(newSnapshotDir, "vmstate")
+	if err := copyFileReflink(filepath.Join(snapshotDir, "mem"), memFile); err != nil {
+		return fmt.Errorf("copy mem: %w", err)
+	}
+	if err := copyFileReflink(filepath.Join(snapshotDir, "vmstate"), vmstateFile); err != nil {
+		return fmt.Errorf("copy vmstate: %w", err)
+	}
 
-	// Step 3: Release old network and reclaim the same TAP name (baked into vmstate)
+	log.Printf("firecracker: warmRestore %s: drives + snapshot copied (%dms)", sandboxID, time.Since(t0).Milliseconds())
+
+	// Step 3: Release old network and allocate a fresh TAP.
+	// We patch the vmstate to reference the new TAP — no need for same-TAP reclamation.
 	if vm.network != nil {
 		RemoveDNAT(vm.network)
 		DeleteTAP(vm.network.TAPName)
 		m.subnets.Release(vm.network.TAPName)
 	}
 
-	netCfg, err := m.subnets.AllocateSpecific(meta.Network.TAPName)
+	netCfg, err := m.subnets.Allocate()
 	if err != nil {
-		return fmt.Errorf("reclaim TAP %s for warm restore: %w", meta.Network.TAPName, err)
+		return fmt.Errorf("allocate subnet: %w", err)
 	}
 	if err := CreateTAP(netCfg); err != nil {
 		m.subnets.Release(netCfg.TAPName)
@@ -1274,7 +1246,21 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 
 	log.Printf("firecracker: warmRestore %s: FC started (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
-	// Step 5: Load snapshot — VM resumes exactly where it was paused during checkpoint
+	// Step 5: Patch vmstate to reference the new TAP and CID
+	oldTAP := ""
+	if meta.Network != nil {
+		oldTAP = meta.Network.TAPName
+	}
+	newCID := m.allocateCID()
+	if err := patchVMStateBinary(vmstateFile, meta.SandboxID, sandboxID, oldTAP, netCfg.TAPName, meta.GuestCID, newCID); err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, "")
+		return fmt.Errorf("patch vmstate: %w", err)
+	}
+	meta.GuestCID = newCID
+
+	// Step 6: Load snapshot — VM resumes exactly where it was paused during checkpoint
 	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
@@ -1507,17 +1493,20 @@ func patchVMStateBinary(vmstatePath, oldSandboxID, newSandboxID, oldTAP, newTAP 
 		return fmt.Errorf("vmstate CRC mismatch before patching: stored=%d computed=%d (unexpected format)", storedCRC, computedCRC)
 	}
 
-	// Patch sandbox ID — fixes drive paths (/data/sandboxes/{id}/rootfs.ext4, workspace.ext4)
-	// and vsock path (/data/sandboxes/{id}/vsock.sock)
-	oldID := []byte(oldSandboxID)
-	newID := []byte(newSandboxID)
-	if len(oldID) != len(newID) {
-		return fmt.Errorf("sandbox ID length mismatch: %q (%d) vs %q (%d)", oldSandboxID, len(oldID), newSandboxID, len(newID))
+	// Patch sandbox ID in path contexts only — fixes drive paths and vsock path.
+	// We use "/{oldID}/" instead of the bare sandbox ID to avoid spurious matches
+	// in binary CPU register / device state data, which corrupts the vmstate.
+	if len(oldSandboxID) != len(newSandboxID) {
+		return fmt.Errorf("sandbox ID length mismatch: %q (%d) vs %q (%d)", oldSandboxID, len(oldSandboxID), newSandboxID, len(newSandboxID))
 	}
-	if !bytes.Contains(data, oldID) {
-		return fmt.Errorf("old sandbox ID %q not found in vmstate — cannot patch", oldSandboxID)
+	oldPath := []byte("/" + oldSandboxID + "/")
+	newPath := []byte("/" + newSandboxID + "/")
+	if !bytes.Contains(data, oldPath) {
+		return fmt.Errorf("old sandbox path %q not found in vmstate — cannot patch", string(oldPath))
 	}
-	data = bytes.ReplaceAll(data, oldID, newID)
+	nPathReplacements := bytes.Count(data, oldPath)
+	data = bytes.ReplaceAll(data, oldPath, newPath)
+	log.Printf("firecracker: patchVMState: replaced sandbox path %q→%q (%d occurrences)", string(oldPath), string(newPath), nPathReplacements)
 
 	// Patch TAP name — must be same length (fixed-width format)
 	if oldTAP != "" && newTAP != "" && oldTAP != newTAP {
@@ -1526,7 +1515,9 @@ func patchVMStateBinary(vmstatePath, oldSandboxID, newSandboxID, oldTAP, newTAP 
 		if len(oldTAPBytes) != len(newTAPBytes) {
 			return fmt.Errorf("TAP name length mismatch: %q (%d) vs %q (%d) — use fixed-width format", oldTAP, len(oldTAPBytes), newTAP, len(newTAPBytes))
 		}
+		nTAPReplacements := bytes.Count(data, oldTAPBytes)
 		data = bytes.ReplaceAll(data, oldTAPBytes, newTAPBytes)
+		log.Printf("firecracker: patchVMState: replaced TAP %q→%q (%d occurrences)", oldTAP, newTAP, nTAPReplacements)
 	}
 
 	// Patch CID — search for the old CID (uint32 LE) near the vsock.sock string.
