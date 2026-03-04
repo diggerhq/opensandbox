@@ -43,6 +43,13 @@ sdks/typescript/examples/loom/
 *.mp4
 *.gif
 
+# Terraform
+deploy/terraform/.terraform/
+deploy/terraform/.terraform.lock.hcl
+deploy/terraform/terraform.tfstate*
+deploy/terraform/terraform.tfvars
+
 # Temp files
 *.tmp
 *.log
+delme

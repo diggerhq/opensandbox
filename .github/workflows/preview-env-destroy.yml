@@ -1,0 +1,79 @@
+name: Preview Environment — Destroy
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+env:
+  ENV_NAME: dev-pr-${{ github.event.pull_request.number }}
+  TF_DIR: deploy/terraform
+
+concurrency:
+  group: preview-env-${{ github.event.pull_request.number }}
+
+jobs:
+  destroy:
+    name: Destroy Preview Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=pr-${{ github.event.pull_request.number }}/terraform.tfstate" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="region=us-east-1"
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform destroy -auto-approve \
+            -var="environment=${{ env.ENV_NAME }}" \
+            -var="key_pair_name=${{ secrets.KEY_PAIR_NAME || 'opensandbox-dev' }}" \
+            -var="api_key=pr-${{ github.event.pull_request.number }}-key" \
+            -var="jwt_secret=pr-${{ github.event.pull_request.number }}-jwt"
+
+      - name: Clean up state from S3
+        run: |
+          aws s3 rm "s3://${{ secrets.TF_STATE_BUCKET }}/pr-${{ github.event.pull_request.number }}/" --recursive || true
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const merged = context.payload.pull_request.merged;
+            const action = merged ? 'merged' : 'closed';
+            const body = [
+              `## Preview Environment Destroyed`,
+              ``,
+              `The preview environment \`${{ env.ENV_NAME }}\` has been torn down (PR ${action}).`,
+              `All AWS resources for this environment have been cleaned up.`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
