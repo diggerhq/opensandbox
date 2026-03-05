@@ -33,6 +33,11 @@ service SandboxAgent {
   rpc PTYResize(PTYResizeRequest) returns (PTYResizeResponse);
   rpc PTYKill(PTYKillRequest) returns (PTYKillResponse);
 
+  // SetEnvs stores sandbox-level environment variables inside the agent.
+  // These are injected into every subsequent Exec/ExecStream call,
+  // between the base OS env and per-command envs.
+  rpc SetEnvs(SetEnvsRequest) returns (SetEnvsResponse);
+
   // Shutdown gracefully terminates the agent and syncs disks.
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 
@@ -180,6 +185,14 @@ message PTYKillRequest {
 }
 
 message PTYKillResponse {}
+
+// --- SetEnvs ---
+
+message SetEnvsRequest {
+  map<string, string> envs = 1;
+}
+
+message SetEnvsResponse {}
 
 // --- Shutdown ---
 

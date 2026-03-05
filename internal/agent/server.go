@@ -38,6 +38,11 @@ type Server struct {
 	// Set by the main package based on the platform (vsock or unix).
 	ListenPort ListenPortFunc
 
+	// Sandbox-level environment variables (set once via SetEnvs RPC).
+	// Injected into every Exec/ExecStream between baseEnv and per-command envs.
+	envMu       sync.RWMutex
+	sandboxEnvs []string
+
 	// PTY sessions
 	ptyMu       sync.Mutex
 	ptySessions map[string]*ptySession
