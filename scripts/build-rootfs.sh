@@ -73,7 +73,46 @@ generate_init_script() {
 # OpenSandbox VM init script
 # Runs as PID 1 inside the Firecracker microVM
 
-# Mount virtual filesystems
+# Mount minimal virtual filesystems needed for setup
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+
+# ── Overlay root: data disk as writable upper layer over the rootfs ──
+# This makes ALL writes (npm install, apt install, etc.) go to the NVMe-backed
+# data disk instead of the small rootfs image.
+mkdir -p /mnt/data
+if mount /dev/vdb /mnt/data 2>/dev/null || mount /dev/vdb1 /mnt/data 2>/dev/null; then
+    mkdir -p /mnt/data/upper /mnt/data/work /mnt/overlay
+
+    # Unmount virtual filesystems before pivot (will re-mount after)
+    umount /dev
+    umount /proc
+
+    # Create overlay: rootfs (lower/read-only) + data disk (upper/writable)
+    mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/data/upper,workdir=/mnt/data/work /mnt/overlay
+
+    # Move data disk mount into the overlay tree so it persists after pivot
+    mkdir -p /mnt/overlay/mnt/data
+    mount --move /mnt/data /mnt/overlay/mnt/data
+
+    # Pivot root to the overlay
+    cd /mnt/overlay
+    mkdir -p mnt/old_root
+    pivot_root . mnt/old_root
+
+    # Detach old root
+    umount -l /mnt/old_root 2>/dev/null
+    rmdir /mnt/old_root 2>/dev/null
+
+    echo "init: overlay root active (data disk backing all writes)"
+else
+    # No data disk available — fall back to rootfs-only (writes hit the small rootfs)
+    umount /dev
+    umount /proc
+    echo "init: warning: no data disk found, running on rootfs only"
+fi
+
+# ── Mount virtual filesystems (in the final root) ──
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
@@ -91,13 +130,6 @@ mount -t tmpfs tmpfs /run
 mount -t devpts devpts /dev/pts
 [ -d /dev/shm ] || mkdir -p /dev/shm
 mount -t tmpfs tmpfs /dev/shm
-
-# Mount workspace from vdb
-mkdir -p /workspace
-mount /dev/vdb /workspace 2>/dev/null || {
-    echo "init: warning: could not mount /dev/vdb, trying /dev/vdb1"
-    mount /dev/vdb1 /workspace 2>/dev/null || echo "init: warning: workspace mount failed"
-}
 
 # Configure networking from kernel command line
 # Format: ip=GUEST_IP::GATEWAY:NETMASK::IFACE:off osb.gateway=GATEWAY
@@ -174,7 +206,7 @@ COPY osb-agent /usr/local/bin/osb-agent
 RUN chmod +x /usr/local/bin/osb-agent
 COPY init /sbin/init
 RUN chmod +x /sbin/init
-RUN mkdir -p /workspace
+RUN mkdir -p /mnt/data /mnt/overlay
 INJECT_EOF
 
     # Build with podman

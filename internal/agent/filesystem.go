@@ -106,10 +106,10 @@ func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatRespons
 	}, nil
 }
 
-// resolvePath ensures paths are rooted in /workspace for relative paths.
+// resolvePath ensures paths are rooted in /root for relative paths.
 func resolvePath(path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}
-	return filepath.Join("/workspace", path)
+	return filepath.Join("/root", path)
 }

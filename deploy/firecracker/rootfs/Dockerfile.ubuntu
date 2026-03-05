@@ -28,11 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     && rm -rf /var/lib/apt/lists/*
 
-# Create workspace directory
-RUN mkdir -p /workspace
+# Overlay mount points (data disk backs all writes via overlayfs)
+RUN mkdir -p /mnt/data /mnt/overlay
 
 # Set default working directory
-WORKDIR /workspace
+WORKDIR /root
 
 # Default locale
 ENV LANG=C.UTF-8

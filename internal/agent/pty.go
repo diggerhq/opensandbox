@@ -49,7 +49,7 @@ func (s *Server) PTYCreate(ctx context.Context, req *pb.PTYCreateRequest) (*pb.P
 	sessCtx, cancel := context.WithCancel(context.Background())
 
 	cmd := exec.CommandContext(sessCtx, shell)
-	cmd.Dir = "/workspace"
+	cmd.Dir = "/root"
 	cmd.Env = append(baseEnv(),
 		"TERM=xterm-256color",
 		fmt.Sprintf("COLUMNS=%d", req.Cols),
