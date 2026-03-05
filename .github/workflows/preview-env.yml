@@ -221,14 +221,10 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
             ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
-              if [ -f /data/firecracker/images/default.ext4 ]; then
-                echo 'Rootfs already exists, skipping'
-              else
-                export PATH=\$PATH:/usr/local/go/bin
-                cd ${{ env.REMOTE_DIR }}
-                echo 'Building rootfs with Docker...'
-                sudo bash ./deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default
-              fi
+              export PATH=\$PATH:/usr/local/go/bin
+              cd ${{ env.REMOTE_DIR }}
+              echo 'Building rootfs with Docker...'
+              sudo bash ./deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default
             "
 
       - name: Install env files and restart services
@@ -239,6 +235,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/preview.pem \
             ${{ env.SSH_USER }}@${{ steps.tf_output.outputs.dev_ip }} "
               sudo bash ${{ env.REMOTE_DIR }}/deploy/ec2/setup-dev-env.sh 'pr-${{ steps.pr.outputs.number }}-key'
+              sudo rm -rf /data/golden-snapshot 2>/dev/null || true
               sudo systemctl restart opensandbox-server
               sudo systemctl restart opensandbox-worker
               echo 'Services restarted'
