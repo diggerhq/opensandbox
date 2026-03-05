@@ -374,6 +374,24 @@ export class Sandbox {
     return resp.json();
   }
 
+  static async deleteCheckpointPatch(
+    checkpointId: string,
+    patchId: string,
+    opts: { apiKey?: string; apiUrl?: string } = {}
+  ): Promise<void> {
+    const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENCOMPUTER_API_URL ?? "https://app.opencomputer.dev");
+    const apiKey = opts.apiKey ?? process.env.OPENCOMPUTER_API_KEY ?? "";
+
+    const resp = await fetch(`${apiUrl}/sandboxes/checkpoints/${checkpointId}/patches/${patchId}`, {
+      method: "DELETE",
+      headers: apiKey ? { "X-API-Key": apiKey } : {},
+    });
+
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(`Failed to delete checkpoint patch: ${resp.status}`);
+    }
+  }
+
   async createPreviewURL(opts: { port: number; domain?: string; authConfig?: Record<string, unknown> }): Promise<PreviewURLResult> {
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview`, {
       method: "POST",

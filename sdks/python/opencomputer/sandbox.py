@@ -361,6 +361,38 @@ class Sandbox:
             resp.raise_for_status()
             return resp.json()
 
+    @staticmethod
+    async def delete_checkpoint_patch(
+        checkpoint_id: str,
+        patch_id: str,
+        api_key: str | None = None,
+        api_url: str | None = None,
+    ) -> None:
+        """Delete a patch from a checkpoint.
+
+        Args:
+            checkpoint_id: UUID of the checkpoint.
+            patch_id: UUID of the patch to delete.
+            api_key: API key (or OPENCOMPUTER_API_KEY env var).
+            api_url: API URL (or OPENCOMPUTER_API_URL env var).
+        """
+        url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
+        url = url.rstrip("/")
+        key = api_key or os.environ.get("OPENCOMPUTER_API_KEY", "")
+
+        api_base = url if url.endswith("/api") else f"{url}/api"
+
+        headers = {}
+        if key:
+            headers["X-API-Key"] = key
+
+        async with httpx.AsyncClient(base_url=api_base, headers=headers, timeout=30.0) as client:
+            resp = await client.delete(
+                f"/sandboxes/checkpoints/{checkpoint_id}/patches/{patch_id}"
+            )
+            if resp.status_code != 404:
+                resp.raise_for_status()
+
     async def delete_checkpoint(self, checkpoint_id: str) -> None:
         """Delete a checkpoint.
 

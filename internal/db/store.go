@@ -903,6 +903,20 @@ func (s *Store) GetPendingPatches(ctx context.Context, checkpointID uuid.UUID, a
 	return patches, rows.Err()
 }
 
+// DeleteCheckpointPatch deletes a patch by ID, scoped to a checkpoint.
+func (s *Store) DeleteCheckpointPatch(ctx context.Context, checkpointID, patchID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM checkpoint_patches WHERE id = $1 AND checkpoint_id = $2`,
+		patchID, checkpointID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("patch not found")
+	}
+	return nil
+}
+
 // UpdateSandboxPatchSequence updates the last_patch_sequence for a sandbox session.
 func (s *Store) UpdateSandboxPatchSequence(ctx context.Context, sandboxID string, sequence int) error {
 	_, err := s.pool.Exec(ctx,
