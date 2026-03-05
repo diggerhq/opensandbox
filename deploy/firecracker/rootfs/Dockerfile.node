@@ -39,11 +39,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install common global npm packages
 RUN npm install -g npm@latest
 
-# Create workspace directory
-RUN mkdir -p /workspace
+# Overlay mount points (data disk backs all writes via overlayfs)
+RUN mkdir -p /mnt/data /mnt/overlay
 
 # Set default working directory
-WORKDIR /workspace
+WORKDIR /root
 
 # Default locale
 ENV LANG=C.UTF-8
