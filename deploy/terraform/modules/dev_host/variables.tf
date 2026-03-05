@@ -33,3 +33,9 @@ variable "ami_id" {
   type        = string
   default     = ""
 }
+
+variable "data_volume_size_gb" {
+  description = "Size of the EBS data volume for Firecracker sandbox storage (GB). Each sandbox needs ~20GB."
+  type        = number
+  default     = 200
+}

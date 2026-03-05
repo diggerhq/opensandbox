@@ -66,7 +66,32 @@ resource "aws_instance" "dev_host" {
     delete_on_termination = true
   }
 
-  # No user_data — run `make deploy-dev` after terraform apply to provision.
+  # Data volume for Firecracker sandbox storage (rootfs + workspace images).
+  # Each sandbox uses ~20GB for its workspace.ext4, so size this based on
+  # how many concurrent sandboxes you need.
+  ebs_block_device {
+    device_name           = "/dev/sdf"
+    volume_size           = var.data_volume_size_gb
+    volume_type           = "gp3"
+    delete_on_termination = true
+  }
+
+  # Format and mount the data volume on first boot
+  user_data = <<-USERDATA
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Format data volume if not already formatted
+    if ! blkid /dev/nvme1n1 2>/dev/null; then
+      mkfs.ext4 -L opensandbox-data /dev/nvme1n1
+    fi
+
+    # Mount data volume
+    mkdir -p /data
+    echo 'LABEL=opensandbox-data /data ext4 defaults,nofail 0 2' >> /etc/fstab
+    mount -a
+    mkdir -p /data/sandboxes /data/firecracker/images
+  USERDATA
 
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-${var.environment}-dev-host"
