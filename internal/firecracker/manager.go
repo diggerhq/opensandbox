@@ -56,11 +56,11 @@ type VMInstance struct {
 // It records VM config so that on hard kill recovery, a sandbox can be
 // cold-booted from template + existing workspace without needing DB access.
 type SandboxMeta struct {
-	SandboxID string `json:"sandboxId"`
-	Template  string `json:"template"`
-	CpuCount  int    `json:"cpuCount"`
-	MemoryMB  int    `json:"memoryMB"`
-	GuestPort int    `json:"guestPort"`
+	SandboxID string            `json:"sandboxId"`
+	Template  string            `json:"template"`
+	CpuCount  int               `json:"cpuCount"`
+	MemoryMB  int               `json:"memoryMB"`
+	GuestPort int               `json:"guestPort"`
 }
 
 // Config holds configuration for the Firecracker Manager.
@@ -399,6 +399,16 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 		return nil, fmt.Errorf("agent not ready: %w", err)
 	}
 	vm.agent = agentClient
+
+	// Send sandbox-level env vars into the VM agent (survives snapshots)
+	if len(cfg.Envs) > 0 {
+		envCtx, envCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := agentClient.SetEnvs(envCtx, cfg.Envs); err != nil {
+			envCancel()
+			log.Printf("firecracker: warning: SetEnvs failed for %s: %v", id, err)
+		}
+		envCancel()
+	}
 
 	// Register VM
 	m.mu.Lock()

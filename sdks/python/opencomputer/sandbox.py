@@ -161,7 +161,9 @@ class Sandbox:
 
     async def set_timeout(self, timeout: int) -> None:
         """Update the sandbox timeout in seconds."""
-        resp = await self._client.post(
+        # Route to worker directly (like commands/files/pty) — the control plane
+        # rejects this call in server mode.
+        resp = await self._ops_client.post(
             f"/sandboxes/{self.sandbox_id}/timeout",
             json={"timeout": timeout},
         )

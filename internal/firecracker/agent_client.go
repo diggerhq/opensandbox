@@ -121,6 +121,12 @@ func (c *AgentClient) Close() error {
 	return c.conn.Close()
 }
 
+// SetEnvs sends sandbox-level environment variables to the in-VM agent.
+func (c *AgentClient) SetEnvs(ctx context.Context, envs map[string]string) error {
+	_, err := c.client.SetEnvs(ctx, &pb.SetEnvsRequest{Envs: envs})
+	return err
+}
+
 // Ping verifies the agent is responsive.
 func (c *AgentClient) Ping(ctx context.Context) (*pb.PingResponse, error) {
 	return c.client.Ping(ctx, &pb.PingRequest{})
