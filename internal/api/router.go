@@ -142,6 +142,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/from-checkpoint/:checkpointId", s.createFromCheckpoint)
 	api.DELETE("/sandboxes/:id/checkpoints/:checkpointId", s.deleteCheckpoint)
 
+	// Checkpoint patches
+	api.POST("/sandboxes/checkpoints/:checkpointId/patches", s.createCheckpointPatch)
+	api.GET("/sandboxes/checkpoints/:checkpointId/patches", s.listCheckpointPatches)
+
 	// Preview URLs (on-demand port-based)
 	api.POST("/sandboxes/:id/preview", s.createPreviewURL)
 	api.GET("/sandboxes/:id/preview", s.listPreviewURLs)

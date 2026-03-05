@@ -662,6 +662,9 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 	_ = s.store.MarkHibernationRestored(ctx, id)
 	_ = s.store.UpdateSandboxSessionForWake(ctx, id, s.workerID)
 
+	// Apply pending checkpoint patches in background
+	go s.applyPendingPatches(id, s.workerID)
+
 	// Issue fresh JWT
 	orgID, _ := auth.GetOrgID(c)
 	if s.jwtIssuer != nil {
@@ -722,6 +725,9 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	// Mark hibernation as restored, update session
 	_ = s.store.MarkHibernationRestored(c.Request().Context(), sandboxID)
 	_ = s.store.UpdateSandboxSessionForWake(c.Request().Context(), sandboxID, worker.ID)
+
+	// Apply pending checkpoint patches in background
+	go s.applyPendingPatches(sandboxID, worker.ID)
 
 	// Issue fresh JWT
 	orgID, _ := auth.GetOrgID(c)
@@ -1097,6 +1103,8 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 		cfgJSON, _ := json.Marshal(originalCfg)
 		metadataJSON, _ := json.Marshal(originalCfg.Metadata)
 		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, nil, template, region, workerID, cfgJSON, metadataJSON)
+		// Track checkpoint lineage for patch system
+		_ = s.store.SetSandboxCheckpointID(ctx, sandboxID, checkpointID)
 	}
 
 	// Boot VM in background
@@ -1150,6 +1158,11 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 		// Also signal router if available (combined mode)
 		if s.router != nil {
 			s.router.MarkCreated(sandboxID, createErr)
+		}
+
+		// Apply any existing patches for this checkpoint after boot
+		if createErr == nil {
+			s.applyPendingPatches(sandboxID, workerID)
 		}
 	}()
 
@@ -1211,6 +1224,229 @@ func (s *Server) deleteCheckpoint(c echo.Context) error {
 	}
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// --- Checkpoint Patch handlers ---
+
+// createCheckpointPatch creates a patch for a checkpoint and fans out to running sandboxes.
+func (s *Server) createCheckpointPatch(c echo.Context) error {
+	checkpointIDStr := c.Param("checkpointId")
+	ctx := c.Request().Context()
+
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	checkpointID, err := uuid.Parse(checkpointIDStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+	}
+
+	// Verify checkpoint exists and belongs to org
+	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
+	}
+	if cp.OrgID != orgID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "checkpoint does not belong to this organization"})
+	}
+	if cp.Status != "ready" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "checkpoint is not ready"})
+	}
+
+	var req struct {
+		Script      string `json:"script"`
+		Description string `json:"description"`
+		Strategy    string `json:"strategy"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if req.Script == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "script is required"})
+	}
+	if req.Strategy == "" {
+		req.Strategy = "hot"
+	}
+	if req.Strategy != "hot" && req.Strategy != "on_wake" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "strategy must be 'hot' or 'on_wake'"})
+	}
+
+	// Create the patch record
+	patch := &db.CheckpointPatch{
+		ID:           uuid.New(),
+		CheckpointID: checkpointID,
+		Script:       req.Script,
+		Description:  req.Description,
+		Strategy:     req.Strategy,
+	}
+	if err := s.store.CreateCheckpointPatch(ctx, patch); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create patch: " + err.Error()})
+	}
+
+	// Fan out to running sandboxes if strategy is "hot"
+	var results struct {
+		Total           int `json:"total"`
+		RunningPatched  int `json:"runningPatched"`
+		RunningFailed   int `json:"runningFailed"`
+		HibernatedQueued int `json:"hibernatedQueued"`
+	}
+
+	sandboxes, err := s.store.ListSandboxesByCheckpoint(ctx, checkpointID)
+	if err != nil {
+		log.Printf("api: patch %s: failed to list sandboxes: %v", patch.ID, err)
+	} else {
+		results.Total = len(sandboxes)
+
+		for _, sess := range sandboxes {
+			if sess.Status == "hibernated" {
+				results.HibernatedQueued++
+				continue
+			}
+
+			if sess.Status == "running" && req.Strategy == "hot" {
+				// Execute patch on running sandbox
+				if err := s.execPatchOnSandbox(ctx, sess.SandboxID, sess.WorkerID, patch); err != nil {
+					log.Printf("api: patch %s: sandbox %s failed: %v", patch.ID, sess.SandboxID, err)
+					results.RunningFailed++
+				} else {
+					results.RunningPatched++
+					_ = s.store.UpdateSandboxPatchSequence(ctx, sess.SandboxID, patch.Sequence)
+				}
+			}
+		}
+	}
+
+	return c.JSON(http.StatusCreated, map[string]interface{}{
+		"patch":   patch,
+		"results": results,
+	})
+}
+
+// execPatchOnSandbox runs a patch script on a running sandbox via gRPC exec.
+func (s *Server) execPatchOnSandbox(ctx context.Context, sandboxID, workerID string, patch *db.CheckpointPatch) error {
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	if s.workerRegistry != nil {
+		client, err := s.workerRegistry.GetWorkerClient(workerID)
+		if err != nil {
+			return fmt.Errorf("worker %s unreachable: %w", workerID, err)
+		}
+		resp, err := client.ExecCommand(execCtx, &pb.ExecCommandRequest{
+			SandboxId: sandboxID,
+			Command:   "bash",
+			Args:      []string{"-c", patch.Script},
+			Timeout:   300,
+		})
+		if err != nil {
+			return fmt.Errorf("exec failed: %w", err)
+		}
+		if resp.ExitCode != 0 {
+			return fmt.Errorf("patch exited with code %d: %s", resp.ExitCode, resp.Stderr)
+		}
+		return nil
+	}
+
+	// Combined mode: exec locally
+	if s.manager != nil {
+		result, err := s.manager.Exec(ctx, sandboxID, types.ProcessConfig{
+			Command: "bash",
+			Args:    []string{"-c", patch.Script},
+			Timeout: 300,
+		})
+		if err != nil {
+			return fmt.Errorf("exec failed: %w", err)
+		}
+		if result.ExitCode != 0 {
+			return fmt.Errorf("patch exited with code %d: %s", result.ExitCode, result.Stderr)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("no execution backend available")
+}
+
+// applyPendingPatches checks for and applies any pending patches after a sandbox wakes.
+func (s *Server) applyPendingPatches(sandboxID, workerID string) {
+	if s.store == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	session, err := s.store.GetSandboxSession(ctx, sandboxID)
+	if err != nil {
+		log.Printf("patches: %s: failed to get session: %v", sandboxID, err)
+		return
+	}
+	if session.BasedOnCheckpointID == nil {
+		return // Not based on a checkpoint, nothing to patch
+	}
+
+	patches, err := s.store.GetPendingPatches(ctx, *session.BasedOnCheckpointID, session.LastPatchSequence)
+	if err != nil {
+		log.Printf("patches: %s: failed to get pending patches: %v", sandboxID, err)
+		return
+	}
+	if len(patches) == 0 {
+		return
+	}
+
+	log.Printf("patches: %s: applying %d pending patches (from seq %d)", sandboxID, len(patches), session.LastPatchSequence+1)
+
+	for _, patch := range patches {
+		if err := s.execPatchOnSandbox(ctx, sandboxID, workerID, &patch); err != nil {
+			log.Printf("patches: %s: patch seq %d failed: %v (stopping)", sandboxID, patch.Sequence, err)
+			return // Stop on first failure
+		}
+		_ = s.store.UpdateSandboxPatchSequence(ctx, sandboxID, patch.Sequence)
+		log.Printf("patches: %s: patch seq %d applied successfully", sandboxID, patch.Sequence)
+	}
+}
+
+// listCheckpointPatches returns all patches for a checkpoint.
+func (s *Server) listCheckpointPatches(c echo.Context) error {
+	checkpointIDStr := c.Param("checkpointId")
+
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	checkpointID, err := uuid.Parse(checkpointIDStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+	}
+
+	// Verify checkpoint belongs to org
+	cp, err := s.store.GetCheckpoint(c.Request().Context(), checkpointID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
+	}
+	if cp.OrgID != orgID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "checkpoint does not belong to this organization"})
+	}
+
+	patches, err := s.store.ListCheckpointPatches(c.Request().Context(), checkpointID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if patches == nil {
+		patches = []db.CheckpointPatch{}
+	}
+
+	return c.JSON(http.StatusOK, patches)
 }
 
 // listSessions returns session history from PostgreSQL.

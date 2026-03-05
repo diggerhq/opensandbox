@@ -76,6 +76,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{10, "migrations/010_template_status.up.sql"},
 		{11, "migrations/011_rename_hibernation.up.sql"},
 		{12, "migrations/012_checkpoints.up.sql"},
+		{13, "migrations/013_checkpoint_patches.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -380,19 +381,21 @@ func (s *Store) DeleteAPIKeyForOrg(ctx context.Context, id uuid.UUID, orgID uuid
 // --- Sandbox Session operations ---
 
 type SandboxSession struct {
-	ID        uuid.UUID  `json:"id"`
-	SandboxID string     `json:"sandboxId"`
-	OrgID     uuid.UUID  `json:"orgId"`
-	UserID    *uuid.UUID `json:"userId,omitempty"`
-	Template  string     `json:"template"`
-	Region    string     `json:"region"`
-	WorkerID  string     `json:"workerId"`
-	Status    string     `json:"status"`
-	Config    json.RawMessage `json:"config"`
-	Metadata  json.RawMessage `json:"metadata,omitempty"`
-	StartedAt time.Time  `json:"startedAt"`
-	StoppedAt *time.Time `json:"stoppedAt,omitempty"`
-	ErrorMsg  *string    `json:"errorMsg,omitempty"`
+	ID                   uuid.UUID       `json:"id"`
+	SandboxID            string          `json:"sandboxId"`
+	OrgID                uuid.UUID       `json:"orgId"`
+	UserID               *uuid.UUID      `json:"userId,omitempty"`
+	Template             string          `json:"template"`
+	Region               string          `json:"region"`
+	WorkerID             string          `json:"workerId"`
+	Status               string          `json:"status"`
+	Config               json.RawMessage `json:"config"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	StartedAt            time.Time       `json:"startedAt"`
+	StoppedAt            *time.Time      `json:"stoppedAt,omitempty"`
+	ErrorMsg             *string         `json:"errorMsg,omitempty"`
+	BasedOnCheckpointID  *uuid.UUID      `json:"basedOnCheckpointId,omitempty"`
+	LastPatchSequence    int             `json:"lastPatchSequence"`
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
@@ -400,10 +403,11 @@ func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgI
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at`,
+		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence`,
 		sandboxID, orgID, userID, template, region, workerID, config, metadata,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
-		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt)
+		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
+		&session.BasedOnCheckpointID, &session.LastPatchSequence)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sandbox session: %w", err)
 	}
@@ -434,11 +438,11 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
 		 FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`, sandboxID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
-		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg)
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox session not found: %w", err)
 	}
@@ -450,12 +454,12 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 	var err error
 	if status != "" {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
 			 FROM sandbox_sessions WHERE org_id = $1 AND status = $2 ORDER BY started_at DESC LIMIT $3 OFFSET $4`,
 			orgID, status, limit, offset)
 	} else {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
 			 FROM sandbox_sessions WHERE org_id = $1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
 			orgID, limit, offset)
 	}
@@ -469,7 +473,7 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)
@@ -831,6 +835,112 @@ func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoin
 		return fmt.Errorf("checkpoint not found or not owned by org")
 	}
 	return nil
+}
+
+// --- Checkpoint Patch operations ---
+
+// CheckpointPatch represents a patch script attached to a checkpoint.
+type CheckpointPatch struct {
+	ID           uuid.UUID `json:"id"`
+	CheckpointID uuid.UUID `json:"checkpointId"`
+	Sequence     int       `json:"sequence"`
+	Script       string    `json:"script"`
+	Description  string    `json:"description"`
+	Strategy     string    `json:"strategy"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+// CreateCheckpointPatch inserts a new patch, auto-assigning the next sequence number.
+func (s *Store) CreateCheckpointPatch(ctx context.Context, patch *CheckpointPatch) error {
+	return s.pool.QueryRow(ctx,
+		`INSERT INTO checkpoint_patches (id, checkpoint_id, sequence, script, description, strategy)
+		 VALUES ($1, $2, COALESCE((SELECT MAX(sequence) FROM checkpoint_patches WHERE checkpoint_id = $2), 0) + 1, $3, $4, $5)
+		 RETURNING sequence, created_at`,
+		patch.ID, patch.CheckpointID, patch.Script, patch.Description, patch.Strategy,
+	).Scan(&patch.Sequence, &patch.CreatedAt)
+}
+
+// ListCheckpointPatches returns all patches for a checkpoint, ordered by sequence.
+func (s *Store) ListCheckpointPatches(ctx context.Context, checkpointID uuid.UUID) ([]CheckpointPatch, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, checkpoint_id, sequence, script, description, strategy, created_at
+		 FROM checkpoint_patches WHERE checkpoint_id = $1 ORDER BY sequence ASC`, checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var patches []CheckpointPatch
+	for rows.Next() {
+		var p CheckpointPatch
+		if err := rows.Scan(&p.ID, &p.CheckpointID, &p.Sequence, &p.Script, &p.Description, &p.Strategy, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		patches = append(patches, p)
+	}
+	return patches, rows.Err()
+}
+
+// GetPendingPatches returns patches with sequence > afterSequence for a checkpoint.
+func (s *Store) GetPendingPatches(ctx context.Context, checkpointID uuid.UUID, afterSequence int) ([]CheckpointPatch, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, checkpoint_id, sequence, script, description, strategy, created_at
+		 FROM checkpoint_patches WHERE checkpoint_id = $1 AND sequence > $2 ORDER BY sequence ASC`,
+		checkpointID, afterSequence)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var patches []CheckpointPatch
+	for rows.Next() {
+		var p CheckpointPatch
+		if err := rows.Scan(&p.ID, &p.CheckpointID, &p.Sequence, &p.Script, &p.Description, &p.Strategy, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		patches = append(patches, p)
+	}
+	return patches, rows.Err()
+}
+
+// UpdateSandboxPatchSequence updates the last_patch_sequence for a sandbox session.
+func (s *Store) UpdateSandboxPatchSequence(ctx context.Context, sandboxID string, sequence int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET last_patch_sequence = $1 WHERE sandbox_id = $2`,
+		sequence, sandboxID)
+	return err
+}
+
+// SetSandboxCheckpointID sets the based_on_checkpoint_id for a sandbox session.
+func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, checkpointID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET based_on_checkpoint_id = $1 WHERE sandbox_id = $2`,
+		checkpointID, sandboxID)
+	return err
+}
+
+// ListSandboxesByCheckpoint returns all non-stopped sandboxes forked from a checkpoint.
+func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid.UUID) ([]SandboxSession, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+		 FROM sandbox_sessions WHERE based_on_checkpoint_id = $1 AND status IN ('running', 'hibernated') ORDER BY started_at DESC`,
+		checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []SandboxSession
+	for rows.Next() {
+		var sess SandboxSession
+		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
+			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, sess)
+	}
+	return sessions, rows.Err()
 }
 
 // --- Template operations ---
