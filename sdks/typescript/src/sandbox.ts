@@ -206,12 +206,19 @@ export class Sandbox {
   }
 
   async setTimeout(timeout: number): Promise<void> {
-    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/timeout`, {
+    // Route to worker directly (like commands/files/pty) — the control plane
+    // rejects this call in server mode.
+    const url = this.connectUrl || this.apiUrl;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.connectUrl && this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    } else if (this.apiKey) {
+      headers["X-API-Key"] = this.apiKey;
+    }
+
+    const resp = await fetch(`${url}/sandboxes/${this.sandboxId}/timeout`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
-      },
+      headers,
       body: JSON.stringify({ timeout }),
     });
 
