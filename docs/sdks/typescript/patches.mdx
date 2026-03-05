@@ -51,6 +51,25 @@ const patches = await Sandbox.listCheckpointPatches(checkpoint.id);
 
 **Returns:** `Promise<PatchInfo[]>` — ordered by sequence number.
 
+## Delete a Patch
+
+Remove a bad or unwanted patch. Remaining patches continue to apply in sequence order.
+
+```typescript
+await Sandbox.deleteCheckpointPatch(checkpoint.id, patch.id);
+```
+
+### `Sandbox.deleteCheckpointPatch(checkpointId, patchId, opts?)`
+
+<ParamField body="checkpointId" type="string" required>
+  UUID of the checkpoint.
+</ParamField>
+<ParamField body="patchId" type="string" required>
+  UUID of the patch to delete.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
 ## How Patches Apply
 
 | Event | Patches run? |

@@ -48,6 +48,25 @@ patches = await Sandbox.list_checkpoint_patches(checkpoint["id"])
 
 **Returns:** `list[dict]` — ordered by sequence number.
 
+## Delete a Patch
+
+Remove a bad or unwanted patch. Remaining patches continue to apply in sequence order.
+
+```python
+await Sandbox.delete_checkpoint_patch(checkpoint["id"], patch["id"])
+```
+
+### `Sandbox.delete_checkpoint_patch(checkpoint_id, patch_id, **kwargs)`
+
+<ParamField body="checkpoint_id" type="str" required>
+  UUID of the checkpoint.
+</ParamField>
+<ParamField body="patch_id" type="str" required>
+  UUID of the patch to delete.
+</ParamField>
+
+**Returns:** `None`
+
 ## How Patches Apply
 
 | Event | Patches run? |

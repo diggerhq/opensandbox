@@ -1407,6 +1407,47 @@ func (s *Server) listCheckpointPatches(c echo.Context) error {
 	return c.JSON(http.StatusOK, patches)
 }
 
+// deleteCheckpointPatch removes a patch from a checkpoint.
+func (s *Server) deleteCheckpointPatch(c echo.Context) error {
+	checkpointIDStr := c.Param("checkpointId")
+	patchIDStr := c.Param("patchId")
+	ctx := c.Request().Context()
+
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	checkpointID, err := uuid.Parse(checkpointIDStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+	}
+
+	patchID, err := uuid.Parse(patchIDStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid patch ID"})
+	}
+
+	// Verify checkpoint belongs to org
+	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
+	}
+	if cp.OrgID != orgID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "checkpoint does not belong to this organization"})
+	}
+
+	if err := s.store.DeleteCheckpointPatch(ctx, checkpointID, patchID); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "patch not found"})
+	}
+
+	return c.NoContent(http.StatusNoContent)
+}
+
 // listSessions returns session history from PostgreSQL.
 func (s *Server) listWorkers(c echo.Context) error {
 	if s.workerRegistry == nil {

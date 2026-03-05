@@ -6,7 +6,9 @@
  *   2. Fork a sandbox — verify patch is applied on boot
  *   3. Create a second patch, hibernate fork, wake it — verify both patches applied
  *   4. List patches and verify ordering
- *   5. Verify bad patch script fails gracefully
+ *   5. Bad patch blocks the chain
+ *   6. Delete the bad patch — recovery on next wake
+ *   7. Delete a patch and verify list updates
  *
  * Usage:
  *   npx tsx examples/test-checkpoint-patches.ts
@@ -40,6 +42,20 @@ async function sleep(ms: number) {
   return new Promise((r) => globalThis.setTimeout(r, ms));
 }
 
+async function waitForSandboxReady(sandbox: Sandbox, timeoutMs = 60000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const result = await sandbox.commands.run("echo ready", { timeout: 10 });
+      if (result.stdout.trim() === "ready") return true;
+    } catch {
+      // sandbox not ready yet
+    }
+    await sleep(3000);
+  }
+  return false;
+}
+
 async function waitForCheckpointReady(sandbox: Sandbox, checkpointId: string, timeoutMs = 60000): Promise<boolean> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -67,12 +83,10 @@ async function main() {
     sandboxes.push(source);
     green(`Created source sandbox: ${source.sandboxId}`);
 
-    // Install a marker to verify patch effects
     await source.commands.run("echo 'python3.10' > /root/python-version.txt");
     const initial = await source.commands.run("cat /root/python-version.txt");
     check("Initial state set", initial.stdout.trim() === "python3.10");
 
-    // Create checkpoint
     const cp = await source.createCheckpoint("patch-base");
     dim(`Checkpoint ID: ${cp.id}`);
 
@@ -102,8 +116,13 @@ async function main() {
     sandboxes.push(fork1);
     green(`Fork 1 created: ${fork1.sandboxId}`);
 
-    // Wait for boot + patch application
-    await sleep(8000);
+    dim("Waiting for fork 1 to be ready...");
+    const fork1Ready = await waitForSandboxReady(fork1);
+    check("Fork 1 is ready", fork1Ready);
+    if (!fork1Ready) throw new Error("Fork 1 not ready, cannot proceed");
+
+    // Give patches a moment to complete after sandbox is accepting commands
+    await sleep(5000);
 
     const f1Patched = await fork1.commands.run("cat /root/python-version.txt");
     check("Fork 1 has patched state (applied on boot)", f1Patched.stdout.trim() === "python3.11", `got: ${f1Patched.stdout.trim()}`);
@@ -123,7 +142,6 @@ async function main() {
     check("Second patch created", patch2Result.patch.id !== undefined);
     check("Patch sequence is 2", patch2Result.patch.sequence === 2);
 
-    // Verify patch is NOT yet applied (fork1 is still running, patch only applies on wake/boot)
     const f1Security = await fork1.commands.run("test -f /root/security-patch.txt && echo exists || echo missing");
     check("Patch not applied to running sandbox", f1Security.stdout.trim() === "missing");
 
@@ -137,13 +155,14 @@ async function main() {
     await fork1.wake({ timeout: 600 });
     green("Fork 1 woken");
 
-    // Wait for post-wake patching
+    dim("Waiting for fork 1 to be ready after wake...");
+    const fork1WakeReady = await waitForSandboxReady(fork1);
+    check("Fork 1 ready after wake", fork1WakeReady);
     await sleep(5000);
 
     const f1SecurityAfterWake = await fork1.commands.run("cat /root/security-patch.txt");
     check("Second patch applied after wake", f1SecurityAfterWake.stdout.trim() === "security-fix-applied", `got: ${f1SecurityAfterWake.stdout.trim()}`);
 
-    // Verify prior patches still present
     const f1PythonAfterWake = await fork1.commands.run("cat /root/python-version.txt");
     check("Prior patch state preserved after wake", f1PythonAfterWake.stdout.trim() === "python3.11", `got: ${f1PythonAfterWake.stdout.trim()}`);
     console.log();
@@ -157,8 +176,8 @@ async function main() {
     check("Second patch has sequence 2", patches[1]?.sequence === 2);
     console.log();
 
-    // ── Test 5: Bad patch (should fail gracefully) ───────────────
-    bold("--- Test 5: Bad patch script ---\n");
+    // ── Test 5: Bad patch blocks the chain ───────────────────────
+    bold("--- Test 5: Bad patch blocks the chain ---\n");
 
     const badPatch = await Sandbox.createCheckpointPatch(cp.id, {
       script: "exit 1",
@@ -167,20 +186,85 @@ async function main() {
 
     check("Bad patch created", badPatch.patch.id !== undefined);
     check("Bad patch sequence is 3", badPatch.patch.sequence === 3);
+    dim(`Bad patch ID: ${badPatch.patch.id}`);
 
-    // Fork a new sandbox — bad patch should fail and stop the chain
+    // Add a 4th patch after the bad one
+    const patch4Result = await Sandbox.createCheckpointPatch(cp.id, {
+      script: "echo 'post-bad' > /root/patch4.txt",
+      description: "Patch after the bad one",
+    });
+    check("Patch 4 created (after bad)", patch4Result.patch.sequence === 4);
+
+    // Fork — bad patch should block patch 4 from applying
     const fork2 = await Sandbox.createFromCheckpoint(cp.id, { timeout: 600 });
     sandboxes.push(fork2);
     green(`Fork 2 created: ${fork2.sandboxId}`);
 
-    await sleep(8000);
+    dim("Waiting for fork 2 to be ready...");
+    const fork2Ready = await waitForSandboxReady(fork2);
+    check("Fork 2 is ready", fork2Ready);
+    if (!fork2Ready) throw new Error("Fork 2 not ready, cannot proceed");
+    await sleep(5000);
 
-    // Patches 1 and 2 should have applied, but patch 3 (exit 1) should have failed
+    // Patches 1+2 should apply, patch 3 fails, patch 4 never runs
     const f2Patched = await fork2.commands.run("cat /root/python-version.txt");
     check("Good patches applied before bad one", f2Patched.stdout.trim() === "python3.11", `got: ${f2Patched.stdout.trim()}`);
 
     const f2Security = await fork2.commands.run("cat /root/security-patch.txt");
-    check("Second good patch also applied", f2Security.stdout.trim() === "security-fix-applied", `got: ${f2Security.stdout.trim()}`);
+    check("Patch 2 applied", f2Security.stdout.trim() === "security-fix-applied", `got: ${f2Security.stdout.trim()}`);
+
+    const f2Patch4 = await fork2.commands.run("test -f /root/patch4.txt && echo exists || echo missing");
+    check("Patch 4 blocked by bad patch 3", f2Patch4.stdout.trim() === "missing");
+    console.log();
+
+    // ── Test 6: Delete bad patch — recovery on wake ──────────────
+    bold("--- Test 6: Delete bad patch — recovery on wake ---\n");
+
+    dim(`Deleting bad patch ${badPatch.patch.id}...`);
+    await Sandbox.deleteCheckpointPatch(cp.id, badPatch.patch.id);
+    green("Bad patch deleted");
+
+    // Verify it's gone from the list
+    const patchesAfterDelete = await Sandbox.listCheckpointPatches(cp.id);
+    check("3 patches remaining after delete", patchesAfterDelete.length === 3, `got ${patchesAfterDelete.length}`);
+    const sequences = patchesAfterDelete.map((p) => p.sequence);
+    check("Remaining sequences are 1, 2, 4", JSON.stringify(sequences) === "[1,2,4]", `got ${JSON.stringify(sequences)}`);
+
+    // Hibernate fork2 and wake — patch 4 should now apply (bad patch 3 is gone)
+    dim("Hibernating fork 2...");
+    await fork2.hibernate();
+    green("Fork 2 hibernated");
+
+    await sleep(3000);
+
+    dim("Waking fork 2...");
+    await fork2.wake({ timeout: 600 });
+    green("Fork 2 woken");
+
+    dim("Waiting for fork 2 to be ready after wake...");
+    const fork2WakeReady = await waitForSandboxReady(fork2);
+    check("Fork 2 ready after wake", fork2WakeReady);
+    await sleep(5000);
+
+    const f2Patch4AfterWake = await fork2.commands.run("cat /root/patch4.txt");
+    check("Patch 4 applied after deleting bad patch and waking", f2Patch4AfterWake.stdout.trim() === "post-bad", `got: ${f2Patch4AfterWake.stdout.trim()}`);
+
+    // Prior state still intact
+    const f2PythonAfterWake = await fork2.commands.run("cat /root/python-version.txt");
+    check("All prior patches preserved", f2PythonAfterWake.stdout.trim() === "python3.11", `got: ${f2PythonAfterWake.stdout.trim()}`);
+    console.log();
+
+    // ── Test 7: Delete is idempotent ─────────────────────────────
+    bold("--- Test 7: Delete is idempotent ---\n");
+
+    // Deleting the same patch again should not throw
+    let deleteAgainOk = true;
+    try {
+      await Sandbox.deleteCheckpointPatch(cp.id, badPatch.patch.id);
+    } catch {
+      deleteAgainOk = false;
+    }
+    check("Deleting already-deleted patch does not throw", deleteAgainOk);
     console.log();
 
   } catch (err: any) {
