@@ -36,6 +36,7 @@ type VMInstance struct {
 	MemoryMB    int
 	HostPort    int
 	GuestPort   int
+	Envs        map[string]string  // sandbox-level environment variables
 
 	// VM internals
 	pid         int                // Firecracker VMM process PID
@@ -56,11 +57,12 @@ type VMInstance struct {
 // It records VM config so that on hard kill recovery, a sandbox can be
 // cold-booted from template + existing workspace without needing DB access.
 type SandboxMeta struct {
-	SandboxID string `json:"sandboxId"`
-	Template  string `json:"template"`
-	CpuCount  int    `json:"cpuCount"`
-	MemoryMB  int    `json:"memoryMB"`
-	GuestPort int    `json:"guestPort"`
+	SandboxID string            `json:"sandboxId"`
+	Template  string            `json:"template"`
+	CpuCount  int               `json:"cpuCount"`
+	MemoryMB  int               `json:"memoryMB"`
+	GuestPort int               `json:"guestPort"`
+	Envs      map[string]string `json:"envs,omitempty"`
 }
 
 // Config holds configuration for the Firecracker Manager.
@@ -377,6 +379,7 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 		MemoryMB:    memMB,
 		HostPort:    hostPort,
 		GuestPort:   guestPort,
+		Envs:        cfg.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
@@ -412,6 +415,7 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 		CpuCount:  cpus,
 		MemoryMB:  memMB,
 		GuestPort: guestPort,
+		Envs:      cfg.Envs,
 	}
 	if metaJSON, err := json.Marshal(sbMeta); err == nil {
 		_ = os.WriteFile(filepath.Join(sandboxDir, "sandbox-meta.json"), metaJSON, 0644)
@@ -669,10 +673,19 @@ func (m *Manager) Exec(ctx context.Context, sandboxID string, cfg types.ProcessC
 		command = "/bin/sh"
 	}
 
+	// Merge sandbox-level envs with per-command envs (per-command takes precedence)
+	envs := make(map[string]string, len(vm.Envs)+len(cfg.Env))
+	for k, v := range vm.Envs {
+		envs[k] = v
+	}
+	for k, v := range cfg.Env {
+		envs[k] = v
+	}
+
 	resp, err := vm.agent.Exec(ctx, &pb.ExecRequest{
 		Command:        command,
 		Args:           args,
-		Envs:           cfg.Env,
+		Envs:           envs,
 		Cwd:            cfg.Cwd,
 		TimeoutSeconds: timeout,
 	})
@@ -1053,6 +1066,7 @@ func (m *Manager) RecoverLocalSandboxes() []LocalRecovery {
 							CpuCount:  snapMeta.CpuCount,
 							MemoryMB:  snapMeta.MemoryMB,
 							GuestPort: snapMeta.GuestPort,
+							Envs:      snapMeta.Envs,
 						},
 					})
 					continue

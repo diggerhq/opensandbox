@@ -25,18 +25,19 @@ import (
 // SnapshotMeta holds metadata persisted alongside snapshot files.
 // This is needed to restore the exact same VM configuration on wake.
 type SnapshotMeta struct {
-	SandboxID     string         `json:"sandboxId"`
-	Network       *NetworkConfig `json:"network"`
-	GuestCID      uint32         `json:"guestCID"`
-	GuestMAC      string         `json:"guestMAC"`
-	BootArgs      string         `json:"bootArgs"`
-	RootfsPath    string         `json:"rootfsPath"`
-	WorkspacePath string         `json:"workspacePath"`
-	VsockPath     string         `json:"vsockPath"`
-	CpuCount      int            `json:"cpuCount"`
-	MemoryMB      int            `json:"memoryMB"`
-	Template      string         `json:"template"`
-	GuestPort     int            `json:"guestPort"`
+	SandboxID     string            `json:"sandboxId"`
+	Network       *NetworkConfig    `json:"network"`
+	GuestCID      uint32            `json:"guestCID"`
+	GuestMAC      string            `json:"guestMAC"`
+	BootArgs      string            `json:"bootArgs"`
+	RootfsPath    string            `json:"rootfsPath"`
+	WorkspacePath string            `json:"workspacePath"`
+	VsockPath     string            `json:"vsockPath"`
+	CpuCount      int               `json:"cpuCount"`
+	MemoryMB      int               `json:"memoryMB"`
+	Template      string            `json:"template"`
+	GuestPort     int               `json:"guestPort"`
+	Envs          map[string]string `json:"envs,omitempty"`
 }
 
 // doHibernate pauses a running VM, creates a full memory snapshot, and kicks off
@@ -122,6 +123,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		MemoryMB:      vm.MemoryMB,
 		Template:      vm.Template,
 		GuestPort:     vm.GuestPort,
+		Envs:          vm.Envs,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -463,6 +465,7 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		MemoryMB:    meta.MemoryMB,
 		HostPort:    hostPort,
 		GuestPort:   netCfg.GuestPort,
+		Envs:        meta.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
@@ -658,6 +661,7 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 		MemoryMB:    memMB,
 		HostPort:    hostPort,
 		GuestPort:   guestPort,
+		Envs:        meta.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
@@ -1047,6 +1051,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			MemoryMB:      vm.MemoryMB,
 			Template:      vm.Template,
 			GuestPort:     vm.GuestPort,
+			Envs:          vm.Envs,
 		}
 		metaJSON, _ := json.MarshalIndent(meta, "", "  ")
 		if writeErr := os.WriteFile(filepath.Join(snapshotDir, "snapshot-meta.json"), metaJSON, 0644); writeErr != nil {
@@ -1304,6 +1309,7 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 		MemoryMB:    meta.MemoryMB,
 		HostPort:    hostPort,
 		GuestPort:   netCfg.GuestPort,
+		Envs:        meta.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
@@ -1366,11 +1372,13 @@ func (m *Manager) coldBootRestoreFromCheckpoint(ctx context.Context, vm *VMInsta
 	cpuCount := 0
 	memoryMB := 0
 	guestPort := 0
+	var envs map[string]string
 	if vm != nil {
 		template = vm.Template
 		cpuCount = vm.CpuCount
 		memoryMB = vm.MemoryMB
 		guestPort = vm.GuestPort
+		envs = vm.Envs
 	}
 
 	cfg := types.SandboxConfig{
@@ -1378,6 +1386,7 @@ func (m *Manager) coldBootRestoreFromCheckpoint(ctx context.Context, vm *VMInsta
 		CpuCount:             cpuCount,
 		MemoryMB:             memoryMB,
 		Port:                 guestPort,
+		Envs:                 envs,
 		NetworkEnabled:       true,
 		TemplateRootfsKey:    "local://" + cachedRootfs,
 		TemplateWorkspaceKey: "local://" + cachedWorkspace,
@@ -1805,6 +1814,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 		CpuCount:  meta.CpuCount,
 		MemoryMB:  meta.MemoryMB,
 		GuestPort: netCfg.GuestPort,
+		Envs:      cfg.Envs,
 	}
 	sbMetaJSON, _ := json.Marshal(sbMeta)
 	_ = os.WriteFile(filepath.Join(sandboxDir, "sandbox-meta.json"), sbMetaJSON, 0644)
@@ -1826,6 +1836,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 		MemoryMB:    meta.MemoryMB,
 		HostPort:    hostPort,
 		GuestPort:   netCfg.GuestPort,
+		Envs:        cfg.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
@@ -2267,6 +2278,7 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 		CpuCount:  cpus,
 		MemoryMB:  memMB,
 		GuestPort: guestPort,
+		Envs:      cfg.Envs,
 	}
 	sbMetaJSON, _ := json.Marshal(sbMeta)
 	_ = os.WriteFile(filepath.Join(sandboxDir, "sandbox-meta.json"), sbMetaJSON, 0644)
@@ -2288,6 +2300,7 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 		MemoryMB:    memMB,
 		HostPort:    hostPort,
 		GuestPort:   guestPort,
+		Envs:        cfg.Envs,
 		pid:         cmd.Process.Pid,
 		cmd:         cmd,
 		network:     netCfg,
