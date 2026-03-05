@@ -67,6 +67,38 @@ cat > "$TMPDIR/init" << 'INIT_EOF'
 #!/bin/busybox sh
 # OpenSandbox VM init script — PID 1 inside Firecracker microVM
 
+# Mount minimal virtual filesystems needed for setup
+mount -t proc proc /proc
+mount -t devtmpfs devtmpfs /dev
+
+# ── Overlay root: data disk as writable upper layer over the rootfs ──
+mkdir -p /mnt/data
+if mount /dev/vdb /mnt/data 2>/dev/null || mount /dev/vdb1 /mnt/data 2>/dev/null; then
+    mkdir -p /mnt/data/upper /mnt/data/work /mnt/overlay
+
+    umount /dev
+    umount /proc
+
+    mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/data/upper,workdir=/mnt/data/work /mnt/overlay
+
+    mkdir -p /mnt/overlay/mnt/data
+    mount --move /mnt/data /mnt/overlay/mnt/data
+
+    cd /mnt/overlay
+    mkdir -p mnt/old_root
+    pivot_root . mnt/old_root
+
+    umount -l /mnt/old_root 2>/dev/null
+    rmdir /mnt/old_root 2>/dev/null
+
+    echo "init: overlay root active (data disk backing all writes)"
+else
+    umount /dev
+    umount /proc
+    echo "init: warning: no data disk found, running on rootfs only"
+fi
+
+# ── Mount virtual filesystems (in the final root) ──
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
@@ -83,12 +115,6 @@ mount -t tmpfs tmpfs /run
 mount -t devpts devpts /dev/pts
 [ -d /dev/shm ] || mkdir -p /dev/shm
 mount -t tmpfs tmpfs /dev/shm
-
-mkdir -p /workspace
-mount /dev/vdb /workspace 2>/dev/null || {
-    echo "init: warning: could not mount /dev/vdb, trying /dev/vdb1"
-    mount /dev/vdb1 /workspace 2>/dev/null || echo "init: warning: workspace mount failed"
-}
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -131,7 +157,7 @@ COPY osb-agent /usr/local/bin/osb-agent
 RUN chmod +x /usr/local/bin/osb-agent
 COPY init /sbin/init
 RUN chmod +x /sbin/init
-RUN mkdir -p /workspace
+RUN mkdir -p /mnt/data /mnt/overlay
 INJECT_EOF
 
 # Build with Docker
