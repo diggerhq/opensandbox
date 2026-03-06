@@ -70,16 +70,12 @@ jobs:
             "linux/arm64"
             "darwin/amd64"
             "darwin/arm64"
-            "windows/amd64"
           )
 
           for platform in "${platforms[@]}"; do
             GOOS="${platform%/*}"
             GOARCH="${platform#*/}"
             output="dist/oc-${GOOS}-${GOARCH}"
-            if [ "$GOOS" = "windows" ]; then
-              output="${output}.exe"
-            fi
             echo "Building ${GOOS}/${GOARCH}..."
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
               -ldflags "$LDFLAGS" \
