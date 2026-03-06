@@ -37,6 +37,7 @@ type SnapshotMeta struct {
 	MemoryMB      int               `json:"memoryMB"`
 	Template      string            `json:"template"`
 	GuestPort     int               `json:"guestPort"`
+	SnapshotedAt  time.Time         `json:"snapshotedAt,omitempty"`
 }
 
 // doHibernate pauses a running VM, creates a full memory snapshot, and kicks off
@@ -122,6 +123,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		MemoryMB:      vm.MemoryMB,
 		Template:      vm.Template,
 		GuestPort:     vm.GuestPort,
+		SnapshotedAt:  time.Now(),
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -392,7 +394,7 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 
 	if snapshotRestore {
 		// Hot restore: load snapshot, VM resumes exactly where it was paused
-		if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
+		if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
 			cmd.Process.Kill()
 			cmd.Wait()
 			m.cleanupVM(netCfg, "")
@@ -718,6 +720,23 @@ func fileExists(path string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// snapshotClockDeltaUs returns the microseconds elapsed since the snapshot was taken,
+// for use as clock_delta_us when restoring. If SnapshotedAt is not recorded in metadata
+// (legacy snapshots), it falls back to the mtime of the mem file — Firecracker writes
+// it at snapshot time so it's a reliable proxy.
+func snapshotClockDeltaUs(meta SnapshotMeta, memFile string) int64 {
+	t := meta.SnapshotedAt
+	if t.IsZero() {
+		if info, err := os.Stat(memFile); err == nil {
+			t = info.ModTime()
+		}
+	}
+	if t.IsZero() {
+		return 0
+	}
+	return time.Since(t).Microseconds()
+}
+
 // --- Save as Template ---
 
 // doSaveAsTemplate snapshots a running sandbox's drives for use as a reusable template.
@@ -939,16 +958,15 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		log.Printf("firecracker: CreateCheckpoint %s/%s: WARNING: vm.agent is nil, guest sync SKIPPED!", vm.ID, checkpointID)
 	}
 
-	// Step 1b: Bring eth0 down to drain virtio-net queues. This makes the snapshot
-	// portable across TAP backends — warm forks get a new TAP and the guest kernel
-	// resumes with clean virtqueues instead of stale descriptors from the old TAP.
-	// Without this, forks under network load can hit virtqueue corruption
-	// ("output.0:id 0 is not a head!") and guest kernel soft lockups.
-	// Established connections are already lost on fork (new IP), so no downside.
+	// Step 1b: Quiesce eth0 before snapshotting to ensure clean virtio-net virtqueues.
+	// Flush addresses first so the host stops sending ARP/IPv6 ND traffic to this TAP,
+	// then bring eth0 down to drain the virtqueues. Without the flush, a race exists
+	// where packets arrive in the RX used ring while NAPI drains, corrupting the snapshot.
+	// Warm forks get a new TAP and the guest kernel resumes with clean virtqueues.
 	if vm.agent != nil {
 		_, _ = vm.agent.Exec(ctx, &pb.ExecRequest{
 			Command:        "/bin/sh",
-			Args:           []string{"-c", "ip link set eth0 down"},
+			Args:           []string{"-c", "ip addr flush dev eth0 && ip link set eth0 down"},
 			TimeoutSeconds: 5,
 		})
 	}
@@ -963,6 +981,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	if err = vm.fcClient.PauseVM(); err != nil {
 		if agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 5*time.Second); reconnErr == nil {
 			vm.agent = agent
+			// eth0 was taken down in step 1b — bring it back up since we're aborting
+			if vm.network != nil {
+				reconfigureGuestNetwork(ctx, agent, vm.network.GuestIP, vm.network.HostIP, vm.network.CIDR)
+			}
 		}
 		os.RemoveAll(cacheDir)
 		return "", "", fmt.Errorf("pause VM for checkpoint: %w", err)
@@ -1027,6 +1049,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		os.Remove(tmpfsMemFile)
 		if agent, reconnErr := m.waitForAgent(ctx, vm.vsockPath, 10*time.Second); reconnErr == nil {
 			vm.agent = agent
+			// eth0 was taken down in step 1b — bring it back up since we're aborting
+			if vm.network != nil {
+				reconfigureGuestNetwork(ctx, agent, vm.network.GuestIP, vm.network.HostIP, vm.network.CIDR)
+			}
 		}
 		os.RemoveAll(cacheDir)
 		return "", "", fmt.Errorf("copy drives for checkpoint: %w", copyErr)
@@ -1038,6 +1064,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		log.Printf("firecracker: CreateCheckpoint %s: agent reconnect failed: %v (VM still running)", vm.ID, reconnErr)
 	} else {
 		vm.agent = agent
+		// Bring eth0 back up — it was taken down before snapshotting to drain virtio-net queues
+		if vm.network != nil {
+			if err := reconfigureGuestNetwork(ctx, agent, vm.network.GuestIP, vm.network.HostIP, vm.network.CIDR); err != nil {
+				log.Printf("firecracker: CreateCheckpoint %s: eth0 restore failed: %v", vm.ID, err)
+			}
+		}
 	}
 
 	// Step 8: Write snapshot metadata + move mem from tmpfs (background)
@@ -1061,6 +1093,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			MemoryMB:      vm.MemoryMB,
 			Template:      vm.Template,
 			GuestPort:     vm.GuestPort,
+			SnapshotedAt:  time.Now(),
 		}
 		metaJSON, _ := json.MarshalIndent(meta, "", "  ")
 		if writeErr := os.WriteFile(filepath.Join(snapshotDir, "snapshot-meta.json"), metaJSON, 0644); writeErr != nil {
@@ -1289,7 +1322,7 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	log.Printf("firecracker: warmRestore %s: FC started (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
 	// Step 5: Load snapshot — VM resumes exactly where it was paused during checkpoint
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, "")
@@ -1794,7 +1827,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	}
 
 	// Step 8: Load snapshot — VM resumes from checkpoint state
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, sandboxDir)
@@ -2092,15 +2125,16 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 
 	// Step 5: Write metadata
 	meta := SnapshotMeta{
-		SandboxID: tempID,
-		Network:   netCfg,
-		GuestCID:  guestCID,
-		GuestMAC:  guestMAC,
-		BootArgs:  bootArgs,
-		CpuCount:  cpus,
-		MemoryMB:  memMB,
-		Template:  "default",
-		GuestPort: m.cfg.DefaultPort,
+		SandboxID:    tempID,
+		Network:      netCfg,
+		GuestCID:     guestCID,
+		GuestMAC:     guestMAC,
+		BootArgs:     bootArgs,
+		CpuCount:     cpus,
+		MemoryMB:     memMB,
+		Template:     "default",
+		GuestPort:    m.cfg.DefaultPort,
+		SnapshotedAt: time.Now(),
 	}
 	metaJSON, _ := json.Marshal(meta)
 	_ = os.WriteFile(filepath.Join(snapshotDir, "snapshot-meta.json"), metaJSON, 0644)
@@ -2260,8 +2294,8 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 		return nil, fmt.Errorf("wait for API socket: %w", err)
 	}
 
-	// Step 6: Load snapshot
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
+	// Step 6: Load snapshot, advancing guest clock to compensate for time since golden snapshot was taken
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, sandboxDir)
