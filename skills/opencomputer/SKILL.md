@@ -1,5 +1,5 @@
 ---
-name: sandbox
+name: opencomputer
 description: Manage OpenComputer cloud sandboxes. Use when the user wants to create, run commands in, checkpoint, or manage sandbox environments. Auto-invokes when sandboxes, remote environments, or the oc CLI are mentioned.
 allowed-tools: Bash(oc *), Bash(which oc), Read, Grep, Glob
 ---
@@ -13,9 +13,19 @@ The `oc` CLI must be installed and configured. Check with:
 which oc
 ```
 
-If not installed, build it from the OpenComputer repo:
-```
-CGO_ENABLED=0 go build -o /usr/local/bin/oc ./cmd/oc
+If not installed, download the latest binary from GitHub Releases:
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+
+# macOS (Intel)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+
+# Linux (x86_64)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+
+# Linux (ARM64)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
 ```
 
 Configuration requires an API key. Set it via:

@@ -7,18 +7,40 @@ The `oc` CLI lets you manage OpenComputer sandboxes directly from your terminal 
 
 ## Installation
 
-```bash
-# Build from source
-make build-oc
+Download the latest binary for your platform from [GitHub Releases](https://github.com/diggerhq/opencomputer/releases):
 
-# Install to /usr/local/bin
-make install-oc
+<CodeGroup>
+
+```bash macOS (Apple Silicon)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc
+chmod +x /usr/local/bin/oc
 ```
 
-Or with `go install`:
+```bash macOS (Intel)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-amd64 -o /usr/local/bin/oc
+chmod +x /usr/local/bin/oc
+```
+
+```bash Linux (x86_64)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-amd64 -o /usr/local/bin/oc
+chmod +x /usr/local/bin/oc
+```
+
+```bash Linux (ARM64)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-arm64 -o /usr/local/bin/oc
+chmod +x /usr/local/bin/oc
+```
+
+```bash Windows (PowerShell)
+Invoke-WebRequest -Uri https://github.com/diggerhq/opencomputer/releases/latest/download/oc-windows-amd64.exe -OutFile oc.exe
+```
+
+</CodeGroup>
+
+Verify the installation:
 
 ```bash
-go install github.com/opensandbox/opensandbox/cmd/oc@latest
+oc --version
 ```
 
 ## Configuration

@@ -5,6 +5,8 @@ BINARY_SERVER = opensandbox-server
 BINARY_WORKER = opensandbox-worker
 BINARY_AGENT = osb-agent
 BUILD_DIR = bin
+VERSION ?= $(shell cat VERSION | tr -d '[:space:]').dev
+LDFLAGS_OC = -s -w -X github.com/opensandbox/opensandbox/cmd/oc/internal/commands.Version=$(VERSION)
 
 ## help: Show this help message
 help:
@@ -39,11 +41,11 @@ build-server-arm64:
 
 ## build-oc: Build the oc CLI tool
 build-oc:
-	CGO_ENABLED=0 go build -o $(BUILD_DIR)/oc ./cmd/oc
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS_OC)" -o $(BUILD_DIR)/oc ./cmd/oc
 
 ## install-oc: Build and install oc to $GOPATH/bin
 install-oc:
-	CGO_ENABLED=0 go install ./cmd/oc
+	CGO_ENABLED=0 go install -ldflags "$(LDFLAGS_OC)" ./cmd/oc
 
 ## --- Local Testing (3 tiers) ---
 

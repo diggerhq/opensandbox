@@ -24,6 +24,26 @@ OpenComputer gives you **secure, isolated cloud sandboxes** that spin up in mill
   </Card>
 </CardGroup>
 
+## CLI
+
+Download the `oc` binary from [GitHub Releases](https://github.com/diggerhq/opencomputer/releases):
+
+```bash
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+```
+
+See the [CLI Reference](/cli/overview) for full usage.
+
+## Agent Skill
+
+Install the OpenComputer skill for Claude Code and other AI agents:
+
+```bash
+npx skills add diggerhq/opencomputer
+```
+
+This gives your AI agent the ability to create and manage cloud sandboxes using the `oc` CLI.
+
 ## SDKs
 
 OpenComputer provides first-class SDKs for TypeScript and Python with identical API surfaces.

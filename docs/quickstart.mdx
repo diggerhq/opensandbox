@@ -7,9 +7,13 @@ description: "Get up and running with OpenComputer in 5 minutes"
 
 Sign up at [app.opencomputer.dev](https://app.opencomputer.dev) and grab your API key from the dashboard.
 
-## 2. Install the SDK
+## 2. Install
 
 <CodeGroup>
+
+```bash CLI
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+```
 
 ```bash npm
 npm install @opencomputer/sdk
@@ -17,6 +21,10 @@ npm install @opencomputer/sdk
 
 ```bash pip
 pip install opencomputer-sdk
+```
+
+```bash Agent Skill
+npx skills add diggerhq/opencomputer
 ```
 
 </CodeGroup>

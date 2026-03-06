@@ -10,15 +10,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Version is set at build time via ldflags.
+var Version = "dev"
+
 var (
 	jsonOutput bool
 	printer    *output.Printer
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "oc",
-	Short: "OpenComputer CLI — manage cloud sandboxes",
-	Long:  "Command-line interface for creating and managing OpenComputer sandboxes.",
+	Use:     "oc",
+	Short:   "OpenComputer CLI — manage cloud sandboxes",
+	Long:    "Command-line interface for creating and managing OpenComputer sandboxes.",
+	Version: Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		cfg := config.Load(cmd)
 		if cfg.APIKey == "" && cmd.Name() != "config" && cmd.Name() != "help" && cmd.Name() != "set" && cmd.Name() != "show" {
