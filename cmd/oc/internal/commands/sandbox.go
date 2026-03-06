@@ -21,7 +21,6 @@ var sandboxCreateCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
 
-		template, _ := cmd.Flags().GetString("template")
 		timeout, _ := cmd.Flags().GetInt("timeout")
 		cpu, _ := cmd.Flags().GetInt("cpu")
 		memory, _ := cmd.Flags().GetInt("memory")
@@ -29,7 +28,6 @@ var sandboxCreateCmd = &cobra.Command{
 		metaSlice, _ := cmd.Flags().GetStringSlice("metadata")
 
 		config := types.SandboxConfig{
-			Template: template,
 			Timeout:  timeout,
 			CpuCount: cpu,
 			MemoryMB: memory,
@@ -211,7 +209,6 @@ var lsShortcut = &cobra.Command{
 func init() {
 	// sandbox create flags
 	for _, cmd := range []*cobra.Command{sandboxCreateCmd, createShortcut} {
-		cmd.Flags().String("template", "base", "Template to use")
 		cmd.Flags().Int("timeout", 300, "Timeout in seconds")
 		cmd.Flags().Int("cpu", 0, "CPU count")
 		cmd.Flags().Int("memory", 0, "Memory in MB")

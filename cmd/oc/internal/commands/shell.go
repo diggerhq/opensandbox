@@ -126,7 +126,6 @@ Examples:
 
 		// Cleanup: kill PTY session
 		signal.Stop(sigWinch)
-		term.Restore(fd, oldState)
 		ptyClient.Delete(cmd.Context(), fmt.Sprintf("/sandboxes/%s/pty/%s", sandboxID, session.SessionID))
 
 		return nil
