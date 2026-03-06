@@ -52,17 +52,6 @@ jobs:
           scp -i ~/.ssh/deploy.pem bin/opensandbox-server ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/opensandbox-server
           scp -i ~/.ssh/deploy.pem bin/web-dist.tar.gz ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/web-dist.tar.gz
 
-      - name: Install and restart
-        run: |
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
-            sudo mv /tmp/opensandbox-server /usr/local/bin/opensandbox-server
-            sudo chmod +x /usr/local/bin/opensandbox-server
-            sudo mkdir -p /opt/opensandbox/web
-            sudo tar xzf /tmp/web-dist.tar.gz -C /opt/opensandbox/web
-            rm /tmp/web-dist.tar.gz
-            sudo systemctl restart opensandbox-server
-          '
-
       - name: Pull secrets from AWS Secrets Manager
         run: |
           ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
@@ -93,6 +82,17 @@ jobs:
           " && sudo mv /tmp/server.env.new /etc/opensandbox/server.env
               echo "Secrets merged."
             fi
+          '
+
+      - name: Install and restart
+        run: |
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
+            sudo mv /tmp/opensandbox-server /usr/local/bin/opensandbox-server
+            sudo chmod +x /usr/local/bin/opensandbox-server
+            sudo mkdir -p /opt/opensandbox/web
+            sudo tar xzf /tmp/web-dist.tar.gz -C /opt/opensandbox/web
+            rm /tmp/web-dist.tar.gz
+            sudo systemctl restart opensandbox-server
           '
 
       - name: Verify deployment
