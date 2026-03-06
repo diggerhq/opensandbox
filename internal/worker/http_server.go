@@ -109,6 +109,11 @@ func (s *HTTPServer) Start(addr string) error {
 	return s.echo.Start(addr)
 }
 
+// StartTLS starts the HTTPS server with the given certificate and key files.
+func (s *HTTPServer) StartTLS(addr, certFile, keyFile string) error {
+	return s.echo.StartTLS(addr, certFile, keyFile)
+}
+
 // Close gracefully shuts down the server.
 func (s *HTTPServer) Close() error {
 	return s.echo.Close()

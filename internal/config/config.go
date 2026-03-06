@@ -95,6 +95,7 @@ type Config struct {
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
 	// Env vars take precedence over secret values (for local overrides).
 	SecretsARN string
+
 }
 
 // Load reads configuration from environment variables with sensible defaults.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/opensandbox/opensandbox/cmd/oc/internal/client"
@@ -90,6 +91,21 @@ Examples:
 		}()
 
 		done := make(chan struct{})
+
+		// WebSocket keepalive: send ping every 30s to prevent idle timeout
+		// (Cloudflare drops idle WebSocket connections after 100s)
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+				case <-done:
+					return
+				}
+			}
+		}()
 
 		// Read from WebSocket → stdout
 		go func() {

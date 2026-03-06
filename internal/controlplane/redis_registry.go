@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +24,25 @@ type WorkerEntry struct {
 	MachineID string  `json:"machine_id,omitempty"` // EC2 instance ID
 	Region    string  `json:"region"`
 	GRPCAddr  string  `json:"grpc_addr"`
-	HTTPAddr  string  `json:"http_addr"`
+	HTTPAddr  string  `json:"http_addr"` // Public address (may be HTTPS with hostname)
 	Capacity  int     `json:"capacity"`
 	Current   int     `json:"current"`
 	CPUPct    float64 `json:"cpu_pct"`
 	MemPct    float64 `json:"mem_pct"`
+}
+
+// InternalHTTPAddr returns the private HTTP address for internal routing (VPC).
+// Derived from GRPCAddr (private_ip:9090 → http://private_ip:8080).
+// Falls back to HTTPAddr if GRPCAddr is not available.
+func (w *WorkerEntry) InternalHTTPAddr() string {
+	if w.GRPCAddr != "" {
+		host := w.GRPCAddr
+		if i := strings.LastIndex(host, ":"); i >= 0 {
+			host = host[:i]
+		}
+		return "http://" + host + ":8080"
+	}
+	return w.HTTPAddr
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state

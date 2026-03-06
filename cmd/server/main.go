@@ -215,6 +215,8 @@ func main() {
 			KeyName:            cfg.EC2KeyName,
 			IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
 			SecretsARN:         cfg.SecretsARN,
+			CFAPIToken:         cfg.CFAPIToken,
+			CFZoneID:           cfg.CFZoneID,
 		})
 		if err != nil {
 			log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)

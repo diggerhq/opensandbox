@@ -31,6 +31,8 @@ type EC2PoolConfig struct {
 	KeyName         string
 	IAMInstanceProfile string // IAM instance profile name (for Secrets Manager + S3 access)
 	SecretsARN         string // Secrets Manager ARN passed to worker env
+	CFAPIToken         string // Cloudflare API token for worker DNS registration
+	CFZoneID           string // Cloudflare zone ID for opencomputer.dev
 }
 
 // EC2Pool implements compute.Pool using AWS EC2 instances.
@@ -277,6 +279,14 @@ func (p *EC2Pool) buildUserData(opts MachineOpts) string {
 		sb.WriteString(fmt.Sprintf("OPENSANDBOX_SECRETS_ARN=%s\n", p.cfg.SecretsARN))
 	}
 	sb.WriteString("ENVEOF\n\n")
+
+	// Write Cloudflare credentials for automatic DNS + TLS registration
+	if p.cfg.CFAPIToken != "" && p.cfg.CFZoneID != "" {
+		sb.WriteString("cat > /etc/opensandbox/cloudflare.env << 'CFEOF'\n")
+		sb.WriteString(fmt.Sprintf("OPENSANDBOX_CF_API_TOKEN=%s\n", p.cfg.CFAPIToken))
+		sb.WriteString(fmt.Sprintf("OPENSANDBOX_CF_ZONE_ID=%s\n", p.cfg.CFZoneID))
+		sb.WriteString("CFEOF\n\n")
+	}
 
 	// Mount NVMe with XFS project quotas
 	sb.WriteString("# Mount NVMe instance storage with XFS project quotas\n")

@@ -268,6 +268,23 @@ func main() {
 	// Start HTTP server for direct SDK access
 	httpServer := worker.NewHTTPServer(mgr, ptyMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
 	httpAddr := fmt.Sprintf(":%d", cfg.Port)
+
+	// Serve HTTPS on :443 if Cloudflare Origin Certificate is present
+	originCert := "/etc/opensandbox/origin-cert.pem"
+	originKey := "/etc/opensandbox/origin-key.pem"
+	_, certErr := os.Stat(originCert)
+	_, keyErr := os.Stat(originKey)
+	if certErr == nil && keyErr == nil {
+		tlsServer := worker.NewHTTPServer(mgr, ptyMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
+		log.Printf("opensandbox-worker: starting HTTPS server on :443 (Cloudflare origin cert)")
+		go func() {
+			if err := tlsServer.StartTLS(":443", originCert, originKey); err != nil {
+				log.Printf("HTTPS server error: %v", err)
+			}
+		}()
+	}
+
+	// Always serve plain HTTP for internal VPC access (control plane proxy)
 	log.Printf("opensandbox-worker: starting HTTP server on %s", httpAddr)
 	go func() {
 		if err := httpServer.Start(httpAddr); err != nil {

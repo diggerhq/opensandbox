@@ -220,29 +220,104 @@ echo "==> Installing identity service..."
 sudo tee /usr/local/bin/opensandbox-worker-identity.sh > /dev/null << 'IDENT'
 #!/usr/bin/env bash
 set -euo pipefail
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+
+CF_API_TOKEN="${OPENSANDBOX_CF_API_TOKEN:-}"
+CF_ZONE_ID="${OPENSANDBOX_CF_ZONE_ID:-}"
+WORKER_DOMAIN="workers.opencomputer.dev"
+
+# Query EC2 instance metadata (IMDSv2)
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id)
-PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/local-ipv4)
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/public-ipv4 || echo "")
+
 SHORT_ID=$(echo "$INSTANCE_ID" | sed 's/^i-//' | cut -c1-8)
 WORKER_ID="w-use2-${SHORT_ID}"
+WORKER_HOSTNAME="${WORKER_ID}.${WORKER_DOMAIN}"
+IP="${PUBLIC_IP:-$PRIVATE_IP}"
+
 mkdir -p /etc/opensandbox
+
+# Register proxied A record in Cloudflare (Cloudflare terminates TLS)
+if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_ZONE_ID" ] && [ -n "$IP" ]; then
+    echo "opensandbox-identity: registering DNS ${WORKER_HOSTNAME} -> ${IP} (Cloudflare proxied)"
+
+    RESP=$(curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+        -H "Authorization: Bearer ${CF_API_TOKEN}" \
+        -H "Content-Type: application/json" \
+        --data "{
+            \"type\": \"A\",
+            \"name\": \"${WORKER_HOSTNAME}\",
+            \"content\": \"${IP}\",
+            \"ttl\": 1,
+            \"proxied\": true
+        }")
+
+    RECORD_ID=$(echo "$RESP" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    SUCCESS=$(echo "$RESP" | grep -o '"success":true')
+
+    if [ -n "$SUCCESS" ] && [ -n "$RECORD_ID" ]; then
+        echo "opensandbox-identity: DNS registered (record_id=${RECORD_ID})"
+        HTTP_ADDR="https://${WORKER_HOSTNAME}"
+    else
+        echo "opensandbox-identity: WARNING: DNS registration failed: ${RESP}"
+        HTTP_ADDR="http://${IP}:8080"
+        RECORD_ID=""
+    fi
+
+    # Save record ID for cleanup on shutdown
+    cat > /etc/opensandbox/worker-dns.env << EOF
+CF_API_TOKEN=${CF_API_TOKEN}
+CF_ZONE_ID=${CF_ZONE_ID}
+CF_RECORD_ID=${RECORD_ID}
+WORKER_HOSTNAME=${WORKER_HOSTNAME}
+EOF
+else
+    echo "opensandbox-identity: WARNING: no CF credentials, using raw IP (no TLS)"
+    HTTP_ADDR="http://${IP}:8080"
+    cat > /etc/opensandbox/worker-dns.env << EOF
+CF_API_TOKEN=
+CF_ZONE_ID=
+CF_RECORD_ID=
+WORKER_HOSTNAME=${WORKER_HOSTNAME}
+EOF
+fi
+
 cat > /etc/opensandbox/worker-identity.env << EOF
 OPENSANDBOX_WORKER_ID=${WORKER_ID}
-OPENSANDBOX_HTTP_ADDR=http://${PUBLIC_IP:-$PRIVATE_IP}:8080
+OPENSANDBOX_HTTP_ADDR=${HTTP_ADDR}
 OPENSANDBOX_GRPC_ADVERTISE=${PRIVATE_IP}:9090
 EOF
-echo "opensandbox-identity: ${WORKER_ID} private=${PRIVATE_IP} public=${PUBLIC_IP:-none}"
+
+echo "opensandbox-identity: ${WORKER_ID} private=${PRIVATE_IP} public=${PUBLIC_IP:-none} addr=${HTTP_ADDR}"
 IDENT
 sudo chmod +x /usr/local/bin/opensandbox-worker-identity.sh
 
+# DNS cleanup script — deletes the Cloudflare A record on shutdown
+sudo tee /usr/local/bin/opensandbox-worker-dns-cleanup.sh > /dev/null << 'CLEANUP'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/opensandbox/worker-dns.env 2>/dev/null || exit 0
+[ -z "$CF_API_TOKEN" ] && exit 0
+[ -z "$CF_ZONE_ID" ] && exit 0
+[ -z "$CF_RECORD_ID" ] && exit 0
+
+echo "opensandbox-dns-cleanup: removing ${WORKER_HOSTNAME} (record_id=${CF_RECORD_ID})"
+curl -s -X DELETE \
+    "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${CF_RECORD_ID}" \
+    -H "Authorization: Bearer ${CF_API_TOKEN}" \
+    > /dev/null 2>&1 || echo "opensandbox-dns-cleanup: WARNING: failed to remove DNS record"
+CLEANUP
+sudo chmod +x /usr/local/bin/opensandbox-worker-dns-cleanup.sh
+
 sudo tee /etc/systemd/system/opensandbox-identity.service > /dev/null << 'SVC'
 [Unit]
-Description=OpenSandbox Worker Identity (from EC2 IMDS)
+Description=OpenSandbox Worker Identity + Cloudflare DNS
 After=network-online.target
 Wants=network-online.target
 Before=opensandbox-worker.service
@@ -250,7 +325,9 @@ Before=opensandbox-worker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+EnvironmentFile=-/etc/opensandbox/cloudflare.env
 ExecStart=/usr/local/bin/opensandbox-worker-identity.sh
+ExecStop=/usr/local/bin/opensandbox-worker-dns-cleanup.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -277,7 +354,7 @@ Environment=OPENSANDBOX_MODE=worker
 Environment=OPENSANDBOX_PORT=8080
 Environment=OPENSANDBOX_REGION=use2
 Environment=OPENSANDBOX_DATA_DIR=/data
-Environment=OPENSANDBOX_SANDBOX_DOMAIN=workers.opensandbox.ai
+Environment=OPENSANDBOX_SANDBOX_DOMAIN=workers.opencomputer.dev
 Environment=OPENSANDBOX_FIRECRACKER_BIN=/usr/local/bin/firecracker
 Environment=OPENSANDBOX_KERNEL_PATH=/data/firecracker/vmlinux-arm64
 Environment=OPENSANDBOX_IMAGES_DIR=/data/firecracker/images
@@ -296,6 +373,14 @@ WantedBy=multi-user.target
 SVC
 
 sudo mkdir -p /etc/opensandbox /data/sandboxes /data/firecracker/images /data/checkpoints
+
+# Cloudflare credentials for automatic DNS + TLS registration.
+# Set these to enable HTTPS worker hostnames via Cloudflare proxy.
+sudo tee /etc/opensandbox/cloudflare.env > /dev/null << 'CFENV'
+OPENSANDBOX_CF_API_TOKEN=
+OPENSANDBOX_CF_ZONE_ID=
+CFENV
+echo "    NOTE: Set CF credentials in /etc/opensandbox/cloudflare.env to enable DNS registration"
 
 # -------------------------------------------------------------------
 # Enable services
