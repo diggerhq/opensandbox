@@ -33,6 +33,10 @@
     {
       "name": "Python SDK",
       "url": "sdks/python"
+    },
+    {
+      "name": "CLI",
+      "url": "cli"
     }
   ],
   "navigation": [
@@ -73,6 +77,18 @@
         "sdks/python/templates",
         "sdks/python/checkpoints",
         "sdks/python/patches"
+      ]
+    },
+    {
+      "group": "CLI Reference",
+      "pages": [
+        "cli/overview",
+        "cli/sandbox",
+        "cli/commands",
+        "cli/shell",
+        "cli/checkpoints",
+        "cli/patches",
+        "cli/previews"
       ]
     }
   ],
