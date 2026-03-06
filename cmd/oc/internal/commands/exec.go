@@ -3,7 +3,6 @@ package commands
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/opensandbox/opensandbox/cmd/oc/internal/client"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -28,18 +27,11 @@ Examples:
 
 		sandboxID := args[0]
 
-		// Find the "--" separator to split sandbox flags from command
-		cmdArgs := cmd.Flags().Args()
-		var command string
-		if len(cmdArgs) > 1 {
-			command = strings.Join(cmdArgs[1:], " ")
-		} else if len(args) > 1 {
-			command = strings.Join(args[1:], " ")
-		}
-
-		if command == "" {
+		if len(args) < 2 {
 			return fmt.Errorf("no command specified. Usage: oc exec <sandbox-id> -- <command>")
 		}
+		command := args[1]
+		cmdArgs := args[2:]
 
 		cwd, _ := cmd.Flags().GetString("cwd")
 		timeout, _ := cmd.Flags().GetInt("timeout")
@@ -47,6 +39,7 @@ Examples:
 
 		req := types.ProcessConfig{
 			Command: command,
+			Args:    cmdArgs,
 			Cwd:     cwd,
 			Timeout: timeout,
 			Env:     parseKVSlice(envSlice),
