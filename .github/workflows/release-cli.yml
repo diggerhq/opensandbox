@@ -1,0 +1,108 @@
+name: Release CLI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/oc/**'
+      - 'internal/**'
+      - 'VERSION'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/release-cli.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need full history for tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Determine version
+        id: version
+        run: |
+          BASE=$(cat VERSION | tr -d '[:space:]')
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+          # Find the latest tag matching this base version
+          LATEST=$(git tag --list "v${BASE}.*" --sort=-v:refname | head -n1)
+
+          if [ -z "$LATEST" ]; then
+            # No existing tag for this base version — start at .0
+            PATCH=0
+          else
+            # Extract 4th number and bump
+            CURRENT_PATCH=$(echo "$LATEST" | sed "s/v${BASE}\.//")
+            PATCH=$((CURRENT_PATCH + 1))
+          fi
+
+          VERSION="${BASE}.${PATCH}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Releasing v${VERSION}"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build CLI binaries
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          LDFLAGS="-s -w -X github.com/opensandbox/opensandbox/cmd/oc/internal/commands.Version=${VERSION}"
+          mkdir -p dist
+
+          platforms=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+          )
+
+          for platform in "${platforms[@]}"; do
+            GOOS="${platform%/*}"
+            GOARCH="${platform#*/}"
+            output="dist/oc-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building ${GOOS}/${GOARCH}..."
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build \
+              -ldflags "$LDFLAGS" \
+              -o "$output" \
+              ./cmd/oc
+          done
+
+          # Create checksums
+          cd dist && sha256sum oc-* > checksums.txt
+
+      - name: Create tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: oc ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/oc-*
+            dist/checksums.txt

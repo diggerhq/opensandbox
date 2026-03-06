@@ -15,6 +15,21 @@ Think of it as the compute equivalent of a laptop that sleeps when you close the
 
 ## Quick start
 
+### CLI
+
+Download the latest `oc` binary from [GitHub Releases](https://github.com/diggerhq/opencomputer/releases):
+
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc
+chmod +x /usr/local/bin/oc
+
+# Configure
+oc config set api-key YOUR_API_KEY
+```
+
+### SDK
+
 Install the SDK:
 
 ```bash
