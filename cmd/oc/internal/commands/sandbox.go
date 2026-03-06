@@ -42,9 +42,6 @@ var sandboxCreateCmd = &cobra.Command{
 
 		printer.Print(sandbox, func() {
 			fmt.Printf("Created sandbox %s (status: %s)\n", sandbox.ID, sandbox.Status)
-			if sandbox.ConnectURL != "" {
-				fmt.Printf("Connect URL: %s\n", sandbox.ConnectURL)
-			}
 		})
 		return nil
 	},
@@ -106,9 +103,6 @@ var sandboxGetCmd = &cobra.Command{
 			fmt.Printf("Memory:    %dMB\n", sandbox.MemoryMB)
 			fmt.Printf("Started:   %s\n", sandbox.StartedAt.Format(time.RFC3339))
 			fmt.Printf("Ends:      %s\n", sandbox.EndAt.Format(time.RFC3339))
-			if sandbox.ConnectURL != "" {
-				fmt.Printf("Connect:   %s\n", sandbox.ConnectURL)
-			}
 		})
 		return nil
 	},
