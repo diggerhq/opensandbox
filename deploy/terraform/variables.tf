@@ -52,7 +52,7 @@ variable "worker_instance_type" {
 variable "dev_host_instance_type" {
   description = "EC2 instance type for the dev single-host. Use bare-metal (e.g. c7g.metal) for Firecracker KVM support, or regular instances (e.g. c8i.xlarge) for control plane dev without sandboxes."
   type        = string
-  default     = "c8i.xlarge"
+  default     = "a1.metal"
 }
 
 # --- Database (prod only) ---
@@ -122,7 +122,7 @@ variable "jwt_secret" {
 # --- AMI ---
 
 variable "ami_id" {
-  description = "AMI ID for EC2 instances (Ubuntu 24.04 x86_64 recommended). If empty, latest Ubuntu 24.04 LTS is used."
+  description = "AMI ID for EC2 instances (Ubuntu 24.04 arm64 recommended). If empty, latest Ubuntu 24.04 LTS arm64 is used."
   type        = string
   default     = ""
 }

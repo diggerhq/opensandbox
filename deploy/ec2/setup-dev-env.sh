@@ -58,4 +58,11 @@ cp "$SCRIPT_DIR/opensandbox-server.service" /etc/systemd/system/
 cp "$SCRIPT_DIR/opensandbox-worker.service" /etc/systemd/system/
 systemctl daemon-reload
 
+# Allow Firecracker VM traffic through the FORWARD chain.
+# Docker sets the FORWARD policy to DROP which blocks VM outbound networking.
+iptables -C FORWARD -s 172.16.0.0/16 -j ACCEPT 2>/dev/null \
+  || iptables -I FORWARD 1 -s 172.16.0.0/16 -j ACCEPT
+iptables -C FORWARD -d 172.16.0.0/16 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+  || iptables -I FORWARD 2 -d 172.16.0.0/16 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
 echo "Env files and systemd units installed (private_ip=$PRIVATE_IP)"

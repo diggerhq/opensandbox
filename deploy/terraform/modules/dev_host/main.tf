@@ -2,7 +2,7 @@
 # Data Sources
 ###############################################################################
 
-# Look up the latest Ubuntu 24.04 LTS x86_64 AMI when no ami_id is provided.
+# Look up the latest Ubuntu 24.04 LTS arm64 AMI when no ami_id is provided.
 data "aws_ami" "ubuntu" {
   count       = var.ami_id == "" ? 1 : 0
   most_recent = true
@@ -10,12 +10,12 @@ data "aws_ami" "ubuntu" {
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
   }
 
   filter {
     name   = "architecture"
-    values = ["x86_64"]
+    values = ["arm64"]
   }
 
   filter {
@@ -55,10 +55,6 @@ resource "aws_instance" "dev_host" {
   key_name               = var.key_pair_name
 
   associate_public_ip_address = true
-
-  cpu_options {
-    nested_virtualization = "enabled"
-  }
 
   root_block_device {
     volume_size           = 100

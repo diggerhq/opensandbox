@@ -109,8 +109,13 @@ echo "==> Downloading Firecracker kernel..."
 sudo mkdir -p /opt/opensandbox
 if [ ! -f /opt/opensandbox/vmlinux ]; then
     case "$ARCH" in
-      x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" ;;
-      aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux.bin" ;;
+      x86_64)
+        KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin"
+        ;;
+      aarch64)
+        # Use the same 6.1 kernel as production (supports vsock after snapshot restore)
+        KERNEL_URL="https://github.com/diggerhq/opencomputer/releases/download/kernel-v1/vmlinux-arm64"
+        ;;
     esac
     sudo curl -fSL -o /opt/opensandbox/vmlinux "$KERNEL_URL"
     sudo chmod 644 /opt/opensandbox/vmlinux

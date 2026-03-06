@@ -29,7 +29,7 @@ variable "key_pair_name" {
 }
 
 variable "ami_id" {
-  description = "AMI ID to use. If empty, the latest Ubuntu 24.04 LTS x86_64 AMI is looked up automatically."
+  description = "AMI ID to use. If empty, the latest Ubuntu 24.04 LTS arm64 AMI is looked up automatically."
   type        = string
   default     = ""
 }
