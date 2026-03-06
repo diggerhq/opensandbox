@@ -50,7 +50,8 @@
     {
       "group": "Guides",
       "pages": [
-        "guides/build-a-lovable-clone"
+        "guides/build-a-lovable-clone",
+        "guides/agent-skill"
       ]
     },
     {
