@@ -815,6 +815,20 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	return checkpoints, rows.Err()
 }
 
+// GetCheckpointByName returns a checkpoint by sandbox ID and name.
+func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
+	cp := &Checkpoint{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
+	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint not found: %w", err)
+	}
+	return cp, nil
+}
+
 // CountCheckpoints returns the number of checkpoints for a sandbox.
 func (s *Store) CountCheckpoints(ctx context.Context, sandboxID string) (int, error) {
 	var count int

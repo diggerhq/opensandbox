@@ -215,7 +215,7 @@ class Sandbox:
         internal clients are refreshed automatically.
 
         Args:
-            checkpoint_id: UUID of the checkpoint to restore.
+            checkpoint_id: UUID or name of the checkpoint to restore.
         """
         resp = await self._client.post(
             f"/sandboxes/{self.sandbox_id}/checkpoints/{checkpoint_id}/restore",
@@ -399,7 +399,7 @@ class Sandbox:
         """Delete a checkpoint.
 
         Args:
-            checkpoint_id: UUID of the checkpoint to delete.
+            checkpoint_id: UUID or name of the checkpoint to delete.
         """
         resp = await self._client.delete(
             f"/sandboxes/{self.sandbox_id}/checkpoints/{checkpoint_id}",

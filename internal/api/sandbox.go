@@ -758,6 +758,20 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 // --- Checkpoint handlers ---
 
 // createCheckpoint creates a named checkpoint of a running sandbox.
+// resolveCheckpoint resolves a checkpoint identifier that can be either a UUID or a name.
+// When sandboxID is provided, names are looked up scoped to that sandbox.
+func (s *Server) resolveCheckpoint(ctx context.Context, idOrName string, sandboxID string) (*db.Checkpoint, error) {
+	// Try UUID first
+	if cpID, err := uuid.Parse(idOrName); err == nil {
+		return s.store.GetCheckpoint(ctx, cpID)
+	}
+	// Fall back to name lookup (requires sandbox scope)
+	if sandboxID == "" {
+		return nil, fmt.Errorf("checkpoint name lookup requires a sandbox ID")
+	}
+	return s.store.GetCheckpointByName(ctx, sandboxID, idOrName)
+}
+
 func (s *Server) createCheckpoint(c echo.Context) error {
 	sandboxID := c.Param("id")
 	ctx := c.Request().Context()
@@ -905,7 +919,7 @@ func (s *Server) listCheckpoints(c echo.Context) error {
 // restoreCheckpoint restores a sandbox to a checkpoint (in-place revert).
 func (s *Server) restoreCheckpoint(c echo.Context) error {
 	sandboxID := c.Param("id")
-	checkpointIDStr := c.Param("checkpointId")
+	checkpointIDOrName := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
 	if s.store == nil {
@@ -915,11 +929,6 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
-	}
-
-	checkpointID, err := uuid.Parse(checkpointIDStr)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
 	}
 
 	// Verify sandbox belongs to org and is running
@@ -934,14 +943,15 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox must be running to restore a checkpoint"})
 	}
 
-	// Verify checkpoint exists, belongs to this sandbox, and is ready
-	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
+	// Resolve checkpoint by UUID or name
+	cp, err := s.resolveCheckpoint(ctx, checkpointIDOrName, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
 	}
 	if cp.SandboxID != sandboxID {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "checkpoint does not belong to this sandbox"})
 	}
+	checkpointID := cp.ID
 	if cp.Status != "ready" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "checkpoint is not ready (status: " + cp.Status + ")"})
 	}
@@ -1179,7 +1189,7 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 // deleteCheckpoint deletes a checkpoint.
 func (s *Server) deleteCheckpoint(c echo.Context) error {
 	sandboxID := c.Param("id")
-	checkpointIDStr := c.Param("checkpointId")
+	checkpointIDOrName := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
 	if s.store == nil {
@@ -1191,13 +1201,8 @@ func (s *Server) deleteCheckpoint(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
 	}
 
-	checkpointID, err := uuid.Parse(checkpointIDStr)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
-	}
-
-	// Verify checkpoint exists and belongs to this sandbox and org
-	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
+	// Resolve checkpoint by UUID or name
+	cp, err := s.resolveCheckpoint(ctx, checkpointIDOrName, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
 	}
@@ -1206,7 +1211,7 @@ func (s *Server) deleteCheckpoint(c echo.Context) error {
 	}
 
 	// Delete from DB (enforces org ownership)
-	if err := s.store.DeleteCheckpoint(ctx, orgID, checkpointID); err != nil {
+	if err := s.store.DeleteCheckpoint(ctx, orgID, cp.ID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 

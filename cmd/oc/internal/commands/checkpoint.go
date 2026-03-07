@@ -89,7 +89,7 @@ var checkpointListCmd = &cobra.Command{
 }
 
 var checkpointRestoreCmd = &cobra.Command{
-	Use:   "restore <sandbox-id> <checkpoint-id>",
+	Use:   "restore <sandbox-id> <checkpoint-id-or-name>",
 	Short: "Restore a sandbox to a checkpoint (in-place revert)",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -132,7 +132,7 @@ var checkpointSpawnCmd = &cobra.Command{
 }
 
 var checkpointDeleteCmd = &cobra.Command{
-	Use:   "delete <sandbox-id> <checkpoint-id>",
+	Use:   "delete <sandbox-id> <checkpoint-id-or-name>",
 	Short: "Delete a checkpoint",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {

@@ -271,6 +271,7 @@ export class Sandbox {
     return resp.json();
   }
 
+  /** Restore the sandbox to a previous checkpoint (in-place revert). Accepts a checkpoint UUID or name. */
   async restoreCheckpoint(checkpointId: string): Promise<void> {
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints/${checkpointId}/restore`, {
       method: "POST",
@@ -325,6 +326,7 @@ export class Sandbox {
     return new Sandbox(data, apiUrl, apiKey);
   }
 
+  /** Delete a checkpoint. Accepts a checkpoint UUID or name. */
   async deleteCheckpoint(checkpointId: string): Promise<void> {
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/checkpoints/${checkpointId}`, {
       method: "DELETE",
