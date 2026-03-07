@@ -33,6 +33,12 @@ service SandboxAgent {
   rpc PTYResize(PTYResizeRequest) returns (PTYResizeResponse);
   rpc PTYKill(PTYKillRequest) returns (PTYKillResponse);
 
+  // Exec sessions — persistent command execution with scrollback and reconnect.
+  rpc ExecSessionCreate(ExecSessionCreateRequest) returns (ExecSessionCreateResponse);
+  rpc ExecSessionAttach(stream ExecSessionInput) returns (stream ExecSessionOutput);
+  rpc ExecSessionList(ExecSessionListRequest) returns (ExecSessionListResponse);
+  rpc ExecSessionKill(ExecSessionKillRequest) returns (ExecSessionKillResponse);
+
   // SetEnvs stores sandbox-level environment variables inside the agent.
   // These are injected into every subsequent Exec/ExecStream call,
   // between the base OS env and per-command envs.
@@ -185,6 +191,60 @@ message PTYKillRequest {
 }
 
 message PTYKillResponse {}
+
+// --- Exec Sessions ---
+
+message ExecSessionCreateRequest {
+  string command = 1;
+  repeated string args = 2;
+  map<string, string> envs = 3;
+  string cwd = 4;
+  int32 timeout_seconds = 5;          // 0 = no timeout (run until exit/kill)
+  int32 max_run_after_disconnect = 6; // seconds, 0 = run forever
+  int32 scrollback_max_bytes = 7;     // 0 = default (1MB)
+}
+
+message ExecSessionCreateResponse {
+  string session_id = 1;
+}
+
+message ExecSessionInput {
+  string session_id = 1; // required on first message
+  bytes stdin = 2;
+}
+
+message ExecSessionOutput {
+  enum Type {
+    STDOUT = 0;
+    STDERR = 1;
+    EXIT = 2;
+    SCROLLBACK_END = 3;
+  }
+  Type type = 1;
+  bytes data = 2;
+  int32 exit_code = 3; // only set when type = EXIT
+}
+
+message ExecSessionListRequest {}
+message ExecSessionListResponse {
+  repeated ExecSessionInfo sessions = 1;
+}
+
+message ExecSessionInfo {
+  string session_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  bool running = 4;
+  int32 exit_code = 5;
+  int64 started_at = 6;
+  int32 attached_clients = 7;
+}
+
+message ExecSessionKillRequest {
+  string session_id = 1;
+  int32 signal = 2; // 0 = SIGKILL
+}
+message ExecSessionKillResponse {}
 
 // --- SetEnvs ---
 

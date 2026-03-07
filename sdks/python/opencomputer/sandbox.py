@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from opencomputer.commands import Commands
+from opencomputer.exec import Exec
 from opencomputer.filesystem import Filesystem
 from opencomputer.pty import Pty
 
@@ -175,9 +175,9 @@ class Sandbox:
         return Filesystem(self._ops_client, self.sandbox_id)
 
     @property
-    def commands(self) -> Commands:
-        """Access command execution."""
-        return Commands(self._ops_client, self.sandbox_id)
+    def exec(self) -> Exec:
+        """Access session-based command execution."""
+        return Exec(self._ops_client, self.sandbox_id, self._connect_url, self._token)
 
     @property
     def pty(self) -> Pty:

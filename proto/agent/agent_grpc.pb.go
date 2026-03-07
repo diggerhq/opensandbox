@@ -19,23 +19,27 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxAgent_Exec_FullMethodName       = "/agent.SandboxAgent/Exec"
-	SandboxAgent_ExecStream_FullMethodName = "/agent.SandboxAgent/ExecStream"
-	SandboxAgent_ReadFile_FullMethodName   = "/agent.SandboxAgent/ReadFile"
-	SandboxAgent_WriteFile_FullMethodName  = "/agent.SandboxAgent/WriteFile"
-	SandboxAgent_ListDir_FullMethodName    = "/agent.SandboxAgent/ListDir"
-	SandboxAgent_MakeDir_FullMethodName    = "/agent.SandboxAgent/MakeDir"
-	SandboxAgent_Remove_FullMethodName     = "/agent.SandboxAgent/Remove"
-	SandboxAgent_Exists_FullMethodName     = "/agent.SandboxAgent/Exists"
-	SandboxAgent_Stat_FullMethodName       = "/agent.SandboxAgent/Stat"
-	SandboxAgent_Stats_FullMethodName      = "/agent.SandboxAgent/Stats"
-	SandboxAgent_Ping_FullMethodName       = "/agent.SandboxAgent/Ping"
-	SandboxAgent_PTYCreate_FullMethodName  = "/agent.SandboxAgent/PTYCreate"
-	SandboxAgent_PTYResize_FullMethodName  = "/agent.SandboxAgent/PTYResize"
-	SandboxAgent_PTYKill_FullMethodName    = "/agent.SandboxAgent/PTYKill"
-	SandboxAgent_SetEnvs_FullMethodName    = "/agent.SandboxAgent/SetEnvs"
-	SandboxAgent_Shutdown_FullMethodName   = "/agent.SandboxAgent/Shutdown"
-	SandboxAgent_SyncFS_FullMethodName     = "/agent.SandboxAgent/SyncFS"
+	SandboxAgent_Exec_FullMethodName              = "/agent.SandboxAgent/Exec"
+	SandboxAgent_ExecStream_FullMethodName        = "/agent.SandboxAgent/ExecStream"
+	SandboxAgent_ReadFile_FullMethodName          = "/agent.SandboxAgent/ReadFile"
+	SandboxAgent_WriteFile_FullMethodName         = "/agent.SandboxAgent/WriteFile"
+	SandboxAgent_ListDir_FullMethodName           = "/agent.SandboxAgent/ListDir"
+	SandboxAgent_MakeDir_FullMethodName           = "/agent.SandboxAgent/MakeDir"
+	SandboxAgent_Remove_FullMethodName            = "/agent.SandboxAgent/Remove"
+	SandboxAgent_Exists_FullMethodName            = "/agent.SandboxAgent/Exists"
+	SandboxAgent_Stat_FullMethodName              = "/agent.SandboxAgent/Stat"
+	SandboxAgent_Stats_FullMethodName             = "/agent.SandboxAgent/Stats"
+	SandboxAgent_Ping_FullMethodName              = "/agent.SandboxAgent/Ping"
+	SandboxAgent_PTYCreate_FullMethodName         = "/agent.SandboxAgent/PTYCreate"
+	SandboxAgent_PTYResize_FullMethodName         = "/agent.SandboxAgent/PTYResize"
+	SandboxAgent_PTYKill_FullMethodName           = "/agent.SandboxAgent/PTYKill"
+	SandboxAgent_ExecSessionCreate_FullMethodName = "/agent.SandboxAgent/ExecSessionCreate"
+	SandboxAgent_ExecSessionAttach_FullMethodName = "/agent.SandboxAgent/ExecSessionAttach"
+	SandboxAgent_ExecSessionList_FullMethodName   = "/agent.SandboxAgent/ExecSessionList"
+	SandboxAgent_ExecSessionKill_FullMethodName   = "/agent.SandboxAgent/ExecSessionKill"
+	SandboxAgent_SetEnvs_FullMethodName           = "/agent.SandboxAgent/SetEnvs"
+	SandboxAgent_Shutdown_FullMethodName          = "/agent.SandboxAgent/Shutdown"
+	SandboxAgent_SyncFS_FullMethodName            = "/agent.SandboxAgent/SyncFS"
 )
 
 // SandboxAgentClient is the client API for SandboxAgent service.
@@ -65,6 +69,11 @@ type SandboxAgentClient interface {
 	PTYCreate(ctx context.Context, in *PTYCreateRequest, opts ...grpc.CallOption) (*PTYCreateResponse, error)
 	PTYResize(ctx context.Context, in *PTYResizeRequest, opts ...grpc.CallOption) (*PTYResizeResponse, error)
 	PTYKill(ctx context.Context, in *PTYKillRequest, opts ...grpc.CallOption) (*PTYKillResponse, error)
+	// Exec sessions — persistent command execution with scrollback and reconnect.
+	ExecSessionCreate(ctx context.Context, in *ExecSessionCreateRequest, opts ...grpc.CallOption) (*ExecSessionCreateResponse, error)
+	ExecSessionAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput], error)
+	ExecSessionList(ctx context.Context, in *ExecSessionListRequest, opts ...grpc.CallOption) (*ExecSessionListResponse, error)
+	ExecSessionKill(ctx context.Context, in *ExecSessionKillRequest, opts ...grpc.CallOption) (*ExecSessionKillResponse, error)
 	// SetEnvs stores sandbox-level environment variables inside the agent.
 	// These are injected into every subsequent Exec/ExecStream call,
 	// between the base OS env and per-command envs.
@@ -233,6 +242,49 @@ func (c *sandboxAgentClient) PTYKill(ctx context.Context, in *PTYKillRequest, op
 	return out, nil
 }
 
+func (c *sandboxAgentClient) ExecSessionCreate(ctx context.Context, in *ExecSessionCreateRequest, opts ...grpc.CallOption) (*ExecSessionCreateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecSessionCreateResponse)
+	err := c.cc.Invoke(ctx, SandboxAgent_ExecSessionCreate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxAgentClient) ExecSessionAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[1], SandboxAgent_ExecSessionAttach_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ExecSessionInput, ExecSessionOutput]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_ExecSessionAttachClient = grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput]
+
+func (c *sandboxAgentClient) ExecSessionList(ctx context.Context, in *ExecSessionListRequest, opts ...grpc.CallOption) (*ExecSessionListResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecSessionListResponse)
+	err := c.cc.Invoke(ctx, SandboxAgent_ExecSessionList_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxAgentClient) ExecSessionKill(ctx context.Context, in *ExecSessionKillRequest, opts ...grpc.CallOption) (*ExecSessionKillResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExecSessionKillResponse)
+	err := c.cc.Invoke(ctx, SandboxAgent_ExecSessionKill_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxAgentClient) SetEnvs(ctx context.Context, in *SetEnvsRequest, opts ...grpc.CallOption) (*SetEnvsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetEnvsResponse)
@@ -290,6 +342,11 @@ type SandboxAgentServer interface {
 	PTYCreate(context.Context, *PTYCreateRequest) (*PTYCreateResponse, error)
 	PTYResize(context.Context, *PTYResizeRequest) (*PTYResizeResponse, error)
 	PTYKill(context.Context, *PTYKillRequest) (*PTYKillResponse, error)
+	// Exec sessions — persistent command execution with scrollback and reconnect.
+	ExecSessionCreate(context.Context, *ExecSessionCreateRequest) (*ExecSessionCreateResponse, error)
+	ExecSessionAttach(grpc.BidiStreamingServer[ExecSessionInput, ExecSessionOutput]) error
+	ExecSessionList(context.Context, *ExecSessionListRequest) (*ExecSessionListResponse, error)
+	ExecSessionKill(context.Context, *ExecSessionKillRequest) (*ExecSessionKillResponse, error)
 	// SetEnvs stores sandbox-level environment variables inside the agent.
 	// These are injected into every subsequent Exec/ExecStream call,
 	// between the base OS env and per-command envs.
@@ -350,6 +407,18 @@ func (UnimplementedSandboxAgentServer) PTYResize(context.Context, *PTYResizeRequ
 }
 func (UnimplementedSandboxAgentServer) PTYKill(context.Context, *PTYKillRequest) (*PTYKillResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PTYKill not implemented")
+}
+func (UnimplementedSandboxAgentServer) ExecSessionCreate(context.Context, *ExecSessionCreateRequest) (*ExecSessionCreateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecSessionCreate not implemented")
+}
+func (UnimplementedSandboxAgentServer) ExecSessionAttach(grpc.BidiStreamingServer[ExecSessionInput, ExecSessionOutput]) error {
+	return status.Error(codes.Unimplemented, "method ExecSessionAttach not implemented")
+}
+func (UnimplementedSandboxAgentServer) ExecSessionList(context.Context, *ExecSessionListRequest) (*ExecSessionListResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecSessionList not implemented")
+}
+func (UnimplementedSandboxAgentServer) ExecSessionKill(context.Context, *ExecSessionKillRequest) (*ExecSessionKillResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExecSessionKill not implemented")
 }
 func (UnimplementedSandboxAgentServer) SetEnvs(context.Context, *SetEnvsRequest) (*SetEnvsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetEnvs not implemented")
@@ -626,6 +695,67 @@ func _SandboxAgent_PTYKill_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxAgent_ExecSessionCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecSessionCreateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxAgentServer).ExecSessionCreate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxAgent_ExecSessionCreate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxAgentServer).ExecSessionCreate(ctx, req.(*ExecSessionCreateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxAgent_ExecSessionAttach_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxAgentServer).ExecSessionAttach(&grpc.GenericServerStream[ExecSessionInput, ExecSessionOutput]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_ExecSessionAttachServer = grpc.BidiStreamingServer[ExecSessionInput, ExecSessionOutput]
+
+func _SandboxAgent_ExecSessionList_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecSessionListRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxAgentServer).ExecSessionList(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxAgent_ExecSessionList_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxAgentServer).ExecSessionList(ctx, req.(*ExecSessionListRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxAgent_ExecSessionKill_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExecSessionKillRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxAgentServer).ExecSessionKill(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxAgent_ExecSessionKill_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxAgentServer).ExecSessionKill(ctx, req.(*ExecSessionKillRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxAgent_SetEnvs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetEnvsRequest)
 	if err := dec(in); err != nil {
@@ -740,6 +870,18 @@ var SandboxAgent_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SandboxAgent_PTYKill_Handler,
 		},
 		{
+			MethodName: "ExecSessionCreate",
+			Handler:    _SandboxAgent_ExecSessionCreate_Handler,
+		},
+		{
+			MethodName: "ExecSessionList",
+			Handler:    _SandboxAgent_ExecSessionList_Handler,
+		},
+		{
+			MethodName: "ExecSessionKill",
+			Handler:    _SandboxAgent_ExecSessionKill_Handler,
+		},
+		{
 			MethodName: "SetEnvs",
 			Handler:    _SandboxAgent_SetEnvs_Handler,
 		},
@@ -757,6 +899,12 @@ var SandboxAgent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "ExecStream",
 			Handler:       _SandboxAgent_ExecStream_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "ExecSessionAttach",
+			Handler:       _SandboxAgent_ExecSessionAttach_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "proto/agent/agent.proto",

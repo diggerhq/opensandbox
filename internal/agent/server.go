@@ -43,6 +43,10 @@ type Server struct {
 	envMu       sync.RWMutex
 	sandboxEnvs []string
 
+	// Exec sessions
+	execMu       sync.RWMutex
+	execSessions map[string]*execSession
+
 	// PTY sessions
 	ptyMu       sync.Mutex
 	ptySessions map[string]*ptySession
@@ -52,10 +56,11 @@ type Server struct {
 // NewServer creates a new agent server.
 func NewServer(version string) *Server {
 	return &Server{
-		startTime:   time.Now(),
-		version:     version,
-		ptySessions: make(map[string]*ptySession),
-		nextPTYPort: PTYDataPortBase,
+		startTime:    time.Now(),
+		version:      version,
+		execSessions: make(map[string]*execSession),
+		ptySessions:  make(map[string]*ptySession),
+		nextPTYPort:  PTYDataPortBase,
 	}
 }
 
