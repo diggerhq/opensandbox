@@ -210,6 +210,8 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.POST("/org/custom-domain/refresh", s.dashboardRefreshCustomDomain)
 		dash.GET("/templates", s.dashboardListTemplates)
 		dash.DELETE("/templates/:id", s.dashboardDeleteTemplate)
+		dash.GET("/checkpoints", s.dashboardListCheckpoints)
+		dash.DELETE("/checkpoints/:id", s.dashboardDeleteCheckpoint)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)

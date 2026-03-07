@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1286,4 +1287,69 @@ func (s *Server) proxyWorkerHTTP(c echo.Context, session *db.SandboxSession, met
 		}
 	}
 	return c.Blob(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+}
+
+// dashboardListCheckpoints returns all checkpoints for the org with fork counts.
+func (s *Server) dashboardListCheckpoints(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	// Pagination
+	page := 1
+	perPage := 20
+	if p := c.QueryParam("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if pp := c.QueryParam("per_page"); pp != "" {
+		if v, err := strconv.Atoi(pp); err == nil && v > 0 && v <= 100 {
+			perPage = v
+		}
+	}
+	offset := (page - 1) * perPage
+
+	checkpoints, total, err := s.store.ListOrgCheckpoints(c.Request().Context(), orgID, perPage, offset)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if checkpoints == nil {
+		checkpoints = []db.CheckpointWithForks{}
+	}
+
+	return c.JSON(http.StatusOK, map[string]any{
+		"checkpoints": checkpoints,
+		"total":       total,
+		"page":        page,
+		"perPage":     perPage,
+	})
+}
+
+// dashboardDeleteCheckpoint deletes a checkpoint for the authenticated org.
+func (s *Server) dashboardDeleteCheckpoint(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	cpID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+	}
+
+	if err := s.store.DeleteCheckpoint(c.Request().Context(), orgID, cpID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }
