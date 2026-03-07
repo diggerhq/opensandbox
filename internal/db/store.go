@@ -815,6 +815,61 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	return checkpoints, rows.Err()
 }
 
+// CheckpointWithForks extends Checkpoint with a count of active forked sandboxes.
+type CheckpointWithForks struct {
+	Checkpoint
+	ActiveForks int `json:"activeForks"`
+	TotalForks  int `json:"totalForks"`
+}
+
+// ListOrgCheckpoints returns all checkpoints for an org with fork counts, paginated.
+func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, offset int) ([]CheckpointWithForks, int, error) {
+	// Total count for pagination
+	var total int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM sandbox_checkpoints WHERE org_id = $1`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT c.id, c.sandbox_id, c.org_id, c.name, c.rootfs_s3_key, c.workspace_s3_key,
+		        c.sandbox_config, c.status, c.size_bytes, c.created_at,
+		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id AND ss.status IN ('running', 'hibernated')) AS active_forks,
+		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id) AS total_forks
+		 FROM sandbox_checkpoints c WHERE c.org_id = $1
+		 ORDER BY c.created_at DESC LIMIT $2 OFFSET $3`, orgID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var results []CheckpointWithForks
+	for rows.Next() {
+		var cf CheckpointWithForks
+		if err := rows.Scan(&cf.ID, &cf.SandboxID, &cf.OrgID, &cf.Name, &cf.RootfsS3Key, &cf.WorkspaceS3Key,
+			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.CreatedAt,
+			&cf.ActiveForks, &cf.TotalForks); err != nil {
+			return nil, 0, err
+		}
+		results = append(results, cf)
+	}
+	return results, total, rows.Err()
+}
+
+// GetCheckpointByName looks up a checkpoint by sandbox-scoped name.
+func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
+	cp := &Checkpoint{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
+	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint not found: %w", err)
+	}
+	return cp, nil
+}
+
 // CountCheckpoints returns the number of checkpoints for a sandbox.
 func (s *Store) CountCheckpoints(ctx context.Context, sandboxID string) (int, error) {
 	var count int
