@@ -28,7 +28,7 @@ func (c *Config) IsConfigured() bool {
 }
 
 // GetAuthToken retrieves a Docker-compatible auth token from ECR.
-// Returns (username, password) suitable for `podman login`.
+// Returns (username, password) suitable for container registry login.
 // If AccessKey is empty, uses the default AWS credential chain (IAM instance profile on EC2).
 func GetAuthToken(ctx context.Context, cfg *Config) (string, string, error) {
 	var client *ecr.Client

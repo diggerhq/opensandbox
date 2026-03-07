@@ -7,8 +7,15 @@ import (
 	"github.com/opensandbox/opensandbox/pkg/types"
 )
 
+// HibernateResult holds the result of a hibernate operation.
+type HibernateResult struct {
+	SandboxID      string `json:"sandboxId"`
+	HibernationKey string `json:"hibernationKey"`
+	SizeBytes      int64  `json:"sizeBytes"`
+}
+
 // SandboxStats holds live resource usage for a sandbox.
-// Runtime-agnostic: both Podman and Firecracker backends populate these fields.
+// Runtime-agnostic interface for sandbox resource stats.
 type SandboxStats struct {
 	CPUPercent float64 `json:"cpuPercent"`
 	MemUsage   uint64  `json:"memUsage"` // bytes
@@ -21,7 +28,7 @@ type SandboxStats struct {
 // Manager defines the sandbox lifecycle interface.
 // Upper layers (SandboxRouter, HTTP/gRPC servers, proxy) depend on this interface,
 // not on a concrete implementation. This allows swapping the backend
-// (e.g., Podman containers → Firecracker microVMs) without changing callers.
+// Currently implemented by the Firecracker backend.
 type Manager interface {
 	// Lifecycle
 	Create(ctx context.Context, cfg types.SandboxConfig) (*types.Sandbox, error)
