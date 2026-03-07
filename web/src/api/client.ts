@@ -57,6 +57,12 @@ export const getTemplates = () => apiFetch<Template[]>('/templates')
 export const deleteTemplate = (id: string) =>
   apiFetch<void>(`/templates/${id}`, { method: 'DELETE' })
 
+export const getCheckpoints = (page = 1, perPage = 20) =>
+  apiFetch<CheckpointsResponse>(`/checkpoints?page=${page}&per_page=${perPage}`)
+
+export const deleteCheckpointDashboard = (id: string) =>
+  apiFetch<void>(`/checkpoints/${id}`, { method: 'DELETE' })
+
 export const getSessionDetail = (sandboxId: string) =>
   apiFetch<SessionDetail>(`/sessions/${sandboxId}`)
 
@@ -164,6 +170,25 @@ export interface SandboxStats {
   netInput: number
   netOutput: number
   pids: number
+}
+
+export interface CheckpointItem {
+  id: string
+  sandboxId: string
+  orgId: string
+  name: string
+  status: string
+  sizeBytes: number
+  activeForks: number
+  totalForks: number
+  createdAt: string
+}
+
+export interface CheckpointsResponse {
+  checkpoints: CheckpointItem[]
+  total: number
+  page: number
+  perPage: number
 }
 
 export interface Org {

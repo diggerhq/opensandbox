@@ -48,7 +48,7 @@ const icons = {
 const navItems = [
   { to: '/', label: 'Dashboard', end: true, icon: icons.grid },
   { to: '/sessions', label: 'Sessions', icon: icons.clock },
-  { to: '/templates', label: 'Templates', icon: icons.layers },
+  { to: '/checkpoints', label: 'Checkpoints', icon: icons.layers },
   { to: '/api-keys', label: 'API Keys', icon: icons.key },
   { to: '/settings', label: 'Settings', icon: icons.gear },
 ]
