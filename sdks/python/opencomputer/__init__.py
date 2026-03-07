@@ -2,18 +2,19 @@
 
 from opencomputer.sandbox import Sandbox
 from opencomputer.filesystem import Filesystem
-from opencomputer.commands import Commands, ProcessResult
+from opencomputer.exec import Exec, ProcessResult, ExecSessionInfo
 from opencomputer.pty import Pty, PtySession
 from opencomputer.template import Template
 
 __all__ = [
     "Sandbox",
     "Filesystem",
-    "Commands",
+    "Exec",
     "ProcessResult",
+    "ExecSessionInfo",
     "Pty",
     "PtySession",
     "Template",
 ]
 
-__version__ = "0.4.4"
+__version__ = "0.5.0"
