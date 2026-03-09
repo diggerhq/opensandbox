@@ -60,6 +60,37 @@ func (s *Server) createSandbox(c echo.Context) error {
 		}
 	}
 
+	// Declarative image or named snapshot → resolve to checkpoint and use createFromCheckpoint flow
+	if len(cfg.ImageManifest) > 0 || cfg.Snapshot != "" {
+		if !hasOrg {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required for image/snapshot creation"})
+		}
+
+		// Check if the client wants build log streaming (SSE)
+		wantsSSE := c.Request().Header.Get("Accept") == "text/event-stream"
+
+		if wantsSSE {
+			return s.createSandboxWithSSE(c, ctx, orgID, cfg)
+		}
+
+		// Non-streaming path
+		var checkpointID uuid.UUID
+		var err error
+
+		if cfg.Snapshot != "" {
+			checkpointID, err = s.resolveSnapshot(ctx, orgID, cfg.Snapshot)
+		} else {
+			checkpointID, err = s.resolveImageManifest(ctx, orgID, cfg.ImageManifest, nil)
+		}
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+
+		c.SetParamNames("checkpointId")
+		c.SetParamValues(checkpointID.String())
+		return s.createFromCheckpoint(c)
+	}
+
 	// Server mode with worker registry: dispatch to remote worker via gRPC
 	if s.workerRegistry != nil {
 		return s.createSandboxRemote(c, ctx, cfg, orgID, hasOrg)
@@ -125,6 +156,67 @@ func (s *Server) createSandbox(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusCreated, sb)
+}
+
+// createSandboxWithSSE handles sandbox creation with SSE build log streaming.
+// Streams build_log events during image build, then emits the final result event.
+func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID uuid.UUID, cfg types.SandboxConfig) error {
+	flusher, ok := c.Response().Writer.(http.Flusher)
+	if !ok {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "streaming not supported"})
+	}
+
+	// Set SSE headers
+	c.Response().Header().Set("Content-Type", "text/event-stream")
+	c.Response().Header().Set("Cache-Control", "no-cache")
+	c.Response().Header().Set("Connection", "keep-alive")
+	c.Response().WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// Helper to emit SSE events
+	emit := func(eventType string, payload interface{}) {
+		data, _ := json.Marshal(payload)
+		fmt.Fprintf(c.Response(), "event: %s\ndata: %s\n\n", eventType, data)
+		flusher.Flush()
+	}
+
+	// Build log callback — emits SSE events during image build
+	logFn := BuildLogFunc(func(step int, stepType string, message string) {
+		emit("build_log", map[string]interface{}{
+			"step":    step,
+			"type":    stepType,
+			"message": message,
+		})
+	})
+
+	// Resolve image or snapshot to checkpoint ID
+	var checkpointID uuid.UUID
+	var err error
+
+	if cfg.Snapshot != "" {
+		emit("build_log", map[string]interface{}{"step": 0, "type": "resolve", "message": "Resolving snapshot '" + cfg.Snapshot + "'..."})
+		checkpointID, err = s.resolveSnapshot(ctx, orgID, cfg.Snapshot)
+	} else {
+		checkpointID, err = s.resolveImageManifest(ctx, orgID, cfg.ImageManifest, logFn)
+	}
+	if err != nil {
+		emit("error", map[string]string{"error": err.Error()})
+		return nil
+	}
+
+	// Create sandbox from checkpoint
+	emit("build_log", map[string]interface{}{"step": 0, "type": "create", "message": "Creating sandbox from image..."})
+
+	c.SetParamNames("checkpointId")
+	c.SetParamValues(checkpointID.String())
+	result, _, cpErr := s.createFromCheckpointCore(c)
+	if cpErr != nil {
+		emit("error", map[string]string{"error": cpErr.Error()})
+		return nil
+	}
+
+	emit("result", result)
+	return nil
 }
 
 // createSandboxRemote dispatches sandbox creation to a remote worker via gRPC.
@@ -995,33 +1087,43 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 
 // createFromCheckpoint creates a new sandbox from an existing checkpoint (fork).
 func (s *Server) createFromCheckpoint(c echo.Context) error {
+	result, httpStatus, err := s.createFromCheckpointCore(c)
+	if err != nil {
+		return c.JSON(httpStatus, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(httpStatus, result)
+}
+
+// createFromCheckpointCore contains the core logic for creating a sandbox from a checkpoint.
+// Returns the result map, HTTP status, or an error.
+func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{}, int, error) {
 	checkpointIDStr := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
 	if s.store == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("database not configured")
 	}
 
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+		return nil, http.StatusUnauthorized, fmt.Errorf("org context required")
 	}
 
 	checkpointID, err := uuid.Parse(checkpointIDStr)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid checkpoint ID")
 	}
 
 	// Verify checkpoint exists, belongs to org, and is ready
 	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
+		return nil, http.StatusNotFound, fmt.Errorf("checkpoint not found")
 	}
 	if cp.OrgID != orgID {
-		return c.JSON(http.StatusForbidden, map[string]string{"error": "checkpoint does not belong to this organization"})
+		return nil, http.StatusForbidden, fmt.Errorf("checkpoint does not belong to this organization")
 	}
 	if cp.Status != "ready" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "checkpoint is not ready (status: " + cp.Status + ")"})
+		return nil, http.StatusBadRequest, fmt.Errorf("checkpoint is not ready (status: %s)", cp.Status)
 	}
 
 	// Parse optional overrides from request body
@@ -1032,7 +1134,7 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 
 	// Get S3 keys from the checkpoint
 	if cp.RootfsS3Key == nil || cp.WorkspaceS3Key == nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "checkpoint S3 keys not available"})
+		return nil, http.StatusBadRequest, fmt.Errorf("checkpoint S3 keys not available")
 	}
 
 	// Parse the original sandbox config to reuse settings
@@ -1063,9 +1165,9 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 
 	if s.workerRegistry != nil {
 		// Server mode: pick a worker
-		worker, client, err := s.workerRegistry.GetLeastLoadedWorker(region)
-		if err != nil {
-			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "no workers available: " + err.Error()})
+		worker, client, wErr := s.workerRegistry.GetLeastLoadedWorker(region)
+		if wErr != nil {
+			return nil, http.StatusServiceUnavailable, fmt.Errorf("no workers available: %w", wErr)
 		}
 		workerID = worker.ID
 		grpcClient = client
@@ -1073,7 +1175,7 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 		// Combined mode: local execution
 		workerID = s.workerID
 	} else {
-		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("sandbox execution not available in server-only mode")
 	}
 
 	// Register pending create — commands will wait until ready
@@ -1088,8 +1190,8 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 	// Issue JWT immediately
 	var token string
 	if s.jwtIssuer != nil {
-		t, err := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, workerID, 24*time.Hour)
-		if err == nil {
+		t, jwtErr := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, workerID, 24*time.Hour)
+		if jwtErr == nil {
 			token = t
 		}
 	}
@@ -1166,14 +1268,14 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 		}
 	}()
 
-	return c.JSON(http.StatusCreated, map[string]interface{}{
+	return map[string]interface{}{
 		"sandboxID":        sandboxID,
 		"status":           "creating",
 		"token":            token,
 		"region":           region,
 		"workerID":         workerID,
 		"fromCheckpointId": checkpointID.String(),
-	})
+	}, http.StatusCreated, nil
 }
 
 // deleteCheckpoint deletes a checkpoint.

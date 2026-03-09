@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SandboxStatus represents the current state of a sandbox.
 type SandboxStatus string
@@ -46,6 +49,12 @@ type SandboxConfig struct {
 	// When set, the sandbox boots from these drives instead of the standard base image.
 	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
+	// Declarative image manifest: when set, the server builds and caches
+	// the image as a checkpoint before creating the sandbox.
+	ImageManifest json.RawMessage `json:"image,omitempty"`
+	// Snapshot name: when set, the server resolves a named snapshot (image cache)
+	// and creates the sandbox from its cached checkpoint.
+	Snapshot string `json:"snapshot,omitempty"`
 	// SandboxID allows pre-determining the sandbox ID for async creation.
 	// If empty, a new ID is generated automatically.
 	SandboxID string `json:"-"`

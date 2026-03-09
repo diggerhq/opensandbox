@@ -1,11 +1,14 @@
 import { Filesystem } from "./filesystem.js";
 import { Commands } from "./commands.js";
 import { Pty } from "./pty.js";
+import { Image } from "./image.js";
+import { parseSSEStream } from "./sse.js";
 
 function resolveApiUrl(url: string): string {
   const base = url.replace(/\/+$/, "");
   return base.endsWith("/api") ? base : `${base}/api`;
 }
+
 
 export interface SandboxOpts {
   template?: string;
@@ -16,6 +19,12 @@ export interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  /** Declarative image definition. The server builds and caches it as a checkpoint. */
+  image?: Image;
+  /** Name of a pre-built snapshot to create the sandbox from. */
+  snapshot?: string;
+  /** Callback for build log streaming when using `image`. Called with each build step message. */
+  onBuildLog?: (log: string) => void;
 }
 
 interface SandboxData {
@@ -112,19 +121,33 @@ export class Sandbox {
     if (opts.metadata) body.metadata = opts.metadata;
     if (opts.cpuCount != null) body.cpuCount = opts.cpuCount;
     if (opts.memoryMB != null) body.memoryMB = opts.memoryMB;
+    if (opts.image) body.image = opts.image.toJSON();
+    if (opts.snapshot) body.snapshot = opts.snapshot;
+
+    const useSSE = opts.onBuildLog && (opts.image || opts.snapshot);
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(apiKey ? { "X-API-Key": apiKey } : {}),
+    };
+    if (useSSE) {
+      headers["Accept"] = "text/event-stream";
+    }
 
     const resp = await fetch(`${apiUrl}/sandboxes`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(apiKey ? { "X-API-Key": apiKey } : {}),
-      },
+      headers,
       body: JSON.stringify(body),
     });
 
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`Failed to create sandbox: ${resp.status} ${text}`);
+    }
+
+    if (useSSE && resp.headers.get("content-type")?.includes("text/event-stream")) {
+      const data = await parseSSEStream<SandboxData>(resp, opts.onBuildLog!);
+      return new Sandbox(data, apiUrl, apiKey);
     }
 
     const data: SandboxData = await resp.json();

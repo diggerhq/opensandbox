@@ -175,6 +175,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.DELETE("/templates/:name", s.deleteTemplate)
 	api.POST("/sandboxes/:sandboxId/save-as-template", s.dashboardSaveAsTemplate)
 
+	// Snapshots (pre-built declarative images)
+	api.POST("/snapshots", s.createSnapshot)
+	api.GET("/snapshots", s.listSnapshots)
+	api.GET("/snapshots/:name", s.getSnapshot)
+	api.DELETE("/snapshots/:name", s.deleteSnapshot)
+
 	// Workers (server mode only — queries worker registry)
 	api.GET("/workers", s.listWorkers)
 
