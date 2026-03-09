@@ -218,6 +218,8 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.DELETE("/templates/:id", s.dashboardDeleteTemplate)
 		dash.GET("/checkpoints", s.dashboardListCheckpoints)
 		dash.DELETE("/checkpoints/:id", s.dashboardDeleteCheckpoint)
+		dash.GET("/images", s.dashboardListImages)
+		dash.DELETE("/images/:id", s.dashboardDeleteImage)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)

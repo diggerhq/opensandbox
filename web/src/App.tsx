@@ -7,6 +7,7 @@ import Dashboard from './pages/Dashboard'
 import Sessions from './pages/Sessions'
 import APIKeys from './pages/APIKeys'
 import Checkpoints from './pages/Checkpoints'
+import Templates from './pages/Templates'
 import Settings from './pages/Settings'
 import SessionDetail from './pages/SessionDetail'
 
@@ -21,6 +22,7 @@ export default function App() {
             <Route path="sessions" element={<Sessions />} />
             <Route path="sessions/:sandboxId" element={<SessionDetail />} />
             <Route path="checkpoints" element={<Checkpoints />} />
+            <Route path="templates" element={<Templates />} />
             <Route path="api-keys" element={<APIKeys />} />
             <Route path="settings" element={<Settings />} />
           </Route>

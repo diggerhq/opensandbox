@@ -1353,3 +1353,51 @@ func (s *Server) dashboardDeleteCheckpoint(c echo.Context) error {
 
 	return c.NoContent(http.StatusNoContent)
 }
+
+// dashboardListImages lists all image cache entries (named snapshots) for the authenticated org.
+func (s *Server) dashboardListImages(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	// namedOnly=false to show all cached images (both named snapshots and auto-cached)
+	showAll := c.QueryParam("all") == "true"
+	images, err := s.store.ListImageCacheByOrg(c.Request().Context(), orgID, !showAll)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	if images == nil {
+		images = []db.ImageCache{}
+	}
+
+	return c.JSON(http.StatusOK, images)
+}
+
+// dashboardDeleteImage deletes an image cache entry for the authenticated org.
+func (s *Server) dashboardDeleteImage(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	imageID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid image ID"})
+	}
+
+	if err := s.store.DeleteImageCache(c.Request().Context(), orgID, imageID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return c.NoContent(http.StatusNoContent)
+}

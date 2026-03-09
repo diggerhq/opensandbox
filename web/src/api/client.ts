@@ -63,6 +63,12 @@ export const getCheckpoints = (page = 1, perPage = 20) =>
 export const deleteCheckpointDashboard = (id: string) =>
   apiFetch<void>(`/checkpoints/${id}`, { method: 'DELETE' })
 
+export const getImages = (all = false) =>
+  apiFetch<ImageCacheItem[]>(`/images${all ? '?all=true' : ''}`)
+
+export const deleteImage = (id: string) =>
+  apiFetch<void>(`/images/${id}`, { method: 'DELETE' })
+
 export const getSessionDetail = (sandboxId: string) =>
   apiFetch<SessionDetail>(`/sessions/${sandboxId}`)
 
@@ -189,6 +195,18 @@ export interface CheckpointsResponse {
   total: number
   page: number
   perPage: number
+}
+
+export interface ImageCacheItem {
+  id: string
+  orgId: string
+  contentHash: string
+  checkpointId?: string
+  name?: string
+  manifest: Record<string, unknown>
+  status: string
+  createdAt: string
+  lastUsedAt: string
 }
 
 export interface Org {

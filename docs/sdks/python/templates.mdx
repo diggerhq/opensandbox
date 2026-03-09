@@ -1,108 +1,377 @@
 ---
 title: "Templates"
-description: "Build and manage reusable sandbox templates"
+description: "Define sandbox environments programmatically with the Image builder and Snapshots"
 ---
 
-Templates let you create reusable sandbox images from Dockerfiles. Pre-install languages, tools, and dependencies so your sandboxes start ready to go.
+Templates provide a code-first approach to defining sandbox environments. Instead of configuring images manually, you define them programmatically using the SDK.
 
-## Building a Template
+The system supports two workflows:
+
+1. **Declarative images** — build images with varying dependencies _on demand_ when creating sandboxes
+2. **Pre-built snapshots** — create and register _ready-to-use_ snapshots that can be shared across multiple sandboxes
+
+## Declarative image building
+
+Build images on-the-fly when creating sandboxes. Ideal for iterating quickly without creating separate snapshots.
+
+Declarative images are **cached by content hash** — identical manifests produce the same image. Subsequent runs reuse the cached image instantly.
 
 ```python
-from opencomputer import Template
+from opencomputer import Sandbox, Image
 
-templates = Template(api_url, api_key)
+# Define an image with packages, env vars, and files
+image = (
+    Image.base()
+    .apt_install(["curl", "jq"])
+    .pip_install(["requests", "pandas"])
+    .env({"PROJECT_ROOT": "/workspace"})
+    .workdir("/workspace")
+)
 
-template = await templates.build('python-ml', """
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y python3 python3-pip
-RUN pip3 install numpy pandas scikit-learn
-""")
+# Create a sandbox — the image is built on first run, cached after
+sandbox = await Sandbox.create(
+    image=image,
+    timeout=300,
+    on_build_log=lambda log: print(f"build: {log}"),
+)
 
-print(template.template_id)  # tpl-abc123
-print(template.status)       # building → ready
+result = await sandbox.commands.run("which curl")
+print(result.exit_code)  # 0
 ```
 
-### `await templates.build(name, dockerfile)`
+### `Sandbox.create(image=..., on_build_log=...)`
 
-Builds a new template from a Dockerfile.
+When you pass an `image` to `Sandbox.create()`, the server:
 
-<ParamField body="name" type="str" required>
-  A unique name for the template.
+1. Hashes the image manifest to compute a **cache key**
+2. If cached, creates the sandbox from the existing checkpoint instantly
+3. If not cached, boots a build sandbox, executes each step, checkpoints the result, then creates your sandbox from it
+
+<ParamField body="image" type="Image" optional>
+  A declarative image definition built with the `Image` builder.
 </ParamField>
-<ParamField body="dockerfile" type="str" required>
-  The Dockerfile content to build from.
-</ParamField>
-
-**Returns:** `TemplateInfo`
-
-## Listing Templates
-
-```python
-all_templates = await templates.list()
-
-for t in all_templates:
-    print(f"{t.name} ({t.tag}) — {t.status}")
-```
-
-### `await templates.list()`
-
-Returns all templates.
-
-**Returns:** `list[TemplateInfo]`
-
-## Getting a Template
-
-```python
-template = await templates.get('python-ml')
-print(template)
-```
-
-### `await templates.get(name)`
-
-Gets a template by name.
-
-<ParamField body="name" type="str" required>
-  Template name.
+<ParamField body="on_build_log" type="Callable[[str], None]" optional>
+  Callback for streaming build log messages via SSE. Receives step-by-step progress updates during image building.
 </ParamField>
 
-**Returns:** `TemplateInfo`
+## Creating pre-built snapshots
 
-## Deleting a Template
+Create named snapshots that persist permanently and can be shared across sandboxes. Snapshots are visible in the dashboard and don't need to be rebuilt.
 
 ```python
-await templates.delete('python-ml')
+from opencomputer import Image, Snapshots
+
+snapshots = Snapshots()
+
+# Define the image
+image = (
+    Image.base()
+    .apt_install(["python3-pip"])
+    .pip_install(["pandas", "numpy", "scikit-learn"])
+    .workdir("/workspace")
+)
+
+# Create a named snapshot with build log streaming
+await snapshots.create(
+    name="data-science",
+    image=image,
+    on_build_logs=lambda log: print(f"build: {log}"),
+)
+
+# Now create sandboxes from the snapshot — instant, no build step
+sandbox = await Sandbox.create(snapshot="data-science")
 ```
 
-### `await templates.delete(name)`
+### `Snapshots(api_key=..., api_url=...)`
 
-Deletes a template by name.
+<ParamField body="api_key" type="str" optional>
+  API key. Falls back to `OPENCOMPUTER_API_KEY` env var.
+</ParamField>
+<ParamField body="api_url" type="str" optional>
+  API base URL. Falls back to `OPENCOMPUTER_API_URL` env var.
+</ParamField>
+
+### `await snapshots.create(name, image, on_build_logs=None)`
+
+Creates a pre-built snapshot from a declarative image.
 
 <ParamField body="name" type="str" required>
-  Template name to delete.
+  Unique name for this snapshot.
+</ParamField>
+<ParamField body="image" type="Image" required>
+  Declarative image definition.
+</ParamField>
+<ParamField body="on_build_logs" type="Callable[[str], None]" optional>
+  Callback for streaming build log messages.
+</ParamField>
+
+**Returns:** `dict` with snapshot info (id, name, status, etc.)
+
+### `await snapshots.list()`
+
+Returns all named snapshots for the current organization.
+
+```python
+snapshot_list = await snapshots.list()
+for s in snapshot_list:
+    print(f"{s['name']} — {s['status']}")
+```
+
+**Returns:** `list[dict]`
+
+### `await snapshots.get(name)`
+
+Gets a snapshot by name.
+
+```python
+snapshot = await snapshots.get("data-science")
+print(snapshot["status"])  # "ready"
+```
+
+<ParamField body="name" type="str" required>
+  Snapshot name.
+</ParamField>
+
+**Returns:** `dict`
+
+### `await snapshots.delete(name)`
+
+Deletes a named snapshot. Existing sandboxes created from it are not affected.
+
+```python
+await snapshots.delete("data-science")
+```
+
+<ParamField body="name" type="str" required>
+  Snapshot name to delete.
 </ParamField>
 
 **Returns:** `None`
 
-## TemplateInfo
+### `Sandbox.create(snapshot=...)`
 
-`TemplateInfo` is a dataclass:
+Create a sandbox from a pre-built snapshot by name.
+
+```python
+sandbox = await Sandbox.create(snapshot="data-science")
+```
+
+<ParamField body="snapshot" type="str" optional>
+  Name of a pre-built snapshot to create the sandbox from.
+</ParamField>
+
+**Returns:** `Sandbox`
+
+---
+
+## Image configuration
+
+The `Image` class provides a fluent, immutable API for defining sandbox environments. Each method returns a **new** `Image` instance — the original is never modified.
+
+### `Image.base()`
+
+Creates a new image starting from the default OpenSandbox environment (Ubuntu 22.04 with Python, Node.js, build tools, and common utilities).
+
+```python
+image = Image.base()
+```
+
+### `image.apt_install(packages)`
+
+Install system packages via `apt-get`.
+
+```python
+image = Image.base().apt_install(["curl", "git", "jq"])
+```
+
+<ParamField body="packages" type="list[str]" required>
+  List of apt package names to install.
+</ParamField>
+
+### `image.pip_install(packages)`
+
+Install Python packages via `pip`.
+
+```python
+image = Image.base().pip_install(["requests", "pandas", "numpy"])
+```
+
+<ParamField body="packages" type="list[str]" required>
+  List of pip package names to install.
+</ParamField>
+
+### `image.run_commands(*commands)`
+
+Run one or more shell commands during image build.
+
+```python
+image = Image.base().run_commands(
+    "mkdir -p /workspace/project",
+    "echo 'Hello' > /workspace/welcome.txt",
+)
+```
+
+<ParamField body="commands" type="str (variadic)" required>
+  Shell commands to execute sequentially.
+</ParamField>
+
+### `image.env(vars)`
+
+Set environment variables. Written to `/etc/environment` so they're available in all sessions.
+
+```python
+image = Image.base().env({
+    "PROJECT_ROOT": "/workspace",
+    "NODE_ENV": "production",
+})
+```
+
+<ParamField body="vars" type="dict[str, str]" required>
+  Key-value pairs of environment variables.
+</ParamField>
+
+### `image.workdir(path)`
+
+Set the default working directory.
+
+```python
+image = Image.base().workdir("/workspace/project")
+```
+
+<ParamField body="path" type="str" required>
+  Absolute path for the working directory.
+</ParamField>
+
+### `image.add_file(remote_path, content)`
+
+Embed a file with inline content into the image.
+
+```python
+image = (
+    Image.base()
+    .add_file("/workspace/config.json", '{"env": "production"}')
+    .add_file("/workspace/setup.sh", "#!/bin/bash\necho 'Ready!'")
+)
+```
+
+<ParamField body="remote_path" type="str" required>
+  Absolute path inside the sandbox.
+</ParamField>
+<ParamField body="content" type="str" required>
+  String content of the file.
+</ParamField>
+
+### `image.add_local_file(local_path, remote_path)`
+
+Read a file from the local machine and embed it into the image.
+
+```python
+image = Image.base().add_local_file("package.json", "/workspace/package.json")
+```
+
+<ParamField body="local_path" type="str" required>
+  Path to the file on the local machine.
+</ParamField>
+<ParamField body="remote_path" type="str" required>
+  Absolute path inside the sandbox.
+</ParamField>
+
+### `image.add_local_dir(local_path, remote_path)`
+
+Recursively read a local directory and embed all files into the image.
+
+```python
+image = Image.base().add_local_dir("src", "/workspace/src")
+```
+
+<ParamField body="local_path" type="str" required>
+  Path to the directory on the local machine.
+</ParamField>
+<ParamField body="remote_path" type="str" required>
+  Absolute path inside the sandbox where the directory will be created.
+</ParamField>
+
+### `image.to_dict()`
+
+Returns the image manifest as a plain dict.
+
+**Returns:** `dict`
+
+### `image.cache_key()`
+
+Computes a deterministic SHA-256 hash of the manifest for cache lookups.
+
+**Returns:** `str`
+
+---
+
+## Snapshot info fields
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `template_id` | `str` | Unique template identifier |
-| `name` | `str` | Template name |
-| `tag` | `str` | Image tag |
-| `status` | `str` | Build status: `"building"`, `"ready"`, `"error"` |
+| `id` | `str` | Unique snapshot identifier |
+| `name` | `str` | Snapshot name |
+| `status` | `str` | `"building"`, `"ready"`, or `"failed"` |
+| `contentHash` | `str` | SHA-256 hash of the image manifest |
+| `checkpointId` | `str` | Linked checkpoint ID |
+| `manifest` | `dict` | The declarative image manifest |
+| `createdAt` | `str` | ISO 8601 creation timestamp |
+| `lastUsedAt` | `str` | ISO 8601 last usage timestamp |
 
-## Using a Template
+---
 
-Once built, pass the template name when creating a sandbox:
+## Complete example
 
 ```python
-sandbox = await Sandbox.create(template='python-ml')
-result = await sandbox.commands.run(
-    'python3 -c "import numpy; print(numpy.__version__)"'
-)
-print(result.stdout)  # 1.24.0
-await sandbox.kill()
+import asyncio
+from opencomputer import Sandbox, Image, Snapshots
+
+async def main():
+    # ── Pattern 1: On-demand image ──
+    dev_image = (
+        Image.base()
+        .apt_install(["curl", "jq"])
+        .pip_install(["requests"])
+        .add_file("/workspace/config.json", '{"debug": true}')
+        .env({"APP_ENV": "development"})
+        .workdir("/workspace")
+    )
+
+    sandbox = await Sandbox.create(
+        image=dev_image,
+        on_build_log=lambda log: print(f"build: {log}"),
+    )
+
+    await sandbox.commands.run("curl --version")
+    await sandbox.kill()
+
+    # ── Pattern 2: Pre-built snapshot ──
+    snapshots = Snapshots()
+
+    prod_image = (
+        Image.base()
+        .apt_install(["python3-pip", "git"])
+        .pip_install(["pandas", "numpy", "scikit-learn"])
+        .run_commands("mkdir -p /workspace/data")
+        .env({"APP_ENV": "production"})
+        .workdir("/workspace")
+    )
+
+    await snapshots.create(
+        name="ml-env",
+        image=prod_image,
+        on_build_logs=lambda log: print(f"build: {log}"),
+    )
+
+    # Instant — no build, just boot from snapshot
+    ml_sandbox = await Sandbox.create(snapshot="ml-env")
+    await ml_sandbox.commands.run(
+        'python3 -c "import pandas; print(pandas.__version__)"'
+    )
+    await ml_sandbox.kill()
+
+    # Cleanup
+    await snapshots.delete("ml-env")
+
+asyncio.run(main())
 ```
