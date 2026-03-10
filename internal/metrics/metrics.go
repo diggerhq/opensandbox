@@ -54,15 +54,6 @@ var (
 		[]string{"region", "worker_id"},
 	)
 
-	PodmanOpDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "opensandbox_podman_op_duration_seconds",
-			Help:    "Time for podman operations",
-			Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1.0, 5.0},
-		},
-		[]string{"operation"},
-	)
-
 	DirectConnectionsActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "opensandbox_direct_connections_active",
@@ -131,7 +122,6 @@ func init() {
 		ExecDuration,
 		PTYSessionsActive,
 		WorkerUtilization,
-		PodmanOpDuration,
 		DirectConnectionsActive,
 		SQLiteSyncLag,
 		HTTPRequestsTotal,

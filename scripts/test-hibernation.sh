@@ -109,8 +109,6 @@ else
   red "  Hibernate failed: $HIB_RESP"
 fi
 
-CONTAINER_CHECK=$(podman ps --format '{{.Names}}' 2>/dev/null | grep "osb-${SANDBOX_ID}" || true)
-check "Container removed after hibernate" "" "$CONTAINER_CHECK"
 echo ""
 
 # --- Explicit Wake ---
@@ -161,10 +159,6 @@ if [[ -z "$HIB2_KEY" ]]; then
 else
   green "  Hibernated (second time)"
 fi
-
-# Verify container is gone
-CONTAINER_CHECK2=$(podman ps --format '{{.Names}}' 2>/dev/null | grep "osb-${SANDBOX_ID}" || true)
-check "Container removed after second hibernate" "" "$CONTAINER_CHECK2"
 
 # Now send a command WITHOUT calling /wake — the router should auto-wake
 AUTOWAKE_START=$(python3 -c 'import time; print(time.time())')

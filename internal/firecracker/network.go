@@ -228,6 +228,20 @@ func EnableForwarding() error {
 			"-j", "MASQUERADE")
 	}
 
+	// Allow FORWARD for VM traffic — many distros (and Docker) default FORWARD to DROP.
+	// Without these rules, packets from VMs are silently dropped even with masquerade.
+	fwdOut, _ := exec.Command("iptables", "-S", "FORWARD").CombinedOutput()
+	fwdRules := string(fwdOut)
+	if !strings.Contains(fwdRules, "172.16.0.0/16 -j ACCEPT") {
+		_ = run("iptables", "-I", "FORWARD",
+			"-s", "172.16.0.0/16",
+			"-j", "ACCEPT")
+		_ = run("iptables", "-I", "FORWARD",
+			"-d", "172.16.0.0/16",
+			"-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED",
+			"-j", "ACCEPT")
+	}
+
 	return nil
 }
 

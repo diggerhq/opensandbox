@@ -82,6 +82,10 @@ func (s *Server) ptyWebSocket(c echo.Context) error {
 		})
 	}
 
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		return err
