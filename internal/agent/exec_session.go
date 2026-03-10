@@ -190,13 +190,17 @@ func (s *Server) ExecSessionAttach(stream pb.SandboxAgent_ExecSessionAttachServe
 		return fmt.Errorf("exec session %s not found", sessionID)
 	}
 
-	// Increment attached clients
+	// Increment attached clients — check if session is already dying
 	sess.mu.Lock()
-	sess.attachedClients++
 	if sess.disconnectTimer != nil {
-		sess.disconnectTimer.Stop()
+		if !sess.disconnectTimer.Stop() {
+			// Timer already fired — session is being torn down
+			sess.mu.Unlock()
+			return fmt.Errorf("exec session %s is shutting down", sessionID)
+		}
 		sess.disconnectTimer = nil
 	}
+	sess.attachedClients++
 	sess.mu.Unlock()
 
 	defer func() {
