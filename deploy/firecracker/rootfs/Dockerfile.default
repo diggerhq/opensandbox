@@ -76,6 +76,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g npm@latest
 
+# ── Claude Agent SDK + wrapper ───────────────────────────────────────────────
+RUN npm install -g @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code
+COPY scripts/claude-agent-wrapper /tmp/claude-agent-wrapper
+RUN cd /tmp/claude-agent-wrapper \
+    && npm install --ignore-scripts \
+    && npx tsc \
+    && cp dist/index.js /usr/local/lib/claude-agent-wrapper.js \
+    && ln -sf /usr/lib/node_modules /usr/local/lib/node_modules \
+    && printf '#!/bin/sh\nexport IS_SANDBOX=1\nexec node --experimental-vm-modules /usr/local/lib/claude-agent-wrapper.js "$@"\n' > /usr/local/bin/claude-agent-wrapper \
+    && chmod +x /usr/local/bin/claude-agent-wrapper \
+    && rm -rf /tmp/claude-agent-wrapper
+
 # ── Locale ───────────────────────────────────────────────────────────────────
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8

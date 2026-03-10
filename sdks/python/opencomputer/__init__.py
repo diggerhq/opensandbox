@@ -1,19 +1,25 @@
 """OpenComputer Python SDK - cloud sandbox platform."""
 
 from opencomputer.sandbox import Sandbox
+from opencomputer.agent import Agent, AgentEvent, AgentSession, AgentSessionInfo
 from opencomputer.filesystem import Filesystem
-from opencomputer.commands import Commands, ProcessResult
+from opencomputer.exec import Exec, ProcessResult, ExecSessionInfo
 from opencomputer.pty import Pty, PtySession
 from opencomputer.template import Template
 
 __all__ = [
     "Sandbox",
+    "Agent",
+    "AgentEvent",
+    "AgentSession",
+    "AgentSessionInfo",
     "Filesystem",
-    "Commands",
+    "Exec",
     "ProcessResult",
+    "ExecSessionInfo",
     "Pty",
     "PtySession",
     "Template",
 ]
 
-__version__ = "0.4.4"
+__version__ = "0.5.0"

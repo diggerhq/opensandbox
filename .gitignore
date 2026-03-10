@@ -49,6 +49,10 @@ deploy/terraform/.terraform.lock.hcl
 deploy/terraform/terraform.tfstate*
 deploy/terraform/terraform.tfvars
 
+# Dev environment state
+deploy/ec2/.dev-env-state*
+deploy/ec2/*.pem
+
 # Temp files
 *.tmp
 *.log

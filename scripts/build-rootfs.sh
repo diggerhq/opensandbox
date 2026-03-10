@@ -198,6 +198,11 @@ build_image() {
     generate_init_script > "$tmpdir/init"
     chmod +x "$tmpdir/init"
 
+    # Copy claude-agent-wrapper source (for images that include it)
+    if [ -d "$SCRIPT_DIR/claude-agent-wrapper" ]; then
+        cp -r "$SCRIPT_DIR/claude-agent-wrapper" "$tmpdir/scripts/claude-agent-wrapper"
+    fi
+
     # Append agent/init injection to Dockerfile
     cat >> "$tmpdir/Dockerfile" << 'INJECT_EOF'
 

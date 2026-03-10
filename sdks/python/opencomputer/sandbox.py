@@ -8,7 +8,8 @@ from typing import Any
 
 import httpx
 
-from opencomputer.commands import Commands
+from opencomputer.agent import Agent
+from opencomputer.exec import Exec
 from opencomputer.filesystem import Filesystem
 from opencomputer.pty import Pty
 
@@ -170,14 +171,24 @@ class Sandbox:
         resp.raise_for_status()
 
     @property
+    def agent(self) -> Agent:
+        """Access Claude Agent SDK sessions."""
+        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token)
+
+    @property
     def files(self) -> Filesystem:
         """Access filesystem operations."""
         return Filesystem(self._ops_client, self.sandbox_id)
 
     @property
-    def commands(self) -> Commands:
-        """Access command execution."""
-        return Commands(self._ops_client, self.sandbox_id)
+    def exec(self) -> Exec:
+        """Access session-based command execution."""
+        return Exec(self._ops_client, self.sandbox_id, self._connect_url, self._token)
+
+    @property
+    def commands(self) -> Exec:
+        """Backwards-compatible alias for ``exec``. Prefer ``sandbox.exec`` instead."""
+        return self.exec
 
     @property
     def pty(self) -> Pty:

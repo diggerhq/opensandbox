@@ -16,30 +16,32 @@ import (
 // HTTPServer serves the REST/WebSocket API for direct SDK access on the worker.
 // It exposes the same endpoints as the control plane but authenticates via sandbox-scoped JWTs.
 type HTTPServer struct {
-	echo          *echo.Echo
-	manager       sandbox.Manager
-	ptyManager    *sandbox.PTYManager
-	jwtIssuer     *auth.JWTIssuer
-	sandboxDBs    *sandbox.SandboxDBManager
-	router        *sandbox.SandboxRouter
-	sandboxDomain string
-	certFetcher   *certmanager.CertFetcher
+	echo               *echo.Echo
+	manager            sandbox.Manager
+	ptyManager         *sandbox.PTYManager
+	execSessionManager *sandbox.ExecSessionManager
+	jwtIssuer          *auth.JWTIssuer
+	sandboxDBs         *sandbox.SandboxDBManager
+	router             *sandbox.SandboxRouter
+	sandboxDomain      string
+	certFetcher        *certmanager.CertFetcher
 }
 
 // NewHTTPServer creates a new worker HTTP server for direct SDK access.
-func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *auth.JWTIssuer, sandboxDBs *sandbox.SandboxDBManager, sbProxy *proxy.SandboxProxy, sbRouter *sandbox.SandboxRouter, sandboxDomain string) *HTTPServer {
+func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, jwtIssuer *auth.JWTIssuer, sandboxDBs *sandbox.SandboxDBManager, sbProxy *proxy.SandboxProxy, sbRouter *sandbox.SandboxRouter, sandboxDomain string) *HTTPServer {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
 
 	s := &HTTPServer{
-		echo:          e,
-		manager:       mgr,
-		ptyManager:    ptyMgr,
-		jwtIssuer:     jwtIssuer,
-		sandboxDBs:    sandboxDBs,
-		router:        sbRouter,
-		sandboxDomain: sandboxDomain,
+		echo:               e,
+		manager:            mgr,
+		ptyManager:         ptyMgr,
+		execSessionManager: execMgr,
+		jwtIssuer:          jwtIssuer,
+		sandboxDBs:         sandboxDBs,
+		router:             sbRouter,
+		sandboxDomain:      sandboxDomain,
 	}
 
 	// Global middleware
@@ -91,8 +93,12 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *a
 	// Sandbox status
 	api.GET("/sandboxes/:id", s.getSandbox)
 
-	// Commands
-	api.POST("/sandboxes/:id/commands", s.runCommand)
+	// Exec sessions (replaces old /commands)
+	api.POST("/sandboxes/:id/exec", s.createExecSession)
+	api.GET("/sandboxes/:id/exec", s.listExecSessions)
+	api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
+	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
+	api.POST("/sandboxes/:id/exec/run", s.execRun)
 
 	// Timeout
 	api.POST("/sandboxes/:id/timeout", s.setTimeout)
@@ -106,6 +112,13 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *a
 
 	// Token refresh
 	api.POST("/sandboxes/:id/token/refresh", s.refreshToken)
+
+	// Agent sessions (Claude Agent SDK)
+	api.POST("/sandboxes/:id/agent", s.createAgentSession)
+	api.GET("/sandboxes/:id/agent", s.listAgentSessions)
+	api.POST("/sandboxes/:id/agent/:sid/prompt", s.sendAgentPrompt)
+	api.POST("/sandboxes/:id/agent/:sid/interrupt", s.interruptAgent)
+	api.POST("/sandboxes/:id/agent/:sid/kill", s.killAgentSession)
 
 	// PTY
 	api.POST("/sandboxes/:id/pty", s.createPTY)

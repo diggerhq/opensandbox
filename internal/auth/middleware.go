@@ -82,13 +82,18 @@ func SandboxJWTMiddleware(jwtIssuer *JWTIssuer) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			authHeader := c.Request().Header.Get("Authorization")
-			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			var tokenStr string
+			if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			} else if q := c.QueryParam("token"); q != "" {
+				// Allow token as query param for WebSocket connections
+				// (browsers/Node.js WebSocket API can't set custom headers)
+				tokenStr = q
+			} else {
 				return c.JSON(http.StatusUnauthorized, map[string]string{
 					"error": "missing or invalid Authorization header",
 				})
 			}
-
-			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 			claims, err := jwtIssuer.ValidateSandboxToken(tokenStr)
 			if err != nil {
 				return c.JSON(http.StatusForbidden, map[string]string{

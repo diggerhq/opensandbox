@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/dns"
 	"github.com/opensandbox/opensandbox/internal/ecr"
-	"github.com/opensandbox/opensandbox/internal/podman"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -35,34 +33,11 @@ func main() {
 
 	ctx := context.Background()
 
-	// Initialize Podman (skipped in server mode — server delegates to workers via gRPC)
+	// Server mode delegates sandbox management to workers via gRPC.
+	// There is no local sandbox manager on the server.
 	var mgr sandbox.Manager
 	var ptyMgr *sandbox.PTYManager
-	if cfg.Mode == "server" {
-		log.Printf("opensandbox: server mode — skipping local podman/sandbox manager (delegating to workers)")
-	} else {
-		podmanClient, err := podman.NewClient()
-		if err != nil {
-			log.Fatalf("failed to initialize podman: %v", err)
-		}
-		version, err := podmanClient.Version(ctx)
-		if err != nil {
-			log.Fatalf("failed to get podman version: %v", err)
-		}
-		log.Printf("opensandbox: using podman %s", version)
-
-		mgr = sandbox.NewManager(podmanClient,
-			sandbox.WithDataDir(cfg.DataDir),
-			sandbox.WithDefaultMemoryMB(cfg.DefaultSandboxMemoryMB),
-			sandbox.WithDefaultCPUs(cfg.DefaultSandboxCPUs),
-			sandbox.WithDefaultDiskMB(cfg.DefaultSandboxDiskMB),
-		)
-		defer mgr.Close()
-
-		podmanPath, _ := exec.LookPath("podman")
-		ptyMgr = sandbox.NewPTYManager(podmanPath, podmanClient.AuthFile())
-		defer ptyMgr.CloseAll()
-	}
+	log.Printf("opensandbox: server mode — delegating sandbox management to workers via gRPC")
 
 	// Build server options
 	opts := &api.ServerOpts{
@@ -146,45 +121,7 @@ func main() {
 		log.Printf("opensandbox: ECR configured (registry=%s, repo=%s)", cfg.ECRRegistry, cfg.ECRRepository)
 	}
 
-	// Initialize SandboxRouter for rolling timeouts, auto-wake, and command routing
-	if mgr != nil {
-		workerID := cfg.WorkerID
-		if workerID == "" {
-			workerID = "w-local-1"
-		}
-		sbRouter := sandbox.NewSandboxRouter(sandbox.RouterConfig{
-			Manager:         mgr,
-			CheckpointStore: opts.CheckpointStore,
-			Store:           opts.Store,
-			WorkerID:        workerID,
-			OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
-				log.Printf("opensandbox: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
-					sandboxID, result.HibernationKey, result.SizeBytes)
-				if opts.Store != nil {
-					_ = opts.Store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
-				}
-			},
-			OnKill: func(sandboxID string) {
-				log.Printf("opensandbox: sandbox %s killed on timeout", sandboxID)
-				if opts.Store != nil {
-					_ = opts.Store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "stopped", nil)
-				}
-			},
-		})
-		defer sbRouter.Close()
-		opts.Router = sbRouter
-		log.Println("opensandbox: sandbox router initialized (rolling timeouts, auto-wake)")
-
-		// Initialize subdomain reverse proxy
-		if cfg.SandboxDomain != "" {
-			sbProxy := proxy.New(cfg.SandboxDomain, mgr, sbRouter)
-			opts.SandboxProxy = sbProxy
-			opts.SandboxDomain = cfg.SandboxDomain
-			log.Printf("opensandbox: subdomain proxy configured (*.%s)", cfg.SandboxDomain)
-		}
-	}
-
-	// Set sandbox domain for API responses (works in both server and combined mode)
+	// Set sandbox domain for API responses
 	if cfg.SandboxDomain != "" && cfg.SandboxDomain != "localhost" {
 		opts.SandboxDomain = cfg.SandboxDomain
 		log.Printf("opensandbox: sandbox domain configured (%s)", cfg.SandboxDomain)

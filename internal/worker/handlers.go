@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -13,6 +15,9 @@ import (
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/pkg/types"
 )
+
+// jsonMarshal is a helper to marshal JSON for agent session stdin commands.
+var jsonMarshal = json.Marshal
 
 func (s *HTTPServer) setTimeout(c echo.Context) error {
 	if s.router == nil {
@@ -58,28 +63,31 @@ func (s *HTTPServer) getSandbox(c echo.Context) error {
 	return c.JSON(http.StatusOK, sb)
 }
 
-func (s *HTTPServer) runCommand(c echo.Context) error {
+func (s *HTTPServer) createExecSession(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
 	id := c.Param("id")
 
-	var cfg types.ProcessConfig
-	if err := c.Bind(&cfg); err != nil {
+	var req types.ExecSessionCreateRequest
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
 	}
-	if cfg.Command == "" {
+	if req.Command == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cmd is required"})
 	}
 
-	var result *types.ProcessResult
-	var execErr error
-	start := time.Now()
+	var session *sandbox.ExecSessionHandle
 
-	routeOp := func(ctx context.Context) error {
-		result, execErr = s.manager.Exec(ctx, id, cfg)
-		return execErr
+	routeOp := func(_ context.Context) error {
+		var err error
+		session, err = s.execSessionManager.CreateSession(id, req)
+		return err
 	}
 
 	if s.router != nil {
-		if err := s.router.Route(c.Request().Context(), id, "exec", routeOp); err != nil {
+		if err := s.router.Route(c.Request().Context(), id, "execSessionCreate", routeOp); err != nil {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 	} else {
@@ -88,17 +96,220 @@ func (s *HTTPServer) runCommand(c echo.Context) error {
 		}
 	}
 
-	durationMs := int(time.Since(start).Milliseconds())
+	return c.JSON(http.StatusCreated, types.ExecSessionInfo{
+		SessionID: session.ID,
+		SandboxID: id,
+		Command:   session.Command,
+		Args:      session.Args,
+		Running:   true,
+		StartedAt: session.StartedAt.Format(time.RFC3339),
+	})
+}
 
-	// Log command to per-sandbox SQLite
-	if s.sandboxDBs != nil {
-		sdb, dbErr := s.sandboxDBs.Get(id)
-		if dbErr == nil {
-			_ = sdb.LogCommand(cfg.Command, cfg.Args, cfg.Cwd, result.ExitCode, durationMs, len(result.Stdout), len(result.Stderr))
+func (s *HTTPServer) listExecSessions(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessions := s.execSessionManager.ListSessions(id)
+
+	if sessions == nil {
+		sessions = []types.ExecSessionInfo{}
+	}
+
+	return c.JSON(http.StatusOK, sessions)
+}
+
+func (s *HTTPServer) execSessionWebSocket(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessionID := c.Param("sessionID")
+
+	session, err := s.execSessionManager.GetSession(sessionID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
+	if s.router != nil {
+		s.router.Touch(id)
+	}
+
+	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
+	if err != nil {
+		return err
+	}
+	defer ws.Close()
+
+	if session.Scrollback == nil {
+		ws.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "no scrollback"),
+			time.Now().Add(time.Second))
+		return nil
+	}
+
+	// Send scrollback snapshot
+	snapshot := session.Scrollback.Snapshot()
+	for _, chunk := range snapshot {
+		msg := make([]byte, 1+len(chunk.Data))
+		msg[0] = chunk.Stream
+		copy(msg[1:], chunk.Data)
+		if err := ws.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+			return nil
+		}
+	}
+
+	// Send scrollback_end marker (0x04)
+	if err := ws.WriteMessage(websocket.BinaryMessage, []byte{0x04}); err != nil {
+		return nil
+	}
+
+	// Subscribe for live output
+	sub := session.Scrollback.Subscribe()
+	defer session.Scrollback.Unsubscribe(sub)
+
+	// Read stdin from WebSocket
+	wsDone := make(chan struct{})
+	go func() {
+		defer close(wsDone)
+		for {
+			_, raw, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			if len(raw) < 1 {
+				continue
+			}
+			if raw[0] == 0x00 && len(raw) > 1 && session.StdinWriter != nil {
+				session.StdinWriter.Write(raw[1:])
+			}
+			if s.router != nil {
+				s.router.Touch(id)
+			}
+		}
+	}()
+
+	for {
+		select {
+		case chunk, ok := <-sub:
+			if !ok {
+				return nil
+			}
+			msg := make([]byte, 1+len(chunk.Data))
+			msg[0] = chunk.Stream
+			copy(msg[1:], chunk.Data)
+			if err := ws.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				return nil
+			}
+			if s.router != nil {
+				s.router.Touch(id)
+			}
+
+		case <-session.Done:
+			// Drain remaining
+			for {
+				select {
+				case chunk := <-sub:
+					msg := make([]byte, 1+len(chunk.Data))
+					msg[0] = chunk.Stream
+					copy(msg[1:], chunk.Data)
+					_ = ws.WriteMessage(websocket.BinaryMessage, msg)
+				default:
+					goto sendExit
+				}
+			}
+		sendExit:
+			exitMsg := make([]byte, 5)
+			exitMsg[0] = 0x03
+			exitCode := 0
+			if session.ExitCode != nil {
+				exitCode = *session.ExitCode
+			}
+			binary.BigEndian.PutUint32(exitMsg[1:], uint32(int32(exitCode)))
+			_ = ws.WriteMessage(websocket.BinaryMessage, exitMsg)
+
+			ws.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+				time.Now().Add(time.Second))
+			return nil
+
+		case <-wsDone:
+			return nil
+		}
+	}
+}
+
+func (s *HTTPServer) execRun(c echo.Context) error {
+	id := c.Param("id")
+
+	var req types.ProcessConfig
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+	}
+	if req.Command == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cmd is required"})
+	}
+
+	var result *types.ProcessResult
+
+	routeOp := func(ctx context.Context) error {
+		var err error
+		result, err = s.manager.Exec(ctx, id, req)
+		return err
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(c.Request().Context(), id, "execRun", routeOp); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	} else {
+		if err := routeOp(c.Request().Context()); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 	}
 
 	return c.JSON(http.StatusOK, result)
+}
+
+func (s *HTTPServer) killExecSession(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessionID := c.Param("sessionID")
+
+	var body struct {
+		Signal int `json:"signal"`
+	}
+	_ = c.Bind(&body)
+
+	if body.Signal == 0 {
+		body.Signal = 9
+	}
+
+	routeOp := func(_ context.Context) error {
+		return s.execSessionManager.KillSession(sessionID, body.Signal)
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(c.Request().Context(), id, "execSessionKill", routeOp); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	} else {
+		if err := routeOp(c.Request().Context()); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }
 
 func (s *HTTPServer) readFile(c echo.Context) error {
@@ -279,6 +490,10 @@ func (s *HTTPServer) ptyWebSocket(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
 	// Touch to reset rolling timeout when PTY connects
 	if s.router != nil {
 		s.router.Touch(id)
@@ -376,6 +591,221 @@ func (s *HTTPServer) resizePTY(c echo.Context) error {
 	}
 
 	return c.NoContent(http.StatusOK)
+}
+
+// --- Agent session handlers ---
+// These are thin wrappers over exec sessions that run the claude-agent-wrapper process.
+
+func (s *HTTPServer) createAgentSession(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+
+	var req types.AgentSessionCreateRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+	}
+
+	// Create exec session running the claude-agent-wrapper
+	execReq := types.ExecSessionCreateRequest{
+		Command: "claude-agent-wrapper",
+	}
+
+	var session *sandbox.ExecSessionHandle
+
+	routeOp := func(_ context.Context) error {
+		var err error
+		session, err = s.execSessionManager.CreateSession(id, execReq)
+		return err
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(c.Request().Context(), id, "agentSessionCreate", routeOp); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	} else {
+		if err := routeOp(c.Request().Context()); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	}
+
+	// Send configure command if any config options provided
+	hasConfig := req.Model != "" || req.SystemPrompt != "" || len(req.AllowedTools) > 0 ||
+		req.PermissionMode != "" || req.MaxTurns > 0 || req.Cwd != "" || len(req.McpServers) > 0
+	if hasConfig && session.StdinWriter != nil {
+		configCmd := map[string]interface{}{"type": "configure"}
+		if req.Model != "" {
+			configCmd["model"] = req.Model
+		}
+		if req.SystemPrompt != "" {
+			configCmd["systemPrompt"] = req.SystemPrompt
+		}
+		if len(req.AllowedTools) > 0 {
+			configCmd["allowedTools"] = req.AllowedTools
+		}
+		if req.PermissionMode != "" {
+			configCmd["permissionMode"] = req.PermissionMode
+		}
+		if req.MaxTurns > 0 {
+			configCmd["maxTurns"] = req.MaxTurns
+		}
+		if req.Cwd != "" {
+			configCmd["cwd"] = req.Cwd
+		}
+		if len(req.McpServers) > 0 {
+			configCmd["mcpServers"] = req.McpServers
+		}
+		configJSON, _ := jsonMarshal(configCmd)
+		session.StdinWriter.Write(append(configJSON, '\n'))
+	}
+
+	// Send initial prompt if provided
+	if req.Prompt != "" && session.StdinWriter != nil {
+		promptCmd := map[string]interface{}{
+			"type": "prompt",
+			"text": req.Prompt,
+		}
+		promptJSON, _ := jsonMarshal(promptCmd)
+		session.StdinWriter.Write(append(promptJSON, '\n'))
+	}
+
+	return c.JSON(http.StatusCreated, types.AgentSessionInfo{
+		SessionID: session.ID,
+		SandboxID: id,
+		Running:   true,
+		StartedAt: session.StartedAt.Format(time.RFC3339),
+	})
+}
+
+func (s *HTTPServer) listAgentSessions(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	allSessions := s.execSessionManager.ListSessions(id)
+
+	// Filter to only agent sessions (command = claude-agent-wrapper)
+	var agentSessions []types.AgentSessionInfo
+	for _, sess := range allSessions {
+		if sess.Command == "claude-agent-wrapper" {
+			agentSessions = append(agentSessions, types.AgentSessionInfo{
+				SessionID: sess.SessionID,
+				SandboxID: sess.SandboxID,
+				Running:   sess.Running,
+				StartedAt: sess.StartedAt,
+			})
+		}
+	}
+
+	if agentSessions == nil {
+		agentSessions = []types.AgentSessionInfo{}
+	}
+
+	return c.JSON(http.StatusOK, agentSessions)
+}
+
+func (s *HTTPServer) sendAgentPrompt(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessionID := c.Param("sid")
+
+	var req types.AgentPromptRequest
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+	}
+	if req.Text == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "text is required"})
+	}
+
+	session, err := s.execSessionManager.GetSession(sessionID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
+	if session.StdinWriter == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "session stdin not available"})
+	}
+
+	promptCmd := map[string]interface{}{
+		"type": "prompt",
+		"text": req.Text,
+	}
+	promptJSON, _ := jsonMarshal(promptCmd)
+	session.StdinWriter.Write(append(promptJSON, '\n'))
+
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *HTTPServer) interruptAgent(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessionID := c.Param("sid")
+
+	session, err := s.execSessionManager.GetSession(sessionID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
+	if session.StdinWriter == nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "session stdin not available"})
+	}
+
+	interruptCmd := map[string]interface{}{"type": "interrupt"}
+	interruptJSON, _ := jsonMarshal(interruptCmd)
+	session.StdinWriter.Write(append(interruptJSON, '\n'))
+
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *HTTPServer) killAgentSession(c echo.Context) error {
+	if s.execSessionManager == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
+	}
+
+	id := c.Param("id")
+	sessionID := c.Param("sid")
+
+	var body struct {
+		Signal int `json:"signal"`
+	}
+	_ = c.Bind(&body)
+
+	if body.Signal == 0 {
+		body.Signal = 9
+	}
+
+	routeOp := func(_ context.Context) error {
+		return s.execSessionManager.KillSession(sessionID, body.Signal)
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(c.Request().Context(), id, "agentSessionKill", routeOp); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	} else {
+		if err := routeOp(c.Request().Context()); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		}
+	}
+
+	return c.NoContent(http.StatusNoContent)
 }
 
 // refreshToken issues a fresh 24h JWT for a sandbox.
