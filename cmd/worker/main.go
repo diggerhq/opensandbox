@@ -409,8 +409,9 @@ func main() {
 	}
 
 	// Serve HTTPS on :443 if cert is available, always serve HTTP for VPC-internal traffic
+	var tlsServer *worker.HTTPServer
 	if certFetcher != nil {
-		tlsServer := worker.NewHTTPServer(mgr, ptyMgr, execMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
+		tlsServer = worker.NewHTTPServer(mgr, ptyMgr, execMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
 		tlsServer.SetCertFetcher(certFetcher)
 		log.Println("opensandbox-worker: starting HTTPS server on :443 (Let's Encrypt wildcard)")
 		go func() {
@@ -481,6 +482,14 @@ func main() {
 
 	// 1. Stop accepting new work
 	grpcServer.Stop()
+	if tlsServer != nil {
+		if err := tlsServer.Close(); err != nil {
+			log.Printf("error closing HTTPS server: %v", err)
+		}
+	}
+	if certFetcher != nil {
+		certFetcher.Stop()
+	}
 	if err := httpServer.Close(); err != nil {
 		log.Printf("error closing HTTP server: %v", err)
 	}

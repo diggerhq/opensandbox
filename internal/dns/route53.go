@@ -87,9 +87,13 @@ func (c *Route53Client) UpsertARecord(ctx context.Context, hostname, ip string, 
 	return nil
 }
 
-// DeleteARecord removes an A record.
-func (c *Route53Client) DeleteARecord(ctx context.Context, hostname, ip string) error {
-	ttl64 := int64(60)
+// DeleteARecord removes an A record. The ttl must match the existing record's TTL
+// for Route53 to accept the deletion.
+func (c *Route53Client) DeleteARecord(ctx context.Context, hostname, ip string, ttl int64) error {
+	if ttl <= 0 {
+		ttl = 60
+	}
+	ttl64 := ttl
 
 	input := &route53.ChangeResourceRecordSetsInput{
 		HostedZoneId: &c.hostedZoneID,

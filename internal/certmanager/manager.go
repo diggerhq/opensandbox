@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -52,6 +53,7 @@ type CertManager struct {
 	s3Client *s3.Client
 	dns      *dns.Route53Client
 	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // NewCertManager creates a new certificate manager.
@@ -119,11 +121,55 @@ func (m *CertManager) ObtainOrRenew(ctx context.Context) error {
 	return m.obtain(ctx)
 }
 
+// loadOrCreateAccountKey loads the ACME account key from S3, or generates and
+// persists a new one if none exists. This prevents creating orphaned Let's Encrypt
+// accounts on every renewal.
+func (m *CertManager) loadOrCreateAccountKey(ctx context.Context) (*ecdsa.PrivateKey, error) {
+	s3Key := m.cfg.S3Prefix + "account-key.pem"
+
+	// Try to load existing key from S3
+	data, err := m.downloadFromS3(ctx, s3Key)
+	if err == nil {
+		block, _ := pem.Decode(data)
+		if block != nil {
+			key, parseErr := x509.ParseECPrivateKey(block.Bytes)
+			if parseErr == nil {
+				log.Printf("certmanager: loaded existing ACME account key from S3")
+				return key, nil
+			}
+			log.Printf("certmanager: failed to parse stored account key: %v, generating new one", parseErr)
+		}
+	}
+
+	// Generate new key
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate account key: %w", err)
+	}
+
+	// Persist to S3
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("marshal account key: %w", err)
+	}
+	var buf bytes.Buffer
+	pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	if err := m.uploadToS3(ctx, s3Key, buf.Bytes()); err != nil {
+		log.Printf("certmanager: warning: failed to persist account key to S3: %v", err)
+		// Continue anyway — key works in memory, just won't survive restarts
+	} else {
+		log.Printf("certmanager: persisted new ACME account key to S3")
+	}
+
+	return key, nil
+}
+
 // obtain performs the ACME DNS-01 flow to get a wildcard cert.
 func (m *CertManager) obtain(ctx context.Context) error {
-	accountKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	accountKey, err := m.loadOrCreateAccountKey(ctx)
 	if err != nil {
-		return fmt.Errorf("generate account key: %w", err)
+		return fmt.Errorf("load account key: %w", err)
 	}
 
 	client := &acme.Client{
@@ -250,9 +296,9 @@ func (m *CertManager) StartRenewalLoop(ctx context.Context) {
 	}()
 }
 
-// Stop stops the renewal loop.
+// Stop stops the renewal loop. Safe to call multiple times.
 func (m *CertManager) Stop() {
-	close(m.stop)
+	m.stopOnce.Do(func() { close(m.stop) })
 }
 
 // GetCertFromS3 downloads the cert and key PEM from S3.

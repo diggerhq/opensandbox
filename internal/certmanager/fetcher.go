@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,7 +37,8 @@ type CertFetcher struct {
 	s3Client *s3.Client
 	cert     atomic.Pointer[tls.Certificate]
 	expiry   atomic.Pointer[time.Time]
-	stop chan struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // NewCertFetcher creates a new cert fetcher for workers.
@@ -159,9 +161,9 @@ func (f *CertFetcher) StartRefreshLoop(ctx context.Context) {
 	}()
 }
 
-// Stop stops the refresh loop.
+// Stop stops the refresh loop. Safe to call multiple times.
 func (f *CertFetcher) Stop() {
-	close(f.stop)
+	f.stopOnce.Do(func() { close(f.stop) })
 }
 
 // GetCertificate implements the tls.Config.GetCertificate callback.

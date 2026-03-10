@@ -73,7 +73,7 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 			} else if time.Until(exp) < 24*time.Hour {
 				resp["tls"] = "expiring_soon"
 				resp["tls_expiry"] = exp.Format(time.RFC3339)
-				resp["status"] = "degraded"
+				// Not degraded — HTTP still works, cert renewal should handle this
 			} else {
 				resp["tls"] = "ok"
 				resp["tls_expiry"] = exp.Format(time.RFC3339)

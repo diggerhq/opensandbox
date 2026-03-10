@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/opensandbox/opensandbox/internal/dns"
@@ -18,6 +19,7 @@ type DNSCleaner struct {
 	domain    string // e.g. "workers.opensandbox.ai"
 	interval  time.Duration
 	stop      chan struct{}
+	stopOnce  sync.Once
 }
 
 // DNSCleanerConfig holds configuration for the DNS cleaner.
@@ -47,9 +49,9 @@ func (c *DNSCleaner) Start() {
 	go c.loop()
 }
 
-// Stop stops the cleanup loop.
+// Stop stops the cleanup loop. Safe to call multiple times.
 func (c *DNSCleaner) Stop() {
-	close(c.stop)
+	c.stopOnce.Do(func() { close(c.stop) })
 }
 
 func (c *DNSCleaner) loop() {
@@ -107,7 +109,7 @@ func (c *DNSCleaner) cleanup() {
 		}
 
 		log.Printf("dns-cleaner: removing stale A record %s -> %s (worker not in registry)", rec.Name, rec.Value)
-		if err := c.dnsClient.DeleteARecord(ctx, rec.Name, rec.Value); err != nil {
+		if err := c.dnsClient.DeleteARecord(ctx, rec.Name, rec.Value, rec.TTL); err != nil {
 			log.Printf("dns-cleaner: failed to delete %s: %v", rec.Name, err)
 		} else {
 			stale++
