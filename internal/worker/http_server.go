@@ -1,12 +1,14 @@
 package worker
 
 import (
+	"crypto/tls"
 	"net/http"
-	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/certmanager"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 )
@@ -21,6 +23,7 @@ type HTTPServer struct {
 	sandboxDBs    *sandbox.SandboxDBManager
 	router        *sandbox.SandboxRouter
 	sandboxDomain string
+	certFetcher   *certmanager.CertFetcher
 }
 
 // NewHTTPServer creates a new worker HTTP server for direct SDK access.
@@ -50,26 +53,35 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *a
 		e.Use(sbProxy.Middleware())
 	}
 
-	// Health check (no auth)
+	// Health check (no auth) — includes TLS cert status
 	e.GET("/health", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "role": "worker"})
-	})
-
-	// Caddy on-demand TLS check — validates that a domain is a valid sandbox subdomain
-	e.GET("/caddy/check", func(c echo.Context) error {
-		domain := c.QueryParam("domain")
-		if domain == "" {
-			return c.String(http.StatusForbidden, "missing domain")
+		resp := map[string]interface{}{
+			"status": "ok",
+			"role":   "worker",
 		}
-		suffix := "." + s.sandboxDomain
-		if !strings.HasSuffix(domain, suffix) {
-			return c.String(http.StatusForbidden, "invalid domain")
+		if s.certFetcher != nil {
+			exp := s.certFetcher.CertExpiry()
+			if exp.IsZero() {
+				resp["tls"] = "no_cert"
+				resp["status"] = "degraded"
+			} else if time.Now().After(exp) {
+				resp["tls"] = "expired"
+				resp["tls_expiry"] = exp.Format(time.RFC3339)
+				resp["status"] = "degraded"
+			} else if time.Until(exp) < 24*time.Hour {
+				resp["tls"] = "expiring_soon"
+				resp["tls_expiry"] = exp.Format(time.RFC3339)
+				resp["status"] = "degraded"
+			} else {
+				resp["tls"] = "ok"
+				resp["tls_expiry"] = exp.Format(time.RFC3339)
+			}
 		}
-		sub := strings.TrimSuffix(domain, suffix)
-		if sub == "" || strings.Contains(sub, ".") {
-			return c.String(http.StatusForbidden, "invalid subdomain")
+		status := http.StatusOK
+		if resp["status"] == "degraded" {
+			status = http.StatusServiceUnavailable
 		}
-		return c.String(http.StatusOK, "ok")
+		return c.JSON(status, resp)
 	})
 
 	// All sandbox routes require JWT auth
@@ -104,9 +116,25 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, jwtIssuer *a
 	return s
 }
 
+// SetCertFetcher sets the cert fetcher for TLS health reporting.
+func (s *HTTPServer) SetCertFetcher(cf *certmanager.CertFetcher) {
+	s.certFetcher = cf
+}
+
 // Start starts the HTTP server on the given address.
 func (s *HTTPServer) Start(addr string) error {
 	return s.echo.Start(addr)
+}
+
+// StartTLSWithCert starts the HTTPS server using a dynamic certificate provider.
+// The getCert callback is called for each TLS handshake, enabling hot-swap of certs.
+func (s *HTTPServer) StartTLSWithCert(addr string, getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)) error {
+	s.echo.TLSServer.TLSConfig = &tls.Config{
+		GetCertificate: getCert,
+		MinVersion:     tls.VersionTLS12,
+	}
+	s.echo.TLSServer.Addr = addr
+	return s.echo.StartServer(s.echo.TLSServer)
 }
 
 // Close gracefully shuts down the server.

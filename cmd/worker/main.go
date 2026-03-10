@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/certmanager"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
 	fc "github.com/opensandbox/opensandbox/internal/firecracker"
@@ -268,6 +269,74 @@ func main() {
 	// Start HTTP server for direct SDK access
 	httpServer := worker.NewHTTPServer(mgr, ptyMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
 	httpAddr := fmt.Sprintf(":%d", cfg.Port)
+
+	// Initialize cert fetcher for TLS (if S3 cert bucket is configured)
+	certBucket := cfg.CertS3Bucket
+	if certBucket == "" {
+		certBucket = cfg.S3Bucket // default to same bucket
+	}
+	var certFetcher *certmanager.CertFetcher
+	if certBucket != "" && cfg.CertS3Prefix != "" {
+		var fetchErr error
+		certFetcher, fetchErr = certmanager.NewCertFetcher(certmanager.FetcherConfig{
+			S3Bucket:       certBucket,
+			S3Prefix:       cfg.CertS3Prefix,
+			S3Region:       cfg.S3Region,
+			AccessKeyID:    cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+			LocalCertDir:   filepath.Join(cfg.DataDir, "tls"),
+		})
+		if fetchErr != nil {
+			log.Printf("opensandbox-worker: cert fetcher init failed: %v (TLS disabled)", fetchErr)
+		} else {
+			// Set up fallback renewal — if cert is close to expiry and server
+			// hasn't renewed, this worker will attempt renewal directly.
+			if cfg.Route53HostedZoneID != "" && cfg.ACMEEmail != "" {
+				cm, cmErr := certmanager.NewCertManager(certmanager.Config{
+					Domain:         cfg.SandboxDomain,
+					HostedZoneID:   cfg.Route53HostedZoneID,
+					S3Bucket:       certBucket,
+					S3Prefix:       cfg.CertS3Prefix,
+					S3Region:       cfg.S3Region,
+					AccessKeyID:    cfg.S3AccessKeyID,
+					SecretAccessKey: cfg.S3SecretAccessKey,
+					ACMEEmail:      cfg.ACMEEmail,
+				})
+				if cmErr != nil {
+					log.Printf("opensandbox-worker: fallback cert renewal disabled: %v", cmErr)
+				} else {
+					certFetcher.SetRenewer(cm)
+					log.Println("opensandbox-worker: fallback cert renewal enabled (worker can renew if server is down)")
+				}
+			}
+
+			if err := certFetcher.FetchAndStore(ctx); err != nil {
+				log.Printf("opensandbox-worker: initial cert fetch failed: %v (TLS disabled, will retry)", err)
+				certFetcher = nil
+			} else {
+				certFetcher.StartRefreshLoop(ctx)
+				log.Println("opensandbox-worker: TLS cert loaded from S3, refresh loop started")
+			}
+		}
+	}
+
+	// Wire cert fetcher into health endpoint
+	if certFetcher != nil {
+		httpServer.SetCertFetcher(certFetcher)
+	}
+
+	// Serve HTTPS on :443 if cert is available, always serve HTTP for VPC-internal traffic
+	if certFetcher != nil {
+		tlsServer := worker.NewHTTPServer(mgr, ptyMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
+		tlsServer.SetCertFetcher(certFetcher)
+		log.Println("opensandbox-worker: starting HTTPS server on :443 (Let's Encrypt wildcard)")
+		go func() {
+			if err := tlsServer.StartTLSWithCert(":443", certFetcher.GetCertificate); err != nil {
+				log.Printf("HTTPS server error: %v", err)
+			}
+		}()
+	}
+
 	log.Printf("opensandbox-worker: starting HTTP server on %s", httpAddr)
 	go func() {
 		if err := httpServer.Start(httpAddr); err != nil {

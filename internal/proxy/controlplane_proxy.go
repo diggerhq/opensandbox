@@ -108,7 +108,7 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) 
 		return p.tryRecoverOrFail(c, ctx, sandboxID, session, port)
 	}
 
-	workerURL := worker.HTTPAddr
+	workerURL := worker.InternalHTTPAddr()
 	if workerURL == "" {
 		return serveUpstreamUnavailable(c, sandboxID, port)
 	}
@@ -193,7 +193,7 @@ func (p *ControlPlaneProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID
 	_ = p.store.MarkHibernationRestored(ctx, sandboxID)
 	_ = p.store.UpdateSandboxSessionForWake(ctx, sandboxID, worker.ID)
 
-	workerURL := worker.HTTPAddr
+	workerURL := worker.InternalHTTPAddr()
 	if workerURL == "" {
 		return nil, "", fmt.Errorf("worker %s has no HTTP address", worker.ID)
 	}

@@ -31,6 +31,8 @@ type EC2PoolConfig struct {
 	KeyName         string
 	IAMInstanceProfile string // IAM instance profile name (for Secrets Manager + S3 access)
 	SecretsARN         string // Secrets Manager ARN passed to worker env
+	Route53HostedZoneID string // Route53 hosted zone ID for worker DNS registration
+	SandboxDomain       string // e.g. "workers.opensandbox.ai"
 }
 
 // EC2Pool implements compute.Pool using AWS EC2 instances.
@@ -277,6 +279,16 @@ func (p *EC2Pool) buildUserData(opts MachineOpts) string {
 		sb.WriteString(fmt.Sprintf("OPENSANDBOX_SECRETS_ARN=%s\n", p.cfg.SecretsARN))
 	}
 	sb.WriteString("ENVEOF\n\n")
+
+	// Write Route53 env for DNS registration on boot
+	if p.cfg.Route53HostedZoneID != "" {
+		sb.WriteString("cat > /etc/opensandbox/route53.env << 'R53EOF'\n")
+		sb.WriteString(fmt.Sprintf("OPENSANDBOX_ROUTE53_HOSTED_ZONE_ID=%s\n", p.cfg.Route53HostedZoneID))
+		if p.cfg.SandboxDomain != "" {
+			sb.WriteString(fmt.Sprintf("OPENSANDBOX_SANDBOX_DOMAIN=%s\n", p.cfg.SandboxDomain))
+		}
+		sb.WriteString("R53EOF\n\n")
+	}
 
 	// Mount NVMe with XFS project quotas
 	sb.WriteString("# Mount NVMe instance storage with XFS project quotas\n")

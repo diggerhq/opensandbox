@@ -88,6 +88,14 @@ type Config struct {
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
 	CFZoneID   string // Cloudflare zone ID for the shared zone (e.g. opencomputer.dev)
 
+	// Route53 DNS for worker hostnames
+	Route53HostedZoneID string // Route53 hosted zone ID for SandboxDomain
+
+	// TLS cert management (Let's Encrypt wildcard via DNS-01)
+	ACMEEmail    string // Let's Encrypt registration email
+	CertS3Bucket string // S3 bucket for shared wildcard cert (defaults to S3Bucket)
+	CertS3Prefix string // S3 key prefix for cert files (default: "certs/wildcard/")
+
 	// Autoscaler
 	ScaleCooldownSec int // Cooldown between scale-up actions (seconds), default 300
 
@@ -164,6 +172,12 @@ func Load() (*Config, error) {
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
+
+		Route53HostedZoneID: os.Getenv("OPENSANDBOX_ROUTE53_HOSTED_ZONE_ID"),
+
+		ACMEEmail:    os.Getenv("OPENSANDBOX_ACME_EMAIL"),
+		CertS3Bucket: os.Getenv("OPENSANDBOX_CERT_S3_BUCKET"),
+		CertS3Prefix: envOrDefault("OPENSANDBOX_CERT_S3_PREFIX", "certs/wildcard/"),
 
 		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
 

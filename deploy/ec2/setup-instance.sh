@@ -64,40 +64,14 @@ sudo apt-get install -y podman uidmap slirp4netns
 # -------------------------------------------------------------------
 # System tools for ext4 image creation
 # -------------------------------------------------------------------
-echo "==> Installing ext4 and rootfs tools..."
-sudo apt-get install -y e2fsprogs
+echo "==> Installing ext4, rootfs, and DNS tools..."
+sudo apt-get install -y e2fsprogs dnsutils
 
 # -------------------------------------------------------------------
 # Redis
 # -------------------------------------------------------------------
 echo "==> Installing Redis..."
 sudo apt-get install -y redis-server
-
-# -------------------------------------------------------------------
-# Caddy (custom build with Route53 DNS module for wildcard certs)
-# -------------------------------------------------------------------
-echo "==> Installing Go (needed for xcaddy)..."
-GO_VERSION="1.23.6"
-curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
-export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-
-echo "==> Building Caddy with Route53 DNS module..."
-go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-xcaddy build --with github.com/caddy-dns/route53 --output /tmp/caddy-custom
-sudo mv /tmp/caddy-custom /usr/local/bin/caddy
-sudo chmod +x /usr/local/bin/caddy
-
-echo "==> Verifying Caddy has Route53 module..."
-caddy list-modules | grep route53 || { echo "ERROR: Caddy missing route53 module"; exit 1; }
-
-echo "==> Installing Caddy config..."
-sudo mkdir -p /etc/caddy
-sudo cp /tmp/deploy-ec2/Caddyfile /etc/caddy/Caddyfile 2>/dev/null || \
-  echo "    NOTE: Copy deploy/ec2/Caddyfile to /etc/caddy/Caddyfile manually"
-
-echo "==> Installing Caddy systemd unit..."
-sudo cp /tmp/deploy-ec2/caddy.service /etc/systemd/system/caddy.service 2>/dev/null || \
-  echo "    NOTE: Copy deploy/ec2/caddy.service to /etc/systemd/system/ manually"
 
 # -------------------------------------------------------------------
 # NVMe instance storage (XFS with reflink for instant rootfs copies)
@@ -220,29 +194,120 @@ echo "==> Installing identity service..."
 sudo tee /usr/local/bin/opensandbox-worker-identity.sh > /dev/null << 'IDENT'
 #!/usr/bin/env bash
 set -euo pipefail
-TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+
+ROUTE53_HOSTED_ZONE_ID="${OPENSANDBOX_ROUTE53_HOSTED_ZONE_ID:-}"
+WORKER_DOMAIN="${OPENSANDBOX_SANDBOX_DOMAIN:-workers.opencomputer.dev}"
+
+# Query EC2 instance metadata (IMDSv2)
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id)
-PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/local-ipv4)
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
   http://169.254.169.254/latest/meta-data/public-ipv4 || echo "")
+
 SHORT_ID=$(echo "$INSTANCE_ID" | sed 's/^i-//' | cut -c1-8)
 WORKER_ID="w-use2-${SHORT_ID}"
+WORKER_HOSTNAME="${WORKER_ID}.${WORKER_DOMAIN}"
+IP="${PUBLIC_IP:-$PRIVATE_IP}"
+
 mkdir -p /etc/opensandbox
+
+# Register A record in Route53 (direct DNS, no proxy)
+if [ -n "$ROUTE53_HOSTED_ZONE_ID" ] && [ -n "$IP" ]; then
+    echo "opensandbox-identity: registering DNS ${WORKER_HOSTNAME} -> ${IP} (Route53)"
+
+    aws route53 change-resource-record-sets \
+        --hosted-zone-id "$ROUTE53_HOSTED_ZONE_ID" \
+        --change-batch "{
+            \"Changes\": [{
+                \"Action\": \"UPSERT\",
+                \"ResourceRecordSet\": {
+                    \"Name\": \"${WORKER_HOSTNAME}\",
+                    \"Type\": \"A\",
+                    \"TTL\": 60,
+                    \"ResourceRecords\": [{\"Value\": \"${IP}\"}]
+                }
+            }]
+        }" > /dev/null 2>&1 && {
+        echo "opensandbox-identity: DNS registered"
+        HTTP_ADDR="https://${WORKER_HOSTNAME}"
+
+        # Verify DNS resolves before proceeding (prevents routing to unresolvable hostname)
+        echo "opensandbox-identity: verifying DNS resolution for ${WORKER_HOSTNAME}..."
+        for i in $(seq 1 30); do
+            RESOLVED=$(dig +short "${WORKER_HOSTNAME}" 2>/dev/null || true)
+            if [ -n "$RESOLVED" ]; then
+                echo "opensandbox-identity: DNS verified (${WORKER_HOSTNAME} -> ${RESOLVED})"
+                break
+            fi
+            if [ $i -eq 30 ]; then
+                echo "opensandbox-identity: WARNING: DNS not resolving after 60s, proceeding anyway"
+            fi
+            sleep 2
+        done
+    } || {
+        echo "opensandbox-identity: WARNING: DNS registration failed, using raw IP"
+        HTTP_ADDR="http://${IP}:8080"
+    }
+
+    # Save state for cleanup on shutdown
+    cat > /etc/opensandbox/worker-dns.env << EOF
+ROUTE53_HOSTED_ZONE_ID=${ROUTE53_HOSTED_ZONE_ID}
+WORKER_HOSTNAME=${WORKER_HOSTNAME}
+WORKER_IP=${IP}
+EOF
+else
+    echo "opensandbox-identity: no Route53 config, using raw IP (no TLS)"
+    HTTP_ADDR="http://${IP}:8080"
+    cat > /etc/opensandbox/worker-dns.env << EOF
+ROUTE53_HOSTED_ZONE_ID=
+WORKER_HOSTNAME=${WORKER_HOSTNAME}
+WORKER_IP=${IP}
+EOF
+fi
+
 cat > /etc/opensandbox/worker-identity.env << EOF
 OPENSANDBOX_WORKER_ID=${WORKER_ID}
-OPENSANDBOX_HTTP_ADDR=http://${PUBLIC_IP:-$PRIVATE_IP}:8080
+OPENSANDBOX_HTTP_ADDR=${HTTP_ADDR}
 OPENSANDBOX_GRPC_ADVERTISE=${PRIVATE_IP}:9090
 EOF
-echo "opensandbox-identity: ${WORKER_ID} private=${PRIVATE_IP} public=${PUBLIC_IP:-none}"
+
+echo "opensandbox-identity: ${WORKER_ID} private=${PRIVATE_IP} public=${PUBLIC_IP:-none} addr=${HTTP_ADDR}"
 IDENT
 sudo chmod +x /usr/local/bin/opensandbox-worker-identity.sh
 
+# DNS cleanup script — deletes the Route53 A record on shutdown
+sudo tee /usr/local/bin/opensandbox-worker-dns-cleanup.sh > /dev/null << 'CLEANUP'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/opensandbox/worker-dns.env 2>/dev/null || exit 0
+[ -z "$ROUTE53_HOSTED_ZONE_ID" ] && exit 0
+[ -z "$WORKER_HOSTNAME" ] && exit 0
+[ -z "$WORKER_IP" ] && exit 0
+
+echo "opensandbox-dns-cleanup: removing ${WORKER_HOSTNAME}"
+aws route53 change-resource-record-sets \
+    --hosted-zone-id "$ROUTE53_HOSTED_ZONE_ID" \
+    --change-batch "{
+        \"Changes\": [{
+            \"Action\": \"DELETE\",
+            \"ResourceRecordSet\": {
+                \"Name\": \"${WORKER_HOSTNAME}\",
+                \"Type\": \"A\",
+                \"TTL\": 60,
+                \"ResourceRecords\": [{\"Value\": \"${WORKER_IP}\"}]
+            }
+        }]
+    }" > /dev/null 2>&1 || echo "opensandbox-dns-cleanup: WARNING: failed to remove DNS record"
+CLEANUP
+sudo chmod +x /usr/local/bin/opensandbox-worker-dns-cleanup.sh
+
 sudo tee /etc/systemd/system/opensandbox-identity.service > /dev/null << 'SVC'
 [Unit]
-Description=OpenSandbox Worker Identity (from EC2 IMDS)
+Description=OpenSandbox Worker Identity + Route53 DNS
 After=network-online.target
 Wants=network-online.target
 Before=opensandbox-worker.service
@@ -250,7 +315,9 @@ Before=opensandbox-worker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+EnvironmentFile=-/etc/opensandbox/route53.env
 ExecStart=/usr/local/bin/opensandbox-worker-identity.sh
+ExecStop=/usr/local/bin/opensandbox-worker-dns-cleanup.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -305,14 +372,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable opensandbox-nvme
 sudo systemctl enable opensandbox-identity
 sudo systemctl enable opensandbox-worker
-sudo systemctl enable caddy 2>/dev/null || true
 
 # -------------------------------------------------------------------
 # Cleanup
 # -------------------------------------------------------------------
-echo "==> Cleaning up build tools..."
+echo "==> Cleaning up..."
 sudo apt-get clean
-sudo rm -rf /usr/local/go $HOME/go
 
 echo ""
 echo "============================================"

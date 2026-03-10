@@ -13,11 +13,13 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/api"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/certmanager"
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/compute"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/dns"
 	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/podman"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -202,6 +204,49 @@ func main() {
 		log.Println("opensandbox: Redis worker registry started")
 	}
 
+	// Initialize cert manager for wildcard TLS (if Route53 + ACME configured).
+	// MUST run before autoscaler — workers need the cert in S3 before they boot.
+	var dnsClient *dns.Route53Client
+	if cfg.Route53HostedZoneID != "" && cfg.ACMEEmail != "" && cfg.S3Bucket != "" {
+		certBucket := cfg.CertS3Bucket
+		if certBucket == "" {
+			certBucket = cfg.S3Bucket
+		}
+		cm, err := certmanager.NewCertManager(certmanager.Config{
+			Domain:         cfg.SandboxDomain,
+			HostedZoneID:   cfg.Route53HostedZoneID,
+			S3Bucket:       certBucket,
+			S3Prefix:       cfg.CertS3Prefix,
+			S3Region:       cfg.S3Region,
+			AccessKeyID:    cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+			ACMEEmail:      cfg.ACMEEmail,
+		})
+		if err != nil {
+			log.Printf("opensandbox: cert manager init failed: %v (TLS wildcard disabled)", err)
+		} else {
+			if err := cm.ObtainOrRenew(ctx); err != nil {
+				log.Printf("opensandbox: initial cert obtain failed: %v (will retry)", err)
+			}
+			cm.StartRenewalLoop(ctx)
+			defer cm.Stop()
+			log.Printf("opensandbox: cert manager started (domain=*.%s, renewal every 12h)", cfg.SandboxDomain)
+		}
+
+		// Create Route53 client for DNS cleanup (reused below)
+		var dnsErr error
+		dnsClient, dnsErr = dns.NewRoute53Client(dns.Route53Config{
+			HostedZoneID:   cfg.Route53HostedZoneID,
+			Region:         cfg.S3Region,
+			AccessKeyID:    cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+		})
+		if dnsErr != nil {
+			log.Printf("opensandbox: Route53 client for DNS cleanup failed: %v", dnsErr)
+			dnsClient = nil
+		}
+	}
+
 	// Initialize EC2 compute pool + autoscaler (server mode with AWS configured)
 	if cfg.Mode == "server" && cfg.EC2AMI != "" && redisRegistry != nil {
 		ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
@@ -213,8 +258,10 @@ func main() {
 			SubnetID:           cfg.EC2SubnetID,
 			SecurityGroupID:    cfg.EC2SecurityGroupID,
 			KeyName:            cfg.EC2KeyName,
-			IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
-			SecretsARN:         cfg.SecretsARN,
+			IAMInstanceProfile:  cfg.EC2IAMInstanceProfile,
+			SecretsARN:          cfg.SecretsARN,
+			Route53HostedZoneID: cfg.Route53HostedZoneID,
+			SandboxDomain:       cfg.SandboxDomain,
 		})
 		if err != nil {
 			log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
@@ -238,6 +285,19 @@ func main() {
 		cpProxy := proxy.NewControlPlaneProxy(cfg.SandboxDomain, opts.Store, redisRegistry)
 		opts.ControlPlaneProxy = cpProxy
 		log.Printf("opensandbox: control plane subdomain proxy configured (*.%s)", cfg.SandboxDomain)
+	}
+
+	// Start DNS cleaner to remove stale A records for dead workers.
+	// Handles crash/termination cases where the worker didn't run its cleanup script.
+	if dnsClient != nil && redisRegistry != nil && cfg.SandboxDomain != "" {
+		dnsCleaner := controlplane.NewDNSCleaner(controlplane.DNSCleanerConfig{
+			DNSClient: dnsClient,
+			Registry:  redisRegistry,
+			Domain:    cfg.SandboxDomain,
+		})
+		dnsCleaner.Start()
+		defer dnsCleaner.Stop()
+		log.Printf("opensandbox: DNS cleaner started (removes stale worker A records every 5m)")
 	}
 
 	// Initialize Cloudflare client for custom hostnames (if configured)
