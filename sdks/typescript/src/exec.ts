@@ -208,37 +208,26 @@ export class Exec {
   }
 
   async run(command: string, opts: RunOpts = {}): Promise<ProcessResult> {
-    let stdout = "";
-    let stderr = "";
-    const timeout = opts.timeout ?? 60;
+    const body: Record<string, unknown> = {
+      cmd: "sh",
+      args: ["-c", command],
+    };
+    if (opts.env) body.envs = opts.env;
+    if (opts.cwd) body.cwd = opts.cwd;
+    if (opts.timeout != null) body.timeout = opts.timeout;
+    else body.timeout = 60;
 
-    return new Promise<ProcessResult>((resolve, reject) => {
-      const decoder = new TextDecoder();
-      let resolved = false;
-
-      this.start("sh", {
-        args: ["-c", command],
-        env: opts.env,
-        cwd: opts.cwd,
-        timeout,
-        onStdout: (data) => {
-          stdout += decoder.decode(data, { stream: true });
-        },
-        onStderr: (data) => {
-          stderr += decoder.decode(data, { stream: true });
-        },
-        onExit: (exitCode) => {
-          if (!resolved) {
-            resolved = true;
-            resolve({ exitCode, stdout, stderr });
-          }
-        },
-      }).catch((err) => {
-        if (!resolved) {
-          resolved = true;
-          reject(err);
-        }
-      });
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/exec/run`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(body),
     });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to run command: ${resp.status} ${text}`);
+    }
+
+    return resp.json();
   }
 }

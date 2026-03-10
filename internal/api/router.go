@@ -160,6 +160,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id/exec", s.listExecSessions)
 	api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
 	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
+	api.POST("/sandboxes/:id/exec/run", s.execRun)
 
 	// Filesystem
 	api.GET("/sandboxes/:id/files", s.readFile)

@@ -205,6 +205,47 @@ func (s *Server) execSessionWebSocket(c echo.Context) error {
 	}
 }
 
+func (s *Server) execRun(c echo.Context) error {
+	id := c.Param("id")
+
+	var req types.ProcessConfig
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid request body: " + err.Error(),
+		})
+	}
+
+	if req.Command == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "cmd is required",
+		})
+	}
+
+	var result *types.ProcessResult
+
+	routeOp := func(ctx context.Context) error {
+		var err error
+		result, err = s.manager.Exec(ctx, id, req)
+		return err
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(c.Request().Context(), id, "execRun", routeOp); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": err.Error(),
+			})
+		}
+	} else {
+		if err := routeOp(c.Request().Context()); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	return c.JSON(http.StatusOK, result)
+}
+
 func (s *Server) killExecSession(c echo.Context) error {
 	if s.execSessionManager == nil {
 		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)

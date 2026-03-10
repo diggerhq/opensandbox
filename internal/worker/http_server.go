@@ -86,6 +86,7 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 	api.GET("/sandboxes/:id/exec", s.listExecSessions)
 	api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
 	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
+	api.POST("/sandboxes/:id/exec/run", s.execRun)
 
 	// Timeout
 	api.POST("/sandboxes/:id/timeout", s.setTimeout)

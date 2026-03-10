@@ -45,7 +45,38 @@ Subcommands:
 		envSlice, _ := cmd.Flags().GetStringSlice("env")
 		wait, _ := cmd.Flags().GetBool("wait")
 
-		// Create exec session
+		if wait {
+			// Wait mode: use exec/run endpoint for synchronous execution
+			req := types.ProcessConfig{
+				Command: command,
+				Args:    cmdArgs,
+				Cwd:     cwd,
+				Timeout: timeout,
+				Env:     parseKVSlice(envSlice),
+			}
+
+			var result types.ProcessResult
+			if err := c.Post(cmd.Context(), "/sandboxes/"+sandboxID+"/exec/run", req, &result); err != nil {
+				return err
+			}
+
+			if jsonOutput {
+				printer.PrintJSON(result)
+			} else {
+				if result.Stdout != "" {
+					fmt.Print(result.Stdout)
+				}
+				if result.Stderr != "" {
+					fmt.Fprint(os.Stderr, result.Stderr)
+				}
+				if result.ExitCode != 0 {
+					os.Exit(result.ExitCode)
+				}
+			}
+			return nil
+		}
+
+		// Non-wait mode: create exec session
 		req := types.ExecSessionCreateRequest{
 			Command: command,
 			Args:    cmdArgs,
@@ -59,53 +90,13 @@ Subcommands:
 			return err
 		}
 
-		if !wait {
-			// Non-wait mode: just print session ID
-			if jsonOutput {
-				printer.PrintJSON(sessionInfo)
-			} else {
-				fmt.Printf("Session %s created (command: %s)\n", sessionInfo.SessionID, sessionInfo.Command)
-				fmt.Printf("Attach with: oc exec attach %s %s\n", sandboxID, sessionInfo.SessionID)
-			}
-			return nil
+		if jsonOutput {
+			printer.PrintJSON(sessionInfo)
+		} else {
+			fmt.Printf("Session %s created (command: %s)\n", sessionInfo.SessionID, sessionInfo.Command)
+			fmt.Printf("Attach with: oc exec attach %s %s\n", sandboxID, sessionInfo.SessionID)
 		}
-
-		// Wait mode: use the REST API to poll for completion
-		// For simplicity, list sessions and check status until done
-		for {
-			var sessions []types.ExecSessionInfo
-			if err := c.Get(cmd.Context(), "/sandboxes/"+sandboxID+"/exec", &sessions); err != nil {
-				return err
-			}
-
-			var found *types.ExecSessionInfo
-			for i := range sessions {
-				if sessions[i].SessionID == sessionInfo.SessionID {
-					found = &sessions[i]
-					break
-				}
-			}
-
-			if found == nil {
-				return fmt.Errorf("session %s not found", sessionInfo.SessionID)
-			}
-
-			if !found.Running {
-				if jsonOutput {
-					printer.PrintJSON(found)
-				} else {
-					exitCode := 0
-					if found.ExitCode != nil {
-						exitCode = *found.ExitCode
-					}
-					fmt.Fprintf(os.Stderr, "Session %s exited with code %d\n", sessionInfo.SessionID, exitCode)
-					if exitCode != 0 {
-						os.Exit(exitCode)
-					}
-				}
-				return nil
-			}
-		}
+		return nil
 	},
 }
 

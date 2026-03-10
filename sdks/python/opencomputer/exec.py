@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import struct
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-import websockets
 
 
 @dataclass
@@ -60,59 +58,23 @@ class Exec:
         The command is executed via `sh -c`, so shell features like pipes,
         redirects, and env var expansion work as expected.
         """
-        body: dict[str, Any] = {"cmd": "sh", "args": ["-c", command]}
+        body: dict[str, Any] = {"cmd": "sh", "args": ["-c", command], "timeout": timeout}
         if env:
             body["envs"] = env
         if cwd:
             body["cwd"] = cwd
-        if timeout:
-            body["timeout"] = timeout
 
         resp = await self._client.post(
-            f"/sandboxes/{self._sandbox_id}/exec",
+            f"/sandboxes/{self._sandbox_id}/exec/run",
             json=body,
         )
         resp.raise_for_status()
         data = resp.json()
-        session_id = data["sessionID"]
-
-        # Attach via WebSocket and collect output
-        ws_url = self._connect_url.replace("http://", "ws://").replace(
-            "https://", "wss://"
-        )
-        ws_endpoint = f"{ws_url}/sandboxes/{self._sandbox_id}/exec/{session_id}"
-        if self._token:
-            ws_endpoint += f"?token={self._token}"
-
-        stdout_parts: list[bytes] = []
-        stderr_parts: list[bytes] = []
-        exit_code = -1
-
-        async with websockets.connect(ws_endpoint) as ws:
-            async for message in ws:
-                if isinstance(message, str):
-                    continue
-                if len(message) < 1:
-                    continue
-
-                stream_id = message[0]
-                payload = message[1:]
-
-                if stream_id == 0x01:  # stdout
-                    stdout_parts.append(payload)
-                elif stream_id == 0x02:  # stderr
-                    stderr_parts.append(payload)
-                elif stream_id == 0x03:  # exit
-                    if len(payload) >= 4:
-                        exit_code = struct.unpack(">i", payload[:4])[0]
-                    break
-                elif stream_id == 0x04:  # scrollback_end
-                    pass
 
         return ProcessResult(
-            exit_code=exit_code,
-            stdout=b"".join(stdout_parts).decode("utf-8", errors="replace"),
-            stderr=b"".join(stderr_parts).decode("utf-8", errors="replace"),
+            exit_code=data["exitCode"],
+            stdout=data.get("stdout", ""),
+            stderr=data.get("stderr", ""),
         )
 
     async def start(
