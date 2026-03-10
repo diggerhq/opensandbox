@@ -4,9 +4,7 @@
 
 | Component | Version | Notes |
 |-----------|---------|-------|
-| Podman | 5.8.0 | Rootful, used for sandbox containers |
-| CRIU | 4.2 | Checkpoint/restore for hibernation |
-| crun | 1.26 | OCI runtime with +CRIU support |
+| Firecracker | latest | MicroVM hypervisor for sandbox isolation |
 | Caddy | latest | Wildcard TLS for `*.workers.opencomputer.dev` (DNS-01 via Route53) |
 | Redis | 7.0.15 | Local, used for sandbox state/routing |
 | Go worker | custom | `/usr/local/bin/opensandbox-worker` |
@@ -23,10 +21,10 @@ Caddy (port 443) -- wildcard TLS for *.workers.opencomputer.dev (DNS-01 via Rout
 opensandbox-worker (port 8080) -- HTTP API + gRPC (9090)
   |
   v
-Podman containers (osb-*) -- one per sandbox
+Firecracker microVMs -- one per sandbox
   |
   v
-CRIU checkpoint/restore -- hibernate to S3, wake on demand
+Snapshot hibernate/wake -- pause to S3, resume on demand
 ```
 
 ## Scripts
@@ -54,7 +52,4 @@ sudo journalctl -u caddy -f
 
 # Restart worker
 sudo systemctl restart opensandbox-worker
-
-# List running sandboxes
-sudo podman ps --filter label=opensandbox.id
 ```
