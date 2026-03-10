@@ -14,6 +14,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
 	fc "github.com/opensandbox/opensandbox/internal/firecracker"
+	agentpb "github.com/opensandbox/opensandbox/proto/agent"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/podman"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -65,6 +66,81 @@ func main() {
 
 	// The Firecracker manager implements sandbox.Manager
 	var mgr sandbox.Manager = fcMgr
+
+	// Initialize PTY manager using Firecracker agent gRPC
+	// Initialize exec session manager using Firecracker agent gRPC
+	execMgr := sandbox.NewAgentExecSessionManager(func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
+		agent, err := fcMgr.GetAgent(sandboxID)
+		if err != nil {
+			return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+		}
+
+		agentPB := &agentpb.ExecSessionCreateRequest{
+			Command:               req.Command,
+			Args:                  req.Args,
+			Envs:                  req.Env,
+			Cwd:                   req.Cwd,
+			TimeoutSeconds:        int32(req.Timeout),
+			MaxRunAfterDisconnect: int32(req.MaxRunAfterDisconnect),
+		}
+
+		sessionID, err := agent.ExecSessionCreate(context.Background(), agentPB)
+		if err != nil {
+			return nil, fmt.Errorf("create exec session in VM: %w", err)
+		}
+
+		scrollback := sandbox.NewScrollbackBuffer(0)
+		done := make(chan struct{})
+
+		handle := &sandbox.ExecSessionHandle{
+			ID:         sessionID,
+			SandboxID:  sandboxID,
+			Command:    req.Command,
+			Args:       req.Args,
+			Running:    true,
+			StartedAt:  time.Now(),
+			Done:       done,
+			Scrollback: scrollback,
+			OnKill: func(signal int) error {
+				return agent.ExecSessionKill(context.Background(), sessionID, int32(signal))
+			},
+		}
+
+		// Attach to the session to pipe output into the host-side scrollback
+		go func() {
+			defer close(done)
+			stream, err := agent.ExecSessionAttach(context.Background())
+			if err != nil {
+				return
+			}
+			// Send first message with session_id
+			if err := stream.Send(&agentpb.ExecSessionInput{SessionId: sessionID}); err != nil {
+				return
+			}
+			for {
+				msg, err := stream.Recv()
+				if err != nil {
+					return
+				}
+				switch msg.Type {
+				case agentpb.ExecSessionOutput_STDOUT:
+					scrollback.Write(1, msg.Data)
+				case agentpb.ExecSessionOutput_STDERR:
+					scrollback.Write(2, msg.Data)
+				case agentpb.ExecSessionOutput_EXIT:
+					exitCode := int(msg.ExitCode)
+					handle.ExitCode = &exitCode
+					handle.Running = false
+					return
+				case agentpb.ExecSessionOutput_SCROLLBACK_END:
+					// Transition from scrollback replay to live
+				}
+			}
+		}()
+
+		return handle, nil
+	})
+	defer execMgr.CloseAll()
 
 	// Initialize PTY manager using Firecracker agent gRPC
 	ptyMgr := sandbox.NewAgentPTYManager(func(sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
@@ -208,6 +284,7 @@ func main() {
 		OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 			log.Printf("opensandbox-worker: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
 				sandboxID, result.HibernationKey, result.SizeBytes)
+			execMgr.RemoveSessions(sandboxID)
 			if store != nil {
 				// Create hibernation record so wake-on-request can find it
 				session, err := store.GetSandboxSession(context.Background(), sandboxID)
@@ -220,6 +297,7 @@ func main() {
 		},
 		OnKill: func(sandboxID string) {
 			log.Printf("opensandbox-worker: sandbox %s killed on timeout", sandboxID)
+			execMgr.RemoveSessions(sandboxID)
 			if store != nil {
 				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "stopped", nil)
 			}
@@ -249,7 +327,7 @@ func main() {
 	}
 
 	// Start gRPC server for control plane communication
-	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, sandboxDBMgr, checkpointStore, sbRouter, builder, store)
+	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, builder, store)
 	grpcAddr := ":9090"
 	log.Printf("opensandbox-worker: starting gRPC server on %s", grpcAddr)
 	go func() {
@@ -266,7 +344,7 @@ func main() {
 	}
 
 	// Start HTTP server for direct SDK access
-	httpServer := worker.NewHTTPServer(mgr, ptyMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
+	httpServer := worker.NewHTTPServer(mgr, ptyMgr, execMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
 	httpAddr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("opensandbox-worker: starting HTTP server on %s", httpAddr)
 	go func() {

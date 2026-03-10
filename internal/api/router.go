@@ -37,6 +37,7 @@ type Server struct {
 	workerID   string                  // this worker's ID
 	region     string                  // this worker's region
 	httpAddr   string                  // public HTTP address for direct access
+	execSessionManager *sandbox.ExecSessionManager     // nil if not configured
 	sandboxDBs      *sandbox.SandboxDBManager         // per-sandbox SQLite manager
 	workos          *auth.WorkOSMiddleware            // nil if WorkOS not configured
 	workerRegistry  *controlplane.RedisWorkerRegistry // nil in combined/worker mode
@@ -61,6 +62,7 @@ type ServerOpts struct {
 	WorkerID    string
 	Region      string
 	HTTPAddr    string
+	ExecSessionManager *sandbox.ExecSessionManager
 	SandboxDBs     *sandbox.SandboxDBManager
 	Router         *sandbox.SandboxRouter             // nil in server-only mode
 	SandboxProxy   *proxy.SandboxProxy               // nil if subdomain routing not configured
@@ -92,6 +94,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.workerID = opts.WorkerID
 		s.region = opts.Region
 		s.httpAddr = opts.HTTPAddr
+		s.execSessionManager = opts.ExecSessionManager
 		s.sandboxDBs = opts.SandboxDBs
 		s.router = opts.Router
 		s.workerRegistry = opts.WorkerRegistry
@@ -152,8 +155,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id/preview", s.listPreviewURLs)
 	api.DELETE("/sandboxes/:id/preview/:port", s.deletePreviewURL)
 
-	// Commands
-	api.POST("/sandboxes/:id/commands", s.runCommand)
+	// Exec sessions (replaces old /commands)
+	api.POST("/sandboxes/:id/exec", s.createExecSession)
+	api.GET("/sandboxes/:id/exec", s.listExecSessions)
+	api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
+	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
+	api.POST("/sandboxes/:id/exec/run", s.execRun)
 
 	// Filesystem
 	api.GET("/sandboxes/:id/files", s.readFile)

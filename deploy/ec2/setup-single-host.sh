@@ -108,9 +108,12 @@ sudo chmod 666 /dev/kvm 2>/dev/null || true
 echo "==> Downloading Firecracker kernel..."
 sudo mkdir -p /opt/opensandbox
 if [ ! -f /opt/opensandbox/vmlinux ]; then
+    # Use the 5.10 "docker" kernel which includes vsock, overlayfs, and other
+    # features needed for sandbox VMs. The plain vmlinux.bin is a minimal 4.14
+    # kernel that lacks CONFIG_VIRTIO_VSOCKETS.
     case "$ARCH" in
-      x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" ;;
-      aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux.bin" ;;
+      x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux-docker-5.10.bin" ;;
+      aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux-docker-5.10.bin" ;;
     esac
     sudo curl -fSL -o /opt/opensandbox/vmlinux "$KERNEL_URL"
     sudo chmod 644 /opt/opensandbox/vmlinux
@@ -129,9 +132,11 @@ if [ "$ARCH" = "aarch64" ]; then
 else
     sudo modprobe kvm_intel || sudo modprobe kvm_amd || true
 fi
+sudo modprobe vhost_vsock || echo "    vhost_vsock module not loadable"
 
 sudo tee /etc/modules-load.d/kvm.conf > /dev/null << 'MODULES'
 kvm
+vhost_vsock
 MODULES
 
 sudo tee /etc/sysctl.d/99-opensandbox.conf > /dev/null << 'SYSCTL'

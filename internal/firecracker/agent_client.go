@@ -233,6 +233,38 @@ func (c *AgentClient) PTYKill(ctx context.Context, sessionID string) error {
 	return err
 }
 
+// ExecSessionCreate creates a new exec session in the VM.
+func (c *AgentClient) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreateRequest) (string, error) {
+	resp, err := c.client.ExecSessionCreate(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return resp.SessionId, nil
+}
+
+// ExecSessionAttach connects to an exec session's bidi stream.
+func (c *AgentClient) ExecSessionAttach(ctx context.Context) (pb.SandboxAgent_ExecSessionAttachClient, error) {
+	return c.client.ExecSessionAttach(ctx)
+}
+
+// ExecSessionList lists all exec sessions in the VM.
+func (c *AgentClient) ExecSessionList(ctx context.Context) ([]*pb.ExecSessionInfo, error) {
+	resp, err := c.client.ExecSessionList(ctx, &pb.ExecSessionListRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Sessions, nil
+}
+
+// ExecSessionKill kills an exec session in the VM.
+func (c *AgentClient) ExecSessionKill(ctx context.Context, sessionID string, signal int32) error {
+	_, err := c.client.ExecSessionKill(ctx, &pb.ExecSessionKillRequest{
+		SessionId: sessionID,
+		Signal:    signal,
+	})
+	return err
+}
+
 // ConnectPTYData connects to the PTY data stream on the given vsock port.
 // Returns a raw TCP-like connection for bidirectional PTY I/O.
 func (c *AgentClient) ConnectPTYData(vsockPath string, dataPort uint32) (net.Conn, error) {

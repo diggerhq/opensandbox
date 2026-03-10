@@ -1,5 +1,5 @@
 import { Filesystem } from "./filesystem.js";
-import { Commands } from "./commands.js";
+import { Exec } from "./exec.js";
 import { Pty } from "./pty.js";
 
 function resolveApiUrl(url: string): string {
@@ -69,8 +69,10 @@ export interface PreviewURLResult {
 export class Sandbox {
   readonly sandboxId: string;
   readonly files: Filesystem;
-  readonly commands: Commands;
+  readonly exec: Exec;
   readonly pty: Pty;
+  /** @deprecated Use `sandbox.exec` instead. This alias exists for backwards compatibility. */
+  readonly commands: Exec;
 
   private apiUrl: string;
   private apiKey: string;
@@ -92,7 +94,8 @@ export class Sandbox {
     const opsToken = this.connectUrl ? this.token : "";
 
     this.files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    this.commands = new Commands(opsUrl, opsKey, this.sandboxId, opsToken);
+    this.exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
+    this.commands = this.exec; // backwards-compatible alias
     this.pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
   }
 
@@ -215,7 +218,7 @@ export class Sandbox {
     const opsToken = this.connectUrl ? this.token : "";
 
     (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).commands = new Commands(opsUrl, opsKey, this.sandboxId, opsToken);
+    (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
   }
 
@@ -296,7 +299,7 @@ export class Sandbox {
     const opsKey = this.connectUrl ? "" : this.apiKey;
     const opsToken = this.connectUrl ? this.token : "";
     (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).commands = new Commands(opsUrl, opsKey, this.sandboxId, opsToken);
+    (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
   }
 

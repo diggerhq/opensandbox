@@ -50,7 +50,8 @@ export class Pty {
     const wsUrl = this.apiUrl
       .replace("http://", "ws://")
       .replace("https://", "wss://");
-    const wsEndpoint = `${wsUrl}/sandboxes/${this.sandboxId}/pty/${sessionId}`;
+    const tokenParam = this.token ? `?token=${encodeURIComponent(this.token)}` : "";
+    const wsEndpoint = `${wsUrl}/sandboxes/${this.sandboxId}/pty/${sessionId}${tokenParam}`;
 
     const ws = new WebSocket(wsEndpoint);
     ws.binaryType = "arraybuffer";
