@@ -134,6 +134,10 @@ func (s *HTTPServer) execSessionWebSocket(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
 	if s.router != nil {
 		s.router.Touch(id)
 	}
@@ -454,6 +458,10 @@ func (s *HTTPServer) ptyWebSocket(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
 	// Touch to reset rolling timeout when PTY connects
 	if s.router != nil {
 		s.router.Touch(id)
@@ -672,6 +680,7 @@ func (s *HTTPServer) sendAgentPrompt(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
 	}
 
+	id := c.Param("id")
 	sessionID := c.Param("sid")
 
 	var req types.AgentPromptRequest
@@ -685,6 +694,10 @@ func (s *HTTPServer) sendAgentPrompt(c echo.Context) error {
 	session, err := s.execSessionManager.GetSession(sessionID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
 	}
 
 	if session.StdinWriter == nil {
@@ -706,11 +719,16 @@ func (s *HTTPServer) interruptAgent(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "exec sessions not available"})
 	}
 
+	id := c.Param("id")
 	sessionID := c.Param("sid")
 
 	session, err := s.execSessionManager.GetSession(sessionID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
 	}
 
 	if session.StdinWriter == nil {

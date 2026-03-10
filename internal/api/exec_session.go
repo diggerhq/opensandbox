@@ -94,6 +94,10 @@ func (s *Server) execSessionWebSocket(c echo.Context) error {
 		})
 	}
 
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
+	}
+
 	if s.router != nil {
 		s.router.Touch(id)
 	}

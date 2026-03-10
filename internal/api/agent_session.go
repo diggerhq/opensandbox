@@ -127,6 +127,7 @@ func (s *Server) sendAgentPrompt(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
 	}
 
+	id := c.Param("id")
 	sessionID := c.Param("sid")
 
 	var req types.AgentPromptRequest
@@ -140,6 +141,10 @@ func (s *Server) sendAgentPrompt(c echo.Context) error {
 	session, err := s.execSessionManager.GetSession(sessionID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
 	}
 
 	if session.StdinWriter == nil {
@@ -161,11 +166,16 @@ func (s *Server) interruptAgent(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
 	}
 
+	id := c.Param("id")
 	sessionID := c.Param("sid")
 
 	session, err := s.execSessionManager.GetSession(sessionID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	if session.SandboxID != id {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
 	}
 
 	if session.StdinWriter == nil {
