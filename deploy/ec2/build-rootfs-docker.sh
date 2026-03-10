@@ -149,6 +149,13 @@ exec /usr/local/bin/osb-agent
 INIT_EOF
 chmod +x "$TMPDIR/init"
 
+# Copy claude-agent-wrapper source (for images that include it)
+WRAPPER_DIR="$PROJECT_ROOT/scripts/claude-agent-wrapper"
+if [ -d "$WRAPPER_DIR" ]; then
+    mkdir -p "$TMPDIR/scripts"
+    cp -r "$WRAPPER_DIR" "$TMPDIR/scripts/claude-agent-wrapper"
+fi
+
 # Append agent/init injection to Dockerfile
 cat >> "$TMPDIR/Dockerfile" << 'INJECT_EOF'
 

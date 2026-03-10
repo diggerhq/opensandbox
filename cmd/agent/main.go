@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/opensandbox/opensandbox/internal/agent"
@@ -18,6 +19,14 @@ const version = "0.1.0"
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
+
+	// Ensure /usr/local/bin and /usr/local/sbin are in PATH for exec.LookPath.
+	// The init script may not set a full PATH.
+	path := os.Getenv("PATH")
+	if !strings.Contains(path, "/usr/local/bin") {
+		os.Setenv("PATH", "/usr/local/bin:/usr/local/sbin:"+path)
+	}
+
 	log.Printf("osb-agent %s starting", version)
 
 	// Listen on vsock port 1024 (inside Firecracker) or Unix socket (testing).

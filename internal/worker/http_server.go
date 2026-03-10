@@ -101,6 +101,13 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 	// Token refresh
 	api.POST("/sandboxes/:id/token/refresh", s.refreshToken)
 
+	// Agent sessions (Claude Agent SDK)
+	api.POST("/sandboxes/:id/agent", s.createAgentSession)
+	api.GET("/sandboxes/:id/agent", s.listAgentSessions)
+	api.POST("/sandboxes/:id/agent/:sid/prompt", s.sendAgentPrompt)
+	api.POST("/sandboxes/:id/agent/:sid/interrupt", s.interruptAgent)
+	api.POST("/sandboxes/:id/agent/:sid/kill", s.killAgentSession)
+
 	// PTY
 	api.POST("/sandboxes/:id/pty", s.createPTY)
 	api.GET("/sandboxes/:id/pty/:sessionID", s.ptyWebSocket)

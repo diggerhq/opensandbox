@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from opencomputer.agent import Agent
 from opencomputer.exec import Exec
 from opencomputer.filesystem import Filesystem
 from opencomputer.pty import Pty
@@ -168,6 +169,11 @@ class Sandbox:
             json={"timeout": timeout},
         )
         resp.raise_for_status()
+
+    @property
+    def agent(self) -> Agent:
+        """Access Claude Agent SDK sessions."""
+        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token)
 
     @property
     def files(self) -> Filesystem:

@@ -162,6 +162,13 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
 	api.POST("/sandboxes/:id/exec/run", s.execRun)
 
+	// Agent sessions (Claude Agent SDK)
+	api.POST("/sandboxes/:id/agent", s.createAgentSession)
+	api.GET("/sandboxes/:id/agent", s.listAgentSessions)
+	api.POST("/sandboxes/:id/agent/:sid/prompt", s.sendAgentPrompt)
+	api.POST("/sandboxes/:id/agent/:sid/interrupt", s.interruptAgent)
+	api.POST("/sandboxes/:id/agent/:sid/kill", s.killAgentSession)
+
 	// Filesystem
 	api.GET("/sandboxes/:id/files", s.readFile)
 	api.PUT("/sandboxes/:id/files", s.writeFile)

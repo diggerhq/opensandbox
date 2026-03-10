@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -92,16 +93,21 @@ func main() {
 		scrollback := sandbox.NewScrollbackBuffer(0)
 		done := make(chan struct{})
 
+		// Create a pipe for stdin: writes to stdinW are forwarded to the gRPC stream
+		stdinR, stdinW := io.Pipe()
+
 		handle := &sandbox.ExecSessionHandle{
-			ID:         sessionID,
-			SandboxID:  sandboxID,
-			Command:    req.Command,
-			Args:       req.Args,
-			Running:    true,
-			StartedAt:  time.Now(),
-			Done:       done,
-			Scrollback: scrollback,
+			ID:          sessionID,
+			SandboxID:   sandboxID,
+			Command:     req.Command,
+			Args:        req.Args,
+			Running:     true,
+			StartedAt:   time.Now(),
+			Done:        done,
+			Scrollback:  scrollback,
+			StdinWriter: stdinW,
 			OnKill: func(signal int) error {
+				stdinW.Close()
 				return agent.ExecSessionKill(context.Background(), sessionID, int32(signal))
 			},
 		}
@@ -109,6 +115,7 @@ func main() {
 		// Attach to the session to pipe output into the host-side scrollback
 		go func() {
 			defer close(done)
+			defer stdinR.Close()
 			stream, err := agent.ExecSessionAttach(context.Background())
 			if err != nil {
 				return
@@ -117,6 +124,25 @@ func main() {
 			if err := stream.Send(&agentpb.ExecSessionInput{SessionId: sessionID}); err != nil {
 				return
 			}
+
+			// Forward stdin pipe to gRPC stream in a separate goroutine
+			go func() {
+				buf := make([]byte, 4096)
+				for {
+					n, err := stdinR.Read(buf)
+					if err != nil {
+						return
+					}
+					if n > 0 {
+						data := make([]byte, n)
+						copy(data, buf[:n])
+						if err := stream.Send(&agentpb.ExecSessionInput{Stdin: data}); err != nil {
+							return
+						}
+					}
+				}
+			}()
+
 			for {
 				msg, err := stream.Recv()
 				if err != nil {

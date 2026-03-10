@@ -1,3 +1,4 @@
+import { Agent } from "./agent.js";
 import { Filesystem } from "./filesystem.js";
 import { Exec } from "./exec.js";
 import { Pty } from "./pty.js";
@@ -68,6 +69,7 @@ export interface PreviewURLResult {
 
 export class Sandbox {
   readonly sandboxId: string;
+  readonly agent: Agent;
   readonly files: Filesystem;
   readonly exec: Exec;
   readonly pty: Pty;
@@ -93,6 +95,7 @@ export class Sandbox {
     const opsKey = this.connectUrl ? "" : apiKey;
     const opsToken = this.connectUrl ? this.token : "";
 
+    this.agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
     this.files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
     this.exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
     this.commands = this.exec; // backwards-compatible alias
@@ -217,6 +220,7 @@ export class Sandbox {
     const opsKey = this.connectUrl ? "" : this.apiKey;
     const opsToken = this.connectUrl ? this.token : "";
 
+    (this as any).agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
@@ -298,6 +302,7 @@ export class Sandbox {
     const opsUrl = this.connectUrl || this.apiUrl;
     const opsKey = this.connectUrl ? "" : this.apiKey;
     const opsToken = this.connectUrl ? this.token : "";
+    (this as any).agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
     (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
