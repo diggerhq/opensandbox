@@ -29,24 +29,26 @@ import (
 // GRPCServer implements the SandboxWorker gRPC service for control plane communication.
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
-	manager         sandbox.Manager
-	router          *sandbox.SandboxRouter
-	ptyManager      *sandbox.PTYManager
-	sandboxDBs      *sandbox.SandboxDBManager
-	checkpointStore *storage.CheckpointStore
-	store           *db.Store // nil if no DB configured
-	server          *grpc.Server
+	manager            sandbox.Manager
+	router             *sandbox.SandboxRouter
+	ptyManager         *sandbox.PTYManager
+	execSessionManager *sandbox.ExecSessionManager
+	sandboxDBs         *sandbox.SandboxDBManager
+	checkpointStore    *storage.CheckpointStore
+	store              *db.Store // nil if no DB configured
+	server             *grpc.Server
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
-func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, store *db.Store) *GRPCServer {
+func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, store *db.Store) *GRPCServer {
 	s := &GRPCServer{
-		manager:         mgr,
-		router:          router,
-		ptyManager:      ptyMgr,
-		sandboxDBs:      sandboxDBs,
-		checkpointStore: checkpointStore,
-		store:           store,
+		manager:            mgr,
+		router:             router,
+		ptyManager:         ptyMgr,
+		execSessionManager: execMgr,
+		sandboxDBs:         sandboxDBs,
+		checkpointStore:    checkpointStore,
+		store:              store,
 		server: grpc.NewServer(
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 				MinTime:             5 * time.Second,
@@ -343,6 +345,93 @@ func (s *GRPCServer) CreatePTY(ctx context.Context, req *pb.CreatePTYRequest) (*
 
 func (s *GRPCServer) PTYStream(_ pb.SandboxWorker_PTYStreamServer) error {
 	return fmt.Errorf("PTY streaming not implemented via gRPC, use WebSocket API directly")
+}
+
+func (s *GRPCServer) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreateRequest) (*pb.ExecSessionCreateResponse, error) {
+	if s.execSessionManager == nil {
+		return nil, fmt.Errorf("exec sessions not configured on this worker")
+	}
+
+	createReq := types.ExecSessionCreateRequest{
+		Command:               req.Command,
+		Args:                  req.Args,
+		Env:                   req.Envs,
+		Cwd:                   req.Cwd,
+		Timeout:               int(req.TimeoutSeconds),
+		MaxRunAfterDisconnect: int(req.MaxRunAfterDisconnect),
+	}
+
+	var session *sandbox.ExecSessionHandle
+
+	routeOp := func(_ context.Context) error {
+		var err error
+		session, err = s.execSessionManager.CreateSession(req.SandboxId, createReq)
+		return err
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(ctx, req.SandboxId, "execSessionCreate", routeOp); err != nil {
+			return nil, fmt.Errorf("exec session create failed: %w", err)
+		}
+	} else {
+		if err := routeOp(ctx); err != nil {
+			return nil, fmt.Errorf("exec session create failed: %w", err)
+		}
+	}
+
+	return &pb.ExecSessionCreateResponse{SessionId: session.ID}, nil
+}
+
+func (s *GRPCServer) ExecSessionList(ctx context.Context, req *pb.ExecSessionListRequest) (*pb.ExecSessionListResponse, error) {
+	if s.execSessionManager == nil {
+		return nil, fmt.Errorf("exec sessions not configured on this worker")
+	}
+
+	sessions := s.execSessionManager.ListSessions(req.SandboxId)
+
+	var entries []*pb.ExecSessionInfoEntry
+	for _, si := range sessions {
+		entry := &pb.ExecSessionInfoEntry{
+			SessionId: si.SessionID,
+			Command:   si.Command,
+			Args:      si.Args,
+			Running:   si.Running,
+			StartedAt: 0,
+		}
+		if si.ExitCode != nil {
+			entry.ExitCode = int32(*si.ExitCode)
+		}
+		entries = append(entries, entry)
+	}
+
+	return &pb.ExecSessionListResponse{Sessions: entries}, nil
+}
+
+func (s *GRPCServer) ExecSessionKill(ctx context.Context, req *pb.ExecSessionKillRequest) (*pb.ExecSessionKillResponse, error) {
+	if s.execSessionManager == nil {
+		return nil, fmt.Errorf("exec sessions not configured on this worker")
+	}
+
+	signal := int(req.Signal)
+	if signal == 0 {
+		signal = 9
+	}
+
+	routeOp := func(_ context.Context) error {
+		return s.execSessionManager.KillSession(req.SessionId, signal)
+	}
+
+	if s.router != nil {
+		if err := s.router.Route(ctx, req.SandboxId, "execSessionKill", routeOp); err != nil {
+			return nil, fmt.Errorf("exec session kill failed: %w", err)
+		}
+	} else {
+		if err := routeOp(ctx); err != nil {
+			return nil, fmt.Errorf("exec session kill failed: %w", err)
+		}
+	}
+
+	return &pb.ExecSessionKillResponse{}, nil
 }
 
 func (s *GRPCServer) HibernateSandbox(ctx context.Context, req *pb.HibernateSandboxRequest) (*pb.HibernateSandboxResponse, error) {

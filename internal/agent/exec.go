@@ -13,16 +13,31 @@ import (
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
-// baseEnv returns the current OS environment with HOME set to /root.
+// baseEnv returns the current OS environment with HOME set to /root and
+// PATH guaranteed to include /usr/local/bin and /usr/local/sbin.
 // With overlayfs, the entire filesystem is backed by the data disk,
 // so /root (the standard root home) has full disk space available.
 func baseEnv() []string {
 	var env []string
+	hasPath := false
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "HOME=") {
 			continue
 		}
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+			path := e[5:]
+			// Ensure /usr/local/bin and /usr/local/sbin are in PATH
+			if !strings.Contains(path, "/usr/local/bin") {
+				path = "/usr/local/bin:/usr/local/sbin:" + path
+			}
+			env = append(env, "PATH="+path)
+			continue
+		}
 		env = append(env, e)
+	}
+	if !hasPath {
+		env = append(env, "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin")
 	}
 	env = append(env, "HOME=/root")
 	return env

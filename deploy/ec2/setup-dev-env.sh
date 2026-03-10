@@ -7,9 +7,10 @@ set -euo pipefail
 API_KEY="${1:?Usage: $0 API_KEY}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Get private IP via IMDSv2
+# Get private + public IP via IMDSv2
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 || echo "")
 
 KERNEL_PATH="/opt/opensandbox/vmlinux"
 
@@ -35,7 +36,8 @@ cat > /etc/opensandbox/worker.env << EOF
 HOME=/root
 OPENSANDBOX_MODE=worker
 OPENSANDBOX_PORT=8081
-OPENSANDBOX_HTTP_ADDR=http://${PRIVATE_IP}:8081
+# Advertise public IP so SDKs can connect directly to the worker
+OPENSANDBOX_HTTP_ADDR=http://${PUBLIC_IP:-${PRIVATE_IP}}:8081
 OPENSANDBOX_GRPC_ADVERTISE=${PRIVATE_IP}:9090
 OPENSANDBOX_JWT_SECRET=dev-secret
 OPENSANDBOX_WORKER_ID=w-dev-1

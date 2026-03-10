@@ -128,10 +128,12 @@ done'
 # ===================================================================
 echo "==> Step 4: Downloading Firecracker kernel..."
 # Firecracker doesn't ship kernels in releases since v1.8+.
-# Use the quickstart kernel from the Firecracker S3 bucket.
+# Use the 5.10 "docker" kernel which includes vsock, overlayfs, and other
+# features needed for sandbox VMs. The plain vmlinux.bin is a minimal 4.14
+# kernel that lacks CONFIG_VIRTIO_VSOCKETS.
 case "$REMOTE_ARCH" in
-  x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin" ;;
-  aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux.bin" ;;
+  x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux-docker-5.10.bin" ;;
+  aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux-docker-5.10.bin" ;;
 esac
 
 $SSH "sudo mkdir -p /data/firecracker && \

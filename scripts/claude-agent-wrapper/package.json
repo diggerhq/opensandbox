@@ -1,0 +1,17 @@
+{
+  "name": "claude-agent-wrapper",
+  "version": "1.0.0",
+  "description": "In-VM wrapper for Claude Agent SDK, bridging JSON-line stdio protocol",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.0.0"
+  }
+}

@@ -46,8 +46,10 @@ $SSH "sudo mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker && \
 # Optionally deploy kernel
 if [ "$DEPLOY_KERNEL" = "1" ]; then
     echo "==> Downloading Firecracker kernel..."
-    FC_VERSION="${FC_VERSION:-v1.9.1}"
-    KERNEL_URL="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/vmlinux-5.10.225.bin"
+    # Firecracker no longer ships kernels in releases since v1.8+.
+    # Use the 5.10 "docker" kernel from the S3 quickstart bucket which includes
+    # vsock, overlayfs, and other features needed for sandbox VMs.
+    KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux-docker-5.10.bin"
 
     $SSH "sudo mkdir -p /data/firecracker && \
           curl -fSL -o /tmp/vmlinux '$KERNEL_URL' && \
