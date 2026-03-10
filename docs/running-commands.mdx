@@ -1,0 +1,207 @@
+---
+title: "Running Commands"
+description: "Execute shell commands inside a sandbox"
+---
+
+The `Exec` module lets you run shell commands inside a sandbox. Access it via `sandbox.exec`.
+
+There are two ways to run commands:
+
+- **`sandbox.exec.run()`** — run a command and wait for it to finish (simple, synchronous)
+- **`sandbox.exec.start()`** — start a long-running command and stream its output (async, with callbacks)
+
+## Quick commands with `sandbox.exec.run`
+
+Run a shell command and get the result when it completes.
+
+<CodeGroup>
+
+```typescript TypeScript
+const result = await sandbox.exec.run('echo "Hello, World!"');
+
+console.log(result.stdout);   // Hello, World!
+console.log(result.stderr);   // (empty)
+console.log(result.exitCode); // 0
+```
+
+```python Python
+result = await sandbox.commands.run('echo "Hello, World!"')
+
+print(result.stdout)     # Hello, World!
+print(result.stderr)     # (empty)
+print(result.exit_code)  # 0
+```
+
+</CodeGroup>
+
+### `sandbox.exec.run(command, opts?)`
+
+Executes a shell command and waits for it to complete.
+
+<ParamField body="command" type="string" required>
+  The shell command to execute.
+</ParamField>
+
+<ParamField body="opts" type="RunOpts" optional>
+  <Expandable title="properties">
+    <ParamField body="timeout" type="number" default="60">
+      Maximum execution time in seconds. The command is killed if it exceeds this.
+    </ParamField>
+    <ParamField body="env" type="Record<string, string>" optional>
+      Additional environment variables for this command.
+    </ParamField>
+    <ParamField body="cwd" type="string" optional>
+      Working directory for the command.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<ProcessResult>`
+
+### ProcessResult
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `exitCode` | `number` | Exit code of the process (0 = success) |
+| `stdout` | `string` | Standard output |
+| `stderr` | `string` | Standard error |
+
+### Examples
+
+```typescript
+// Run with a working directory
+const result = await sandbox.exec.run('ls -la', { cwd: '/app' });
+
+// Run with environment variables
+const result = await sandbox.exec.run('echo $MY_VAR', {
+  env: { MY_VAR: 'hello' },
+});
+
+// Run with a timeout
+const result = await sandbox.exec.run('sleep 30', { timeout: 5 });
+
+// Chain commands
+const result = await sandbox.exec.run(
+  'cd /app && npm install && npm run build'
+);
+```
+
+---
+
+## Async commands with `sandbox.exec.start`
+
+Start a long-running command and stream its output via callbacks. The command runs in the background and you get a session handle to interact with it.
+
+```typescript
+const session = await sandbox.exec.start("npm run dev", {
+  cwd: "/app",
+  onStdout: (data) => {
+    console.log("stdout:", new TextDecoder().decode(data));
+  },
+  onStderr: (data) => {
+    console.error("stderr:", new TextDecoder().decode(data));
+  },
+  onExit: (exitCode) => {
+    console.log(`Process exited with code: ${exitCode}`);
+  },
+});
+
+// Send input to the process
+session.sendStdin("some input\n");
+
+// Kill the process later
+await session.kill();
+
+// Or wait for it to finish
+const exitCode = await session.done;
+```
+
+### `sandbox.exec.start(command, opts?)`
+
+Starts a command and returns an interactive session.
+
+<ParamField body="command" type="string" required>
+  The command to execute.
+</ParamField>
+
+<ParamField body="opts" type="ExecStartOpts" optional>
+  <Expandable title="properties">
+    <ParamField body="args" type="string[]" optional>
+      Arguments to pass to the command.
+    </ParamField>
+    <ParamField body="env" type="Record<string, string>" optional>
+      Additional environment variables.
+    </ParamField>
+    <ParamField body="cwd" type="string" optional>
+      Working directory.
+    </ParamField>
+    <ParamField body="timeout" type="number" optional>
+      Maximum execution time in seconds.
+    </ParamField>
+    <ParamField body="maxRunAfterDisconnect" type="number" optional>
+      How long (in seconds) the process continues running after the WebSocket disconnects.
+    </ParamField>
+    <ParamField body="onStdout" type="(data: Uint8Array) => void" optional>
+      Callback for stdout data.
+    </ParamField>
+    <ParamField body="onStderr" type="(data: Uint8Array) => void" optional>
+      Callback for stderr data.
+    </ParamField>
+    <ParamField body="onExit" type="(exitCode: number) => void" optional>
+      Callback when the process exits.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<ExecSession>`
+
+### ExecSession
+
+| Property / Method | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Unique session identifier |
+| `done` | `Promise<number>` | Resolves with the exit code when the process exits |
+| `sendStdin(data)` | `(data: string \| Uint8Array) => void` | Send input to the process |
+| `kill(signal?)` | `(signal?: number) => Promise<void>` | Kill the process |
+| `close()` | `() => void` | Close the WebSocket connection |
+
+### Examples
+
+#### Start a dev server and keep it running
+
+```typescript
+const devServer = await sandbox.exec.start("npm run dev", {
+  cwd: "/app",
+  onStdout: (data) => {
+    const text = new TextDecoder().decode(data);
+    if (text.includes("ready")) {
+      console.log("Dev server is ready!");
+    }
+  },
+});
+
+// Do other work while the server runs...
+
+// Stop it when done
+await devServer.kill();
+```
+
+#### List running exec sessions
+
+```typescript
+const sessions = await sandbox.exec.list();
+for (const s of sessions) {
+  console.log(`${s.sessionID} — ${s.command} — running: ${s.running}`);
+}
+```
+
+#### Attach to an existing session
+
+Reconnect to a running exec session by its ID:
+
+```typescript
+const session = await sandbox.exec.attach("session-id", {
+  onStdout: (data) => console.log(new TextDecoder().decode(data)),
+  onExit: (code) => console.log(`Exited: ${code}`),
+});
+```

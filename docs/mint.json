@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "quill",
   "name": "OpenComputer",
-  "description": "Secure cloud sandboxes for AI agents and developers",
+  "description": "Cloud sandboxes for running AI agents",
   "colors": {
     "primary": "#6366F1",
     "light": "#818CF8",
@@ -48,10 +48,17 @@
       ]
     },
     {
+      "group": "Using OpenComputer",
+      "pages": [
+        "agents",
+        "running-commands",
+        "working-with-files"
+      ]
+    },
+    {
       "group": "Guides",
       "pages": [
-        "guides/build-a-lovable-clone",
-        "guides/agent-skill"
+        "guides/build-a-lovable-clone"
       ]
     },
     {
