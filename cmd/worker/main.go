@@ -284,6 +284,7 @@ func main() {
 		OnHibernate: func(sandboxID string, result *sandbox.HibernateResult) {
 			log.Printf("opensandbox-worker: sandbox %s auto-hibernated (key=%s, size=%d bytes)",
 				sandboxID, result.HibernationKey, result.SizeBytes)
+			execMgr.RemoveSessions(sandboxID)
 			if store != nil {
 				// Create hibernation record so wake-on-request can find it
 				session, err := store.GetSandboxSession(context.Background(), sandboxID)
@@ -296,6 +297,7 @@ func main() {
 		},
 		OnKill: func(sandboxID string) {
 			log.Printf("opensandbox-worker: sandbox %s killed on timeout", sandboxID)
+			execMgr.RemoveSessions(sandboxID)
 			if store != nil {
 				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "stopped", nil)
 			}
