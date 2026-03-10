@@ -180,6 +180,11 @@ class Sandbox:
         return Exec(self._ops_client, self.sandbox_id, self._connect_url, self._token)
 
     @property
+    def commands(self) -> Exec:
+        """Backwards-compatible alias for ``exec``. Prefer ``sandbox.exec`` instead."""
+        return self.exec
+
+    @property
     def pty(self) -> Pty:
         """Access PTY terminal sessions."""
         pty_url = self._connect_url or self._api_url
