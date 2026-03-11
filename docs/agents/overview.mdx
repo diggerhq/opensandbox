@@ -8,7 +8,7 @@ An agent session is a Claude Agent SDK instance running inside a sandbox. You se
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from "@anthropic-ai/opencomputer";
+import { Sandbox } from "@opencomputer/sdk";
 
 const sandbox = await Sandbox.create();
 const session = await sandbox.agent.start({

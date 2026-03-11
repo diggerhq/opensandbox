@@ -8,7 +8,7 @@ A sandbox is a full Linux virtual machine in the cloud. Each one has its own fil
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from "@anthropic-ai/opencomputer";
+import { Sandbox } from "@opencomputer/sdk";
 
 const sandbox = await Sandbox.create();
 const result = await sandbox.exec.run("echo Hello from $(uname -a)");
