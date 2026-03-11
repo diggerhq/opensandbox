@@ -3,13 +3,16 @@ package api
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
+	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/pkg/types"
+	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
 func (s *Server) createExecSession(c echo.Context) error {
@@ -225,6 +228,15 @@ func (s *Server) execRun(c echo.Context) error {
 		})
 	}
 
+	// Server mode: route exec to the worker that owns this sandbox via gRPC
+	if s.workerRegistry != nil {
+		return s.execRunRemote(c, id, req)
+	}
+
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
 	var result *types.ProcessResult
 
 	routeOp := func(ctx context.Context) error {
@@ -248,6 +260,54 @@ func (s *Server) execRun(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, result)
+}
+
+// execRunRemote routes an exec/run request to the worker via gRPC.
+func (s *Server) execRunRemote(c echo.Context, sandboxID string, req types.ProcessConfig) error {
+	orgID, _ := auth.GetOrgID(c)
+
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	if session.OrgID != orgID {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": fmt.Sprintf("worker unavailable: %v", err),
+		})
+	}
+
+	timeout := int32(req.Timeout)
+	if timeout <= 0 {
+		timeout = 30
+	}
+
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), time.Duration(timeout+5)*time.Second)
+	defer cancel()
+
+	resp, err := client.ExecCommand(grpcCtx, &pb.ExecCommandRequest{
+		SandboxId: sandboxID,
+		Command:   req.Command,
+		Args:      req.Args,
+		Envs:      req.Env,
+		Cwd:       req.Cwd,
+		Timeout:   timeout,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, &types.ProcessResult{
+		ExitCode: int(resp.ExitCode),
+		Stdout:   resp.Stdout,
+		Stderr:   resp.Stderr,
+	})
 }
 
 func (s *Server) killExecSession(c echo.Context) error {

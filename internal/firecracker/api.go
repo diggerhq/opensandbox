@@ -142,8 +142,8 @@ func (c *FirecrackerClient) CreateSnapshot(snapshotPath, memFilePath string) err
 // LoadSnapshot restores a VM from a snapshot.
 // If resumeVM is true, the VM starts running immediately after load.
 // clockDeltaUs is the microseconds elapsed since the snapshot was taken; Firecracker
-// advances the guest clock by this amount so the VM wakes with the correct wall time.
-// Pass 0 to skip clock correction (e.g. for legacy snapshots without a recorded time).
+// The clockDeltaUs parameter is accepted for interface compatibility but not sent
+// to Firecracker (the API does not support clock correction).
 func (c *FirecrackerClient) LoadSnapshot(snapshotPath, memFilePath string, resumeVM bool, clockDeltaUs int64) error {
 	body := map[string]interface{}{
 		"snapshot_path": snapshotPath,
@@ -153,9 +153,6 @@ func (c *FirecrackerClient) LoadSnapshot(snapshotPath, memFilePath string, resum
 		},
 		"enable_diff_snapshots": false,
 		"resume_vm":             resumeVM,
-	}
-	if clockDeltaUs > 0 {
-		body["clock_delta_us"] = clockDeltaUs
 	}
 	return c.put("/snapshot/load", body)
 }
