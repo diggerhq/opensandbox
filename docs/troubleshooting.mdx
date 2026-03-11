@@ -3,44 +3,96 @@ title: "Troubleshooting"
 description: "Common errors and debugging tips"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Help users debug common issues quickly.
-
-  KEY NOTES:
-  - Common errors: 401 (API key), sandbox not found (killed/timed out), connection refused (creating/hibernated), timeout
-  - Debugging: sandbox.isRunning(), exec.list(), agent onError callback
-  - Include CLI debugging: oc sandbox get <id>
-*/}
-
 ## Common Errors
 
 ### `401 Unauthorized`
 
-{/* Check API key, env var name (OPENCOMPUTER_API_KEY). */}
+Your API key is missing or invalid.
+
+- Check that `OPENCOMPUTER_API_KEY` is set: `echo $OPENCOMPUTER_API_KEY`
+- Verify the key in your code matches what's in the dashboard
+- CLI users: run `oc config show` to check the stored key
 
 ### `Sandbox not found`
 
-{/* Sandbox may have been killed or timed out. Check with oc ls or sandbox.isRunning(). */}
+The sandbox may have been killed or timed out (auto-hibernated or stopped).
+
+```bash
+oc ls                     # list all sandboxes
+oc sandbox get sb-abc123  # check a specific sandbox
+```
+
+In code:
+
+```typescript
+const running = await sandbox.isRunning();
+```
 
 ### `Connection refused`
 
-{/* Sandbox still creating, or hibernated. Check status. */}
+The sandbox is still starting up, or it's hibernated and hasn't finished waking.
+
+- Check the sandbox status — if `hibernated`, call `wake()` or `oc sandbox wake`
+- If just created, wait a moment for the VM to boot (~150ms typical)
 
 ### Timeout errors
 
-{/* Increase timeout. Check idle timeout (rolling, resets on every operation). */}
+**Command timeout:** Increase the `timeout` parameter on `exec.run()` or use `--timeout` with `oc exec`. Default is 60s for SDK `exec.run()`, unlimited for CLI without `--wait`.
+
+**Idle timeout:** Sandboxes auto-hibernate after 300s of inactivity. Increase with `sandbox.setTimeout()` or `oc sandbox set-timeout`. The timeout resets on every operation.
+
+### Agent exits immediately
+
+- Check that the sandbox has the Claude Agent SDK installed (the default template includes it)
+- Verify `ANTHROPIC_API_KEY` is available — pass it via `envs` on sandbox create if the agent needs it
+- Use the `onError` callback to capture stderr from the agent process
 
 ## Debugging Tips
 
-{/*
-  - Check sandbox status with sandbox.isRunning() / is_running()
-  - Use sandbox.exec.list() to see running processes
-  - Agent stderr via onError callback
-  - CLI: oc sandbox get <id> for full details
-*/}
+### Check sandbox status
+
+```bash
+oc sandbox get sb-abc123
+```
+
+```typescript
+console.log(sandbox.status);
+const running = await sandbox.isRunning();
+```
+
+### List running processes
+
+```bash
+oc exec sb-abc123 --wait -- ps aux
+```
+
+```typescript
+const sessions = await sandbox.exec.list();
+for (const s of sessions) {
+  console.log(s.sessionID, s.running, s.command);
+}
+```
+
+### Capture agent errors
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "...",
+  onEvent: (event) => {
+    if (event.type === "error") console.error("Agent error:", event.message);
+  },
+  onError: (data) => console.error("Stderr:", data),
+});
+```
+
+### Read sandbox logs
+
+```bash
+oc exec sb-abc123 --wait -- cat /var/log/syslog
+oc exec sb-abc123 --wait -- journalctl --no-pager -n 50
+```
 
 ## Getting Help
 
-{/* GitHub issues: https://github.com/diggerhq/opencomputer/issues */}
+- **GitHub Issues:** [github.com/diggerhq/opencomputer/issues](https://github.com/diggerhq/opencomputer/issues)
+- **API Reference:** [HTTP API](/reference/api) · [TypeScript SDK](/reference/typescript-sdk) · [Python SDK](/reference/python-sdk) · [CLI](/reference/cli)

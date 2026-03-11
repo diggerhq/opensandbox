@@ -3,53 +3,24 @@ title: "Introduction"
 description: "Cloud sandboxes for AI agents"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Explain what OpenComputer is, who it's for, and why it exists.
-  In 60 seconds a reader should know if this product is relevant.
-
-  ABSORBS: Parts of old sdks/typescript/overview.mdx and sdks/python/overview.mdx (install sections).
-
-  CHANGES FROM CURRENT:
-  - Add install for CLI (link to cli/overview for full platform-specific install)
-  - Pin env var name (OPENCOMPUTER_API_KEY)
-  - Tighten copy — no filler
-  - "Full Linux VM" card replaces "Run agent tasks easily" (redundant with Agent SDK card)
-*/}
-
-
-## What is OpenComputer
-
-{/* One-sentence tagline: cloud sandboxes for AI agents. 3-4 sentences explaining: what a sandbox is, how it differs from containers/serverless (persistent full Linux VM, hibernates, checkpoints). */}
-
-## Key Features
-
-{/* Feature cards (4):
-  - Claude Agent SDK built in
-  - Long-running (hours/days, not minutes)
-  - Checkpoint/fork like git branches
-  - Full Linux VM (not a container)
-*/}
+OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated Firecracker microVM with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
 
 <CardGroup cols={2}>
   <Card title="Claude Agent SDK built in" icon="robot">
-    {/* Agent runs inside VM with full filesystem and shell access */}
+    Claude runs inside the VM with full filesystem and shell access. Think → act → observe loop, streaming events back to your code.
   </Card>
   <Card title="Long-running" icon="clock">
-    {/* Hours/days, not minutes. Install packages, build, test, iterate. */}
+    Hours or days, not minutes. Install packages, build projects, run test suites, iterate — no cold starts between steps.
   </Card>
   <Card title="Checkpoint & fork" icon="code-branch">
-    {/* Named snapshots. Fork new sandboxes from any checkpoint. Like git branches for VMs. */}
+    Named snapshots you can fork from. Try five approaches in parallel from the same starting point — like git branches for VMs.
   </Card>
   <Card title="Full Linux VM" icon="server">
-    {/* Not a container. Real VM with its own kernel, memory, disk. Hardware isolation via Firecracker. */}
+    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via Firecracker — the same technology behind AWS Lambda.
   </Card>
 </CardGroup>
 
 ## Install
-
-{/* CodeGroup: npm / pip / CLI install commands. Set OPENCOMPUTER_API_KEY env var. */}
 
 <CodeGroup>
 
@@ -62,7 +33,8 @@ pip install opencomputer-sdk
 ```
 
 ```bash CLI
-# See /cli/overview for the current install commands for your platform
+# See cli/overview for platform-specific install
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
 ```
 
 </CodeGroup>
@@ -73,21 +45,52 @@ export OPENCOMPUTER_API_KEY=your-api-key
 
 ## Quick Example
 
-{/* Minimal: create sandbox -> run agent -> get result. TS + Python CodeGroup. Keep very short — quickstart has the full walkthrough. */}
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+const session = await sandbox.agent.start({
+  prompt: "Create a hello world Express app and test it",
+  onEvent: (event) => {
+    if (event.type === "assistant") console.log(event.message);
+  },
+});
+
+await session.done;
+await sandbox.kill();
+```
+
+```python Python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+session = await sandbox.agent.start(
+    prompt="Create a hello world Express app and test it",
+    on_event=lambda event: print(event.data.get("message", ""))
+    if event.type == "assistant" else None,
+)
+
+await session.wait()
+await sandbox.kill()
+```
+
+</CodeGroup>
 
 ## Next Steps
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    {/* Working agent in 2 minutes */}
+    Working agent in 2 minutes
   </Card>
   <Card title="How It Works" icon="microchip" href="/how-it-works">
-    {/* Architecture: Firecracker VMs, hibernation, checkpoints */}
+    Architecture: Firecracker VMs, hibernation, checkpoints
   </Card>
   <Card title="Agents" icon="robot" href="/agents/overview">
-    {/* Run Claude inside sandboxes */}
+    Run Claude inside sandboxes
   </Card>
   <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
-    {/* The compute primitive */}
+    The compute primitive
   </Card>
 </CardGroup>

@@ -3,25 +3,9 @@ title: "CLI"
 description: "Manage sandboxes from your terminal"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Entry point for CLI users. Install, configure, and learn key workflows.
-  Guide-like — teaches patterns and concepts, not exhaustive flag reference.
-
-  KEY NOTES:
-  - 4 platform install: macOS Apple Silicon/Intel, Linux x86_64/ARM64
-  - Config resolution: flags > env > config file > defaults
-  - Top-level shortcuts: oc create = oc sandbox create, oc ls = oc sandbox list
-  - `oc exec` creates a session by default; use `--wait` for synchronous command execution
-  - JSON output mode + jq patterns for scripting
-*/}
-
 The `oc` CLI lets you manage OpenComputer sandboxes directly from your terminal — create sandboxes, run commands, open interactive shells, manage checkpoints, and more.
 
 ## Installation
-
-{/* 4 platforms: macOS Apple Silicon, macOS Intel, Linux x86_64, Linux ARM64. CodeGroup with curl commands. */}
 
 <CodeGroup>
 
@@ -49,11 +33,12 @@ chmod +x /usr/local/bin/oc
 
 ## Configuration
 
-{/* oc config set api-key / api-url. Config file: ~/.oc/config.json. oc config show. */}
+```bash
+oc config set api-key your-api-key
+oc config show
+```
 
 ### Resolution Order
-
-{/* Table: flags > env > config > defaults */}
 
 | Priority | Source | Example |
 | --- | --- | --- |
@@ -71,14 +56,6 @@ chmod +x /usr/local/bin/oc
 | `--json` | — | Output as JSON instead of tables |
 
 ## Key Workflows
-
-{/* Practical patterns — how to actually use the CLI effectively.
-  - Create and shell in one line: oc shell $(oc create --json | jq -r '.sandboxID')
-  - Scripting with --json and jq
-  - Hibernate/wake for cost savings
-  - Checkpoint -> fork -> parallel testing pattern
-  - Top-level shortcuts: oc create = oc sandbox create, oc ls = oc sandbox list
-*/}
 
 ### Quick Start
 
@@ -98,7 +75,7 @@ oc sandbox kill sb-abc123
 
 ### JSON Output & Scripting
 
-{/* --json flag + jq patterns. Capture IDs, filter by status. */}
+All commands support `--json` for machine-readable output:
 
 ```bash
 # Get a sandbox ID programmatically
@@ -106,22 +83,57 @@ ID=$(oc create --json | jq -r '.sandboxID')
 
 # List all running sandbox IDs
 oc ls --json | jq -r '.[].sandboxID'
+
+# Run a command and capture the result
+RESULT=$(oc exec $ID --json --wait -- npm test)
+echo $RESULT | jq '.exitCode'
 ```
 
 ### Top-level Shortcuts
 
-{/* oc create = oc sandbox create, oc ls = oc sandbox list */}
+| Shortcut | Expands to |
+| --- | --- |
+| `oc create` | `oc sandbox create` |
+| `oc ls` | `oc sandbox list` |
+| `oc cp` | `oc checkpoint` |
+
+### Create and Shell In
+
+```bash
+oc shell $(oc create --json | jq -r '.sandboxID')
+```
+
+### Hibernate for Cost Savings
+
+```bash
+oc sandbox hibernate sb-abc123
+# ... hours later ...
+oc sandbox wake sb-abc123
+oc shell sb-abc123
+```
+
+### Checkpoint and Fork
+
+```bash
+oc cp create sb-abc --name ready-state
+ID1=$(oc cp spawn cp-xyz --json | jq -r '.sandboxID')
+ID2=$(oc cp spawn cp-xyz --json | jq -r '.sandboxID')
+oc exec $ID1 --wait -- ./test-a.sh
+oc exec $ID2 --wait -- ./test-b.sh
+```
 
 ## Command Reference
 
-{/* Links to per-command reference pages (in Reference section) */}
-
 | Command | Description |
 | --- | --- |
-| [sandbox](/cli/sandbox) | Create, list, kill, hibernate, wake |
-| [exec](/cli/exec) | Run commands, manage exec sessions |
-| [shell](/cli/shell) | Interactive PTY terminal |
-| [checkpoint](/cli/checkpoint) | Snapshot, fork, restore |
-| [patch](/cli/patch) | Checkpoint-attached scripts |
-| [preview](/cli/preview) | Expose ports to the internet |
-| [config](/reference/cli#oc-config) | Configure API key and API URL |
+| [`oc sandbox`](/cli/sandbox) | Create, list, kill, hibernate, wake |
+| [`oc exec`](/cli/exec) | Run commands, manage exec sessions |
+| [`oc shell`](/cli/shell) | Interactive PTY terminal |
+| [`oc checkpoint`](/cli/checkpoint) | Snapshot, fork, restore |
+| [`oc patch`](/cli/patch) | Checkpoint-attached scripts |
+| [`oc preview`](/cli/preview) | Expose ports to the internet |
+| [`oc config`](/reference/cli#oc-config) | Configure API key and API URL |
+
+<Tip>
+  Full flag reference for every command: [CLI Reference](/reference/cli).
+</Tip>

@@ -3,20 +3,13 @@ title: "Patches"
 description: "Attach scripts to checkpoints from the CLI"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Guide-like page for patch workflows from CLI.
-  Creating from file or stdin, layering setup steps, inspecting before spawning.
-*/}
-
 ## What Patches Do
 
-{/* Shell scripts attached to a checkpoint. Run in order every time a sandbox is forked from that checkpoint. Layer setup without re-creating the checkpoint. */}
+A patch is a shell script attached to a checkpoint. Patches run in order every time a sandbox is forked from that checkpoint — layer setup without re-creating the checkpoint.
 
 ## Creating a Patch
 
-{/* From file or stdin. */}
+From a file or stdin:
 
 ```bash
 # From a file
@@ -28,19 +21,32 @@ echo "npm install -g typescript" | oc patch create cp-7f3a1b2c --script=-
 
 ## Layering Setup
 
-{/* Pattern: base checkpoint + multiple patches for each layer of configuration. */}
+Add multiple patches — they execute in creation order on every fork:
 
 ```bash
 oc patch create cp-7f3a1b2c --script ./install-node.sh --description "Node.js 20"
 oc patch create cp-7f3a1b2c --script ./app-config.sh --description "App config"
 
 # Each spawned sandbox gets both patches applied in order
-oc checkpoint spawn cp-7f3a1b2c
+oc cp spawn cp-7f3a1b2c
 ```
 
 ## Inspecting Patches
 
-{/* oc patch list before spawning to review what will run. */}
+Review what will run before forking:
+
+```bash
+oc patch list cp-7f3a1b2c
+# ID          SEQ  DESCRIPTION     STRATEGY  CREATED
+# pa-abc123   1    Node.js 20      on_wake   2025-01-15T10:30:00Z
+# pa-def456   2    App config      on_wake   2025-01-15T10:31:00Z
+```
+
+## Removing a Patch
+
+```bash
+oc patch delete cp-7f3a1b2c pa-abc123
+```
 
 <Tip>
   SDK usage: [Patches](/sandboxes/patches). Full flags: [CLI Reference](/reference/cli#oc-patch).

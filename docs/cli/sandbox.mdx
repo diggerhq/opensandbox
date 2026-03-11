@@ -3,57 +3,62 @@ title: "Sandbox Management"
 description: "Create, manage, and control sandbox lifecycles from the CLI"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Guide-like page for sandbox lifecycle management from CLI.
-  Teach patterns and workflows, not exhaustive flags.
-
-  KEY NOTES:
-  - Create-and-shell one-liner: oc shell $(oc create --json | jq -r '.sandboxID')
-  - Hibernate/wake for cost savings
-  - Filter running sandboxes with --json + jq
-*/}
-
 ## Creating a Sandbox
 
-{/* oc create (shortcut for oc sandbox create). Timeout, resources, env vars, metadata.
-  Do not mention a --template flag unless the CLI grows one.
-*/}
+`oc create` (shortcut for `oc sandbox create`) provisions a new Firecracker microVM:
 
 ```bash
 oc create
 oc create --timeout 600 --cpu 2 --memory 2048 --env NODE_ENV=production
 ```
 
-## Listing & Inspecting
-
-{/* oc ls (shortcut). Table output. oc sandbox get for details. */}
+The sandbox ID is printed on success. Use `--json` to capture it programmatically:
 
 ```bash
+ID=$(oc create --json | jq -r '.sandboxID')
+```
+
+## Listing & Inspecting
+
+```bash
+# List all sandboxes
 oc ls
+
+# Detailed info for a specific sandbox
 oc sandbox get sb-abc123
 ```
 
+`oc ls` shows a table with ID, template, status, CPU, memory, and age. Add `--json` for machine-readable output.
+
 ## Hibernation & Wake
 
-{/* Save state and stop paying. Resume the same sandbox later; keep the wording practical rather than over-promising exact process continuity. */}
+Save state and stop paying for compute. Wake resumes the same sandbox — the platform attempts fast snapshot restore with a cold-boot fallback if needed.
 
 ```bash
 oc sandbox hibernate sb-abc123
 
 # ... hours later ...
 oc sandbox wake sb-abc123
-oc shell sb-abc123  # picks up where you left off
+oc shell sb-abc123
 ```
+
+The sandbox keeps the same ID across hibernate/wake cycles. Preview URLs remain active.
 
 ## Adjusting Timeout
 
-{/* oc sandbox set-timeout. Rolling idle timeout resets on every operation. */}
+The idle timeout resets on every operation (exec, file access, agent activity). Default: 300s.
+
+```bash
+oc sandbox set-timeout sb-abc123 3600  # 1 hour
+```
 
 ## Killing a Sandbox
 
-{/* oc sandbox kill. Data lost unless checkpointed. */}
+```bash
+oc sandbox kill sb-abc123
+```
+
+All data is lost unless you've created a [checkpoint](/cli/checkpoint) first.
 
 ## Common Patterns
 
@@ -67,6 +72,12 @@ oc shell $(oc create --json | jq -r '.sandboxID')
 
 ```bash
 oc ls --json | jq '.[] | select(.status == "running") | .sandboxID'
+```
+
+### Batch Cleanup
+
+```bash
+oc ls --json | jq -r '.[].sandboxID' | xargs -I{} oc sandbox kill {}
 ```
 
 <Tip>

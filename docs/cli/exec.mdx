@@ -3,61 +3,79 @@ title: "Running Commands"
 description: "Execute shell commands from the CLI"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Guide-like page for running commands via CLI.
-  When to use exec vs shell, scripting patterns, session management.
-
-  KEY NOTES:
-  - `oc exec` defaults to creating an exec session, not waiting for command completion
-  - `--wait` switches to synchronous exec/run behavior and mirrors the remote exit code
-  - `oc exec attach` is not implemented yet in the CLI; say that explicitly
-*/}
-
 ## Running a Command
 
-{/* Start with the synchronous mode most readers expect:
-  oc exec <id> --wait -- <command>
-  Explain that plain `oc exec` creates a session and prints attach instructions instead.
-*/}
+Use `--wait` to run a command synchronously — output streams to your terminal and the CLI exits with the process exit code:
 
 ```bash
 oc exec sb-abc123 --wait -- echo "Hello, World!"
+oc exec sb-abc123 --wait -- npm run build
+```
+
+Without `--wait`, `oc exec` creates an **exec session** and prints the session ID with attach instructions. This is useful for long-running commands:
+
+```bash
+oc exec sb-abc123 -- node server.js
+# → Session es-xyz created. Attach with: oc exec attach sb-abc es-xyz
 ```
 
 ## Working Directory & Environment
 
-{/* --cwd and --env flags. When to use them. */}
-
 ```bash
 oc exec sb-abc123 --wait --cwd /app --env NODE_ENV=production -- npm run build
+oc exec sb-abc123 --wait --env API_KEY=xxx --env DEBUG=true -- ./run.sh
 ```
 
 ## Timeouts
 
-{/* --timeout flag. Default 60s. What happens when exceeded. */}
+Set a timeout with `--timeout` (in seconds). Default is 0 (no timeout). When exceeded, the command is killed:
+
+```bash
+oc exec sb-abc123 --wait --timeout 30 -- npm test
+```
 
 ## Creating an Exec Session
 
-{/* Plain `oc exec` creates a session for long-running commands and prints the session ID plus attach hint. */}
+Plain `oc exec` (without `--wait`) creates a session for long-running commands. The command keeps running even after you disconnect:
+
+```bash
+oc exec sb-abc123 -- python train.py
+# Session es-abc created
+```
 
 ## Capturing Output as JSON
 
-{/* `--json` with `--wait` gives ProcessResult output for scripting. */}
+Combine `--json` with `--wait` for scripting:
 
 ```bash
 RESULT=$(oc exec sb-abc123 --json --wait -- node -e 'console.log("hello")')
-echo $RESULT | jq '.stdout'
+echo $RESULT | jq '.stdout'   # "hello\n"
+echo $RESULT | jq '.exitCode' # 0
 ```
 
 ## Managing Exec Sessions
 
-{/* oc exec list and kill are available. `oc exec attach` exists as a command name but is not implemented yet in the CLI; point users to the SDK or raw WebSocket if needed. */}
+```bash
+# List active sessions
+oc exec list sb-abc123
+
+# Kill a session
+oc exec kill sb-abc123 es-xyz
+oc exec kill sb-abc123 es-xyz --signal 15  # SIGTERM
+```
+
+<Warning>
+  `oc exec attach` exists as a command but is not yet implemented. It prints guidance to use the SDK or a WebSocket client. Use `oc exec list` and `oc exec kill` to manage sessions from the CLI.
+</Warning>
 
 ## Shell vs Exec
 
-{/* When to use oc exec (single command, scripting, automation) vs oc shell (interactive, debugging). */}
+| Use Case | Command |
+| --- | --- |
+| Single command, capture output | `oc exec --wait` |
+| Scripting and automation | `oc exec --wait --json` |
+| Long-running background process | `oc exec` (no `--wait`) |
+| Interactive development, debugging | [`oc shell`](/cli/shell) |
 
 <Tip>
   SDK usage: [Running Commands](/sandboxes/running-commands). Full flags: [CLI Reference](/reference/cli#oc-exec).

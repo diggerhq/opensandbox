@@ -3,55 +3,59 @@ title: "Shell"
 description: "Interactive terminal sessions from the CLI"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Guide-like page for interactive shell sessions.
-  What works (full-screen apps, colors, resizing), shell vs exec decision, tips.
-*/}
-
 ## Opening a Shell
-
-{/* oc shell <id>. Full interactive terminal over WebSocket. Ctrl+D or exit to disconnect. */}
 
 ```bash
 oc shell sb-abc123
 ```
 
-## Choosing a Shell
+Opens a full interactive terminal over WebSocket. Press `Ctrl+D` or type `exit` to disconnect.
 
-{/* --shell flag. Default /bin/bash. */}
+## Choosing a Shell
 
 ```bash
 oc shell sb-abc123 --shell /bin/zsh
 ```
 
+Default: `/bin/bash`.
+
 ## What Works
 
-{/* Full-screen apps, colors, tab completion, terminal resizing — everything you'd expect. */}
+The PTY supports everything you'd expect from a real terminal:
 
-- `vim`, `nano` — text editors
-- `top`, `htop` — process monitors
-- Tab completion, command history
-- Terminal resizing (automatic)
+- **Editors:** vim, nano
+- **Monitors:** top, htop
+- **Tab completion** and command history
+- **Colors** and ANSI escape codes
+- **Terminal resizing** — automatic, resize events forwarded
+
+Full-screen applications like `tmux` and `less` work correctly.
 
 ## Shell vs Exec
 
-{/* When to use which. */}
-
 | Use Case | Command |
 | --- | --- |
-| Run a single command, capture output | `oc exec` |
-| Scripting and automation | `oc exec` |
+| Run a single command, capture output | `oc exec --wait` |
+| Scripting and automation | `oc exec --wait --json` |
 | Interactive development | `oc shell` |
 | Debugging | `oc shell` |
 
 ## Tips
 
-### Create and Shell in One Line
+### Create and Shell In
 
 ```bash
 oc shell $(oc create --json | jq -r '.sandboxID')
+```
+
+### Shell with Custom Environment
+
+Set up the environment before shelling in:
+
+```bash
+ID=$(oc create --json | jq -r '.sandboxID')
+oc exec $ID --wait -- bash -c 'echo "export PATH=/app/bin:\$PATH" >> ~/.bashrc'
+oc shell $ID
 ```
 
 <Tip>
