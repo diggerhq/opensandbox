@@ -3,244 +3,629 @@ title: "HTTP API"
 description: "Complete REST API reference"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Complete HTTP API reference. Every endpoint, request/response format, auth headers, status codes.
-  A developer using curl or a non-SDK language should be able to build a full integration from this page alone.
-
-  SOURCE: internal/api/router.go (routes), internal/api/sandbox.go, exec_session.go,
-  agent_session.go, filesystem.go, templates.go (handlers).
-
-  KEY NOTES:
-  - Each endpoint: method, path, request body, response body, status codes, curl example
-  - Separate control plane routes from worker-direct routes. Hosted/server mode uses both surfaces.
-  - Derive exact field names from current handler/types source. Do not normalize casing by hand.
-  - Dual auth: X-API-Key for control plane, JWT Bearer for worker direct access
-  - WebSocket binary protocol section is essential for non-SDK users
-  - Token refresh: POST /sandboxes/:id/token/refresh — worker-only, returns new JWT
-*/}
-
 ## Base URL & Authentication
 
-{/* Document both surfaces explicitly:
-  - Control plane base: https://app.opencomputer.dev/api
-  - Worker direct base: connectURL from sandbox create/get response (no /api prefix)
-  - Control plane auth: X-API-Key header
-  - Worker direct auth: Authorization: Bearer <JWT> (or token query param for WS)
-  - SDK users only need API key — SDK handles JWT transparently
-  - Add a route-availability matrix: control plane only / worker only / both
-  - File reads return raw content, not JSON. File writes use raw request body + path query param.
-  - Token refresh: POST /sandboxes/:id/token/refresh — worker auth only
-*/}
+OpenComputer exposes two API surfaces:
+
+| Surface | Base URL | Auth Header | Use |
+| --- | --- | --- | --- |
+| **Control plane** | `https://app.opencomputer.dev/api` | `X-API-Key: <key>` | Create/list/kill sandboxes, templates, hibernation |
+| **Worker direct** | `connectURL` from create/get response | `Authorization: Bearer <jwt>` | Exec, files, agents, PTY, timeout |
+
+The `connectURL` and `token` fields are returned when you create or get a sandbox. Worker-direct routes have **no `/api` prefix** — for example, `POST {connectURL}/sandboxes/:id/exec/run`.
+
+SDK users only need the API key. The SDK resolves `connectURL` and manages the JWT automatically.
+
+### Route Availability
+
+Most operational routes are available on **both** surfaces. Exceptions:
+
+| Route | Control Plane | Worker |
+| --- | --- | --- |
+| `POST /api/sandboxes` (create) | Yes | — |
+| `GET /api/sandboxes` (list all) | Yes | — |
+| `DELETE /api/sandboxes/:id` (kill) | Yes | — |
+| `POST .../hibernate`, `.../wake` | Yes | — |
+| Checkpoint routes | Yes | — |
+| Preview URL routes | Yes | — |
+| Template routes | Yes | — |
+| `POST .../token/refresh` | — | Yes |
+| `POST .../timeout` | — | Yes |
+| Exec, filesystem, agent, PTY routes | Yes | Yes |
+
+### Token Refresh
+
+Worker JWTs are short-lived. To refresh:
+
+```bash
+curl -X POST {connectURL}/sandboxes/{id}/token/refresh \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Returns a new JWT. The SDKs handle this automatically.
+
+---
 
 ## Sandbox Lifecycle
 
 ### `POST /api/sandboxes` — Create
 
-{/* Body matches SandboxConfig: templateID, timeout, envs, metadata, cpuCount, memoryMB.
-  Hosted/server-mode response is currently minimal: sandboxID, status, connectURL, token, region, workerID.
-  Do not promise cpuCount/memoryMB/startedAt/endAt on create unless verified for the served surface.
-  Curl example. */}
+Create a new sandbox.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `templateID` | string | No | Template name (default: `"base"`) |
+| `timeout` | int | No | Idle timeout in seconds (default: `300`) |
+| `cpuCount` | int | No | CPU cores, 1–4 (default: `1`) |
+| `memoryMB` | int | No | Memory in MB, up to 2048 (default: `512`) |
+| `envs` | object | No | Environment variables |
+| `metadata` | object | No | Arbitrary key-value pairs |
+
+**Response** `200`:
+
+```json
+{
+  "sandboxID": "sb-abc123",
+  "templateID": "base",
+  "status": "running",
+  "startedAt": "2025-01-15T10:30:00Z",
+  "endAt": "2025-01-15T10:35:00Z",
+  "cpuCount": 1,
+  "memoryMB": 512,
+  "metadata": {},
+  "connectURL": "https://worker-xyz.opencomputer.dev",
+  "token": "eyJhbG..."
+}
+```
+
+```bash
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"templateID": "base", "timeout": 600}'
+```
 
 ### `GET /api/sandboxes` — List
 
-{/* Response: array of sandbox objects. */}
+List all running sandboxes.
+
+**Response** `200`: Array of sandbox objects.
 
 ### `GET /api/sandboxes/:id` — Get
 
-{/* Response: sandbox details. */}
+Get sandbox details by ID. Available on both control plane and worker.
+
+**Response** `200`: Sandbox object (same shape as create response).
 
 ### `DELETE /api/sandboxes/:id` — Kill
 
-{/* 204 on success. */}
+Terminate and remove a sandbox.
+
+**Response** `204`: No content.
 
 ### `POST /api/sandboxes/:id/timeout` — Set Timeout
 
-{/* Body: { timeout }.
-  Important: in hosted/server mode this must be sent to the worker via connectURL; control plane returns an error telling the client to use the worker directly.
-*/}
+Update the idle timeout. In hosted mode, this must be sent to the **worker** via `connectURL`.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `timeout` | int | Yes | New timeout in seconds (must be > 0) |
+
+**Response** `200`: Empty object.
 
 ### `POST /api/sandboxes/:id/hibernate` — Hibernate
 
-{/* Snapshot VM state. */}
+Snapshot VM state and stop the sandbox. Control plane only.
+
+**Response** `200`:
+
+```json
+{
+  "sizeBytes": 134217728
+}
+```
 
 ### `POST /api/sandboxes/:id/wake` — Wake
 
-{/* Resume from hibernation. */}
+Resume a hibernated sandbox. Control plane only.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `timeout` | int | No | Idle timeout after wake (default: `300`) |
+
+**Response** `200`: Sandbox object with updated status.
+
+---
 
 ## Commands (Exec)
 
 ### `POST /api/sandboxes/:id/exec/run` — Run Command
 
-{/* Body matches ProcessConfig: cmd, optional args, envs, cwd, timeout.
-  Response: { exitCode, stdout, stderr }.
-*/}
+Execute a command synchronously and return the result. Available on both surfaces.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cmd` | string | Yes | Command to execute |
+| `args` | string[] | No | Command arguments |
+| `envs` | object | No | Environment variables |
+| `cwd` | string | No | Working directory |
+| `timeout` | int | No | Timeout in seconds (default: `60`) |
+
+**Response** `200`:
+
+```json
+{
+  "exitCode": 0,
+  "stdout": "Hello, World!\n",
+  "stderr": ""
+}
+```
+
+```bash
+curl -X POST {connectURL}/sandboxes/{id}/exec/run \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "echo", "args": ["Hello, World!"]}'
+```
 
 ### `POST /api/sandboxes/:id/exec` — Create Exec Session
 
-{/* Body matches ExecSessionCreateRequest: cmd, optional args, envs, cwd, timeout, maxRunAfterDisconnect.
-  Response is ExecSessionInfo with sessionID casing, not sessionId.
-*/}
+Start a long-running command as a session. Attach via WebSocket to stream I/O.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cmd` | string | Yes | Command to execute |
+| `args` | string[] | No | Command arguments |
+| `envs` | object | No | Environment variables |
+| `cwd` | string | No | Working directory |
+| `timeout` | int | No | Timeout in seconds |
+| `maxRunAfterDisconnect` | int | No | Seconds to keep running after all clients disconnect |
+
+**Response** `201`:
+
+```json
+{
+  "sessionID": "es-abc123",
+  "sandboxID": "sb-abc123",
+  "command": "node",
+  "args": ["server.js"],
+  "running": true,
+  "exitCode": null,
+  "startedAt": "2025-01-15T10:30:00Z",
+  "attachedClients": 0
+}
+```
 
 ### `GET /api/sandboxes/:id/exec` — List Sessions
 
-{/* Response: array of ExecSessionInfo. */}
+**Response** `200`: Array of `ExecSessionInfo` objects (same shape as create response).
 
 ### `GET /api/sandboxes/:id/exec/:sessionID` — WebSocket Attach
 
-{/* Upgrade to WebSocket. Binary protocol. */}
+Upgrade to WebSocket. Streams I/O using the [binary protocol](#websocket-binary-protocol).
+
+Pass auth via query parameter: `?token=<jwt>`
+
+On connect, the server replays the scrollback buffer, sends a `0x04` end marker, then streams live output.
 
 ### `POST /api/sandboxes/:id/exec/:sessionID/kill` — Kill Session
 
-{/* Body: { signal? }. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `signal` | int | No | Signal number (default: `9` / SIGKILL) |
+
+**Response** `200`: Empty object.
+
+---
 
 ## Agent Sessions
 
-### `POST /api/sandboxes/:id/agent` — Create Agent Session
+Agent sessions run the Claude Agent SDK inside the sandbox. Events stream over the exec session WebSocket transport — there is no separate agent WebSocket endpoint.
 
-{/* Body matches AgentSessionCreateRequest: prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, resume.
-  Note: there is no separate agent WebSocket endpoint; attach uses the exec session WebSocket transport.
-*/}
+### `POST /api/sandboxes/:id/agent` — Create
 
-### `GET /api/sandboxes/:id/agent` — List Agent Sessions
+**Request body:**
 
-{/* Response: array of session objects. */}
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `prompt` | string | No | Initial prompt |
+| `model` | string | No | Claude model name |
+| `systemPrompt` | string | No | System prompt |
+| `allowedTools` | string[] | No | Restrict available tools |
+| `permissionMode` | string | No | Permission mode |
+| `maxTurns` | int | No | Maximum turns |
+| `cwd` | string | No | Working directory |
+| `mcpServers` | object | No | MCP server configuration |
+| `resume` | string | No | Session ID to resume |
+
+**Response** `201`:
+
+```json
+{
+  "sessionID": "as-abc123",
+  "sandboxID": "sb-abc123",
+  "running": true,
+  "startedAt": "2025-01-15T10:30:00Z",
+  "claudeSessionID": ""
+}
+```
+
+```bash
+curl -X POST {connectURL}/sandboxes/{id}/agent \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Create a hello world app", "model": "claude-sonnet-4-20250514"}'
+```
+
+### `GET /api/sandboxes/:id/agent` — List
+
+**Response** `200`: Array of `AgentSessionInfo` objects.
 
 ### `POST /api/sandboxes/:id/agent/:sid/prompt` — Send Follow-up
 
-{/* Body: { text }. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `text` | string | Yes | Follow-up prompt text |
+
+**Response** `200`: Empty object.
 
 ### `POST /api/sandboxes/:id/agent/:sid/interrupt` — Interrupt
 
-{/* Stop current turn. */}
+Stop the agent's current turn.
+
+**Response** `200`: Empty object.
 
 ### `POST /api/sandboxes/:id/agent/:sid/kill` — Kill
 
-{/* Terminate agent session. */}
+Terminate the agent session.
+
+**Response** `200`: Empty object.
+
+---
 
 ## Filesystem
 
 ### `GET /api/sandboxes/:id/files?path=...` — Read File
 
-{/* Returns file content as plain text. */}
+Returns file content as **plain text** (not JSON). The `path` query parameter is required.
 
-### `PUT /api/sandboxes/:id/files` — Write File
+```bash
+curl {connectURL}/sandboxes/{id}/files?path=/app/index.js \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-{/* Raw request body is written as file contents. `path` is a required query parameter. */}
+**Response** `200`: Raw file content with `Content-Type: text/plain`.
+
+### `PUT /api/sandboxes/:id/files?path=...` — Write File
+
+The request body is written as raw file content (not JSON). The `path` query parameter specifies the destination.
+
+```bash
+curl -X PUT {connectURL}/sandboxes/{id}/files?path=/app/hello.txt \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: text/plain" \
+  -d "Hello, World!"
+```
+
+**Response** `200`: Empty object.
 
 ### `GET /api/sandboxes/:id/files/list?path=...` — List Directory
 
-{/* Response: array of EntryInfo. */}
+**Query parameter:** `path` (default: `/`)
 
-### `POST /api/sandboxes/:id/files/mkdir` — Create Directory
+**Response** `200`:
 
-{/* `path` is a required query parameter. */}
+```json
+[
+  { "name": "app", "isDir": true, "size": 4096, "path": "/app" },
+  { "name": "README.md", "isDir": false, "size": 1234, "path": "/README.md" }
+]
+```
+
+Each entry has: `name` (string), `isDir` (boolean), `size` (int64), `path` (string).
+
+### `POST /api/sandboxes/:id/files/mkdir?path=...` — Create Directory
+
+The `path` query parameter specifies the directory to create.
+
+**Response** `200`: Empty object.
 
 ### `DELETE /api/sandboxes/:id/files?path=...` — Remove
 
-{/* Delete file or directory. */}
+Delete a file or directory. The `path` query parameter is required.
+
+**Response** `200`: Empty object.
+
+---
 
 ## Checkpoints
 
+Maximum 10 checkpoints per sandbox.
+
 ### `POST /api/sandboxes/:id/checkpoints` — Create
 
-{/* Body: { name }. Response: CheckpointInfo. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Checkpoint name (unique per sandbox) |
+
+**Response** `201`:
+
+```json
+{
+  "id": "cp-abc123",
+  "sandboxID": "sb-abc123",
+  "name": "before-migration",
+  "status": "processing",
+  "sizeBytes": 0,
+  "createdAt": "2025-01-15T10:30:00Z"
+}
+```
+
+Status transitions: `processing` → `ready` or `failed`.
 
 ### `GET /api/sandboxes/:id/checkpoints` — List
 
-{/* Response: array of CheckpointInfo. */}
+**Response** `200`: Array of `CheckpointInfo` objects.
 
 ### `POST /api/sandboxes/:id/checkpoints/:checkpointId/restore` — Restore
 
-{/* Revert sandbox in-place. */}
+Revert the sandbox in-place to a checkpoint. All changes since the checkpoint are lost.
+
+**Response** `200`: Empty object.
 
 ### `POST /api/sandboxes/from-checkpoint/:checkpointId` — Fork
 
-{/* Create new sandbox from checkpoint. Response: sandbox object. */}
+Create a new sandbox from a checkpoint.
+
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `timeout` | int | No | Idle timeout for the new sandbox (default: `300`) |
+
+**Response** `200`: Sandbox object (same shape as create).
+
+```bash
+curl -X POST https://app.opencomputer.dev/api/sandboxes/from-checkpoint/cp-abc123 \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"timeout": 600}'
+```
 
 ### `DELETE /api/sandboxes/:id/checkpoints/:checkpointId` — Delete
 
-{/* 204 on success. */}
+**Response** `204`: No content.
+
+---
 
 ## Checkpoint Patches
 
+Patches are scripts that run when a sandbox is spawned from a checkpoint. They apply in sequence order.
+
 ### `POST /api/sandboxes/checkpoints/:checkpointId/patches` — Create
 
-{/* Body: { script, description? }. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `script` | string | Yes | Bash script to execute on spawn |
+| `description` | string | No | Human-readable description |
+
+**Response** `201`:
+
+```json
+{
+  "patch": {
+    "id": "pa-abc123",
+    "checkpointId": "cp-abc123",
+    "script": "apt install -y curl",
+    "description": "Install curl",
+    "strategy": "on_wake",
+    "sequence": 1,
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+}
+```
 
 ### `GET /api/sandboxes/checkpoints/:checkpointId/patches` — List
 
-{/* Response: array of PatchInfo. */}
+**Response** `200`: Array of `PatchInfo` objects.
 
 ### `DELETE /api/sandboxes/checkpoints/:checkpointId/patches/:patchId` — Delete
 
-{/* 204 on success. */}
+**Response** `204`: No content.
+
+---
 
 ## Preview URLs
 
 ### `POST /api/sandboxes/:id/preview` — Create
 
-{/* Body: { port, domain?, authConfig? }.
-  Response is the full preview object: id, sandboxId, orgId, hostname, optional customHostname, port, sslStatus, authConfig, createdAt, and optional cfHostnameId.
-*/}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `port` | int | Yes | Container port (1–65535) |
+| `domain` | string | No | Custom domain |
+| `authConfig` | object | No | Authentication configuration |
+
+**Response** `201`:
+
+```json
+{
+  "id": "pv-abc123",
+  "sandboxId": "sb-abc123",
+  "hostname": "sb-abc123-p3000.preview.opencomputer.dev",
+  "port": 3000,
+  "sslStatus": "active",
+  "createdAt": "2025-01-15T10:30:00Z"
+}
+```
 
 ### `GET /api/sandboxes/:id/preview` — List
 
-{/* Response: array of preview URL objects. */}
+**Response** `200`: Array of preview URL objects.
 
 ### `DELETE /api/sandboxes/:id/preview/:port` — Delete
 
-{/* 204 on success. */}
+**Response** `204`: No content.
+
+---
 
 ## Templates
 
+Templates are built from Dockerfiles. The Docker build produces a filesystem image that Firecracker boots from directly.
+
 ### `POST /api/templates` — Build
 
-{/* Body: { name, dockerfile, tag? }.
-  Response shape comes from the current template store record. Verify field names from the handler/store before writing the final page.
-*/}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Template name |
+| `dockerfile` | string | Yes | Dockerfile content |
+| `tag` | string | No | Image tag (default: `"latest"`) |
+
+**Response** `201`:
+
+```json
+{
+  "id": "tpl-abc123",
+  "name": "my-template",
+  "tag": "latest",
+  "status": "ready",
+  "createdAt": "2025-01-15T10:30:00Z"
+}
+```
+
+Dockerfile templates return `status: "ready"` immediately. Sandbox-snapshot templates transition `processing` → `ready`.
 
 ### `GET /api/templates` — List
 
-{/* Response: array of TemplateInfo. */}
+**Response** `200`: Array of template objects.
 
 ### `GET /api/templates/:name` — Get
 
-{/* Response: TemplateInfo. */}
+**Response** `200`: Template object.
 
 ### `DELETE /api/templates/:name` — Delete
 
-{/* 204 on success. */}
+**Response** `204`: No content.
+
+---
 
 ## PTY
 
+Terminal sessions for interactive shell access.
+
 ### `POST /api/sandboxes/:id/pty` — Create
 
-{/* Body: { cols?, rows?, shell? }. Response uses sessionID casing. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cols` | int | No | Terminal columns (default: `80`) |
+| `rows` | int | No | Terminal rows (default: `24`) |
+| `shell` | string | No | Shell path (default: `/bin/bash`) |
+
+**Response** `201`:
+
+```json
+{
+  "sessionID": "ps-abc123",
+  "sandboxID": "sb-abc123"
+}
+```
 
 ### `GET /api/sandboxes/:id/pty/:sessionID` — WebSocket
 
-{/* Upgrade to WebSocket. Binary protocol same as exec. */}
+Upgrade to WebSocket. Raw binary I/O — data from the PTY is sent as-is, data received is written to PTY stdin.
+
+Pass auth via query parameter: `?token=<jwt>`
 
 ### `POST /api/sandboxes/:id/pty/:sessionID/resize` — Resize
 
-{/* Body: { cols, rows }. */}
+**Request body:**
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cols` | int | Yes | New column count |
+| `rows` | int | Yes | New row count |
+
+**Response** `200`: Empty object.
+
+<Note>
+  PTY resize is HTTP-only — not exposed in the TypeScript or Python SDKs. The SDKs handle resize automatically for interactive sessions.
+</Note>
 
 ### `DELETE /api/sandboxes/:id/pty/:sessionID` — Kill
 
-{/* Terminate PTY session. */}
+Terminate a PTY session.
+
+**Response** `200`: Empty object.
+
+---
 
 ## WebSocket Binary Protocol
 
-{/* Exec and PTY sessions use binary WebSocket frames.
-  Input: prefix 0x00 + stdin data.
-  Output: 0x01 (stdout), 0x02 (stderr), 0x03 (exit code, 4-byte BE int32), 0x04 (scrollback end marker).
-  On connect: server replays scrollback buffer, sends 0x04, then live-streams.
-*/}
+Exec and PTY WebSocket sessions use binary frames with a 1-byte stream prefix:
+
+| Byte | Direction | Meaning |
+| --- | --- | --- |
+| `0x00` | Client → Server | stdin data |
+| `0x01` | Server → Client | stdout data |
+| `0x02` | Server → Client | stderr data |
+| `0x03` | Server → Client | Exit code (4-byte big-endian int32) |
+| `0x04` | Server → Client | Scrollback end marker |
+
+**Connection flow:**
+
+1. Client opens WebSocket with `?token=<jwt>`
+2. Server replays scrollback buffer (historical output)
+3. Server sends `0x04` to mark end of scrollback
+4. Live output streams as `0x01`/`0x02` frames
+5. When the process exits, server sends `0x03` with the exit code
+6. Server closes the connection
+
+**Sending input:** Prefix your data with `0x00` and send as a binary frame.
+
+**PTY sessions** use the same binary framing but without stream prefixes — raw bidirectional terminal data.
+
+---
 
 ## Error Format
 
-{/* All errors: {"error": "message"} envelope.
-  Common codes: 400, 401, 403, 404, 409, 500.
-*/}
+All errors use a consistent envelope:
+
+```json
+{
+  "error": "descriptive error message"
+}
+```
+
+| Status Code | Meaning |
+| --- | --- |
+| `400` | Invalid request (missing fields, bad values) |
+| `401` | Missing or invalid authentication |
+| `403` | Insufficient permissions |
+| `404` | Resource not found |
+| `409` | Conflict (duplicate resource, e.g. checkpoint name) |
+| `429` | Quota exceeded |
+| `500` | Internal server error |
+| `503` | Feature unavailable in current deployment mode |
