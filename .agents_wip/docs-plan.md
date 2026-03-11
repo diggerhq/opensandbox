@@ -3,10 +3,10 @@
 ## Guiding Principles
 
 1. **Single sidebar, no tabs.** Every page lives in one navigation tree. SDK languages shown side-by-side via CodeGroup, not separated into tabs.
-2. **Feature-first, not SDK-first.** Pages organized by what you can *do* (run commands, create checkpoints), not by which SDK you use. Each feature page is the single source of truth — concept + TypeScript + Python + CLI all in one place where appropriate.
+2. **Entity-first.** Pages organized around things the user encounters (sandboxes, agents, checkpoints, templates), not by SDK or abstract category. Each entity page is self-contained: what it is, how to use it, full API reference.
 3. **Quality over quantity.** If it can be said in fewer words, it should be. No filler sections. Every page earns its place.
-4. **Concept → Usage → Reference** flow on each page. Lead with *what* and *why* (1-2 sentences), show the common usage pattern, then provide the full API reference below.
-5. **Code-forward.** The first thing on every feature page (after the one-liner description) should be a working code example. Parameters and types come after.
+4. **Entity → Example → Reference** flow on each page. Open with what the entity *is* (2-3 sentences), show a working code example, then provide the full API reference below.
+5. **Code-forward.** The first thing on every entity page (after the short explanation) should be a working code example. Parameters and types come after.
 6. **Honest about gaps.** Don't document features that don't exist yet. Mark experimental/beta features clearly.
 
 ---
@@ -32,31 +32,28 @@
 
 ## Proposed Structure
 
+The two top-level entities are **Sandboxes** (the compute primitive) and **Agents** (Claude running inside sandboxes). Everything else — files, checkpoints, templates, patches, preview URLs — are sub-entities that the user needs to understand in context. Each entity page is self-contained: opens with what the entity *is*, then shows how to use it. No separate "Concepts" section.
+
 ```
 docs/
 ├── mint.json
 ├── images/
 │   ├── favicon.svg
 │   ├── logo-light.svg
-│   ├── logo-dark.svg
-│   └── architecture.svg          ← NEW (simple diagram)
+│   └── logo-dark.svg
 │
 │── introduction.mdx               ← REWRITE
 │── quickstart.mdx                 ← REWRITE
 │
-├── concepts/                       ← NEW section
-│   ├── sandboxes.mdx
-│   ├── persistence.mdx
-│   └── networking.mdx
-│
-│── agents.mdx                     ← REWRITE (merge TS/Python SDK agent pages)
-│── running-commands.mdx           ← REWRITE (merge TS/Python SDK exec pages)
-│── working-with-files.mdx         ← REWRITE (merge TS/Python SDK filesystem pages)
-│── interactive-terminals.mdx      ← REWRITE (merge TS/Python SDK pty pages)
-│── checkpoints.mdx                ← REWRITE (merge TS/Python SDK checkpoint pages)
-│── templates.mdx                  ← REWRITE (merge TS/Python SDK template pages)
-│── patches.mdx                    ← REWRITE (merge TS/Python SDK patch pages)
-│── preview-urls.mdx               ← REWRITE (merge TS/Python SDK + CLI preview pages)
+│── sandboxes.mdx                  ← NEW (entity: what sandboxes are + lifecycle + create/kill/hibernate API)
+│── agents.mdx                     ← REWRITE (entity: what agents are + full session API)
+│── running-commands.mdx           ← REWRITE (merge SDK exec pages, unified CodeGroup)
+│── working-with-files.mdx         ← REWRITE (merge SDK filesystem pages, unified CodeGroup)
+│── interactive-terminals.mdx      ← NEW (promote from SDK-only to top-level)
+│── checkpoints.mdx                ← REWRITE (entity: what checkpoints are + API)
+│── templates.mdx                  ← REWRITE (entity: what templates are + API)
+│── patches.mdx                    ← REWRITE (entity: what patches are + API)
+│── preview-urls.mdx               ← NEW (entity: what preview URLs are + API)
 │
 ├── cli/                            ← KEEP (trimmed)
 │   ├── overview.mdx
@@ -66,7 +63,7 @@ docs/
 │   ├── checkpoint.mdx
 │   └── preview.mdx
 │
-├── guides/                         ← KEEP + expand
+├── guides/                         ← KEEP
 │   ├── build-a-lovable-clone.mdx
 │   └── agent-skill.mdx
 │
@@ -74,8 +71,8 @@ docs/
 │── changelog.mdx                  ← NEW (stub)
 │
 ├── sdks/                           ← DELETE entire directory
-│   ├── typescript/                  (content merged into feature pages)
-│   └── python/                     (content merged into feature pages)
+│   ├── typescript/                  (content merged into entity/feature pages)
+│   └── python/                     (content merged into entity/feature pages)
 ```
 
 ### mint.json Navigation
@@ -92,17 +89,9 @@ docs/
       ]
     },
     {
-      "group": "Concepts",
+      "group": "Sandboxes",
       "pages": [
-        "concepts/sandboxes",
-        "concepts/persistence",
-        "concepts/networking"
-      ]
-    },
-    {
-      "group": "Features",
-      "pages": [
-        "agents",
+        "sandboxes",
         "running-commands",
         "working-with-files",
         "interactive-terminals",
@@ -110,6 +99,12 @@ docs/
         "templates",
         "patches",
         "preview-urls"
+      ]
+    },
+    {
+      "group": "Agents",
+      "pages": [
+        "agents"
       ]
     },
     {
@@ -140,6 +135,13 @@ docs/
   ]
 }
 ```
+
+### Why this structure
+
+- **Sandboxes group** contains the sandbox entity page plus everything you do with a sandbox (run commands, work with files, open terminals, create checkpoints, build templates, expose URLs). These are all operations on or properties of the sandbox primitive.
+- **Agents group** is its own top-level group because agents are conceptually distinct — they're not just another operation on a sandbox, they're an autonomous actor *inside* one. Currently one page, but the group gives room to grow (e.g., MCP servers, multi-turn patterns).
+- **No "Concepts" section.** Each entity page (sandboxes, agents, checkpoints, templates, patches, preview URLs) opens with what the entity is and why it exists, then shows the API. Concept and reference live together — one place to look.
+- **No "Features" section.** The word "features" is meaningless navigation. The sidebar groups tell you what things *are*.
 
 ---
 
@@ -181,109 +183,75 @@ docs/
 
 ---
 
-### Concepts (NEW section)
+### Entity Pages
 
-#### `concepts/sandboxes.mdx` — NEW
+Each entity page follows this template:
+1. **What is this** — 2-3 sentences explaining the entity for someone who's never seen it
+2. **Primary code example** (TS + Python via CodeGroup)
+3. **API reference** with `<ParamField>` for each method
+4. **Additional examples**
+5. **Related** — links to CLI equivalent and related entity pages
 
-**Goal:** Mental model for what a sandbox is and how it behaves. No API reference here — pure concepts.
+#### `sandboxes.mdx` — NEW (entity page)
+
+**Goal:** The definitive page for understanding and working with the sandbox primitive. Concept + lifecycle + full SDK API for sandbox management.
 
 **Structure:**
-1. What is a sandbox (Firecracker microVM, full Linux, isolated, ephemeral by default)
-2. Sandbox lifecycle diagram: `creating → running → hibernated → (wake) → running → killed`
-3. Resource specs table:
+1. **What is a sandbox** — A full Linux virtual machine in the cloud. Each sandbox is an isolated environment with its own filesystem, network, and processes. Think of it as a laptop that sleeps when idle and wakes instantly when you need it.
+2. **Quick example:** create → run command → kill (TS + Python CodeGroup)
+3. **Specs table:**
    - OS: Ubuntu-based Linux
-   - Default CPU: 1 vCPU (configurable up to 4)
-   - Default memory: 512MB (configurable up to 2GB)
+   - Default CPU: 1 vCPU (configurable up to 4 via `cpuCount`)
+   - Default memory: 512MB (configurable up to 2GB via `memoryMB`)
    - Storage: 20GB workspace
    - Network: full outbound internet access
    - Pre-installed: Python 3, Node.js, common CLI tools
-4. Idle timeout behavior (rolling timeout, default 300s, resets on every operation)
-5. What happens on timeout (auto-hibernate if possible, else kill)
-6. Sandbox identity (`sandbox_id` string, used in all API calls)
-
-**Sources:** `internal/firecracker/` (VM config), `internal/sandbox/router.go` (timeout logic), `deploy/firecracker/rootfs/Dockerfile.default` (base image).
-
-#### `concepts/persistence.mdx` — NEW
-
-**Goal:** Explain the persistence model: checkpoints, templates, patches, hibernation. How they relate.
-
-**Structure:**
-1. Overview: sandboxes are ephemeral by default but OpenComputer provides three persistence mechanisms
-2. **Hibernation** — pause a running sandbox, resume later. Like closing a laptop lid.
-   - VM state (memory + disk) snapshotted
-   - Sandbox ID stays the same
-   - Resume in seconds
-   - No cost while hibernated
+4. **Creating a sandbox** — `Sandbox.create(opts)` with full param reference:
+   - template, timeout, apiKey, apiUrl, envs, metadata, cpuCount, memoryMB
+5. **Connecting to an existing sandbox** — `Sandbox.connect(sandboxId)`
+6. **Sandbox lifecycle:**
+   - Status states: `creating → running → hibernated → killed`
+   - Lifecycle diagram (text-based)
+   - Rolling timeout: resets on every operation, default 300s
+   - What happens on timeout: auto-hibernate if possible, else kill
+7. **Hibernation & wake** — `sandbox.hibernate()`, `sandbox.wake()`
+   - Like closing a laptop lid: memory + disk snapshotted, sandbox ID stays the same
+   - Resume in seconds, no cost while hibernated
    - Auto-triggered on idle timeout
-3. **Checkpoints** — named snapshots you can fork from. Like git commits.
-   - Create from running sandbox
-   - Fork new sandboxes from any checkpoint (fast, ~1s)
-   - Restore in-place (revert sandbox to checkpoint state)
-   - Status: `processing → ready`
-4. **Templates** — pre-built base images. Like Docker images.
-   - `default` template: Ubuntu + Python + Node.js
-   - Custom templates from Dockerfiles
-   - `SaveAsTemplate` from a running sandbox
-5. **Patches** — scripts that run on checkpoint restore. Modify state at fork time.
-   - Attached to checkpoints
-   - Execute in sequence order
-   - Use case: inject config, update dependencies
-6. Comparison table: hibernation vs checkpoint vs template
+   - Difference from checkpoints: hibernation is transparent resume, checkpoints are named snapshots you fork from
+8. **Other methods** — `kill()`, `isRunning()`, `setTimeout()`
+9. **Sandbox properties** — sandboxId, agent, exec, files, pty
 
-#### `concepts/networking.mdx` — NEW
+**Absorbs content from:** old `concepts/sandboxes.mdx`, `concepts/persistence.mdx` (hibernation section), `concepts/networking.mdx` (outbound access mention), `sdks/typescript/sandbox.mdx`, `sdks/python/sandbox.mdx`.
 
-**Goal:** Explain how sandbox networking works — outbound access, preview URLs, custom domains.
+#### `agents.mdx` — REWRITE (entity page)
+
+**Goal:** The definitive page for understanding and using agent sessions. This is the other top-level entity alongside sandboxes.
 
 **Structure:**
-1. Outbound networking: full internet access by default, no configuration needed
-2. Preview URLs: expose a port to the public internet via HTTPS
-   - `createPreviewURL({ port: 3000 })` → returns public URL
-   - Multiple ports supported simultaneously
-   - URLs persist across hibernation/wake cycles
-3. Custom domains: point your own domain at sandbox preview URLs
-   - DNS verification flow
-   - CNAME setup
-   - SSL automatic
-4. No inbound SSH (use PTY/exec instead)
-
----
-
-### Features (unified SDK + concept pages)
-
-Each feature page follows this template:
-1. One-sentence description
-2. Primary code example (TS + Python via CodeGroup)
-3. API reference with `<ParamField>` for each method
-4. Additional examples
-5. Related: links to CLI equivalent and related concepts
-
-#### `agents.mdx` — REWRITE (merge from: current agents.mdx + sdks/typescript/agent + sdks/python/agent)
-
-**Structure:**
-1. Description: run Claude Agent SDK sessions inside a sandbox
-2. Quick example: `sandbox.agent.start()` with events (TS + Python CodeGroup)
-3. **`sandbox.agent.start(opts)`** — full param reference
-   - All params: prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, resume, onEvent, onError, onExit
+1. **What is an agent session** — A Claude Agent SDK instance running inside a sandbox. The agent has full access to the sandbox's filesystem and shell. You send it a prompt, it works autonomously — writing files, running commands, iterating on errors — and streams events back as it goes.
+2. **Quick example:** `sandbox.agent.start()` with event handling (TS + Python CodeGroup)
+3. **`sandbox.agent.start(opts)`** — full param reference:
+   - prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, resume, onEvent, onError, onExit
    - **NEW: document `resume` param** — pass `claude_session_id` from a previous `turn_complete` event to continue a conversation
-4. **AgentSession** — properties and methods table
+4. **AgentSession** — properties and methods table:
    - sessionId, done, sendPrompt, interrupt, configure, kill, close
-   - **Python addition:** `collect_events()`, `wait()`
-5. **Agent events** — table of event types with descriptions
-   - Add `system` and `tool_use_summary` event types (currently missing from docs)
+   - **Python-specific:** `collect_events()`, `wait()`
+5. **Agent events** — table of all event types:
+   - ready, configured, assistant, tool_use_summary, system, result, turn_complete, interrupted, error
 6. **Examples:**
-   - Follow-up prompts (start, wait, start again)
+   - Follow-up prompts
    - MCP servers configuration
-   - List active sessions
-   - Attach to existing session
    - Resume a previous conversation (NEW)
-7. CLI equivalent: note that agent sessions are SDK-only (no CLI command yet)
+   - List active sessions / attach to existing
+7. **Note:** Agent sessions are SDK-only (no CLI command yet)
 
-**Key improvement:** Merge all three current agent pages into one. Add `resume` documentation. Add Python `collect_events()`.
+**Key improvements:** Merge three current agent pages into one. Add `resume` docs. Add Python `collect_events()`. Document all event types including `system` and `tool_use_summary`.
 
-#### `running-commands.mdx` — REWRITE (merge from: current + sdks/typescript/commands + sdks/python/commands)
+#### `running-commands.mdx` — REWRITE
 
 **Structure:**
-1. Two modes: `sandbox.exec.run()` (wait for result) and `sandbox.exec.start()` (streaming/async)
+1. Brief intro: two modes for running shell commands — `run()` (wait for result) and `start()` (streaming/async)
 2. **Quick commands: `sandbox.exec.run()`** — CodeGroup TS + Python
    - Full param reference (command, timeout, env, cwd)
    - ProcessResult table
@@ -298,74 +266,92 @@ Each feature page follows this template:
    - `sandbox.exec.kill()` — kill a session
 5. Examples: dev server, long-running process, reconnect pattern
 
-**Key improvement:** Consolidate to use `sandbox.exec.*` consistently (not `sandbox.commands`). Document `maxRunAfterDisconnect`. Add session management.
+**Key improvement:** Use `sandbox.exec.*` consistently (not `sandbox.commands`). Document `maxRunAfterDisconnect`. Add session management.
 
-#### `working-with-files.mdx` — REWRITE (merge from: current + sdks/typescript/filesystem + sdks/python/filesystem)
+#### `working-with-files.mdx` — REWRITE
 
-**Structure:** Keep current structure, it's already good. Add CodeGroup for all examples.
+**Structure:** Keep current structure — it's already good. Add CodeGroup for all examples.
 1. Reading files (read, readBytes)
 2. Writing files (write — text and binary)
 3. Listing directories (list, EntryInfo)
 4. Managing files (makeDir, remove, exists)
 5. Examples: upload & run script, copy files
 
-**Minimal changes needed.** Just merge TS/Python into CodeGroups and ensure consistency.
+**Minimal changes needed.** Merge TS/Python into CodeGroups and ensure consistency.
 
-#### `interactive-terminals.mdx` — REWRITE (merge from: sdks/typescript/pty + sdks/python/pty)
+#### `interactive-terminals.mdx` — NEW (promote from SDK-only)
 
 **Structure:**
-1. What PTY sessions are (full interactive terminal, like SSH but via WebSocket)
+1. **What is a PTY session** — A full interactive terminal inside the sandbox, like SSH but over WebSocket. Supports colors, resize, full-screen apps (vim, top).
 2. Create a PTY session (TS + Python CodeGroup)
 3. PtyOpts reference (cols, rows, onOutput)
 4. PtySession methods (send, close)
 5. Examples: run interactive commands, pipe stdin
 6. CLI equivalent: `oc shell <sandbox-id>`
 
-**Note:** Currently has no top-level feature page (only exists in SDK tabs). Promoting to feature page.
-
-#### `checkpoints.mdx` — REWRITE (merge from: sdks/typescript/checkpoints + sdks/python/checkpoints + cli/checkpoints)
+#### `checkpoints.mdx` — REWRITE (entity page)
 
 **Structure:**
-1. What checkpoints are (link to concepts/persistence)
-2. Create a checkpoint
-3. List checkpoints
-4. Fork a new sandbox from checkpoint (`Sandbox.createFromCheckpoint()`)
-5. Restore in-place (`sandbox.restoreCheckpoint()`)
-6. Delete a checkpoint
-7. CheckpointInfo structure
-8. Examples: checkpoint before risky operation, fork for parallel exploration
+1. **What is a checkpoint** — A named snapshot of a running sandbox's full state (memory, disk, processes). Create a checkpoint, then fork new sandboxes from it — each fork starts exactly where the checkpoint left off. Think of it like git commits for VMs.
+2. Quick example: create checkpoint → fork → verify state (TS + Python CodeGroup)
+3. **How checkpoints differ from hibernation:**
+   - Hibernation pauses and resumes the *same* sandbox
+   - Checkpoints create *new* sandboxes from a saved state
+   - A sandbox can have many checkpoints; hibernation is a single pause/resume
+4. **API reference:**
+   - `sandbox.createCheckpoint(name)` — create
+   - `sandbox.listCheckpoints()` — list
+   - `Sandbox.createFromCheckpoint(id)` — fork a new sandbox
+   - `sandbox.restoreCheckpoint(id)` — revert in-place
+   - `sandbox.deleteCheckpoint(id)` — delete
+5. CheckpointInfo structure (id, name, status, sandboxId, createdAt)
+6. Status: `processing → ready`
+7. Examples: checkpoint before risky operation, fork for parallel exploration
 
-#### `templates.mdx` — REWRITE (merge from: sdks/typescript/templates + sdks/python/templates)
-
-**Structure:**
-1. What templates are (link to concepts/persistence)
-2. Default template (what's pre-installed)
-3. Build a custom template from Dockerfile
-4. List / get / delete templates
-5. Use a template when creating a sandbox
-6. TemplateInfo structure
-7. Example: create a template with specific tools pre-installed
-
-#### `patches.mdx` — REWRITE (merge from: sdks/typescript/patches + sdks/python/patches + cli/patches)
+#### `templates.mdx` — REWRITE (entity page)
 
 **Structure:**
-1. What patches are (scripts that modify checkpoints at fork time)
-2. Create a patch
-3. List patches (ordered by sequence)
-4. Delete a patch
-5. When patches apply (table: fork vs restore)
-6. Failure handling
-7. Example: inject config, update dependencies at fork time
+1. **What is a template** — A pre-built base image that sandboxes start from. The `default` template includes Ubuntu, Python, and Node.js. Build custom templates from Dockerfiles to skip setup time.
+2. Quick example: build template → create sandbox from it (TS + Python CodeGroup)
+3. **Default template** — what's pre-installed (derive from `Dockerfile.default`)
+4. **API reference:**
+   - `Template.build(name, dockerfile)` — build from Dockerfile
+   - `Template.list()` — list available
+   - `Template.get(name)` — get details
+   - `Template.delete(name)` — delete
+   - Using in `Sandbox.create({ template: "my-template" })`
+5. TemplateInfo structure
+6. Example: template with specific language/framework pre-installed
 
-#### `preview-urls.mdx` — REWRITE (merge from: cli/previews, sandbox methods)
+#### `patches.mdx` — REWRITE (entity page)
 
 **Structure:**
-1. What preview URLs do (expose sandbox port to public internet via HTTPS)
-2. Create a preview URL (SDK + CLI)
-3. List active previews
-4. Delete a preview
-5. Custom domains (brief, link to concepts/networking)
-6. Examples: share a dev server, multiple ports
+1. **What is a patch** — A shell script attached to a checkpoint that runs every time a sandbox is forked from that checkpoint. Use patches to inject configuration, update dependencies, or customize state at fork time without modifying the checkpoint itself.
+2. Quick example: create patch on checkpoint (TS + Python CodeGroup)
+3. **API reference:**
+   - `Sandbox.createCheckpointPatch(checkpointId, { script, description })`
+   - `Sandbox.listCheckpointPatches(checkpointId)`
+   - `Sandbox.deleteCheckpointPatch(checkpointId, patchId)`
+4. When patches run (table: fork = yes, restore = yes/no)
+5. Execution order: patches run in sequence order
+6. Failure handling: what happens if a patch script fails
+7. Example: inject API keys, update packages at fork time
+
+#### `preview-urls.mdx` — NEW (entity page)
+
+**Structure:**
+1. **What is a preview URL** — A public HTTPS URL that exposes a port inside your sandbox to the internet. Start a web server on port 3000 in your sandbox, create a preview URL, and anyone can access it.
+2. Quick example: create preview URL (TS + Python CodeGroup)
+3. **API reference:**
+   - `sandbox.createPreviewURL({ port, domain?, authConfig? })`
+   - `sandbox.listPreviewURLs()`
+   - `sandbox.deletePreviewURL(port)`
+4. **Custom domains:**
+   - How to verify your domain
+   - DNS setup (TXT for verification, CNAME for routing)
+   - SSL is automatic
+5. Preview URLs persist across hibernation/wake cycles
+6. Examples: share a dev server, multiple ports, custom domain
 
 ---
 
@@ -464,58 +450,55 @@ These are specific pieces of information that exist in the codebase but are miss
 |-----|--------|-------------|
 | Agent session `resume` parameter | `sdks/typescript/src/agent.ts` | agents.mdx |
 | `maxRunAfterDisconnect` in exec | `sdks/typescript/src/exec.ts` | running-commands.mdx |
-| Sandbox resource options (`cpuCount`, `memoryMB`) | `sdks/typescript/src/sandbox.ts` | concepts/sandboxes.mdx |
-| Sandbox `metadata` option | `sdks/typescript/src/sandbox.ts` | concepts/sandboxes.mdx |
-| Sandbox `envs` option (persistent env vars) | `sdks/typescript/src/sandbox.ts` | concepts/sandboxes.mdx |
-| Hibernation API (`sandbox.hibernate()`, `sandbox.wake()`) | Both SDKs | concepts/persistence.mdx |
-| Sandbox status states & transitions | `internal/sandbox/router.go` | concepts/sandboxes.mdx |
+| Sandbox resource options (`cpuCount`, `memoryMB`) | `sdks/typescript/src/sandbox.ts` | sandboxes.mdx |
+| Sandbox `metadata` option | `sdks/typescript/src/sandbox.ts` | sandboxes.mdx |
+| Sandbox `envs` option (persistent env vars) | `sdks/typescript/src/sandbox.ts` | sandboxes.mdx |
+| Hibernation API (`sandbox.hibernate()`, `sandbox.wake()`) | Both SDKs | sandboxes.mdx |
+| Sandbox status states & transitions | `internal/sandbox/router.go` | sandboxes.mdx |
 | Default template contents | `deploy/firecracker/rootfs/Dockerfile.default` | templates.mdx |
 | Preview URL `authConfig` option | Both SDKs | preview-urls.mdx |
-| Preview URL custom domain verification | Worker code | concepts/networking.mdx |
+| Preview URL custom domain verification | Worker code | preview-urls.mdx |
 | Python `AgentSession.collect_events()` | `sdks/python/opencomputer/agent.py` | agents.mdx |
 | Python `AgentSession.wait()` | `sdks/python/opencomputer/agent.py` | agents.mdx |
 | Agent `tool_use_summary` and `system` event types | Agent wrapper code | agents.mdx |
-| Rolling timeout behavior | `internal/sandbox/router.go` | concepts/sandboxes.mdx |
+| Rolling timeout behavior | `internal/sandbox/router.go` | sandboxes.mdx |
 | Exec session scrollback buffer | `internal/sandbox/scrollback.go` | running-commands.mdx |
-| Sandbox `connect()` (attach to existing) | Both SDKs | concepts/sandboxes.mdx |
+| Sandbox `connect()` (attach to existing) | Both SDKs | sandboxes.mdx |
 
 ---
 
 ## Execution Order
 
-### Phase 1: Foundation (do first)
-1. Create `concepts/sandboxes.mdx`
-2. Create `concepts/persistence.mdx`
-3. Create `concepts/networking.mdx`
-4. Rewrite `introduction.mdx`
-5. Rewrite `quickstart.mdx`
+### Phase 1: Top-level entities (do first — everything else references these)
+1. Create `sandboxes.mdx` (the foundational entity page)
+2. Rewrite `agents.mdx` (the other top-level entity)
+3. Rewrite `introduction.mdx` (now links to entity pages, not concepts)
+4. Rewrite `quickstart.mdx`
 
-### Phase 2: Feature Pages (merge SDK content)
-6. Rewrite `agents.mdx` (merge TS + Python agent pages)
-7. Rewrite `running-commands.mdx` (merge TS + Python exec pages)
-8. Rewrite `working-with-files.mdx` (merge TS + Python filesystem pages)
-9. Create `interactive-terminals.mdx` (merge TS + Python PTY pages)
-10. Rewrite `checkpoints.mdx` (merge TS + Python checkpoint pages)
-11. Rewrite `templates.mdx` (merge TS + Python template pages)
-12. Rewrite `patches.mdx` (merge TS + Python patch pages)
-13. Rewrite `preview-urls.mdx` (new unified page)
+### Phase 2: Sandbox sub-entity and operation pages
+5. Rewrite `running-commands.mdx` (merge TS + Python exec pages)
+6. Rewrite `working-with-files.mdx` (merge TS + Python filesystem pages)
+7. Create `interactive-terminals.mdx` (promote from SDK-only)
+8. Rewrite `checkpoints.mdx` (entity page: concept + API)
+9. Rewrite `templates.mdx` (entity page: concept + API)
+10. Rewrite `patches.mdx` (entity page: concept + API)
+11. Create `preview-urls.mdx` (entity page: concept + API)
 
 ### Phase 3: CLI + Support Pages
-14. Rewrite `cli/overview.mdx`
-15. Update `cli/sandbox.mdx`
-16. Create `cli/exec.mdx` (rename from commands)
-17. Update `cli/shell.mdx`
-18. Create `cli/checkpoint.mdx` (merge checkpoint + patch)
-19. Create `cli/preview.mdx` (rename from previews)
-20. Create `troubleshooting.mdx`
-21. Create `changelog.mdx` (stub)
+12. Rewrite `cli/overview.mdx`
+13. Update `cli/sandbox.mdx`
+14. Create `cli/exec.mdx` (rename from commands)
+15. Update `cli/shell.mdx`
+16. Create `cli/checkpoint.mdx` (merge checkpoint + patch)
+17. Create `cli/preview.mdx` (rename from previews)
+18. Create `troubleshooting.mdx`
+19. Create `changelog.mdx` (stub)
 
 ### Phase 4: Cleanup
-22. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
-23. Delete all `sdks/` pages
-24. Delete obsolete CLI pages
-25. Update `mint.json` with new navigation
-26. Create `images/architecture.svg` (simple sandbox lifecycle diagram)
+20. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
+21. Delete all `sdks/` pages
+22. Delete obsolete CLI pages
+23. Update `mint.json` with new navigation
 
 ---
 
@@ -524,15 +507,17 @@ These are specific pieces of information that exist in the codebase but are miss
 | Section | Current | Proposed | Delta |
 |---------|---------|----------|-------|
 | Getting Started | 2 | 2 | 0 |
-| Concepts | 0 | 3 | +3 |
-| Features | 3 | 8 | +5 |
+| Sandboxes | 3 | 8 | +5 |
+| Agents | 0* | 1 | +1 |
 | CLI | 7 | 6 | -1 |
 | Guides | 2 | 2 | 0 |
 | Resources | 0 | 2 | +2 |
 | SDK (tabs) | 16 | 0 | -16 |
-| **Total** | **30** | **23** | **-7** |
+| **Total** | **30** | **21** | **-9** |
 
-Net result: 7 fewer pages, but more complete coverage. Zero duplication.
+*agents.mdx existed but wasn't in its own nav group.
+
+Net result: 9 fewer pages, more complete coverage, zero duplication. Every entity self-contained.
 
 ---
 
