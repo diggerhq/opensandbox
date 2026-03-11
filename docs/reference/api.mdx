@@ -63,7 +63,7 @@ Create a new sandbox.
 | `envs` | object | No | Environment variables |
 | `metadata` | object | No | Arbitrary key-value pairs |
 
-**Response** `200`:
+**Response** `201`:
 
 ```json
 {
@@ -107,7 +107,7 @@ Terminate and remove a sandbox.
 
 ### `POST /api/sandboxes/:id/timeout` — Set Timeout
 
-Update the idle timeout. In hosted mode, this must be sent to the **worker** via `connectURL`.
+Update the idle timeout. **Worker-direct only** — must be sent to the worker via `connectURL` with a Bearer token. The control plane will reject this request.
 
 **Request body:**
 
@@ -115,7 +115,7 @@ Update the idle timeout. In hosted mode, this must be sent to the **worker** via
 | --- | --- | --- | --- |
 | `timeout` | int | Yes | New timeout in seconds (must be > 0) |
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ### `POST /api/sandboxes/:id/hibernate` — Hibernate
 
@@ -125,7 +125,10 @@ Snapshot VM state and stop the sandbox. Control plane only.
 
 ```json
 {
-  "sizeBytes": 134217728
+  "sandboxID": "sb-abc123",
+  "hibernationKey": "checkpoints/sb-abc123/1234567890.tar.zst",
+  "sizeBytes": 134217728,
+  "status": "hibernated"
 }
 ```
 
@@ -226,7 +229,7 @@ On connect, the server replays the scrollback buffer, sends a `0x04` end marker,
 | --- | --- | --- | --- |
 | `signal` | int | No | Signal number (default: `9` / SIGKILL) |
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ---
 
@@ -399,7 +402,7 @@ Create a new sandbox from a checkpoint.
 | --- | --- | --- | --- |
 | `timeout` | int | No | Idle timeout for the new sandbox (default: `300`) |
 
-**Response** `200`: Sandbox object (same shape as create).
+**Response** `201`: Sandbox object (same shape as create).
 
 ```bash
 curl -X POST https://app.opencomputer.dev/api/sandboxes/from-checkpoint/cp-abc123 \
@@ -578,7 +581,7 @@ Pass auth via query parameter: `?token=<jwt>`
 
 Terminate a PTY session.
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ---
 
