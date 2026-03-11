@@ -270,70 +270,127 @@ Python-unique features: `collect_events`, `wait`, `recv`, context manager.
 
 ## Execution Order
 
-### Phase 1: Core pages (do first — everything else references these)
-1. `agents/overview.mdx` (the headline entity)
-2. `sandboxes/overview.mdx` (the foundational primitive)
-3. `how-it-works.mdx` (architecture + technical decisions)
-4. `introduction.mdx` (links to agents, sandboxes, how-it-works)
-5. `quickstart.mdx` (single agent example)
+Treat this as an operating model, not a rigid serial checklist.
 
-### Phase 2: Agent sub-pages
-6. `agents/events.mdx`
-7. `agents/tools.mdx`
-8. `agents/multi-turn.mdx`
+### Build Workflow
 
-### Phase 3: Sandbox sub-entity and operation pages
-9. `sandboxes/running-commands.mdx`
-10. `sandboxes/working-with-files.mdx`
-11. `sandboxes/interactive-terminals.mdx`
-12. `sandboxes/checkpoints.mdx`
-13. `sandboxes/templates.mdx`
-14. `sandboxes/patches.mdx`
-15. `sandboxes/preview-urls.mdx`
+- **Stub first.** If the plan and a page stub disagree, the stub wins.
+- **Read source, then write.** For every page, read the stub plus the authoritative code paths listed in the Source Map before drafting.
+- **Reference-first for contracts.** If a page depends on exact payloads, flags, or method signatures, update the relevant `reference/*` section in the same change.
+- **Replace, don't accumulate.** When a new page supersedes an old one, remove or redirect the old page in the same batch.
+- **Write in shippable batches.** Prefer landing one coherent cluster at a time rather than scattering partial edits across the tree.
+- **Self-audit before done.** Run the Quality Bar and cross-link checks before considering a page finished.
 
-### Phase 4: Reference Pages
-16. `reference/api.mdx` (derived from router.go + handlers)
-17. `reference/typescript-sdk.mdx` (derived from sdks/typescript/src/)
-18. `reference/python-sdk.mdx` (derived from sdks/python/opencomputer/)
-19. `reference/cli.mdx` (derived from cmd/oc/internal/commands/)
+### Priority Bands
 
-### Phase 5: CLI Guide Pages + Support
-20. `cli/overview.mdx`
-21. `cli/sandbox.mdx`
-22. `cli/exec.mdx`
-23. `cli/shell.mdx`
-24. `cli/checkpoint.mdx`
-25. `cli/patch.mdx`
-26. `cli/preview.mdx`
-27. `troubleshooting.mdx`
+These are priority bands, not a strict sequence. Within a band, order can change based on momentum or blockers.
 
-### Phase 6: Cleanup
-28. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
-29. Delete all `sdks/` pages
-30. Delete old root-level pages (agents.mdx, running-commands.mdx, working-with-files.mdx)
-31. Delete obsolete CLI pages (commands.mdx, checkpoints.mdx [plural], patches.mdx, previews.mdx)
+#### Band A: Foundations
 
-Note: `mint.json` navigation already updated during stub scaffolding pass.
+- `how-it-works.mdx`
+- `reference/api.mdx`
+- `reference/cli.mdx`
+- `agents/overview.mdx`
+- `sandboxes/overview.mdx`
+
+#### Band B: Contract-Heavy Entity Pages
+
+- `agents/events.mdx`
+- `agents/tools.mdx`
+- `agents/multi-turn.mdx`
+- `sandboxes/running-commands.mdx`
+- `sandboxes/working-with-files.mdx`
+- `sandboxes/interactive-terminals.mdx`
+- `sandboxes/checkpoints.mdx`
+- `sandboxes/templates.mdx`
+- `sandboxes/patches.mdx`
+- `sandboxes/preview-urls.mdx`
+- `reference/typescript-sdk.mdx`
+- `reference/python-sdk.mdx`
+
+#### Band C: Onboarding, CLI Guides, and Cleanup
+
+- `introduction.mdx`
+- `quickstart.mdx`
+- `cli/overview.mdx`
+- `cli/sandbox.mdx`
+- `cli/exec.mdx`
+- `cli/shell.mdx`
+- `cli/checkpoint.mdx`
+- `cli/patch.mdx`
+- `cli/preview.mdx`
+- `troubleshooting.mdx`
+- `guides/build-a-lovable-clone.mdx` (minor fixes)
+- Delete old `sdks/` pages
+- Delete old root-level pages (`agents.mdx`, `running-commands.mdx`, `working-with-files.mdx`)
+- Delete obsolete CLI pages (`commands.mdx`, `checkpoints.mdx`, `patches.mdx`, `previews.mdx`)
 
 ---
 
-## Page Count Summary
+## Source Map
 
-| Section | Current | Proposed | Delta |
-|---------|---------|----------|-------|
-| Getting Started | 2 | 3 | +1 |
-| Agents | 1* | 4 | +3 |
-| Sandboxes | 2* | 8 | +6 |
-| CLI | 7 | 7 | 0 |
-| Guides | 2 | 2 | 0 |
-| Reference | 0 | 4 | +4 |
-| Resources | 0 | 1 | +1 |
-| SDK (tabs) | 16 | 0 | -16 |
-| **Total** | **30** | **29** | **-1** |
+Use these as the primary code sources when writing each page family.
 
-*Current agents.mdx + running-commands.mdx + working-with-files.mdx exist at root level without clear grouping.
+### `reference/api.mdx`
 
-CLI nav group = 7 guide-like pages. Reference group includes exhaustive CLI reference. Entity pages teach; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
+- `internal/api/router.go`
+- `internal/api/sandbox.go`
+- `internal/api/exec_session.go`
+- `internal/api/agent_session.go`
+- `internal/api/filesystem.go`
+- `internal/api/pty.go`
+- `internal/api/templates.go`
+- `internal/worker/http_server.go`
+
+### `agents/*`
+
+- `sdks/typescript/src/agent.ts`
+- `sdks/python/opencomputer/agent.py`
+- `scripts/claude-agent-wrapper/index.ts`
+
+### `sandboxes/*`
+
+- `sdks/typescript/src/sandbox.ts`
+- `sdks/python/opencomputer/sandbox.py`
+- `sdks/typescript/src/exec.ts`
+- `sdks/python/opencomputer/exec.py`
+- `sdks/typescript/src/filesystem.ts`
+- `sdks/python/opencomputer/filesystem.py`
+- `sdks/typescript/src/pty.ts`
+- `sdks/python/opencomputer/pty.py`
+- `internal/firecracker/manager.go`
+- `internal/firecracker/snapshot.go`
+
+### `templates`
+
+- `sdks/typescript/src/template.ts`
+- `sdks/python/opencomputer/template.py`
+- `deploy/firecracker/rootfs/Dockerfile.default`
+- `internal/api/templates.go`
+- `internal/db/store.go`
+
+### `cli/*` and `reference/cli.mdx`
+
+- `cmd/oc/internal/commands/*`
+
+### Cross-checking real-world usage
+
+Use downstream consumers when you need to understand how the public surface is actually being used:
+
+- `../agents-api/`
+- `../base360-checkin-agent/`
+
+---
+
+## Open Decisions / Blockers
+
+The writing agent should not rediscover these from scratch while drafting.
+
+- **Connection model must be explained centrally.** Hosted usage spans control plane and worker-direct surfaces (`connectURL`, JWT auth, token refresh, worker-only operations).
+- **Python template API ergonomics are awkward.** If there is no public construction story worth documenting, make template docs HTTP-first or improve the SDK before documenting it as a first-class Python surface.
+- **`default` vs `base` needs a single public story.** Docs should choose one canonical framing and treat the other as legacy/backward-compatibility.
+- **Do not over-promise exact restore semantics.** Hibernation/checkpoint/fork pages must avoid blanket “exactly where you left off” language when cold-boot fallback exists.
+- **Dashboard-only features need deliberate placement.** `saveAsTemplate` and `/api/dashboard/*` should only be surfaced where that distinction is explicit.
 
 ---
 
@@ -346,9 +403,13 @@ Each page must pass these checks before shipping:
 - [ ] Streaming/WebSocket operations can omit HTTP tab (SDK-only is fine)
 - [ ] No deprecated API names (`commands` → `exec`)
 - [ ] All parameters documented match actual SDK source code (verified per-SDK, not assumed identical)
+- [ ] Exact API field casing matches the live handlers/types (`sessionID`, `sandboxID`, `text`, `cmd`, etc.)
 - [ ] TS-only features clearly marked — no Python tab that shows nonexistent API
 - [ ] Python-unique features (context manager, collect_events, recv) documented where relevant
+- [ ] No invented SDK convenience APIs or constructors
+- [ ] Defaults/specs are only documented when they are true product guarantees, not template contents or deployment config
 - [ ] No "coming soon" for features that now exist
 - [ ] No filler sentences ("In this section we will..." — just do it)
 - [ ] Entity pages: `<Tip>` at bottom linking to CLI guide (if applicable) + Reference pages (TS SDK, Python SDK, HTTP API)
 - [ ] CLI guide pages: `<Tip>` at bottom linking to SDK entity page + reference/cli.mdx section
+- [ ] If terminology or workflow changed publicly (`commands` → `exec`, CLI rename, `base` vs `default`), add a migration note where readers will expect it
