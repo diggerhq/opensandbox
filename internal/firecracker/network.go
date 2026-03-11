@@ -20,6 +20,9 @@ type NetworkConfig struct {
 	HostPort      int // host port mapped to guest
 	GuestPort     int // guest port (typically 80)
 	DNATRuleAdded bool
+
+	// Secrets proxy redirect
+	ProxyRedirectAdded bool
 }
 
 // SubnetAllocator manages /30 subnet allocation from a 172.16.0.0/16 pool.
@@ -185,6 +188,34 @@ func RemoveDNAT(cfg *NetworkConfig) {
 		"-p", "tcp", "--dport", fmt.Sprintf("%d", cfg.HostPort),
 		"-j", "DNAT", "--to-destination",
 		fmt.Sprintf("%s:%d", cfg.GuestIP, cfg.GuestPort))
+}
+
+// AddProxyRedirect adds an iptables rule to redirect HTTPS traffic from the VM
+// through the secrets proxy on the host. Traffic from guestIP:443 is redirected
+// to hostIP:3128 where the MITM proxy substitutes sealed tokens.
+func AddProxyRedirect(cfg *NetworkConfig) error {
+	err := run("iptables", "-t", "nat", "-A", "PREROUTING",
+		"-s", cfg.GuestIP,
+		"-p", "tcp", "--dport", "443",
+		"-j", "DNAT", "--to-destination",
+		fmt.Sprintf("%s:3128", cfg.HostIP))
+	if err != nil {
+		return fmt.Errorf("add proxy redirect: %w", err)
+	}
+	cfg.ProxyRedirectAdded = true
+	return nil
+}
+
+// RemoveProxyRedirect removes the iptables proxy redirect rule.
+func RemoveProxyRedirect(cfg *NetworkConfig) {
+	if !cfg.ProxyRedirectAdded {
+		return
+	}
+	_ = run("iptables", "-t", "nat", "-D", "PREROUTING",
+		"-s", cfg.GuestIP,
+		"-p", "tcp", "--dport", "443",
+		"-j", "DNAT", "--to-destination",
+		fmt.Sprintf("%s:3128", cfg.HostIP))
 }
 
 // EnableForwarding enables IPv4 forwarding and masquerading for the VM subnet.

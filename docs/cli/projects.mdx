@@ -1,0 +1,175 @@
+---
+title: "Projects & Secrets"
+description: "Manage projects and encrypted secrets from the CLI"
+---
+
+Projects group sandboxes with shared config defaults and encrypted secrets. Use `oc project` to manage projects and `oc secret` to manage their secrets.
+
+## Projects
+
+### Create a Project
+
+```bash
+oc project create --name my-agent --cpu 2 --memory 1024 --timeout 600
+```
+
+#### `oc project create`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--name` | string | *required* | Project name (unique per org) |
+| `--template` | string | — | Default template for sandboxes |
+| `--cpu` | int | — | Default vCPU count |
+| `--memory` | int | — | Default memory in MB |
+| `--timeout` | int | — | Default timeout in seconds |
+
+### List Projects
+
+```bash
+oc project list
+```
+
+Output:
+
+```
+ID                                    NAME       TEMPLATE  CPU  MEMORY  TIMEOUT
+9961c10e-c83c-4e6b-ad61-b91144323a3d  my-agent   default   2    1024    600
+```
+
+### Get Project Details
+
+```bash
+oc project get <project-id>
+```
+
+### Update a Project
+
+Partial updates — only the flags you pass are changed.
+
+```bash
+oc project update <project-id> --memory 2048
+# Name, template, CPU, timeout are preserved
+```
+
+#### `oc project update`
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--name` | string | New project name |
+| `--template` | string | New default template |
+| `--cpu` | int | New default vCPU count |
+| `--memory` | int | New default memory in MB |
+| `--timeout` | int | New default timeout in seconds |
+
+### Delete a Project
+
+```bash
+oc project delete <project-id>
+```
+
+Deletes the project and all its secrets. Running sandboxes are not affected.
+
+## Secrets
+
+Secrets are encrypted at rest and injected as sealed tokens when a sandbox is created with the project. The real values are never visible inside the sandbox — they are only substituted by the MITM proxy on outbound HTTPS requests.
+
+### Set a Secret
+
+```bash
+oc secret set <project-id> ANTHROPIC_API_KEY sk-ant-...
+```
+
+Or pipe from stdin (useful for multiline values or scripts):
+
+```bash
+cat ~/.anthropic_key | oc secret set <project-id> ANTHROPIC_API_KEY --from-stdin
+```
+
+```bash
+echo "sk-ant-..." | oc secret set <project-id> ANTHROPIC_API_KEY --from-stdin
+```
+
+#### `oc secret set`
+
+| Argument | Description |
+| --- | --- |
+| `<project-id>` | UUID of the project |
+| `<name>` | Secret name (becomes the env var name in sandboxes) |
+| `<value>` | Secret value (omit if using `--from-stdin`) |
+
+| Flag | Description |
+| --- | --- |
+| `--from-stdin` | Read the secret value from stdin |
+
+### List Secrets
+
+```bash
+oc secret list <project-id>
+```
+
+Output:
+
+```
+ANTHROPIC_API_KEY
+DATABASE_URL
+```
+
+Returns names only. Values are never exposed.
+
+### Delete a Secret
+
+```bash
+oc secret delete <project-id> ANTHROPIC_API_KEY
+```
+
+## Creating Sandboxes with Projects
+
+Use the `--project` flag on `oc create` to inherit a project's config and secrets:
+
+```bash
+oc create --project my-agent --timeout 600
+```
+
+The sandbox inherits the project's template, CPU, memory, and timeout as defaults. Any flags you pass explicitly override the project defaults.
+
+Secrets are injected as sealed tokens:
+
+```bash
+oc exec <sandbox-id> -- echo '$ANTHROPIC_API_KEY'
+# osb_sealed_2ce9277be9baafcb... (sealed, never the real key)
+```
+
+The proxy replaces sealed tokens with real values on outbound HTTPS requests, so code running in the sandbox can use API keys normally without ever seeing the actual secret.
+
+## Example Workflow
+
+```bash
+# Create a project
+oc project create --name my-agent --cpu 2 --memory 1024 --timeout 600
+
+# Add secrets
+oc secret set <project-id> ANTHROPIC_API_KEY sk-ant-...
+oc secret set <project-id> DATABASE_URL postgres://user:pass@host/db
+
+# Verify secrets are stored
+oc secret list <project-id>
+
+# Create a sandbox — inherits config + secrets
+oc create --project my-agent
+
+# Secrets are sealed inside the sandbox
+oc exec <sandbox-id> -- env | grep -E 'API_KEY|DATABASE'
+# ANTHROPIC_API_KEY=osb_sealed_...
+# DATABASE_URL=osb_sealed_...
+
+# But HTTPS requests get real values via the proxy
+oc exec <sandbox-id> -- curl -s https://api.anthropic.com/v1/messages \
+  -H "x-api-key: \$ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-haiku-4-5-20251001","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}'
+
+# Clean up
+oc sandbox delete <sandbox-id>
+oc project delete <project-id>
+```

@@ -49,6 +49,8 @@ func init() {
 	rootCmd.AddCommand(checkpointCmd)
 	rootCmd.AddCommand(patchCmd)
 	rootCmd.AddCommand(previewCmd)
+	rootCmd.AddCommand(projectCmd)
+	rootCmd.AddCommand(secretCmd)
 	rootCmd.AddCommand(configCmd)
 
 	// Top-level shortcuts

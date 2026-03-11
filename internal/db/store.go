@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/opensandbox/opensandbox/internal/crypto"
 )
 
 //go:embed migrations/*.sql
@@ -19,7 +21,13 @@ var migrationsFS embed.FS
 
 // Store provides data access to the global PostgreSQL database.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	encryptor *crypto.Encryptor // nil if no encryption key configured
+}
+
+// SetEncryptor configures the encryption key for project secrets.
+func (s *Store) SetEncryptor(enc *crypto.Encryptor) {
+	s.encryptor = enc
 }
 
 // NewStore creates a new Store with a connection pool.
@@ -77,6 +85,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{11, "migrations/011_rename_hibernation.up.sql"},
 		{12, "migrations/012_checkpoints.up.sql"},
 		{13, "migrations/013_checkpoint_patches.up.sql"},
+		{14, "migrations/014_projects.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -1238,4 +1247,234 @@ func (s *Store) DeletePreviewURLsBySandbox(ctx context.Context, sandboxID string
 		urls = append(urls, p)
 	}
 	return urls, nil
+}
+
+// ── Projects ──────────────────────────────────────────────────────────────────
+
+// Project represents a project that groups sandboxes and holds secrets.
+type Project struct {
+	ID              uuid.UUID `json:"id"`
+	OrgID           uuid.UUID `json:"orgId"`
+	Name            string    `json:"name"`
+	Template        string    `json:"template"`
+	CpuCount        int       `json:"cpuCount"`
+	MemoryMB        int       `json:"memoryMB"`
+	TimeoutSec      int       `json:"timeoutSec"`
+	EgressAllowlist []string  `json:"egressAllowlist"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+// ProjectSecret represents an encrypted secret belonging to a project.
+type ProjectSecret struct {
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"projectId"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// CreateProject creates a new project for an org.
+func (s *Store) CreateProject(ctx context.Context, orgID uuid.UUID, name, template string, cpuCount, memoryMB, timeoutSec int, allowlist []string) (*Project, error) {
+	if template == "" {
+		template = "default"
+	}
+	if cpuCount <= 0 {
+		cpuCount = 1
+	}
+	if memoryMB <= 0 {
+		memoryMB = 1024
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 300
+	}
+	if allowlist == nil {
+		allowlist = []string{}
+	}
+
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO projects (org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at`,
+		orgID, name, template, cpuCount, memoryMB, timeoutSec, allowlist,
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create project: %w", err)
+	}
+	return &p, nil
+}
+
+// GetProject returns a project by ID, scoped to an org.
+func (s *Store) GetProject(ctx context.Context, orgID, projectID uuid.UUID) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
+		 FROM projects WHERE id = $1 AND org_id = $2`,
+		projectID, orgID,
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get project: %w", err)
+	}
+	return &p, nil
+}
+
+// GetProjectByName returns a project by name, scoped to an org.
+func (s *Store) GetProjectByName(ctx context.Context, orgID uuid.UUID, name string) (*Project, error) {
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
+		 FROM projects WHERE org_id = $1 AND name = $2`,
+		orgID, name,
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get project by name: %w", err)
+	}
+	return &p, nil
+}
+
+// ListProjects returns all projects for an org.
+func (s *Store) ListProjects(ctx context.Context, orgID uuid.UUID) ([]Project, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
+		 FROM projects WHERE org_id = $1 ORDER BY name`,
+		orgID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list projects: %w", err)
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, nil
+}
+
+// UpdateProject updates a project's configuration.
+func (s *Store) UpdateProject(ctx context.Context, orgID, projectID uuid.UUID, name, template string, cpuCount, memoryMB, timeoutSec int, allowlist []string) (*Project, error) {
+	if allowlist == nil {
+		allowlist = []string{}
+	}
+	var p Project
+	err := s.pool.QueryRow(ctx,
+		`UPDATE projects SET name = $3, template = $4, cpu_count = $5, memory_mb = $6, timeout_sec = $7, egress_allowlist = $8, updated_at = now()
+		 WHERE id = $1 AND org_id = $2
+		 RETURNING id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at`,
+		projectID, orgID, name, template, cpuCount, memoryMB, timeoutSec, allowlist,
+	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("update project: %w", err)
+	}
+	return &p, nil
+}
+
+// DeleteProject deletes a project and all its secrets (cascading).
+func (s *Store) DeleteProject(ctx context.Context, orgID, projectID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("project not found")
+	}
+	return nil
+}
+
+// ── Project Secrets ───────────────────────────────────────────────────────────
+
+// SetProjectSecret creates or updates a secret on a project. The value is encrypted at rest.
+func (s *Store) SetProjectSecret(ctx context.Context, projectID uuid.UUID, name string, value []byte) error {
+	if s.encryptor == nil {
+		return fmt.Errorf("encryption not configured (set OPENSANDBOX_SECRET_ENCRYPTION_KEY)")
+	}
+	encrypted, err := s.encryptor.Encrypt(value)
+	if err != nil {
+		return fmt.Errorf("encrypt secret: %w", err)
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO project_secrets (project_id, name, encrypted_value)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (project_id, name) DO UPDATE SET encrypted_value = $3, updated_at = now()`,
+		projectID, name, encrypted,
+	)
+	if err != nil {
+		return fmt.Errorf("set project secret: %w", err)
+	}
+	return nil
+}
+
+// DeleteProjectSecret removes a secret from a project.
+func (s *Store) DeleteProjectSecret(ctx context.Context, projectID uuid.UUID, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM project_secrets WHERE project_id = $1 AND name = $2`,
+		projectID, name,
+	)
+	if err != nil {
+		return fmt.Errorf("delete project secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("secret not found")
+	}
+	return nil
+}
+
+// ListProjectSecretNames returns the names (not values) of all secrets on a project.
+func (s *Store) ListProjectSecretNames(ctx context.Context, projectID uuid.UUID) ([]ProjectSecret, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, project_id, name, created_at, updated_at
+		 FROM project_secrets WHERE project_id = $1 ORDER BY name`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list project secrets: %w", err)
+	}
+	defer rows.Close()
+
+	var secrets []ProjectSecret
+	for rows.Next() {
+		var ps ProjectSecret
+		if err := rows.Scan(&ps.ID, &ps.ProjectID, &ps.Name, &ps.CreatedAt, &ps.UpdatedAt); err != nil {
+			return nil, err
+		}
+		secrets = append(secrets, ps)
+	}
+	return secrets, nil
+}
+
+// DecryptProjectSecrets returns all secrets for a project as plaintext name→value pairs.
+// Used server-side when creating a sandbox to pass decrypted values to the worker.
+func (s *Store) DecryptProjectSecrets(ctx context.Context, projectID uuid.UUID) (map[string]string, error) {
+	if s.encryptor == nil {
+		return nil, fmt.Errorf("encryption not configured")
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT name, encrypted_value FROM project_secrets WHERE project_id = $1`,
+		projectID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query project secrets: %w", err)
+	}
+	defer rows.Close()
+
+	secrets := make(map[string]string)
+	for rows.Next() {
+		var name string
+		var encrypted []byte
+		if err := rows.Scan(&name, &encrypted); err != nil {
+			return nil, err
+		}
+		plaintext, err := s.encryptor.Decrypt(encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt secret %q: %w", name, err)
+		}
+		secrets[name] = string(plaintext)
+	}
+	return secrets, nil
 }

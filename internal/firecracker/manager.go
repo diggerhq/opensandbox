@@ -49,7 +49,8 @@ type VMInstance struct {
 	guestMAC    string             // e.g., "AA:FC:00:00:2d:31"
 	guestCID    uint32             // vsock CID
 	bootArgs    string             // kernel boot args
-	restoring   chan struct{}      // closed when an in-progress restore completes; nil when not restoring
+	restoring    chan struct{}      // closed when an in-progress restore completes; nil when not restoring
+	sealedTokens map[string]string // sealed token → real value (for re-registering proxy on wake)
 }
 
 // SandboxMeta is persisted to sandbox-meta.json in each sandbox directory.
@@ -61,6 +62,27 @@ type SandboxMeta struct {
 	CpuCount  int               `json:"cpuCount"`
 	MemoryMB  int               `json:"memoryMB"`
 	GuestPort int               `json:"guestPort"`
+}
+
+// SecretsProxyIntegration provides the interface for the secrets proxy to integrate
+// with VM lifecycle. The firecracker package uses this interface to avoid importing
+// the secretsproxy package directly.
+type SecretsProxyIntegration interface {
+	// CreateSealedEnvs generates sealed tokens for env vars, registers a proxy session,
+	// and returns the full env map (sealed tokens + proxy config vars) to inject into the VM.
+	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist, secretHosts []string) map[string]string
+	// UnregisterSession removes the proxy session for the given guest IP.
+	UnregisterSession(guestIP string)
+	// GetSessionTokens returns the sealed token → real value map for persisting during hibernate.
+	GetSessionTokens(guestIP string) map[string]string
+	// GetSessionAllowlist returns the egress allowlist for persisting during hibernate.
+	GetSessionAllowlist(guestIP string) []string
+	// GetSessionSecretHosts returns the secret hosts list for persisting during hibernate.
+	GetSessionSecretHosts(guestIP string) []string
+	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
+	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist, secretHosts []string)
+	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
+	CACertPEM() []byte
 }
 
 // Config holds configuration for the Firecracker Manager.
@@ -95,6 +117,8 @@ type Manager struct {
 
 	goldenMu sync.RWMutex
 	golden   *GoldenSnapshot // pre-booted default VM snapshot for fast creation
+
+	secretsProxy SecretsProxyIntegration // nil if secrets proxy is not configured
 }
 
 // NewManager creates a new Firecracker-backed sandbox manager.
@@ -145,6 +169,12 @@ func NewManager(cfg Config) (*Manager, error) {
 		vms:     make(map[string]*VMInstance),
 		nextCID: 3, // CIDs 0-2 are reserved (hypervisor=0, local=1, host=2)
 	}, nil
+}
+
+// SetSecretsProxy configures the secrets proxy integration for token substitution.
+// Must be called before any sandboxes are created.
+func (m *Manager) SetSecretsProxy(sp SecretsProxyIntegration) {
+	m.secretsProxy = sp
 }
 
 // allocateCID returns a unique guest CID for a new VM.
@@ -400,10 +430,27 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 	}
 	vm.agent = agentClient
 
+	// Secrets proxy integration: seal env vars and set up proxy redirect.
+	// Sealed tokens replace real values inside the VM — the MITM proxy swaps
+	// them back to real values on outbound HTTPS requests.
+	envsToInject := cfg.Envs
+	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, nil, nil)
+		if sealedEnvs != nil {
+			envsToInject = sealedEnvs
+			// Redirect VM HTTPS traffic through the proxy
+			if err := AddProxyRedirect(netCfg); err != nil {
+				log.Printf("firecracker: warning: proxy redirect failed for %s: %v", id, err)
+			}
+			// Inject CA cert into VM trust store
+			m.injectCACert(context.Background(), agentClient, id)
+		}
+	}
+
 	// Send sandbox-level env vars into the VM agent (survives snapshots)
-	if len(cfg.Envs) > 0 {
+	if len(envsToInject) > 0 {
 		envCtx, envCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := agentClient.SetEnvs(envCtx, cfg.Envs); err != nil {
+		if err := agentClient.SetEnvs(envCtx, envsToInject); err != nil {
 			envCancel()
 			log.Printf("firecracker: warning: SetEnvs failed for %s: %v", id, err)
 		}
@@ -528,8 +575,14 @@ func (m *Manager) destroyVM(vm *VMInstance) error {
 		vm.cmd.Wait()
 	}
 
+	// Clean up secrets proxy session
+	if m.secretsProxy != nil && vm.network != nil {
+		m.secretsProxy.UnregisterSession(vm.network.GuestIP)
+	}
+
 	// Clean up network
 	if vm.network != nil {
+		RemoveProxyRedirect(vm.network)
 		RemoveDNAT(vm.network)
 		DeleteTAP(vm.network.TAPName)
 		m.subnets.Release(vm.network.TAPName)
@@ -549,9 +602,43 @@ func (m *Manager) destroyVM(vm *VMInstance) error {
 	return nil
 }
 
+// injectCACert writes the secrets proxy CA certificate into the VM and updates
+// the trust store so HTTPS requests through the proxy are trusted.
+func (m *Manager) injectCACert(ctx context.Context, agent *AgentClient, sandboxID string) {
+	if m.secretsProxy == nil {
+		return
+	}
+	certPEM := m.secretsProxy.CACertPEM()
+	if len(certPEM) == 0 {
+		return
+	}
+
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	certPath := "/usr/local/share/ca-certificates/opensandbox-proxy.crt"
+	if err := agent.WriteFile(writeCtx, certPath, certPEM); err != nil {
+		log.Printf("firecracker: warning: write CA cert failed for %s: %v", sandboxID, err)
+		return
+	}
+
+	// Update the system trust store
+	updateCtx, updateCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer updateCancel()
+	_, err := agent.Exec(updateCtx, &pb.ExecRequest{
+		Command:        "/bin/sh",
+		Args:           []string{"-c", "update-ca-certificates 2>/dev/null || true"},
+		TimeoutSeconds: 10,
+	})
+	if err != nil {
+		log.Printf("firecracker: warning: update-ca-certificates failed for %s: %v", sandboxID, err)
+	}
+}
+
 // cleanupVM cleans up resources on failed creation.
 func (m *Manager) cleanupVM(netCfg *NetworkConfig, sandboxDir string) {
 	if netCfg != nil {
+		RemoveProxyRedirect(netCfg)
 		RemoveDNAT(netCfg)
 		DeleteTAP(netCfg.TAPName)
 		m.subnets.Release(netCfg.TAPName)

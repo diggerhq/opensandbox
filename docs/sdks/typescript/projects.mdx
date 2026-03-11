@@ -1,0 +1,220 @@
+---
+title: "Projects & Secrets"
+description: "Manage projects and encrypted secrets that are securely injected into sandboxes"
+---
+
+Projects group sandboxes together with shared configuration defaults and encrypted secrets. When you create a sandbox with a project, it inherits the project's template, resource limits, and timeout — and secrets are sealed inside the sandbox so they never exist as plaintext in VM memory.
+
+## How Secrets Work
+
+When a sandbox is created with a project:
+
+1. The server decrypts the project's secrets
+2. Secrets are sent to the worker and **sealed** into opaque tokens (`osb_sealed_...`)
+3. Inside the sandbox, env vars contain sealed tokens — never real values
+4. When the sandbox makes an outbound HTTPS request, the MITM proxy intercepts it and replaces sealed tokens with real values in headers and request body
+5. The real secret only exists in the proxy's memory on the host, never inside the VM
+
+## Creating a Project
+
+```typescript
+import { Project } from '@opencomputer/sdk';
+
+const project = await Project.create({
+  name: 'my-agent',
+  template: 'default',
+  cpuCount: 2,
+  memoryMB: 1024,
+  timeoutSec: 600,
+});
+```
+
+### `Project.create(opts)`
+
+<ParamField body="opts" type="CreateProjectOpts" required>
+  <Expandable title="properties">
+    <ParamField body="name" type="string" required>
+      Project name (unique per organization).
+    </ParamField>
+    <ParamField body="template" type="string" optional>
+      Default template for sandboxes in this project.
+    </ParamField>
+    <ParamField body="cpuCount" type="number" optional>
+      Default vCPU count.
+    </ParamField>
+    <ParamField body="memoryMB" type="number" optional>
+      Default memory in MB.
+    </ParamField>
+    <ParamField body="timeoutSec" type="number" optional>
+      Default sandbox timeout in seconds.
+    </ParamField>
+    <ParamField body="egressAllowlist" type="string[]" optional>
+      Allowed egress hosts (e.g. `["api.anthropic.com"]`).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<ProjectInfo>`
+
+## Listing Projects
+
+```typescript
+const projects = await Project.list();
+```
+
+### `Project.list(opts?)`
+
+**Returns:** `Promise<ProjectInfo[]>`
+
+## Getting a Project
+
+```typescript
+const project = await Project.get('project-uuid');
+```
+
+### `Project.get(projectId, opts?)`
+
+<ParamField body="projectId" type="string" required>
+  UUID of the project.
+</ParamField>
+
+**Returns:** `Promise<ProjectInfo>`
+
+## Updating a Project
+
+Partial updates — only the fields you pass are changed.
+
+```typescript
+const updated = await Project.update('project-uuid', {
+  memoryMB: 2048,
+  timeoutSec: 900,
+});
+// Name, template, cpuCount are preserved
+```
+
+### `Project.update(projectId, opts)`
+
+<ParamField body="projectId" type="string" required>
+  UUID of the project to update.
+</ParamField>
+<ParamField body="opts" type="UpdateProjectOpts" required>
+  <Expandable title="properties">
+    <ParamField body="name" type="string" optional>
+      New project name.
+    </ParamField>
+    <ParamField body="template" type="string" optional>
+      New default template.
+    </ParamField>
+    <ParamField body="cpuCount" type="number" optional>
+      New default vCPU count.
+    </ParamField>
+    <ParamField body="memoryMB" type="number" optional>
+      New default memory in MB.
+    </ParamField>
+    <ParamField body="timeoutSec" type="number" optional>
+      New default timeout in seconds.
+    </ParamField>
+    <ParamField body="egressAllowlist" type="string[]" optional>
+      New allowed egress hosts.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<ProjectInfo>`
+
+## Deleting a Project
+
+```typescript
+await Project.delete('project-uuid');
+```
+
+Deletes the project and all its secrets. Running sandboxes are not affected.
+
+### `Project.delete(projectId, opts?)`
+
+**Returns:** `Promise<void>`
+
+## Setting a Secret
+
+```typescript
+await Project.setSecret('project-uuid', 'ANTHROPIC_API_KEY', 'sk-ant-...');
+```
+
+Secrets are encrypted at rest. The value is never returned by the API.
+
+### `Project.setSecret(projectId, name, value, opts?)`
+
+<ParamField body="projectId" type="string" required>
+  UUID of the project.
+</ParamField>
+<ParamField body="name" type="string" required>
+  Secret name (used as the env var name in sandboxes).
+</ParamField>
+<ParamField body="value" type="string" required>
+  Secret value (encrypted at rest, never returned by API).
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+## Listing Secrets
+
+```typescript
+const names = await Project.listSecrets('project-uuid');
+// ['ANTHROPIC_API_KEY', 'DATABASE_URL']
+```
+
+Returns secret names only. Values are never exposed.
+
+### `Project.listSecrets(projectId, opts?)`
+
+**Returns:** `Promise<string[]>`
+
+## Deleting a Secret
+
+```typescript
+await Project.deleteSecret('project-uuid', 'DATABASE_URL');
+```
+
+### `Project.deleteSecret(projectId, name, opts?)`
+
+**Returns:** `Promise<void>`
+
+## Creating a Sandbox with a Project
+
+Pass the `project` option to `Sandbox.create()` to inherit the project's config and secrets:
+
+```typescript
+import { Sandbox } from '@opencomputer/sdk';
+
+const sandbox = await Sandbox.create({
+  project: 'my-agent',
+  timeout: 600,
+});
+
+// Secrets are available as sealed env vars
+const result = await sandbox.commands.run('echo $ANTHROPIC_API_KEY');
+// stdout: "osb_sealed_abc123..." (sealed, not the real key)
+
+// But outbound HTTPS requests get the real value substituted by the proxy
+const apiResult = await sandbox.commands.run(
+  'curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY" ...'
+);
+// The proxy replaces the sealed token with the real key before it hits Anthropic
+```
+
+Request-level options (`timeout`, `envs`, `cpuCount`, etc.) override project defaults.
+
+## ProjectInfo Type
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | Project UUID |
+| `orgId` | `string` | Organization UUID |
+| `name` | `string` | Project name |
+| `template` | `string` | Default template |
+| `cpuCount` | `number` | Default vCPU count |
+| `memoryMB` | `number` | Default memory in MB |
+| `timeoutSec` | `number` | Default timeout in seconds |
+| `egressAllowlist` | `string[]` | Allowed egress hosts |
+| `createdAt` | `string` | ISO 8601 timestamp |
+| `updatedAt` | `string` | ISO 8601 timestamp |

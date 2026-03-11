@@ -95,6 +95,10 @@ type Config struct {
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
 	// Env vars take precedence over secret values (for local overrides).
 	SecretsARN string
+
+	// Secret encryption key (hex-encoded 32 bytes / 64 hex chars) for encrypting
+	// project secrets at rest in PostgreSQL. Required if using project secrets.
+	SecretEncryptionKey string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -168,6 +172,8 @@ func Load() (*Config, error) {
 		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
+
+		SecretEncryptionKey: os.Getenv("OPENSANDBOX_SECRET_ENCRYPTION_KEY"),
 	}
 
 	// Default S3 region to worker region for same-region storage

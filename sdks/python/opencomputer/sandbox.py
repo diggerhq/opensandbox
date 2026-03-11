@@ -37,8 +37,20 @@ class Sandbox:
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
+        project: str | None = None,
     ) -> Sandbox:
-        """Create a new sandbox instance."""
+        """Create a new sandbox instance.
+
+        Args:
+            template: Template to use (default "base").
+            timeout: Sandbox timeout in seconds (default 300).
+            api_key: API key (or OPENCOMPUTER_API_KEY env var).
+            api_url: API URL (or OPENCOMPUTER_API_URL env var).
+            envs: Environment variables to inject. Overrides project secrets.
+            metadata: Custom metadata key-value pairs.
+            project: Project name — inherits template, cpu, memory, timeout,
+                and secrets from the project.
+        """
         url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
         key = api_key or os.environ.get("OPENCOMPUTER_API_KEY", "")
@@ -60,6 +72,8 @@ class Sandbox:
             body["envs"] = envs
         if metadata:
             body["metadata"] = metadata
+        if project:
+            body["project"] = project
 
         resp = await client.post("/sandboxes", json=body)
         resp.raise_for_status()

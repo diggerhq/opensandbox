@@ -60,6 +60,49 @@ func (s *Server) createSandbox(c echo.Context) error {
 		}
 	}
 
+	// Resolve project: inherit config defaults + decrypt and merge secrets
+	if cfg.Project != "" && s.store != nil && hasOrg {
+		project, err := s.store.GetProjectByName(ctx, orgID, cfg.Project)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "project not found: " + cfg.Project,
+			})
+		}
+
+		// Project config serves as defaults — request fields override
+		if cfg.Template == "" {
+			cfg.Template = project.Template
+		}
+		if cfg.CpuCount == 0 {
+			cfg.CpuCount = project.CpuCount
+		}
+		if cfg.MemoryMB == 0 {
+			cfg.MemoryMB = project.MemoryMB
+		}
+		if cfg.Timeout == 0 {
+			cfg.Timeout = project.TimeoutSec
+		}
+
+		// Decrypt project secrets and merge into envs (request envs override project secrets)
+		secrets, err := s.store.DecryptProjectSecrets(ctx, project.ID)
+		if err != nil {
+			log.Printf("api: decrypt project secrets failed for %s: %v", cfg.Project, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to decrypt project secrets",
+			})
+		}
+		if len(secrets) > 0 {
+			if cfg.Envs == nil {
+				cfg.Envs = make(map[string]string)
+			}
+			for k, v := range secrets {
+				if _, exists := cfg.Envs[k]; !exists {
+					cfg.Envs[k] = v
+				}
+			}
+		}
+	}
+
 	// Server mode with worker registry: dispatch to remote worker via gRPC
 	if s.workerRegistry != nil {
 		return s.createSandboxRemote(c, ctx, cfg, orgID, hasOrg)

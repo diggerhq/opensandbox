@@ -16,6 +16,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/compute"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
+	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -58,6 +59,16 @@ func main() {
 			log.Fatalf("failed to run migrations: %v", err)
 		}
 		log.Println("opensandbox: database migrations complete")
+
+		// Configure encryption for project secrets if key is provided
+		if cfg.SecretEncryptionKey != "" {
+			enc, err := crypto.NewEncryptor(cfg.SecretEncryptionKey)
+			if err != nil {
+				log.Fatalf("invalid OPENSANDBOX_SECRET_ENCRYPTION_KEY: %v", err)
+			}
+			store.SetEncryptor(enc)
+			log.Println("opensandbox: project secret encryption configured")
+		}
 
 		opts.Store = store
 	} else {

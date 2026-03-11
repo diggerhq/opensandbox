@@ -1,0 +1,198 @@
+---
+title: "Projects & Secrets"
+description: "Manage projects and encrypted secrets that are securely injected into sandboxes"
+---
+
+Projects group sandboxes together with shared configuration defaults and encrypted secrets. When you create a sandbox with a project, it inherits the project's template, resource limits, and timeout — and secrets are sealed inside the sandbox so they never exist as plaintext in VM memory.
+
+## How Secrets Work
+
+When a sandbox is created with a project:
+
+1. The server decrypts the project's secrets
+2. Secrets are sent to the worker and **sealed** into opaque tokens (`osb_sealed_...`)
+3. Inside the sandbox, env vars contain sealed tokens — never real values
+4. When the sandbox makes an outbound HTTPS request, the MITM proxy intercepts it and replaces sealed tokens with real values in headers and request body
+5. The real secret only exists in the proxy's memory on the host, never inside the VM
+
+## Creating a Project
+
+```python
+from opencomputer import Project
+
+project = await Project.create(
+    name='my-agent',
+    template='default',
+    cpu_count=2,
+    memory_mb=1024,
+    timeout_sec=600,
+)
+```
+
+### `Project.create(**kwargs)`
+
+<ParamField body="name" type="str" required>
+  Project name (unique per organization).
+</ParamField>
+<ParamField body="template" type="str" default="">
+  Default template for sandboxes in this project.
+</ParamField>
+<ParamField body="cpu_count" type="int" default="0">
+  Default vCPU count.
+</ParamField>
+<ParamField body="memory_mb" type="int" default="0">
+  Default memory in MB.
+</ParamField>
+<ParamField body="timeout_sec" type="int" default="0">
+  Default sandbox timeout in seconds.
+</ParamField>
+<ParamField body="egress_allowlist" type="list[str] | None" default="None">
+  Allowed egress hosts (e.g. `["api.anthropic.com"]`).
+</ParamField>
+
+**Returns:** `dict` — Project info with `id`, `name`, `template`, etc.
+
+## Listing Projects
+
+```python
+projects = await Project.list()
+```
+
+### `Project.list(**kwargs)`
+
+**Returns:** `list[dict]`
+
+## Getting a Project
+
+```python
+project = await Project.get('project-uuid')
+```
+
+### `Project.get(project_id, **kwargs)`
+
+<ParamField body="project_id" type="str" required>
+  UUID of the project.
+</ParamField>
+
+**Returns:** `dict`
+
+## Updating a Project
+
+Partial updates — only the fields you pass are changed.
+
+```python
+updated = await Project.update(
+    'project-uuid',
+    memory_mb=2048,
+    timeout_sec=900,
+)
+# Name, template, cpu_count are preserved
+```
+
+### `Project.update(project_id, **kwargs)`
+
+<ParamField body="project_id" type="str" required>
+  UUID of the project to update.
+</ParamField>
+<ParamField body="name" type="str" default="">
+  New project name (empty = no change).
+</ParamField>
+<ParamField body="template" type="str" default="">
+  New default template (empty = no change).
+</ParamField>
+<ParamField body="cpu_count" type="int" default="0">
+  New default vCPU count (0 = no change).
+</ParamField>
+<ParamField body="memory_mb" type="int" default="0">
+  New default memory in MB (0 = no change).
+</ParamField>
+<ParamField body="timeout_sec" type="int" default="0">
+  New default timeout in seconds (0 = no change).
+</ParamField>
+<ParamField body="egress_allowlist" type="list[str] | None" default="None">
+  New allowed egress hosts (None = no change).
+</ParamField>
+
+**Returns:** `dict`
+
+## Deleting a Project
+
+```python
+await Project.delete('project-uuid')
+```
+
+Deletes the project and all its secrets. Running sandboxes are not affected.
+
+### `Project.delete(project_id, **kwargs)`
+
+**Returns:** `None`
+
+## Setting a Secret
+
+```python
+await Project.set_secret('project-uuid', 'ANTHROPIC_API_KEY', 'sk-ant-...')
+```
+
+Secrets are encrypted at rest. The value is never returned by the API.
+
+### `Project.set_secret(project_id, name, value, **kwargs)`
+
+<ParamField body="project_id" type="str" required>
+  UUID of the project.
+</ParamField>
+<ParamField body="name" type="str" required>
+  Secret name (used as the env var name in sandboxes).
+</ParamField>
+<ParamField body="value" type="str" required>
+  Secret value (encrypted at rest, never returned by API).
+</ParamField>
+
+**Returns:** `None`
+
+## Listing Secrets
+
+```python
+names = await Project.list_secrets('project-uuid')
+# ['ANTHROPIC_API_KEY', 'DATABASE_URL']
+```
+
+Returns secret names only. Values are never exposed.
+
+### `Project.list_secrets(project_id, **kwargs)`
+
+**Returns:** `list[str]`
+
+## Deleting a Secret
+
+```python
+await Project.delete_secret('project-uuid', 'DATABASE_URL')
+```
+
+### `Project.delete_secret(project_id, name, **kwargs)`
+
+**Returns:** `None`
+
+## Creating a Sandbox with a Project
+
+Pass the `project` parameter to `Sandbox.create()` to inherit the project's config and secrets:
+
+```python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create(
+    project='my-agent',
+    timeout=600,
+)
+
+# Secrets are available as sealed env vars
+result = await sandbox.commands.run('echo $ANTHROPIC_API_KEY')
+# stdout: "osb_sealed_abc123..." (sealed, not the real key)
+
+# But outbound HTTPS requests get the real value substituted by the proxy
+api_result = await sandbox.commands.run(
+    'curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY" ...'
+)
+# The proxy replaces the sealed token with the real key before it hits Anthropic
+```
+
+Request-level options (`timeout`, `envs`, `cpu_count`, etc.) override project defaults.

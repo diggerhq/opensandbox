@@ -42,6 +42,9 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
     <ParamField body="metadata" type="Record<string, string>" optional>
       Arbitrary key-value metadata attached to the sandbox.
     </ParamField>
+    <ParamField body="project" type="string" optional>
+      Project name. Inherits the project's config defaults and [sealed secrets](/sdks/typescript/projects).
+    </ParamField>
   </Expandable>
 </ParamField>
 

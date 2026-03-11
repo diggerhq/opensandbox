@@ -40,6 +40,9 @@ Creates a new sandbox and returns a connected `Sandbox` instance.
 <ParamField body="metadata" type="dict[str, str] | None" default="None">
   Arbitrary key-value metadata attached to the sandbox.
 </ParamField>
+<ParamField body="project" type="str | None" default="None">
+  Project name. Inherits the project's config defaults and [sealed secrets](/sdks/python/projects).
+</ParamField>
 
 **Returns:** `Sandbox`
 

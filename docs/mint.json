@@ -63,6 +63,7 @@
         "sdks/typescript/filesystem",
         "sdks/typescript/pty",
         "sdks/typescript/templates",
+        "sdks/typescript/projects",
         "sdks/typescript/checkpoints",
         "sdks/typescript/patches"
       ]
@@ -76,6 +77,7 @@
         "sdks/python/filesystem",
         "sdks/python/pty",
         "sdks/python/templates",
+        "sdks/python/projects",
         "sdks/python/checkpoints",
         "sdks/python/patches"
       ]
@@ -87,6 +89,7 @@
         "cli/sandbox",
         "cli/commands",
         "cli/shell",
+        "cli/projects",
         "cli/checkpoints",
         "cli/patches",
         "cli/previews"
