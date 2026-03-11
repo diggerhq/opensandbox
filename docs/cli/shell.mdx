@@ -1,71 +1,55 @@
 ---
 title: "Shell"
-description: "Open an interactive terminal session in a sandbox"
+description: "Interactive terminal sessions from the CLI"
 ---
 
-The `shell` command opens a full interactive terminal inside a running sandbox. It connects via WebSocket and supports everything you'd expect from a local terminal — colors, tab completion, `vim`, `top`, and terminal resizing.
+{/* STUB — Guide-like CLI page. Key concepts and tips.
+  Exhaustive reference lives at /reference/cli. */}
 
 ## Opening a Shell
+
+{/* oc shell <id>. Full interactive terminal over WebSocket. Ctrl+D or exit to disconnect. */}
 
 ```bash
 oc shell sb-abc123
 ```
 
-You'll be dropped into a bash shell inside the sandbox. Press `Ctrl+D` or type `exit` to disconnect.
+## Choosing a Shell
 
-### `oc shell <id>`
-
-Creates a PTY session and opens a bidirectional WebSocket connection to the sandbox.
-
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--shell` | string | `/bin/bash` | Shell binary to use |
-
-## Using a Different Shell
+{/* --shell flag. Default /bin/bash. */}
 
 ```bash
 oc shell sb-abc123 --shell /bin/zsh
-oc shell sb-abc123 --shell /bin/sh
 ```
 
-## How It Works
+## What Works
 
-1. **Get sandbox info** — Fetches the sandbox's direct worker URL and auth token from the control plane
-2. **Create PTY** — Sends your terminal dimensions to the worker to create a PTY session
-3. **WebSocket connect** — Opens a persistent WebSocket to the worker for bidirectional I/O
-4. **Raw terminal mode** — Puts your local terminal into raw mode so keystrokes are forwarded directly
-5. **Resize handling** — Listens for `SIGWINCH` and sends resize events when you resize your terminal window
-6. **Cleanup** — On exit, restores your terminal, closes the WebSocket, and destroys the remote PTY session
+{/* Full-screen apps, colors, tab completion, terminal resizing — everything you'd expect. */}
+
+- `vim`, `nano` — text editors
+- `top`, `htop` — process monitors
+- Tab completion, command history
+- Terminal resizing (automatic)
+
+## Shell vs Exec
+
+{/* When to use which. */}
+
+| Use Case | Command |
+| --- | --- |
+| Run a single command, capture output | `oc exec` |
+| Scripting and automation | `oc exec` |
+| Interactive development | `oc shell` |
+| Debugging | `oc shell` |
 
 ## Tips
 
-### Create and Shell In One Line
+### Create and Shell in One Line
 
 ```bash
 oc shell $(oc create --json | jq -r '.sandboxID')
 ```
 
-### Interactive Tools Work
-
-Full-screen terminal applications work as expected:
-
-```bash
-# Inside the shell:
-top           # Process monitor
-vim file.txt  # Text editor
-htop          # Interactive process viewer
-```
-
-### Terminal Resizing
-
-Resize your terminal window at any time — the remote PTY automatically adjusts to match your new dimensions.
-
-### When to Use Shell vs Exec
-
-| Use Case | Command |
-| --- | --- |
-| Run a single command and capture output | `oc exec` |
-| Script or automation | `oc exec` |
-| Interactive development | `oc shell` |
-| Debugging | `oc shell` |
-| Long-running interactive sessions | `oc shell` |
+<Tip>
+  SDK usage: [Interactive Terminals](/sandboxes/interactive-terminals). Full flags: [CLI Reference](/reference/cli#oc-shell).
+</Tip>

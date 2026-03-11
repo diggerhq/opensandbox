@@ -58,6 +58,18 @@
       ]
     },
     {
+      "group": "CLI",
+      "pages": [
+        "cli/overview",
+        "cli/sandbox",
+        "cli/exec",
+        "cli/shell",
+        "cli/checkpoint",
+        "cli/patch",
+        "cli/preview"
+      ]
+    },
+    {
       "group": "Guides",
       "pages": [
         "guides/build-a-lovable-clone",
@@ -70,13 +82,7 @@
         "reference/api",
         "reference/typescript-sdk",
         "reference/python-sdk",
-        "cli/overview",
-        "cli/sandbox",
-        "cli/exec",
-        "cli/shell",
-        "cli/checkpoint",
-        "cli/patch",
-        "cli/preview"
+        "reference/cli"
       ]
     },
     {

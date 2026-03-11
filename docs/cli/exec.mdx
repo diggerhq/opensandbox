@@ -1,48 +1,48 @@
 ---
-title: "exec"
-description: "Execute shell commands inside a sandbox"
+title: "Running Commands"
+description: "Execute shell commands from the CLI"
 ---
 
-{/* STUB — Renamed from commands.mdx. Content will be migrated with minor updates (oc exec naming). */}
-
-{/* Sections:
-  - oc exec <id> -- <command...> (run and wait)
-  - Flags: --cwd, --timeout, --env
-  - oc exec list <id> — list running exec sessions
-  - oc exec attach <id> <session-id> — attach to running session
-  - oc exec kill <id> <session-id> — kill session
-  - ProcessResult (JSON output)
-  - Examples: cwd, env, timeout, chaining, capture JSON output
-*/}
+{/* STUB — Guide-like CLI page. Key concepts and patterns, not exhaustive flag reference.
+  Exhaustive reference lives at /reference/cli. */}
 
 ## Running a Command
+
+{/* oc exec <id> -- <command>. How it works: command runs inside sandbox, stdout/stderr stream to terminal, CLI exits with same exit code. */}
 
 ```bash
 oc exec sb-abc123 -- echo "Hello, World!"
 ```
 
-### `oc exec <id> -- <command...>`
+## Working Directory & Environment
 
-{/* Flags table: --cwd, --timeout, --env. JSON output mode. */}
-
-## List Exec Sessions
+{/* --cwd and --env flags. When to use them. */}
 
 ```bash
-oc exec list sb-abc123
+oc exec sb-abc123 --cwd /app --env NODE_ENV=production -- npm run build
 ```
 
-## Attach to a Session
+## Timeouts
+
+{/* --timeout flag. Default 60s. What happens when exceeded. */}
+
+## Capturing Output as JSON
+
+{/* --json flag gives ProcessResult object. Pipe to jq for scripting. */}
 
 ```bash
-oc exec attach sb-abc123 sess-xyz
+RESULT=$(oc exec sb-abc123 --json -- node -e 'console.log("hello")')
+echo $RESULT | jq '.stdout'
 ```
 
-## Kill a Session
+## Managing Exec Sessions
 
-```bash
-oc exec kill sb-abc123 sess-xyz
-```
+{/* oc exec list, attach, kill — for long-running processes started via SDK. */}
 
-## Examples
+## Shell vs Exec
 
-{/* Working directory, env vars, timeout, chaining, JSON capture */}
+{/* When to use oc exec (single command, scripting, automation) vs oc shell (interactive, debugging). */}
+
+<Tip>
+  SDK usage: [Running Commands](/sandboxes/running-commands). Full flags: [CLI Reference](/reference/cli#oc-exec).
+</Tip>

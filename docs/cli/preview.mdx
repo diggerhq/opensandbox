@@ -1,41 +1,39 @@
 ---
-title: "preview"
-description: "Expose sandbox ports to the internet"
+title: "Preview URLs"
+description: "Expose sandbox ports from the CLI"
 ---
 
-{/* STUB — Renamed from previews.mdx. Content will be migrated with minor updates. */}
+{/* STUB — Guide-like CLI page. Key concepts and workflows.
+  Exhaustive reference lives at /reference/cli. */}
 
-{/* Sections:
-  - oc preview create <sandbox-id> --port <port> [--domain]
-  - oc preview list <sandbox-id>
-  - oc preview delete <sandbox-id> <port>
-  - Examples: share dev server, multiple ports, custom domain, scripted URL capture
-*/}
+## Exposing a Port
 
-## Create a Preview URL
+{/* oc preview create. Public HTTPS URL that proxies to a sandbox port. */}
 
 ```bash
 oc preview create sb-abc123 --port 3000
 ```
 
-With custom domain:
+## Sharing a Dev Server
+
+{/* Start a server inside sandbox, expose it, share the URL. */}
 
 ```bash
-oc preview create sb-abc123 --port 8080 --domain preview.example.com
+oc exec sb-abc123 -- bash -c 'cd /app && npm run dev &'
+oc preview create sb-abc123 --port 3000
+
+# Get the URL
+oc preview list sb-abc123 --json | jq -r '.[0].hostname'
 ```
 
-## List Preview URLs
+## Multiple Ports
 
-```bash
-oc preview list sb-abc123
-```
+{/* Frontend on 3000, API on 4000. */}
 
-## Delete a Preview URL
+## Custom Domains
 
-```bash
-oc preview delete sb-abc123 3000
-```
+{/* --domain flag. DNS must point to OpenComputer ingress. SSL automatic. */}
 
-## Examples
-
-{/* Share dev server, multiple ports, custom domain, scripted URL capture */}
+<Tip>
+  SDK usage: [Preview URLs](/sandboxes/preview-urls). Full flags: [CLI Reference](/reference/cli#oc-preview).
+</Tip>

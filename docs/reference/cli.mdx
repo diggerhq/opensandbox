@@ -1,0 +1,102 @@
+---
+title: "CLI Reference"
+description: "Every command, subcommand, and flag"
+---
+
+{/* STUB — Progressive JPEG pass 1. Exhaustive CLI reference: every command, every flag, every output format. */}
+
+## Global Flags
+
+| Flag | Environment Variable | Description |
+| --- | --- | --- |
+| `--api-key` | `OPENCOMPUTER_API_KEY` | API key for authentication |
+| `--api-url` | `OPENCOMPUTER_API_URL` | Control plane URL |
+| `--json` | — | Output as JSON instead of tables |
+
+## `oc sandbox`
+
+{/* Aliases: oc create = oc sandbox create, oc ls = oc sandbox list */}
+
+### `oc sandbox create` / `oc create`
+
+{/* Flags: --template, --timeout, --cpu, --memory, --env, --metadata. Output: sandbox ID. */}
+
+### `oc sandbox list` / `oc ls`
+
+{/* Output: table with ID, TEMPLATE, STATUS, CPU, MEM, AGE. */}
+
+### `oc sandbox get <id>`
+
+{/* Output: detailed sandbox info. */}
+
+### `oc sandbox kill <id>`
+
+### `oc sandbox hibernate <id>`
+
+### `oc sandbox wake <id>`
+
+{/* Flags: --timeout */}
+
+### `oc sandbox set-timeout <id> <seconds>`
+
+## `oc exec`
+
+### `oc exec <id> -- <command...>`
+
+{/* Flags: --cwd, --timeout, --env. Exit code passthrough. JSON output: ProcessResult. */}
+
+### `oc exec list <id>`
+
+### `oc exec attach <id> <session-id>`
+
+### `oc exec kill <id> <session-id>`
+
+## `oc shell`
+
+### `oc shell <id>`
+
+{/* Flags: --shell (default /bin/bash). WebSocket PTY session. */}
+
+## `oc checkpoint`
+
+{/* Alias: oc cp */}
+
+### `oc checkpoint create <sandbox-id> --name <name>`
+
+### `oc checkpoint list <sandbox-id>`
+
+### `oc checkpoint restore <sandbox-id> <checkpoint-id>`
+
+### `oc checkpoint spawn <checkpoint-id>`
+
+{/* Flags: --timeout */}
+
+### `oc checkpoint delete <sandbox-id> <checkpoint-id>`
+
+## `oc patch`
+
+### `oc patch create <checkpoint-id>`
+
+{/* Flags: --script (file or - for stdin), --description */}
+
+### `oc patch list <checkpoint-id>`
+
+### `oc patch delete <checkpoint-id> <patch-id>`
+
+## `oc preview`
+
+### `oc preview create <sandbox-id>`
+
+{/* Flags: --port (required), --domain */}
+
+### `oc preview list <sandbox-id>`
+
+### `oc preview delete <sandbox-id> <port>`
+
+## `oc config`
+
+### `oc config set <key> <value>`
+
+{/* Keys: api-key, api-url */}
+
+### `oc config show`

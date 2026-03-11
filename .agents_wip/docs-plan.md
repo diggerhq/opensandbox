@@ -67,16 +67,17 @@ docs/
 ├── reference/                      ← NEW directory
 │   ├── api.mdx                    ← NEW (HTTP API — every endpoint)
 │   ├── typescript-sdk.mdx         ← NEW (every class, method, type)
-│   └── python-sdk.mdx             ← NEW (every class, method, type)
+│   ├── python-sdk.mdx             ← NEW (every class, method, type)
+│   └── cli.mdx                    ← NEW (every CLI command, flag, subcommand)
 │
-├── cli/                            ← KEEP (trimmed)
-│   ├── overview.mdx
-│   ├── sandbox.mdx
-│   ├── exec.mdx
-│   ├── shell.mdx
-│   ├── checkpoint.mdx
-│   ├── patch.mdx
-│   └── preview.mdx
+├── cli/                            ← KEEP (guide-like pages in CLI nav group)
+│   ├── overview.mdx               ← REWRITE (install, config, key workflows)
+│   ├── sandbox.mdx                ← REWRITE (guide: sandbox management patterns)
+│   ├── exec.mdx                   ← REWRITE from commands.mdx (guide: running commands)
+│   ├── shell.mdx                  ← REWRITE (guide: interactive terminal tips)
+│   ├── checkpoint.mdx             ← REWRITE from checkpoints.mdx (guide: checkpoint workflows)
+│   ├── patch.mdx                  ← REWRITE from patches.mdx (guide: patch patterns)
+│   └── preview.mdx                ← REWRITE from previews.mdx (guide: preview URL workflows)
 │
 ├── guides/                         ← KEEP
 │   ├── build-a-lovable-clone.mdx
@@ -126,14 +127,6 @@ docs/
       ]
     },
     {
-      "group": "Reference",
-      "pages": [
-        "reference/api",
-        "reference/typescript-sdk",
-        "reference/python-sdk"
-      ]
-    },
-    {
       "group": "CLI",
       "pages": [
         "cli/overview",
@@ -153,6 +146,15 @@ docs/
       ]
     },
     {
+      "group": "Reference",
+      "pages": [
+        "reference/api",
+        "reference/typescript-sdk",
+        "reference/python-sdk",
+        "reference/cli"
+      ]
+    },
+    {
       "group": "Resources",
       "pages": [
         "troubleshooting"
@@ -167,6 +169,8 @@ docs/
 - **Agents first.** This is the headline feature — most users land here to run Claude inside sandboxes. Putting Agents right after Getting Started matches the reader's intent.
 - **Agents get depth.** Four pages mirror the Sandboxes pattern: an overview page explaining what agents are, then dedicated pages for events (the output you consume), tools (configuring what agents can do), and multi-turn (conversations that span sessions). Each page earns its place by covering a distinct concern.
 - **Sandboxes group** contains the sandbox entity page plus everything you do with a sandbox (run commands, work with files, open terminals, create checkpoints, build templates, expose URLs).
+- **CLI group** has guide-like pages (install, config, key workflows per topic). Each CLI page teaches patterns and concepts; the exhaustive flag-by-flag reference lives in `reference/cli.mdx`.
+- **Reference is second-to-last.** It's lookup-oriented (every endpoint, every flag, every command) — most users read the entity/CLI pages first and only reach for Reference when they need exact signatures.
 - **Directory = group.** `agents/`, `sandboxes/`, `cli/`, `guides/` — folder structure mirrors navigation. No orphan files at the root (except Getting Started and Resources).
 - **No "Concepts" section.** Each entity page opens with what it is and why it exists, then shows the API.
 - **No "Features" section.** The sidebar groups tell you what things *are*.
@@ -236,7 +240,9 @@ Each entity page follows this template:
 2. **Primary code example** in tabs (TypeScript / Python / HTTP API where applicable)
 3. **API reference** with `<ParamField>` for each method
 4. **Additional examples** (also tabbed where applicable)
-5. **Related** — links to CLI equivalent, reference pages, and related entity pages
+5. **Cross-links** — `<Tip>` at the bottom with: CLI equivalent (if one exists), links to Reference pages (TS SDK, Python SDK, HTTP API)
+
+**Cross-linking pattern:** Entity pages link down to CLI guide + Reference. CLI guide pages link to the SDK entity page + `reference/cli.mdx`. This creates a navigable triangle: entity page ↔ CLI guide ↔ reference. A reader never hits a dead end.
 
 ### Agents (`agents/`)
 
@@ -469,7 +475,7 @@ Each entity page follows this template:
 
 ### Reference (`reference/`)
 
-These are exhaustive, lookup-oriented pages. No tutorials, no "why" — just every endpoint/method/type with parameters, return types, and a minimal example. The entity pages (Agents, Sandboxes) teach; these pages are the source of truth.
+These are exhaustive, lookup-oriented pages. No tutorials, no "why" — just every endpoint/method/type/flag with parameters, return types, and a minimal example. The entity pages (Agents, Sandboxes) and CLI guide pages teach; these pages are the source of truth. Four pages: HTTP API, TypeScript SDK, Python SDK, CLI.
 
 #### `reference/api.mdx` — NEW
 
@@ -610,31 +616,83 @@ Each method: full async signature, params with types and defaults, return type, 
 
 **Source:** `sdks/python/opencomputer/` — all source files.
 
+#### `reference/cli.mdx` — NEW
+
+**Goal:** Exhaustive CLI reference. Every command, every subcommand, every flag. The lookup page for exact syntax when the CLI guide pages aren't enough.
+
+**Structure:**
+1. **Global flags** — `--api-key`, `--api-url`, `--json`
+2. **`oc sandbox`** — create (flags: --template, --timeout, --cpu, --memory, --env, --metadata), list, get, kill, hibernate, wake, set-timeout
+3. **`oc exec`** — exec (flags: --cwd, --timeout, --env), list, attach, kill
+4. **`oc shell`** — shell (flags: --shell)
+5. **`oc checkpoint`** — create (--name), list, restore, spawn (--timeout), delete. Alias: `oc cp`
+6. **`oc patch`** — create (--script, --description), list, delete
+7. **`oc preview`** — create (--port, --domain), list, delete
+8. **`oc config`** — set, show
+
+Each command: full syntax, flags table, output example.
+
+**Source:** `cmd/oc/internal/commands/` — all command files.
+
 ---
 
-### CLI Reference (KEEP, streamline)
+### CLI (guide-like pages)
 
-CLI pages stay as a separate nav group. These are reference-only (no conceptual content — that lives in feature pages). Each page: flags table, output examples, practical one-liners.
+The CLI has two tiers:
+
+1. **CLI nav group** — 7 guide-like pages covering install, config, and key workflows per topic. Each page teaches patterns, concepts, and when to use what — not exhaustive flag reference.
+2. **Reference nav group** — one `reference/cli.mdx` page with every command, every subcommand, every flag. The exhaustive lookup page.
+
+Each CLI guide page ends with a `<Tip>` linking to both:
+- The SDK entity page for the same topic (e.g., cli/checkpoint → sandboxes/checkpoints)
+- The relevant section in `reference/cli.mdx` for the full flag spec
 
 #### `cli/overview.mdx` — REWRITE
 - Installation (4 platforms)
 - Configuration (`oc config set`)
 - Resolution order (flags > env > config > defaults)
 - Global flags
-- JSON output mode
+- JSON output mode & scripting with jq
+- Key workflows (create-and-shell, piping patterns)
+- Command index table linking to per-topic pages
 
-#### `cli/sandbox.mdx` — KEEP (minor edits)
-- Includes: create, list, get, kill, hibernate, wake, set-timeout
-#### `cli/exec.mdx` — RENAME from commands.mdx, update to match `oc exec` naming
-- Includes: exec (default), list, attach, kill subcommands
-#### `cli/shell.mdx` — KEEP (minor edits)
-- Supports `--shell` flag (default `/bin/bash`)
-#### `cli/checkpoint.mdx` — KEEP (minor edits)
-- Includes: create, list, restore, spawn, delete
-#### `cli/patch.mdx` — RENAME from patches.mdx (singular)
-- `oc patch` is a separate command group from `oc checkpoint`
-- Includes: create (--script file/stdin), list, delete
-#### `cli/preview.mdx` — RENAME from previews.mdx (singular)
+#### `cli/sandbox.mdx` — REWRITE (guide)
+- Creating, listing, inspecting sandboxes
+- Hibernation & wake patterns
+- Adjusting timeouts
+- Killing a sandbox
+- Common patterns: create-and-shell, filter running sandboxes
+
+#### `cli/exec.mdx` — REWRITE from commands.mdx (guide)
+- Running commands, working directory, env vars
+- Timeouts
+- JSON output capture for scripting
+- Managing exec sessions (list, attach, kill)
+- When to use exec vs shell
+
+#### `cli/shell.mdx` — REWRITE (guide)
+- Opening a shell, choosing shell binary
+- What works (full-screen apps, colors, resizing)
+- Shell vs exec decision table
+- Tips and one-liners
+
+#### `cli/checkpoint.mdx` — REWRITE (guide)
+- Creating checkpoints
+- Forking pattern (parallel exploration)
+- Restoring
+- Checkpoint vs hibernate decision table
+
+#### `cli/patch.mdx` — REWRITE from patches.mdx (guide)
+- What patches do
+- Creating from file or stdin
+- Layering setup steps pattern
+- Inspecting before spawning
+
+#### `cli/preview.mdx` — REWRITE from previews.mdx (guide)
+- Exposing ports
+- Sharing a dev server workflow
+- Multiple ports
+- Custom domains
 
 ---
 
@@ -696,13 +754,14 @@ agents.mdx                       → agents/overview.mdx
 running-commands.mdx             → sandboxes/running-commands.mdx
 working-with-files.mdx           → sandboxes/working-with-files.mdx
 
-# CLI renames (3)
+# CLI renames (4)
 cli/commands.mdx                 → cli/exec.mdx
+cli/checkpoints.mdx              → cli/checkpoint.mdx
 cli/patches.mdx                  → cli/patch.mdx
 cli/previews.mdx                 → cli/preview.mdx
 ```
 
-Total: 16 SDK pages deleted, 3 root pages moved, 3 CLI pages renamed.
+Total: 16 SDK pages deleted, 3 root pages moved, 4 CLI pages renamed.
 
 ---
 
@@ -771,23 +830,25 @@ The Python SDK is **not feature-equivalent** to TypeScript. Every page spec abov
 16. Create `reference/api.mdx` (HTTP API — derived from router.go)
 17. Create `reference/typescript-sdk.mdx` (derived from sdks/typescript/src/)
 18. Create `reference/python-sdk.mdx` (derived from sdks/python/opencomputer/)
+19. Create `reference/cli.mdx` (exhaustive CLI reference — derived from cmd/oc/)
 
-### Phase 5: CLI + Support Pages
-19. Rewrite `cli/overview.mdx`
-20. Update `cli/sandbox.mdx`
-21. Create `cli/exec.mdx` (rename from commands)
-22. Update `cli/shell.mdx`
-23. Update `cli/checkpoint.mdx`
-24. Create `cli/patch.mdx` (rename from patches)
-25. Create `cli/preview.mdx` (rename from previews)
-26. Create `troubleshooting.mdx`
+### Phase 5: CLI Guide Pages + Support
+20. Rewrite `cli/overview.mdx` (install, config, workflows)
+21. Rewrite `cli/sandbox.mdx` (guide: sandbox management patterns)
+22. Rewrite `cli/exec.mdx` (guide: running commands — rename from commands)
+23. Rewrite `cli/shell.mdx` (guide: interactive terminal tips)
+24. Rewrite `cli/checkpoint.mdx` (guide: checkpoint workflows)
+25. Rewrite `cli/patch.mdx` (guide: patch patterns — rename from patches)
+26. Rewrite `cli/preview.mdx` (guide: preview URL workflows — rename from previews)
+27. Create `troubleshooting.mdx`
 
 ### Phase 6: Cleanup
-27. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
-28. Delete all `sdks/` pages
-29. Delete old root-level feature pages (agents.mdx, running-commands.mdx, working-with-files.mdx)
-30. Delete obsolete CLI pages
-31. Update `mint.json` with new navigation
+28. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
+29. Delete all `sdks/` pages
+30. Delete old root-level feature pages (agents.mdx, running-commands.mdx, working-with-files.mdx)
+31. Delete obsolete CLI pages (commands.mdx, checkpoints.mdx [plural], patches.mdx, previews.mdx)
+
+Note: `mint.json` navigation already updated during stub scaffolding pass.
 
 ---
 
@@ -798,16 +859,18 @@ The Python SDK is **not feature-equivalent** to TypeScript. Every page spec abov
 | Getting Started | 2 | 3 | +1 |
 | Agents | 1* | 4 | +3 |
 | Sandboxes | 2* | 8 | +6 |
-| Reference | 0 | 3 | +3 |
 | CLI | 7 | 7 | 0 |
 | Guides | 2 | 2 | 0 |
+| Reference | 0 | 4 | +4 |
 | Resources | 0 | 1 | +1 |
 | SDK (tabs) | 16 | 0 | -16 |
-| **Total** | **30** | **28** | **-2** |
+| **Total** | **30** | **29** | **-1** |
 
 *Current agents.mdx + running-commands.mdx + working-with-files.mdx exist at root level without clear grouping.
 
-Net result: 2 fewer pages, but every page earns its place. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
+CLI nav group = 7 guide-like pages (overview + per-topic). Reference group = HTTP API + TS SDK + Python SDK + CLI Reference (exhaustive). CLI pages teach workflows; Reference/CLI has every flag.
+
+Net result: 1 fewer page, but every page earns its place. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
 
 ---
 
@@ -824,5 +887,5 @@ Each page must pass these checks before shipping:
 - [ ] Python-unique features (context manager, collect_events, recv) documented where relevant
 - [ ] No "coming soon" for features that now exist
 - [ ] No filler sentences ("In this section we will..." — just do it)
-- [ ] Cross-links to reference pages for full method signatures
-- [ ] CLI equivalent noted where applicable
+- [ ] Entity pages: `<Tip>` at bottom linking to CLI guide (if applicable) + Reference pages (TS SDK, Python SDK, HTTP API)
+- [ ] CLI guide pages: `<Tip>` at bottom linking to SDK entity page + reference/cli.mdx section

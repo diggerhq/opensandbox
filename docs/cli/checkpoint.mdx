@@ -1,50 +1,50 @@
 ---
-title: "checkpoint"
-description: "Snapshot, fork, and restore sandboxes"
+title: "Checkpoints"
+description: "Snapshot, fork, and restore from the CLI"
 ---
 
-{/* STUB — Renamed from checkpoints.mdx. Content will be migrated with minor updates. */}
+{/* STUB — Guide-like CLI page. Key workflows and patterns.
+  Exhaustive reference lives at /reference/cli. */}
 
-{/* Sections:
-  - oc checkpoint create <sandbox-id> --name <name>
-  - oc checkpoint list <sandbox-id>
-  - oc checkpoint restore <sandbox-id> <checkpoint-id>
-  - oc checkpoint spawn <checkpoint-id> [--timeout]
-  - oc checkpoint delete <sandbox-id> <checkpoint-id>
-  - Alias: oc cp
-  - Examples: save before risky op, fork for parallel testing, checkpoint vs hibernate table
+## Creating a Checkpoint
+
+{/* oc checkpoint create. What gets captured (memory, disk, processes). */}
+
+```bash
+oc checkpoint create sb-abc123 --name before-migration
+```
+
+## Forking from a Checkpoint
+
+{/* oc checkpoint spawn. Creates a new sandbox from saved state. Parallel exploration pattern. */}
+
+```bash
+# Spawn two independent sandboxes from the same checkpoint
+ID1=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.id')
+ID2=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.id')
+
+# Run different experiments
+oc exec $ID1 -- ./experiment-a.sh
+oc exec $ID2 -- ./experiment-b.sh
+```
+
+## Restoring
+
+{/* oc checkpoint restore. Reverts in-place — all changes since checkpoint are lost. */}
+
+## Checkpoint vs Hibernate
+
+{/* When to use which:
+  - Checkpoint: branching, forking, testing multiple approaches
+  - Hibernate: pause and resume the same sandbox, cost savings
 */}
 
-## Create a Checkpoint
+| | Checkpoint | Hibernate |
+| --- | --- | --- |
+| Original sandbox | Keeps running | Stopped |
+| Can fork / clone | Yes | No |
+| Use case | Branching, testing | Pause and resume |
 
-```bash
-oc checkpoint create sb-abc123 --name my-checkpoint
-```
-
-## List Checkpoints
-
-```bash
-oc checkpoint list sb-abc123
-```
-
-## Restore
-
-```bash
-oc checkpoint restore sb-abc123 cp-7f3a1b2c
-```
-
-## Spawn (Fork)
-
-```bash
-oc checkpoint spawn cp-7f3a1b2c
-```
-
-## Delete
-
-```bash
-oc checkpoint delete sb-abc123 cp-7f3a1b2c
-```
-
-## Examples
-
-{/* Save before risky op, fork for parallel testing, checkpoint vs hibernate comparison */}
+<Tip>
+  SDK usage: [Checkpoints](/sandboxes/checkpoints). Full flags: [CLI Reference](/reference/cli#oc-checkpoint).
+</Tip>
