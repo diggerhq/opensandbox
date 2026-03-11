@@ -1,0 +1,37 @@
+---
+title: "Tools"
+description: "Configure what tools an agent can use"
+---
+
+{/* STUB — Progressive JPEG pass 1. Tools configuration including MCP servers. */}
+
+## Default Tools
+
+{/* What the agent can do out of the box: bash, file read/write, Python. Brief explanation of allowedTools param to restrict. */}
+
+## MCP Servers
+
+{/* Main event on this page. What MCP is (one sentence), then how to configure:
+  - mcpServers param structure: Record<string, { command, args?, env? }>
+  - MCP servers run inside the sandbox, agent discovers tools via protocol
+*/}
+
+### Example: SQLite Database Tool
+
+{/* TS + Python CodeGroup showing mcpServers config with sqlite MCP server */}
+
+### Example: Custom API Tool
+
+{/* TS + Python CodeGroup showing custom MCP server */}
+
+## System Prompt
+
+{/* systemPrompt param — how to steer agent behavior with custom instructions. Example. */}
+
+## Permission Mode
+
+{/* permissionMode param — what it controls, available values. */}
+
+## Max Turns
+
+{/* maxTurns param — limiting agent iterations. When to use it. */}

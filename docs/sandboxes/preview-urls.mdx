@@ -1,0 +1,56 @@
+---
+title: "Preview URLs"
+description: "Expose sandbox ports to the internet"
+---
+
+{/* STUB — Progressive JPEG pass 1. Entity page: public HTTPS URLs for sandbox ports. */}
+
+## What is a Preview URL
+
+{/* A public HTTPS URL that exposes a port inside your sandbox to the internet. Start a web server on port 3000, create a preview URL, and anyone can access it. */}
+
+## Quick Example
+
+{/* Create preview URL. TS + Python CodeGroup. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: sandbox.createPreviewURL({ port: 3000 }) -> url
+```
+
+```python Python
+# TODO: sandbox.create_preview_url(port=3000) -> url
+```
+
+</CodeGroup>
+
+## API Reference
+
+### Create Preview URL
+
+{/* sandbox.createPreviewURL({ port, domain?, authConfig? }). ParamField. */}
+
+### List Preview URLs
+
+{/* sandbox.listPreviewURLs(). */}
+
+### Delete Preview URL
+
+{/* sandbox.deletePreviewURL(port). */}
+
+## Custom Domains
+
+{/* Requires Cloudflare integration on deployment.
+  - Pass domain param when creating
+  - SSL automatic via Cloudflare
+  - Custom domain setup is org-level config (dashboard, not SDK)
+*/}
+
+## Persistence
+
+{/* Preview URLs persist across hibernation/wake cycles. */}
+
+## Examples
+
+{/* Share a dev server. Multiple ports. Custom domain. */}

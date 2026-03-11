@@ -1,0 +1,48 @@
+---
+title: "exec"
+description: "Execute shell commands inside a sandbox"
+---
+
+{/* STUB — Renamed from commands.mdx. Content will be migrated with minor updates (oc exec naming). */}
+
+{/* Sections:
+  - oc exec <id> -- <command...> (run and wait)
+  - Flags: --cwd, --timeout, --env
+  - oc exec list <id> — list running exec sessions
+  - oc exec attach <id> <session-id> — attach to running session
+  - oc exec kill <id> <session-id> — kill session
+  - ProcessResult (JSON output)
+  - Examples: cwd, env, timeout, chaining, capture JSON output
+*/}
+
+## Running a Command
+
+```bash
+oc exec sb-abc123 -- echo "Hello, World!"
+```
+
+### `oc exec <id> -- <command...>`
+
+{/* Flags table: --cwd, --timeout, --env. JSON output mode. */}
+
+## List Exec Sessions
+
+```bash
+oc exec list sb-abc123
+```
+
+## Attach to a Session
+
+```bash
+oc exec attach sb-abc123 sess-xyz
+```
+
+## Kill a Session
+
+```bash
+oc exec kill sb-abc123 sess-xyz
+```
+
+## Examples
+
+{/* Working directory, env vars, timeout, chaining, JSON capture */}

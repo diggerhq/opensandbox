@@ -1,0 +1,213 @@
+---
+title: "HTTP API"
+description: "Complete REST API reference"
+---
+
+{/* STUB — Progressive JPEG pass 1. Every endpoint, request/response format, auth, status codes. */}
+
+## Base URL & Authentication
+
+{/* Base: https://app.opencomputer.dev/api
+  - Control plane auth: X-API-Key header (or api_key query param)
+  - Worker direct auth: Authorization: Bearer <JWT> (or token query param for WS)
+  - SDK users only need API key — SDK handles JWT transparently
+  - All JSON except file read (plain text)
+*/}
+
+## Sandbox Lifecycle
+
+### `POST /api/sandboxes` — Create
+
+{/* Params: templateID, timeout, envs, metadata, cpuCount, memoryMB.
+  Response: sandboxID, status, connectURL, token, cpuCount, memoryMB, startedAt, endAt.
+  Curl example. */}
+
+### `GET /api/sandboxes` — List
+
+{/* Response: array of sandbox objects. */}
+
+### `GET /api/sandboxes/:id` — Get
+
+{/* Response: sandbox details. */}
+
+### `DELETE /api/sandboxes/:id` — Kill
+
+{/* 204 on success. */}
+
+### `POST /api/sandboxes/:id/timeout` — Set Timeout
+
+{/* Body: { timeout: seconds }. */}
+
+### `POST /api/sandboxes/:id/hibernate` — Hibernate
+
+{/* Snapshot VM state. */}
+
+### `POST /api/sandboxes/:id/wake` — Wake
+
+{/* Resume from hibernation. */}
+
+## Commands (Exec)
+
+### `POST /api/sandboxes/:id/exec/run` — Run Command
+
+{/* Body: { command, timeout?, env?, cwd? }. Response: { exitCode, stdout, stderr }. */}
+
+### `POST /api/sandboxes/:id/exec` — Create Exec Session
+
+{/* Body: { command, args?, env?, cwd?, timeout? }. Response: { sessionId }. */}
+
+### `GET /api/sandboxes/:id/exec` — List Sessions
+
+{/* Response: array of ExecSessionInfo. */}
+
+### `GET /api/sandboxes/:id/exec/:sessionID` — WebSocket Attach
+
+{/* Upgrade to WebSocket. Binary protocol. */}
+
+### `POST /api/sandboxes/:id/exec/:sessionID/kill` — Kill Session
+
+{/* Body: { signal? }. */}
+
+## Agent Sessions
+
+### `POST /api/sandboxes/:id/agent` — Create Agent Session
+
+{/* Body: { prompt, model?, systemPrompt?, allowedTools?, permissionMode?, maxTurns?, cwd?, mcpServers?, resume? }. */}
+
+### `GET /api/sandboxes/:id/agent` — List Agent Sessions
+
+{/* Response: array of session objects. */}
+
+### `POST /api/sandboxes/:id/agent/:sid/prompt` — Send Follow-up
+
+{/* Body: { prompt }. */}
+
+### `POST /api/sandboxes/:id/agent/:sid/interrupt` — Interrupt
+
+{/* Stop current turn. */}
+
+### `POST /api/sandboxes/:id/agent/:sid/kill` — Kill
+
+{/* Terminate agent session. */}
+
+## Filesystem
+
+### `GET /api/sandboxes/:id/files?path=...` — Read File
+
+{/* Returns file content as plain text. */}
+
+### `PUT /api/sandboxes/:id/files` — Write File
+
+{/* Body: { path, content }. */}
+
+### `GET /api/sandboxes/:id/files/list?path=...` — List Directory
+
+{/* Response: array of EntryInfo. */}
+
+### `POST /api/sandboxes/:id/files/mkdir` — Create Directory
+
+{/* Body: { path }. */}
+
+### `DELETE /api/sandboxes/:id/files?path=...` — Remove
+
+{/* Delete file or directory. */}
+
+## Checkpoints
+
+### `POST /api/sandboxes/:id/checkpoints` — Create
+
+{/* Body: { name }. Response: CheckpointInfo. */}
+
+### `GET /api/sandboxes/:id/checkpoints` — List
+
+{/* Response: array of CheckpointInfo. */}
+
+### `POST /api/sandboxes/:id/checkpoints/:checkpointId/restore` — Restore
+
+{/* Revert sandbox in-place. */}
+
+### `POST /api/sandboxes/from-checkpoint/:checkpointId` — Fork
+
+{/* Create new sandbox from checkpoint. Response: sandbox object. */}
+
+### `DELETE /api/sandboxes/:id/checkpoints/:checkpointId` — Delete
+
+{/* 204 on success. */}
+
+## Checkpoint Patches
+
+### `POST /api/sandboxes/checkpoints/:checkpointId/patches` — Create
+
+{/* Body: { script, description? }. */}
+
+### `GET /api/sandboxes/checkpoints/:checkpointId/patches` — List
+
+{/* Response: array of PatchInfo. */}
+
+### `DELETE /api/sandboxes/checkpoints/:checkpointId/patches/:patchId` — Delete
+
+{/* 204 on success. */}
+
+## Preview URLs
+
+### `POST /api/sandboxes/:id/preview` — Create
+
+{/* Body: { port, domain? }. Response: { url }. */}
+
+### `GET /api/sandboxes/:id/preview` — List
+
+{/* Response: array of preview URL objects. */}
+
+### `DELETE /api/sandboxes/:id/preview/:port` — Delete
+
+{/* 204 on success. */}
+
+## Templates
+
+### `POST /api/templates` — Build
+
+{/* Body: { name, dockerfile }. Response: TemplateInfo. */}
+
+### `GET /api/templates` — List
+
+{/* Response: array of TemplateInfo. */}
+
+### `GET /api/templates/:name` — Get
+
+{/* Response: TemplateInfo. */}
+
+### `DELETE /api/templates/:name` — Delete
+
+{/* 204 on success. */}
+
+## PTY
+
+### `POST /api/sandboxes/:id/pty` — Create
+
+{/* Body: { cols?, rows? }. Response: { sessionId }. */}
+
+### `GET /api/sandboxes/:id/pty/:sessionID` — WebSocket
+
+{/* Upgrade to WebSocket. Binary protocol same as exec. */}
+
+### `POST /api/sandboxes/:id/pty/:sessionID/resize` — Resize
+
+{/* Body: { cols, rows }. */}
+
+### `DELETE /api/sandboxes/:id/pty/:sessionID` — Kill
+
+{/* Terminate PTY session. */}
+
+## WebSocket Binary Protocol
+
+{/* Exec and PTY sessions use binary WebSocket frames.
+  Input: prefix 0x00 + stdin data.
+  Output: 0x01 (stdout), 0x02 (stderr), 0x03 (exit code, 4-byte BE int32), 0x04 (scrollback end marker).
+  On connect: server replays scrollback buffer, sends 0x04, then live-streams.
+*/}
+
+## Error Format
+
+{/* All errors: {"error": "message"} envelope.
+  Common codes: 400, 401, 403, 404, 409, 500.
+*/}

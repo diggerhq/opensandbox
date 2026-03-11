@@ -1,0 +1,56 @@
+---
+title: "Patches"
+description: "Scripts that run when forking from a checkpoint"
+---
+
+{/* STUB — Progressive JPEG pass 1. Entity page: checkpoint-attached scripts. */}
+
+## What is a Patch
+
+{/* A shell script attached to a checkpoint that runs every time a sandbox is forked from that checkpoint. Inject config, update deps, or customize state at fork time without modifying the checkpoint. */}
+
+## Quick Example
+
+{/* Create patch on checkpoint. TS + Python CodeGroup. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: Sandbox.createCheckpointPatch(checkpointId, { script: '...', description: '...' })
+```
+
+```python Python
+# TODO: Sandbox.create_checkpoint_patch(checkpoint_id, script='...', description='...')
+```
+
+</CodeGroup>
+
+## API Reference
+
+### Create Patch
+
+{/* Sandbox.createCheckpointPatch(checkpointId, { script, description }). ParamField. */}
+
+### List Patches
+
+{/* Sandbox.listCheckpointPatches(checkpointId). Returns PatchInfo[]. */}
+
+### Delete Patch
+
+{/* Sandbox.deleteCheckpointPatch(checkpointId, patchId). */}
+
+## When Patches Run
+
+{/* Applied on wake/boot from checkpoint. Strategy is always `on_wake`. */}
+
+## Execution Order
+
+{/* Patches run in creation order. */}
+
+## Failure Handling
+
+{/* What happens if a patch script fails. */}
+
+## Example
+
+{/* Inject API keys at fork time. Update packages without rebuilding checkpoint. */}

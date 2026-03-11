@@ -1,0 +1,163 @@
+---
+title: "TypeScript SDK"
+description: "Complete TypeScript SDK reference"
+---
+
+{/* STUB — Progressive JPEG pass 1. Every class, method, type, parameter. */}
+
+## Installation
+
+```bash
+npm install @opencomputer/sdk
+```
+
+```typescript
+import { Sandbox, Templates } from "@opencomputer/sdk";
+```
+
+## Sandbox
+
+{/* Static methods: create(opts?), connect(sandboxId, opts?), createFromCheckpoint(checkpointId, opts?),
+  createCheckpointPatch(checkpointId, opts), listCheckpointPatches(checkpointId, opts?), deleteCheckpointPatch(checkpointId, patchId, opts?) */}
+
+### Static Methods
+
+#### `Sandbox.create(opts?): Promise<Sandbox>`
+
+{/* SandboxOpts: template, timeout, apiKey, apiUrl, envs, metadata, cpuCount, memoryMB */}
+
+#### `Sandbox.connect(sandboxId, opts?): Promise<Sandbox>`
+
+#### `Sandbox.createFromCheckpoint(checkpointId, opts?): Promise<Sandbox>`
+
+#### `Sandbox.createCheckpointPatch(checkpointId, opts): Promise<PatchResult>`
+
+#### `Sandbox.listCheckpointPatches(checkpointId, opts?): Promise<PatchInfo[]>`
+
+#### `Sandbox.deleteCheckpointPatch(checkpointId, patchId, opts?): Promise<void>`
+
+### Instance Methods
+
+#### `sandbox.kill(): Promise<void>`
+
+#### `sandbox.isRunning(): Promise<boolean>`
+
+#### `sandbox.hibernate(): Promise<void>`
+
+#### `sandbox.wake(opts?): Promise<void>`
+
+#### `sandbox.setTimeout(timeout): Promise<void>`
+
+#### `sandbox.createCheckpoint(name): Promise<CheckpointInfo>`
+
+#### `sandbox.listCheckpoints(): Promise<CheckpointInfo[]>`
+
+#### `sandbox.restoreCheckpoint(checkpointId): Promise<void>`
+
+#### `sandbox.deleteCheckpoint(checkpointId): Promise<void>`
+
+#### `sandbox.createPreviewURL(opts): Promise<PreviewURLResult>`
+
+#### `sandbox.listPreviewURLs(): Promise<PreviewURLResult[]>`
+
+#### `sandbox.deletePreviewURL(port): Promise<void>`
+
+### Properties
+
+{/* sandboxId: string, agent: Agent, exec: Exec, files: Filesystem, pty: Pty */}
+
+### Types
+
+{/* SandboxOpts, CheckpointInfo, PatchInfo, PatchResult, PreviewURLResult */}
+
+## Agent
+
+### `sandbox.agent.start(opts?): Promise<AgentSession>`
+
+{/* AgentStartOpts extends AgentConfig: prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, onEvent, onError, resume, onExit, onScrollbackEnd */}
+
+### `sandbox.agent.attach(sessionId, opts?): Promise<AgentSession>`
+
+### `sandbox.agent.list(): Promise<AgentSessionInfo[]>`
+
+### AgentSession
+
+{/* sessionId, done: Promise<number>, sendPrompt(), interrupt(), configure(), kill(), close() */}
+
+### Types
+
+{/* AgentStartOpts, AgentConfig, AgentEvent, McpServerConfig */}
+
+## Exec
+
+### `sandbox.exec.run(command, opts?): Promise<ProcessResult>`
+
+{/* RunOpts: timeout, env, cwd */}
+
+### `sandbox.exec.start(command, opts?): Promise<ExecSession>`
+
+{/* ExecStartOpts: args, env, cwd, timeout, maxRunAfterDisconnect, onStdout, onStderr, onExit */}
+
+### `sandbox.exec.attach(sessionId, opts?): Promise<ExecSession>`
+
+{/* ExecAttachOpts: onStdout, onStderr, onExit, onScrollbackEnd */}
+
+### `sandbox.exec.list(): Promise<ExecSessionInfo[]>`
+
+### `sandbox.exec.kill(sessionId, signal?): Promise<void>`
+
+### ExecSession
+
+{/* sessionId, done: Promise<number>, sendStdin(), kill(), close() */}
+
+### Types
+
+{/* RunOpts, ExecStartOpts, ExecAttachOpts, ProcessResult, ExecSessionInfo */}
+
+## Filesystem
+
+### `sandbox.files.read(path): Promise<string>`
+
+### `sandbox.files.readBytes(path): Promise<Uint8Array>`
+
+### `sandbox.files.write(path, content): Promise<void>`
+
+### `sandbox.files.list(path?): Promise<EntryInfo[]>`
+
+### `sandbox.files.makeDir(path): Promise<void>`
+
+### `sandbox.files.remove(path): Promise<void>`
+
+### `sandbox.files.exists(path): Promise<boolean>`
+
+### Types
+
+{/* EntryInfo: name, isDir, size, modTime */}
+
+## Pty
+
+### `sandbox.pty.create(opts?): Promise<PtySession>`
+
+{/* PtyOpts: cols, rows, onOutput */}
+
+### PtySession
+
+{/* sessionId, send(data), close() */}
+
+## Templates
+
+<Note>
+  `Templates` is a standalone class (not a Sandbox property). Import: `import { Templates } from "@opencomputer/sdk"`.
+</Note>
+
+### `Templates.build(name, dockerfile, opts?): Promise<TemplateInfo>`
+
+### `Templates.list(opts?): Promise<TemplateInfo[]>`
+
+### `Templates.get(name, opts?): Promise<TemplateInfo>`
+
+### `Templates.delete(name, opts?): Promise<void>`
+
+### Types
+
+{/* TemplateInfo: templateID, name, tag, status */}

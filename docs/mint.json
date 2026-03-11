@@ -25,78 +25,64 @@
     "name": "Get Started",
     "url": "/quickstart"
   },
-  "tabs": [
-    {
-      "name": "TypeScript SDK",
-      "url": "sdks/typescript"
-    },
-    {
-      "name": "Python SDK",
-      "url": "sdks/python"
-    },
-    {
-      "name": "CLI",
-      "url": "cli"
-    }
-  ],
+  "tabs": [],
   "navigation": [
     {
       "group": "Getting Started",
       "pages": [
         "introduction",
-        "quickstart"
+        "quickstart",
+        "how-it-works"
       ]
     },
     {
-      "group": "Using OpenComputer",
+      "group": "Agents",
       "pages": [
-        "agents",
-        "running-commands",
-        "working-with-files"
+        "agents/overview",
+        "agents/events",
+        "agents/tools",
+        "agents/multi-turn"
+      ]
+    },
+    {
+      "group": "Sandboxes",
+      "pages": [
+        "sandboxes/overview",
+        "sandboxes/running-commands",
+        "sandboxes/working-with-files",
+        "sandboxes/interactive-terminals",
+        "sandboxes/checkpoints",
+        "sandboxes/templates",
+        "sandboxes/patches",
+        "sandboxes/preview-urls"
       ]
     },
     {
       "group": "Guides",
       "pages": [
-        "guides/build-a-lovable-clone"
+        "guides/build-a-lovable-clone",
+        "guides/agent-skill"
       ]
     },
     {
-      "group": "TypeScript SDK",
+      "group": "Reference",
       "pages": [
-        "sdks/typescript/overview",
-        "sdks/typescript/sandbox",
-        "sdks/typescript/commands",
-        "sdks/typescript/filesystem",
-        "sdks/typescript/pty",
-        "sdks/typescript/templates",
-        "sdks/typescript/checkpoints",
-        "sdks/typescript/patches"
-      ]
-    },
-    {
-      "group": "Python SDK",
-      "pages": [
-        "sdks/python/overview",
-        "sdks/python/sandbox",
-        "sdks/python/commands",
-        "sdks/python/filesystem",
-        "sdks/python/pty",
-        "sdks/python/templates",
-        "sdks/python/checkpoints",
-        "sdks/python/patches"
-      ]
-    },
-    {
-      "group": "CLI Reference",
-      "pages": [
+        "reference/api",
+        "reference/typescript-sdk",
+        "reference/python-sdk",
         "cli/overview",
         "cli/sandbox",
-        "cli/commands",
+        "cli/exec",
         "cli/shell",
-        "cli/checkpoints",
-        "cli/patches",
-        "cli/previews"
+        "cli/checkpoint",
+        "cli/patch",
+        "cli/preview"
+      ]
+    },
+    {
+      "group": "Resources",
+      "pages": [
+        "troubleshooting"
       ]
     }
   ],

@@ -1,0 +1,68 @@
+---
+title: "Events"
+description: "Understanding the agent event stream"
+---
+
+{/* STUB — Progressive JPEG pass 1. Complete reference for agent session events. */}
+
+## Overview
+
+{/* Brief intro: agent sessions emit typed events via onEvent callback. Each event has a `type` field. */}
+
+## Event Lifecycle
+
+{/* Typical order for a successful session:
+  ready -> configured -> assistant -> tool_use_summary -> assistant -> ... -> result -> turn_complete
+*/}
+
+## Event Reference
+
+{/* One subsection per event type. Each with: what it means, when it fires, fields/payload, code example. */}
+
+### `ready`
+
+{/* Agent process started, waiting for configuration. */}
+
+### `configured`
+
+{/* Agent configured and working on the prompt. */}
+
+### `assistant`
+
+{/* Claude's text output. Fields: content. The most common event — this is the agent "talking". */}
+
+### `tool_use_summary`
+
+{/* Agent used a tool (bash, file, etc.). Fields: tool, input summary, output summary. */}
+
+### `system`
+
+{/* System-level message from the agent process. */}
+
+### `result`
+
+{/* Final structured result. Fields: result. Only emitted if the agent produces a final answer. */}
+
+### `turn_complete`
+
+{/* Turn finished. Fields: claude_session_id (used for resume). Emitted after result. */}
+
+### `interrupted`
+
+{/* Agent was interrupted via session.interrupt(). */}
+
+### `error`
+
+{/* Agent encountered an error. Fields: error message. */}
+
+## Filtering Events
+
+{/* Practical patterns:
+  - Log only assistant messages
+  - Capture the final result
+  - Build a progress indicator from tool_use_summary events
+*/}
+
+## Error Handling
+
+{/* error events vs onError (stderr) vs rejected promises. When each fires, how to respond. */}

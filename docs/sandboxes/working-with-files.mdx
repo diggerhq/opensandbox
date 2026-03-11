@@ -1,0 +1,46 @@
+---
+title: "Working with Files"
+description: "Read, write, and manage files inside a sandbox"
+---
+
+{/* STUB — Progressive JPEG pass 1. Filesystem operations via sandbox.files. */}
+
+## Reading Files
+
+{/* sandbox.files.read(path) — returns string content. TS + Python CodeGroup. */}
+
+### Read as Bytes
+
+{/* sandbox.files.readBytes(path) / read_bytes(path) — returns binary. TS + Python CodeGroup. */}
+
+## Writing Files
+
+{/* sandbox.files.write(path, content) — text and binary. TS + Python CodeGroup. */}
+
+## Listing Directories
+
+{/* sandbox.files.list(path) — returns EntryInfo[]. TS + Python CodeGroup. */}
+
+### EntryInfo
+
+{/* Table: name, isDir/is_dir, size, modTime/mod_time */}
+
+## Managing Files
+
+{/* make_dir, remove, exists. TS + Python CodeGroup for each. */}
+
+### Create Directory
+
+{/* sandbox.files.makeDir(path) / make_dir(path) */}
+
+### Remove
+
+{/* sandbox.files.remove(path) */}
+
+### Check Existence
+
+{/* sandbox.files.exists(path) — client-side wrapper (HEAD request). Both SDKs. */}
+
+## Examples
+
+{/* Upload & run a script. Copy files between paths. */}

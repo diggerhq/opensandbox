@@ -1,0 +1,34 @@
+---
+title: "How It Works"
+description: "Architecture and key technical decisions"
+---
+
+{/* STUB — Progressive JPEG pass 1. Goal: clear mental model in under 3 minutes. Concise, technical, opinionated. No marketing. */}
+
+## Overview
+
+{/* One paragraph: Your code talks to the OpenComputer API. The API provisions a Firecracker microVM. Your agent (or commands) run inside that VM. Events stream back to your code. */}
+
+## Firecracker microVMs
+
+{/* Why not containers? Each sandbox is a real VM with its own kernel, memory, and disk. Hardware-level isolation (KVM). Boot in ~150ms. Same technology AWS Lambda uses. */}
+
+## Hibernation
+
+{/* VM's full state (memory + disk) snapshotted to S3. Resume is fast — kernel doesn't reboot, picks up where it left off. Tradeoff: snapshot size scales with memory allocation. */}
+
+## Checkpoints & Forking
+
+{/* Named snapshots. Forking creates a new VM from a checkpoint with copy-on-write semantics. Enables parallel exploration (try 5 approaches from same starting point) and reproducibility. */}
+
+## Templates
+
+{/* Built from Dockerfiles but converted to VM root filesystems (not run as containers). Docker produces a filesystem image, Firecracker boots from it directly. */}
+
+## Networking
+
+{/* Each VM gets a TAP device with NAT. Full outbound internet. Inbound access via preview URLs (reverse-proxied through the host). */}
+
+## Agent Sessions
+
+{/* Claude Agent SDK runs inside the VM as a regular process. SDK spawns Claude, gives it bash + file tools, manages think->act->observe loop. Events parsed from stdout, streamed to your code over WebSocket. */}

@@ -1,0 +1,69 @@
+---
+title: "Checkpoints"
+description: "Snapshot and fork sandbox state"
+---
+
+{/* STUB — Progressive JPEG pass 1. Entity page: named VM snapshots. */}
+
+## What is a Checkpoint
+
+{/* Named snapshot of a running sandbox's full state (memory, disk, processes). Fork new sandboxes from it — each fork starts exactly where the checkpoint left off. Like git commits for VMs. */}
+
+## Quick Example
+
+{/* Create checkpoint -> fork new sandbox -> verify state preserved. TS + Python CodeGroup. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: sandbox.createCheckpoint('before-deploy') -> Sandbox.createFromCheckpoint(id) -> verify
+```
+
+```python Python
+# TODO: sandbox.create_checkpoint('before-deploy') -> Sandbox.create_from_checkpoint(id) -> verify
+```
+
+</CodeGroup>
+
+## Checkpoints vs Hibernation
+
+{/* Key difference:
+  - Hibernation pauses and resumes the SAME sandbox
+  - Checkpoints create NEW sandboxes from saved state
+  - A sandbox can have many checkpoints; hibernation is a single pause/resume
+*/}
+
+## API Reference
+
+### Create Checkpoint
+
+{/* sandbox.createCheckpoint(name) / create_checkpoint(name). ParamField. */}
+
+### List Checkpoints
+
+{/* sandbox.listCheckpoints() / list_checkpoints(). Returns CheckpointInfo[]. */}
+
+### Fork from Checkpoint
+
+{/* Sandbox.createFromCheckpoint(checkpointId) / create_from_checkpoint(). Creates new sandbox. */}
+
+### Restore Checkpoint
+
+{/* sandbox.restoreCheckpoint(checkpointId) / restore_checkpoint(). Reverts sandbox in-place. */}
+
+### Delete Checkpoint
+
+{/* sandbox.deleteCheckpoint(checkpointId) / delete_checkpoint(). */}
+
+## CheckpointInfo
+
+{/* Fields:
+  - TS: id, sandboxId, orgId, name, sandboxConfig, status, sizeBytes, createdAt
+  - Python: returns raw dict from API
+  - HTTP: id, sandboxId, orgId, name, status, sizeBytes, createdAt
+  Status: processing -> ready (or failed)
+*/}
+
+## Examples
+
+{/* Checkpoint before risky operation. Fork for parallel exploration (try 5 approaches from same state). */}

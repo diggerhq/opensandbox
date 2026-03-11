@@ -1,0 +1,41 @@
+---
+title: "patch"
+description: "Apply scripted modifications to checkpoints"
+---
+
+{/* STUB — Renamed from patches.mdx. Content will be migrated with minor updates. */}
+
+{/* Sections:
+  - oc patch create <checkpoint-id> --script <file|-> [--description]
+  - oc patch list <checkpoint-id>
+  - oc patch delete <checkpoint-id> <patch-id>
+  - Examples: layer setup, stdin one-liners, inspect before spawning
+*/}
+
+## Create a Patch
+
+```bash
+oc patch create cp-7f3a1b2c --script ./setup.sh --description "Install dependencies"
+```
+
+From stdin:
+
+```bash
+echo "apt install -y curl jq" | oc patch create cp-7f3a1b2c --script=-
+```
+
+## List Patches
+
+```bash
+oc patch list cp-7f3a1b2c
+```
+
+## Delete a Patch
+
+```bash
+oc patch delete cp-7f3a1b2c patch-3c8d2e1a
+```
+
+## Examples
+
+{/* Layer setup steps, stdin one-liners, inspect before spawning */}

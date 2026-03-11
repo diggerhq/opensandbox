@@ -1,0 +1,73 @@
+---
+title: "Running Commands"
+description: "Execute shell commands inside a sandbox"
+---
+
+{/* STUB — Progressive JPEG pass 1. Two modes: run() (sync) and start() (streaming/async). */}
+
+## Quick Commands: `sandbox.exec.run()`
+
+{/* Run a shell command and wait for the result. TS + Python CodeGroup. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: sandbox.exec.run('echo "hello"') -> result.stdout
+```
+
+```python Python
+# TODO: sandbox.exec.run('echo "hello"') -> result.stdout
+```
+
+</CodeGroup>
+
+### Parameters
+
+{/* ParamField: command (required), timeout (default 60), env, cwd */}
+
+### ProcessResult
+
+{/* Table: exitCode/exit_code, stdout, stderr */}
+
+### Examples
+
+{/* Working directory, env vars, timeout, chaining commands. TS + Python CodeGroup. */}
+
+## Async Commands: `sandbox.exec.start()`
+
+{/* Start long-running command, stream output.
+  - TS: full streaming — returns ExecSession with onStdout, onStderr, onExit callbacks, sendStdin(), kill(), close(). Supports maxRunAfterDisconnect.
+  - Python: returns str (session ID only). No streaming callbacks, no ExecSession. Use exec.list() and exec.kill().
+*/}
+
+### TypeScript — Full Streaming
+
+{/* TS example with onStdout, onStderr, onExit, sendStdin, kill */}
+
+### Python — Session ID
+
+{/* Python example: start() returns session_id, then list/kill */}
+
+### ExecSession (TypeScript)
+
+{/* Table: sessionId, done, sendStdin, kill, close */}
+
+## Managing Sessions
+
+{/* exec.list() — both SDKs. exec.attach() — TS only. exec.kill() — both SDKs. */}
+
+### List Sessions
+
+{/* TS + Python CodeGroup */}
+
+### Attach to Running Session (TypeScript only)
+
+{/* Reconnect to running session by ID. TS example with onStdout, onScrollbackEnd. */}
+
+### Kill a Session
+
+{/* TS + Python CodeGroup */}
+
+## Examples
+
+{/* Dev server (TS streaming), long-running process, reconnect pattern (TS only) */}

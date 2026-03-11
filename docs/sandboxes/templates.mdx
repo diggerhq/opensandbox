@@ -1,0 +1,66 @@
+---
+title: "Templates"
+description: "Pre-built base images for sandboxes"
+---
+
+{/* STUB — Progressive JPEG pass 1. Entity page: Dockerfile-based base images. */}
+
+## What is a Template
+
+{/* Pre-built base image that sandboxes start from. The `default` template includes Ubuntu, Python, Node.js. Build custom templates from Dockerfiles to skip setup time. */}
+
+## Quick Example
+
+{/* Build template -> create sandbox from it. TS + Python CodeGroup. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: Templates.build('my-env', dockerfile) -> Sandbox.create({ template: 'my-env' })
+```
+
+```python Python
+# TODO: Template.build('my-env', dockerfile) -> Sandbox.create(template='my-env')
+```
+
+</CodeGroup>
+
+## Default Template
+
+{/* What's pre-installed: Ubuntu, Python 3, Node.js, common CLI tools. Derived from Dockerfile.default. */}
+
+## API Reference
+
+<Note>
+  Templates is a standalone class, not a property on Sandbox. TypeScript exports `Templates` (plural), Python exports `Template` (singular).
+</Note>
+
+### Build Template
+
+{/* templates.build(name, dockerfile) / Template.build(name, dockerfile). ParamField. */}
+
+### List Templates
+
+{/* templates.list() / Template.list(). Returns TemplateInfo[]. */}
+
+### Get Template
+
+{/* templates.get(name) / Template.get(name). */}
+
+### Delete Template
+
+{/* templates.delete(name) / Template.delete(name). */}
+
+### Using with Sandbox.create
+
+{/* Sandbox.create({ template: 'my-template' }) */}
+
+## TemplateInfo
+
+{/* Fields: templateID/template_id, name, tag, status.
+  Status: building -> ready (or error).
+*/}
+
+## Example
+
+{/* Template with specific language/framework pre-installed (e.g., Node 20 + pnpm). */}

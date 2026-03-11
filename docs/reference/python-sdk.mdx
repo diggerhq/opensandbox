@@ -1,0 +1,160 @@
+---
+title: "Python SDK"
+description: "Complete Python SDK reference"
+---
+
+{/* STUB — Progressive JPEG pass 1. Every class, method, type. Accurate to actual Python SDK. */}
+
+## Installation
+
+```bash
+pip install opencomputer-sdk
+```
+
+```python
+from opencomputer import Sandbox, Template
+```
+
+## Sandbox
+
+### Class Methods
+
+#### `await Sandbox.create(template?, timeout?, api_key?, api_url?, envs?, metadata?): Sandbox`
+
+{/* No cpuCount/memoryMB — use HTTP API for custom resources */}
+
+#### `await Sandbox.connect(sandbox_id, api_key?, api_url?): Sandbox`
+
+#### `await Sandbox.create_from_checkpoint(checkpoint_id, ...): Sandbox`
+
+#### `await Sandbox.create_checkpoint_patch(checkpoint_id, script, description?, ...): dict`
+
+#### `await Sandbox.list_checkpoint_patches(checkpoint_id, ...): list[dict]`
+
+#### `await Sandbox.delete_checkpoint_patch(checkpoint_id, patch_id, ...): None`
+
+### Context Manager
+
+```python
+async with await Sandbox.create() as sandbox:
+    # sandbox auto-kills on exit
+    pass
+```
+
+### Instance Methods
+
+#### `await sandbox.kill(): None`
+
+#### `await sandbox.is_running(): bool`
+
+#### `await sandbox.set_timeout(timeout): None`
+
+#### `await sandbox.create_checkpoint(name): dict`
+
+#### `await sandbox.list_checkpoints(): list[dict]`
+
+#### `await sandbox.restore_checkpoint(checkpoint_id): None`
+
+#### `await sandbox.delete_checkpoint(checkpoint_id): None`
+
+#### `await sandbox.create_preview_url(port, domain?): dict`
+
+#### `await sandbox.list_preview_urls(): list[dict]`
+
+#### `await sandbox.delete_preview_url(port): None`
+
+#### `sandbox.close(): None`
+
+### Not Available in Python
+
+{/* hibernate(), wake(), cpuCount/memoryMB on create — use HTTP API directly */}
+
+### Properties
+
+{/* sandbox_id, agent, exec, files, pty */}
+
+## Agent
+
+### `await sandbox.agent.start(prompt, model?, system_prompt?, allowed_tools?, permission_mode?, max_turns?, cwd?, mcp_servers?, on_event?, on_error?): AgentSession`
+
+{/* No resume param. No on_exit, on_scrollback_end. */}
+
+### `await sandbox.agent.attach(session_id, on_event?, on_error?): AgentSession`
+
+### `await sandbox.agent.list(): list[dict]`
+
+### AgentSession
+
+{/* session_id, collect_events(), wait(), send_prompt(), interrupt(), configure(), kill(), close() */}
+
+#### `session.collect_events(): list[AgentEvent]`
+
+{/* Python-unique: returns all events since last call */}
+
+#### `await session.wait(): int`
+
+{/* Python-unique: waits for session to complete, returns exit code */}
+
+### AgentEvent
+
+{/* Dataclass: type, data. Dict-like access: event['type'], event.get('content'). */}
+
+## Exec
+
+### `await sandbox.exec.run(command, timeout?, env?, cwd?): ProcessResult`
+
+{/* ProcessResult: exit_code, stdout, stderr */}
+
+### `await sandbox.exec.start(command, args?, env?, cwd?, timeout?): str`
+
+{/* Returns session ID (string), NOT an ExecSession object. No streaming callbacks. */}
+
+### `await sandbox.exec.list(): list[dict]`
+
+### `await sandbox.exec.kill(session_id, signal?): None`
+
+### Not Available in Python
+
+{/* attach(), streaming callbacks (onStdout, onStderr, onExit), maxRunAfterDisconnect, ExecSession object */}
+
+## Filesystem
+
+### `await sandbox.files.read(path): str`
+
+### `await sandbox.files.read_bytes(path): bytes`
+
+### `await sandbox.files.write(path, content): None`
+
+### `await sandbox.files.list(path?): list[EntryInfo]`
+
+### `await sandbox.files.make_dir(path): None`
+
+### `await sandbox.files.remove(path): None`
+
+### `await sandbox.files.exists(path): bool`
+
+### EntryInfo
+
+{/* name, is_dir, size, mod_time */}
+
+## Pty
+
+### `await sandbox.pty.create(cols?, rows?, on_output?): PtySession`
+
+### PtySession
+
+{/* session_id, send(data), recv() (Python-unique: returns bytes), close() */}
+
+## Template
+
+<Note>
+  `Template` is a standalone class (singular, not `Templates`). Import: `from opencomputer import Template`.
+</Note>
+
+### `await Template.build(name, dockerfile, api_key?, api_url?): dict`
+
+### `await Template.list(api_key?, api_url?): list[dict]`
+
+### `await Template.get(name, api_key?, api_url?): dict`
+
+### `await Template.delete(name, api_key?, api_url?): None`

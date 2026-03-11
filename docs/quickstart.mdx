@@ -1,84 +1,53 @@
 ---
 title: "Quickstart"
-description: "Run your first AI agent inside a sandbox"
+description: "Working agent in 2 minutes"
 ---
 
-## 1. Get your API key
+{/* STUB — Progressive JPEG pass 1. Goal: one focused example, zero detours. */}
 
-Sign up at [app.opencomputer.dev](https://app.opencomputer.dev) and grab your API key from the dashboard.
+## Prerequisites
 
-## 2. Install the SDK
-
-<CodeGroup>
-
-```bash npm
-npm install @opencomputer/sdk
-```
-
-```bash pip
-pip install opencomputer-sdk
-```
-
-</CodeGroup>
-
-## 3. Set your API key
+{/* API key + SDK installed (link to intro for install). */}
 
 ```bash
-export OPENCOMPUTER_API_KEY="your-api-key"
+export OPENCOMPUTER_API_KEY=your-api-key
 ```
 
-## 4. Run your first agent
+## Run an Agent
+
+{/* Single example: create sandbox, agent.start() with a real task, stream events, print result.
+    TS + Python CodeGroup. This is the ONLY example on this page.
+    Python example must use sandbox.agent (NOT sandbox.commands). */}
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from "@opencomputer/sdk";
-
-// Create a sandbox
-const sandbox = await Sandbox.create({ template: "default" });
-
-// Start an agent session with a task
-const session = await sandbox.agent.start({
-  prompt: "Create a Python script that prints the Fibonacci sequence up to 100, then run it",
-  onEvent: (event) => {
-    if (event.type === "assistant") {
-      console.log(event.content);
-    }
-    if (event.type === "result") {
-      console.log("Result:", event.result);
-    }
-  },
-});
-
-// Wait for the agent to finish
-const exitCode = await session.done;
-console.log(`Agent exited with code: ${exitCode}`);
-
-// Clean up
-await sandbox.kill();
+// TODO: create sandbox -> agent.start() -> stream events -> print result -> kill
 ```
 
 ```python Python
-import asyncio
-from opencomputer import Sandbox
-
-async def main():
-    sandbox = await Sandbox.create(template="default")
-
-    result = await sandbox.commands.run('echo "Hello from OpenComputer!"')
-    print(result.stdout)
-
-    await sandbox.kill()
-
-asyncio.run(main())
+# TODO: create sandbox -> agent.start() -> collect_events() -> print result -> kill
 ```
 
 </CodeGroup>
 
-The agent will create the file, write the code, and execute it — all inside the sandbox.
+## What Just Happened
 
-## Next steps
+{/* 2-3 sentences: you created a cloud VM (Firecracker microVM), Claude ran inside it with bash and file tools, worked autonomously, and streamed events back to your code. */}
 
-- [Agents](/agents) — full reference for `sandbox.agent`
-- [Running Commands](/running-commands) — run shell commands directly with `sandbox.exec`
-- [Working with Files](/working-with-files) — read, write, and manage files
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="How It Works" icon="microchip" href="/how-it-works">
+    {/* Architecture and technical decisions */}
+  </Card>
+  <Card title="Agents" icon="robot" href="/agents/overview">
+    {/* Events, tools, multi-turn conversations */}
+  </Card>
+  <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
+    {/* Lifecycle, running commands, files */}
+  </Card>
+  <Card title="Checkpoints" icon="code-branch" href="/sandboxes/checkpoints">
+    {/* Snapshot and fork VMs */}
+  </Card>
+</CardGroup>

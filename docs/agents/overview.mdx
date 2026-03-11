@@ -1,0 +1,64 @@
+---
+title: "Agents"
+description: "Run Claude inside sandboxes"
+---
+
+{/* STUB — Progressive JPEG pass 1. Entity page: what agents are, how they work, full API reference. */}
+
+## What is an Agent Session
+
+{/* 2-3 sentences: A Claude Agent SDK instance running inside a sandbox (cloud VM). You send a prompt, it works autonomously — writing files, running commands, iterating — and streams events back. */}
+
+## Quick Example
+
+{/* sandbox.agent.start() with event handling. TS + Python CodeGroup. The simplest working agent. */}
+
+<CodeGroup>
+
+```typescript TypeScript
+// TODO: Sandbox.create -> agent.start({ prompt, onEvent }) -> session.done -> kill
+```
+
+```python Python
+# TODO: Sandbox.create -> agent.start(prompt, on_event) -> session.wait() -> kill
+```
+
+</CodeGroup>
+
+## How It Works
+
+{/* Brief (3-4 sentences): SDK spawns Claude inside sandbox VM, Claude gets bash/file tools, works in think->act->observe loop, events stream back via WebSocket. */}
+
+## `sandbox.agent.start(opts)`
+
+{/* Full param reference with ParamField:
+  - prompt (required)
+  - model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd
+  - mcpServers (Record<string, McpServerConfig>)
+  - onEvent, onError
+  - TS-only: resume, onExit, onScrollbackEnd
+*/}
+
+## AgentSession
+
+{/* Properties and methods table:
+  - Both SDKs: sessionId, done, sendPrompt, interrupt, configure, kill, close
+  - Python-specific: collect_events(), wait()
+  - TS-specific: done returns Promise<number>
+*/}
+
+## Next
+
+{/* Quick links to sub-pages: Events, Tools, Multi-turn */}
+
+<CardGroup cols={3}>
+  <Card title="Events" icon="stream" href="/agents/events">
+    Understanding the event stream
+  </Card>
+  <Card title="Tools" icon="wrench" href="/agents/tools">
+    Configure tools and MCP servers
+  </Card>
+  <Card title="Multi-turn" icon="comments" href="/agents/multi-turn">
+    Follow-ups, resume, session management
+  </Card>
+</CardGroup>

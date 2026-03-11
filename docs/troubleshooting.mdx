@@ -1,0 +1,37 @@
+---
+title: "Troubleshooting"
+description: "Common errors and debugging tips"
+---
+
+{/* STUB — Progressive JPEG pass 1. */}
+
+## Common Errors
+
+### `401 Unauthorized`
+
+{/* Check API key, env var name (OPENCOMPUTER_API_KEY). */}
+
+### `Sandbox not found`
+
+{/* Sandbox may have been killed or timed out. Check with oc ls or sandbox.isRunning(). */}
+
+### `Connection refused`
+
+{/* Sandbox still creating, or hibernated. Check status. */}
+
+### Timeout errors
+
+{/* Increase timeout. Check idle timeout (rolling, resets on every operation). */}
+
+## Debugging Tips
+
+{/*
+  - Check sandbox status with sandbox.isRunning() / is_running()
+  - Use sandbox.exec.list() to see running processes
+  - Agent stderr via onError callback
+  - CLI: oc sandbox get <id> for full details
+*/}
+
+## Getting Help
+
+{/* GitHub issues: https://github.com/diggerhq/opencomputer/issues */}
