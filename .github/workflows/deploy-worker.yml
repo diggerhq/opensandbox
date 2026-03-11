@@ -75,9 +75,13 @@ jobs:
             sudo chmod +x /usr/local/bin/osb-agent
 
             # Rebuild rootfs with new agent baked in
+            # Read IMAGES_DIR from the worker systemd unit (matches OPENSANDBOX_IMAGES_DIR)
+            IMAGES_DIR=$(systemctl show opensandbox-worker -p Environment --value | tr " " "\n" | grep OPENSANDBOX_IMAGES_DIR | cut -d= -f2-)
+            IMAGES_DIR="${IMAGES_DIR:-/data/sandboxes/firecracker/images}"
+            echo "Rebuilding rootfs in $IMAGES_DIR"
             cd /tmp/osb-rootfs-ctx
-            sudo rm -f /data/firecracker/images/default.ext4
-            sudo bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default
+            sudo rm -f "$IMAGES_DIR/default.ext4"
+            sudo bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent "$IMAGES_DIR" default
 
             # Cleanup
             rm -rf /tmp/osb-rootfs-ctx
