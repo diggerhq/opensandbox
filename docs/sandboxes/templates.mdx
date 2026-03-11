@@ -3,89 +3,165 @@ title: "Templates"
 description: "Pre-built base images for sandboxes"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Complete guide to templates — pre-built base images for sandboxes.
-  Entity page: concept + API + examples.
-
-  ABSORBS: sdks/typescript/templates.mdx, sdks/python/templates.mdx.
-
-  KEY NOTES:
-  - Templates is not a Sandbox property
-  - TS: Templates (plural), Python: Template (singular)
-  - Do not invent static helper APIs. Document the actual exported construction/usage pattern for each SDK.
-  - Python template ergonomics are currently awkward; if no public construction helper exists, either improve the SDK first or make this section HTTP-first.
-  - Template status depends on template type. Dockerfile builds currently return ready immediately; sandbox-snapshot templates use processing -> ready.
-  - Be explicit about `default` vs legacy `base` naming where relevant
-  - Default template: derive pre-installed list from Dockerfile.default
-*/}
-
-## What is a Template
-
-{/* Pre-built base image that sandboxes start from. The `default` template includes Ubuntu, Python, Node.js. Build custom templates from Dockerfiles to skip setup time. */}
-
-## Quick Example
-
-{/* Build template -> create sandbox from it.
-  Use real SDK construction only. If Python still lacks a public ergonomic entry point, use HTTP for the primary example and call the SDK gap out explicitly.
-*/}
+A template is a pre-built filesystem image that sandboxes start from. Build custom templates from Dockerfiles to skip repeated setup — install your dependencies once, then create sandboxes instantly from that template.
 
 <CodeGroup>
 
 ```typescript TypeScript
-// TODO: use the real exported Templates construction pattern, then build/list/get/delete from that instance
+import { Sandbox, Templates } from "@opencomputer/sdk";
+
+const templates = new Templates(apiUrl, apiKey);
+await templates.build("my-stack", `
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y nodejs npm
+RUN npm install -g pnpm
+WORKDIR /app
+`);
+
+// Create a sandbox with the custom template
+const sandbox = await Sandbox.create({ template: "my-stack" });
+await sandbox.exec.run("pnpm --version"); // already installed
 ```
 
-```python Python
-# TODO: only add a Python SDK example if there is a public construction path worth documenting; otherwise use HTTP and note the SDK ergonomics gap
+```bash curl
+# Build template
+curl -X POST https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-stack",
+    "dockerfile": "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y nodejs npm\nRUN npm install -g pnpm\nWORKDIR /app"
+  }'
+
+# Create sandbox from template
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"templateID": "my-stack"}'
 ```
 
 </CodeGroup>
 
+<Note>
+  `Templates` is a standalone class, not a property on Sandbox. TypeScript exports `Templates` (plural), Python exports `Template` (singular).
+</Note>
+
+<Note>
+  The Python `Template` class does not have a public constructor. Use the HTTP API for template management from Python, or use `Sandbox.create(template="my-stack")` after building the template via HTTP.
+</Note>
+
 ## Default Template
 
-{/* What's pre-installed: Ubuntu, Python 3, Node.js, common CLI tools. Derived from Dockerfile.default. */}
+Sandboxes use the default template when no template is specified. It includes:
+
+- **Ubuntu 22.04**
+- **Python 3** with pip, venv, setuptools
+- **Node.js 20 LTS** with npm
+- **Build tools:** build-essential, cmake, pkg-config
+- **CLI tools:** git, git-lfs, curl, wget, jq, rsync, htop, tree
+- **Editors:** nano, vim-tiny
+- **Database:** sqlite3
+- **Networking:** openssh-client, iproute2, net-tools, dnsutils
+- **Claude Agent SDK** and claude-code (pre-installed for agent sessions)
 
 ## API Reference
 
-<Note>
-  Templates is a standalone class, not a property on Sandbox. TypeScript exports `Templates` (plural), Python exports `Template` (singular).
-</Note>
-
 ### Build Template
 
-{/* Document the real SDK invocation pattern and the HTTP API.
-  Do not publish fictional static helpers if the SDK requires an instance.
-*/}
+Templates are built from Dockerfiles. The Docker build produces a filesystem image that Firecracker boots as the VM's root disk.
+
+<CodeGroup>
+
+```typescript TypeScript
+const templates = new Templates(apiUrl, apiKey);
+const info = await templates.build("node20-pnpm", `
+FROM ubuntu:22.04
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+RUN apt-get install -y nodejs && npm install -g pnpm
+`);
+console.log(info.status); // "ready"
+```
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "node20-pnpm", "dockerfile": "FROM ubuntu:22.04\n..."}'
+```
+
+</CodeGroup>
+
+Dockerfile templates return `status: "ready"` immediately. Sandbox-snapshot templates transition `processing` → `ready`.
 
 ### List Templates
 
-{/* Document the real SDK callable surface for listing templates plus the HTTP API.
-  Avoid implying Python classmethods if the SDK does not expose them.
-*/}
+<CodeGroup>
+
+```typescript TypeScript
+const all = await templates.list();
+```
+
+```bash curl
+curl https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
 
 ### Get Template
 
-{/* Document the real SDK callable surface for fetching a template plus the HTTP API. */}
+<CodeGroup>
+
+```typescript TypeScript
+const info = await templates.get("my-stack");
+```
+
+```bash curl
+curl https://app.opencomputer.dev/api/templates/my-stack \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
 
 ### Delete Template
 
-{/* Document the real SDK callable surface for deleting a template plus the HTTP API. */}
+<CodeGroup>
+
+```typescript TypeScript
+await templates.delete("my-stack");
+```
+
+```bash curl
+curl -X DELETE https://app.opencomputer.dev/api/templates/my-stack \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
 
 ### Using with Sandbox.create
 
-{/* Sandbox.create({ template: 'my-template' }) */}
+Pass the template name when creating a sandbox:
+
+<CodeGroup>
+
+```typescript TypeScript
+const sandbox = await Sandbox.create({ template: "my-stack" });
+```
+
+```python Python
+sandbox = await Sandbox.create(template="my-stack")
+```
+
+</CodeGroup>
 
 ## TemplateInfo
 
-{/* Fields: verify against the current handler/SDK mapping before writing the final page.
-  Status is not one universal enum across all template creation flows.
-*/}
-
-## Example
-
-{/* Template with specific language/framework pre-installed (e.g., Node 20 + pnpm). */}
+| Field | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Template ID | `templateID` | `template_id` | Unique identifier |
+| Name | `name` | `name` | Template name |
+| Tag | `tag` | `tag` | Image tag (default: `"latest"`) |
+| Status | `status` | `status` | `ready`, `building`, or `error` |
 
 <Tip>
   Full reference: [TypeScript SDK](/reference/typescript-sdk#templates) · [Python SDK](/reference/python-sdk#template) · [HTTP API](/reference/api#templates).

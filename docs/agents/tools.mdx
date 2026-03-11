@@ -3,40 +3,157 @@ title: "Tools"
 description: "Configure what tools an agent can use"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Explain how to configure what tools an agent can use, including MCP servers.
-  MCP servers are the main event on this page — most configuration value is here.
-*/}
+By default, the agent has access to bash, file read/write, and Python — the same tools available in [Claude Code](https://docs.anthropic.com/en/docs/agents/claude-code-sdk-overview). You can restrict these and add custom tools via MCP servers.
 
 ## Default Tools
 
-{/* What the agent can do out of the box: bash, file read/write, Python. Brief explanation of allowedTools param to restrict. */}
+The agent runs with all Claude Code tools enabled. To restrict which tools the agent can use, pass `allowedTools`:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Analyze the CSV files in /data",
+  allowedTools: ["Read", "Bash"],
+});
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Analyze the CSV files in /data",
+    allowed_tools=["Read", "Bash"],
+)
+```
+
+</CodeGroup>
 
 ## MCP Servers
 
-{/* Main event on this page. What MCP is (one sentence), then how to configure:
-  - mcpServers param structure: Record<string, { command, args?, env? }>
-  - MCP servers run inside the sandbox, agent discovers tools via protocol
-*/}
+[Model Context Protocol](https://modelcontextprotocol.io/) servers give the agent access to custom tools. MCP servers run inside the sandbox — the agent discovers available tools via the protocol.
 
-### Example: SQLite Database Tool
+Pass MCP server configuration when starting the agent:
 
-{/* TS + Python CodeGroup showing mcpServers config with sqlite MCP server */}
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Query the users table and summarize the results",
+  mcpServers: {
+    sqlite: {
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-sqlite", "/data/app.db"],
+    },
+  },
+});
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Query the users table and summarize the results",
+    mcp_servers={
+        "sqlite": {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-sqlite", "/data/app.db"],
+        },
+    },
+)
+```
+
+</CodeGroup>
+
+### McpServerConfig
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `command` | string | Yes | Command to start the MCP server |
+| `args` | string[] | No | Command arguments |
+| `env` | object | No | Environment variables for the server process |
 
 ### Example: Custom API Tool
 
-{/* TS + Python CodeGroup showing custom MCP server */}
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "Fetch the latest deployment status",
+  mcpServers: {
+    deploy: {
+      command: "node",
+      args: ["/tools/deploy-server.js"],
+      env: { DEPLOY_API_KEY: process.env.DEPLOY_API_KEY },
+    },
+  },
+});
+```
 
 ## System Prompt
 
-{/* systemPrompt param — how to steer agent behavior with custom instructions. Example. */}
+Steer agent behavior with a custom system prompt:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Review the codebase for security issues",
+  systemPrompt: "You are a security auditor. Focus on OWASP Top 10 vulnerabilities. Output findings as a markdown checklist.",
+});
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Review the codebase for security issues",
+    system_prompt="You are a security auditor. Focus on OWASP Top 10 vulnerabilities. Output findings as a markdown checklist.",
+)
+```
+
+</CodeGroup>
 
 ## Permission Mode
 
-{/* permissionMode param — what it controls, available values. */}
+Controls how the agent handles tool permissions:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Set up the project",
+  permissionMode: "bypassPermissions", // default — agent runs freely
+});
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Set up the project",
+    permission_mode="bypassPermissions",
+)
+```
+
+</CodeGroup>
+
+The default is `bypassPermissions` — the agent can use any available tool without confirmation. This is safe because the agent runs inside an isolated sandbox VM.
 
 ## Max Turns
 
-{/* maxTurns param — limiting agent iterations. When to use it. */}
+Limit how many think → act → observe iterations the agent can perform:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Fix the failing test",
+  maxTurns: 10, // default: 50
+});
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Fix the failing test",
+    max_turns=10,
+)
+```
+
+</CodeGroup>
+
+Lower `maxTurns` to prevent runaway agents on simple tasks. The default is 50.
+
+<Tip>
+  Back to [Agents overview](/agents/overview). See also: [Events](/agents/events) · [Multi-turn](/agents/multi-turn).
+</Tip>

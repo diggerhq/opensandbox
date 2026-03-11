@@ -3,22 +3,6 @@ title: "Python SDK"
 description: "Complete Python SDK reference"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Exhaustive Python SDK reference. Every class, every method, every type.
-  Accurate to actual Python SDK — note gaps vs TypeScript honestly.
-
-  SOURCE: sdks/python/opencomputer/ — all source files.
-
-  KEY NOTES:
-  - Each method: full async signature, params with types and defaults, return type, one-line example
-  - Not available: hibernate/wake, cpuCount/memoryMB, exec streaming, exec.attach, agent resume
-  - Python-unique: collect_events(), wait(), recv(), context manager
-  - Include ExecSessionInfo.attachedClients
-  - Template class is singular (not Templates), but verify the public construction story before documenting usage examples
-*/}
-
 ## Installation
 
 ```bash
@@ -29,49 +13,134 @@ pip install opencomputer-sdk
 from opencomputer import Sandbox, Template
 ```
 
+---
+
 ## Sandbox
 
 ### Class Methods
 
-#### `await Sandbox.create(template?, timeout?, api_key?, api_url?, envs?, metadata?): Sandbox`
+#### `await Sandbox.create(...): Sandbox`
 
-{/* No cpuCount/memoryMB — use HTTP API for custom resources */}
+Create a new sandbox.
 
-#### `await Sandbox.connect(sandbox_id, api_key?, api_url?): Sandbox`
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `template` | str | `"base"` | Template name |
+| `timeout` | int | `300` | Idle timeout in seconds |
+| `api_key` | str | env var | API key |
+| `api_url` | str | env var | API URL |
+| `envs` | dict[str, str] | None | Environment variables |
+| `metadata` | dict[str, str] | None | Arbitrary metadata |
+
+```python
+sandbox = await Sandbox.create(template="my-stack", timeout=600)
+```
+
+<Note>
+  `cpuCount` and `memoryMB` are not available in the Python SDK. Use the [HTTP API](/reference/api#sandbox-lifecycle) for custom resources.
+</Note>
+
+#### `await Sandbox.connect(sandbox_id, ...): Sandbox`
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sandbox_id` | str | Sandbox ID (**required**) |
+| `api_key` | str | API key (optional) |
+| `api_url` | str | API URL (optional) |
+
+```python
+sandbox = await Sandbox.connect("sb-abc123")
+```
 
 #### `await Sandbox.create_from_checkpoint(checkpoint_id, ...): Sandbox`
 
-#### `await Sandbox.create_checkpoint_patch(checkpoint_id, script, description?, ...): dict`
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `checkpoint_id` | str | — | Checkpoint ID (**required**) |
+| `timeout` | int | `300` | Idle timeout |
+| `api_key` | str | env var | API key |
+| `api_url` | str | env var | API URL |
+
+```python
+forked = await Sandbox.create_from_checkpoint("cp-abc123")
+```
+
+#### `await Sandbox.create_checkpoint_patch(checkpoint_id, script, ...): dict`
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checkpoint_id` | str | Yes | Target checkpoint |
+| `script` | str | Yes | Bash script |
+| `description` | str | No | Description |
+
+```python
+result = await Sandbox.create_checkpoint_patch("cp-abc", script="apt install -y curl")
+```
 
 #### `await Sandbox.list_checkpoint_patches(checkpoint_id, ...): list[dict]`
 
+```python
+patches = await Sandbox.list_checkpoint_patches("cp-abc")
+```
+
 #### `await Sandbox.delete_checkpoint_patch(checkpoint_id, patch_id, ...): None`
+
+```python
+await Sandbox.delete_checkpoint_patch("cp-abc", "pa-xyz")
+```
 
 ### Context Manager
 
+Auto-kills the sandbox on exit:
+
 ```python
 async with await Sandbox.create() as sandbox:
-    # sandbox auto-kills on exit
-    pass
+    result = await sandbox.exec.run("echo hello")
+    print(result.stdout)
+# sandbox.kill() called automatically
 ```
 
 ### Instance Methods
 
 #### `await sandbox.kill(): None`
 
+Terminate the sandbox.
+
 #### `await sandbox.is_running(): bool`
+
+Check if the sandbox is running.
 
 #### `await sandbox.set_timeout(timeout): None`
 
+Update idle timeout.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `timeout` | int | New timeout in seconds |
+
 #### `await sandbox.create_checkpoint(name): dict`
+
+Create a named checkpoint. Returns checkpoint info as a dictionary.
 
 #### `await sandbox.list_checkpoints(): list[dict]`
 
+List all checkpoints for the sandbox.
+
 #### `await sandbox.restore_checkpoint(checkpoint_id): None`
+
+Revert in-place to a checkpoint.
 
 #### `await sandbox.delete_checkpoint(checkpoint_id): None`
 
-#### `await sandbox.create_preview_url(port, domain?): dict`
+Delete a checkpoint.
+
+#### `await sandbox.create_preview_url(port, domain?, auth_config?): dict`
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `port` | int | Yes | Container port (1–65535) |
+| `domain` | str | No | Custom domain |
+| `auth_config` | dict | No | Auth configuration |
 
 #### `await sandbox.list_preview_urls(): list[dict]`
 
@@ -79,96 +148,321 @@ async with await Sandbox.create() as sandbox:
 
 #### `await sandbox.close(): None`
 
+Close HTTP clients. Called automatically by the context manager.
+
 ### Not Available in Python
 
-{/* hibernate(), wake(), cpuCount/memoryMB on create — use HTTP API directly */}
+These features are TypeScript-only. Use the [HTTP API](/reference/api) directly:
+
+- `hibernate()` / `wake()`
+- `cpuCount` / `memoryMB` on create
 
 ### Properties
 
-{/* sandbox_id, agent, exec, files, pty */}
+| Property | Type | Description |
+| --- | --- | --- |
+| `sandbox_id` | str | Sandbox ID |
+| `status` | str | Current status |
+| `agent` | Agent | [Agent sessions](#agent) |
+| `exec` | Exec | [Command execution](#exec) |
+| `files` | Filesystem | [File operations](#filesystem) |
+| `pty` | Pty | [Terminal sessions](#pty) |
+| `commands` | Exec | **Deprecated** — alias for `exec` |
+
+---
 
 ## Agent
 
-### `await sandbox.agent.start(prompt, model?, system_prompt?, allowed_tools?, permission_mode?, max_turns?, cwd?, mcp_servers?, on_event?, on_error?): AgentSession`
+Accessed via `sandbox.agent`.
 
-{/* No resume param. No on_exit, on_scrollback_end. */}
+### `await sandbox.agent.start(...): AgentSession`
 
-### `await sandbox.agent.attach(session_id, on_event?, on_error?): AgentSession`
+Start an agent session.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `prompt` | str | Initial prompt |
+| `model` | str | Claude model |
+| `system_prompt` | str | System prompt |
+| `allowed_tools` | list[str] | Restrict tools |
+| `permission_mode` | str | Permission mode |
+| `max_turns` | int | Max turns (default: 50) |
+| `cwd` | str | Working directory |
+| `mcp_servers` | dict[str, Any] | MCP server configuration |
+| `on_event` | Callable[[AgentEvent], None] | Event callback |
+| `on_error` | Callable[[str], None] | Stderr callback |
+
+```python
+session = await sandbox.agent.start(
+    prompt="Build a todo app",
+    on_event=lambda e: print(e.type),
+)
+```
+
+<Note>
+  `resume`, `on_exit`, and `on_scrollback_end` are not available in the Python SDK.
+</Note>
+
+### `await sandbox.agent.attach(session_id, ...): AgentSession`
+
+Reconnect to a running agent session. Accepts `on_event` and `on_error`.
 
 ### `await sandbox.agent.list(): list[AgentSessionInfo]`
 
+List all agent sessions.
+
 ### AgentSession
 
-{/* session_id, collect_events(), wait(), send_prompt(), interrupt(), configure(), kill(), close() */}
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | str | Session ID |
+| `sandbox_id` | str | Sandbox ID |
+| `send_prompt(text)` | method | Send follow-up prompt |
+| `interrupt()` | method | Interrupt current turn |
+| `configure(...)` | method | Update model, tools, cwd |
+| `await kill(signal=9)` | method | Kill agent process |
+| `await close()` | method | Close WebSocket |
 
-#### `session.collect_events(): list[AgentEvent]`
+#### `await session.collect_events(): list[AgentEvent]`
 
-{/* Python-unique: returns all events since last call */}
+Collect all events until the agent process exits. Python-unique alternative to callbacks.
+
+```python
+session = await sandbox.agent.start(prompt="Fix the tests")
+events = await session.collect_events()
+for event in events:
+    if event.type == "result":
+        print(event.data)
+```
 
 #### `await session.wait(): int`
 
-{/* Python-unique: waits for session to complete, returns exit code */}
+Wait for the agent to finish. Returns the exit code.
+
+```python
+exit_code = await session.wait()
+```
 
 ### AgentEvent
 
-{/* Dataclass: type, data. Dict-like access: event['type'], event.get(...).
-  Do not hard-code a single event payload shape; assistant/result/system payloads vary.
-*/}
+Dataclass with dict-like access:
+
+```python
+@dataclass
+class AgentEvent:
+    type: str
+    data: dict[str, Any]
+
+# Usage:
+event["message"]      # dict-like access
+event.get("message")  # safe access with default
+event.type            # attribute access
+```
+
+### AgentSessionInfo
+
+```python
+@dataclass
+class AgentSessionInfo:
+    session_id: str
+    sandbox_id: str
+    running: bool
+    started_at: str
+```
+
+---
 
 ## Exec
 
-### `await sandbox.exec.run(command, timeout?, env?, cwd?): ProcessResult`
+Accessed via `sandbox.exec`.
 
-{/* ProcessResult: exit_code, stdout, stderr */}
+### `await sandbox.exec.run(command, ...): ProcessResult`
 
-### `await sandbox.exec.start(command, args?, env?, cwd?, timeout?): str`
+Run a command synchronously via `sh -c`.
 
-{/* Returns session ID (string), NOT an ExecSession object. No streaming callbacks. */}
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `command` | str | — | Shell command (**required**) |
+| `timeout` | int | `60` | Timeout in seconds |
+| `env` | dict[str, str] | None | Environment variables |
+| `cwd` | str | None | Working directory |
+
+```python
+result = await sandbox.exec.run("npm test", cwd="/app")
+```
+
+### `await sandbox.exec.start(command, ...): str`
+
+Start a long-running command. Returns the **session ID** (not a session object).
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `command` | str | — | Command (**required**) |
+| `args` | list[str] | None | Arguments |
+| `env` | dict[str, str] | None | Environment variables |
+| `cwd` | str | None | Working directory |
+| `timeout` | int | None | Timeout in seconds |
+
+```python
+session_id = await sandbox.exec.start("node server.js", cwd="/app")
+```
+
+<Note>
+  Python `exec.start()` returns a session ID string. There are no streaming callbacks, `ExecSession` object, or `maxRunAfterDisconnect`. For streaming, use the [WebSocket binary protocol](/reference/api#websocket-binary-protocol).
+</Note>
 
 ### `await sandbox.exec.list(): list[ExecSessionInfo]`
 
-### `await sandbox.exec.kill(session_id, signal?): None`
+List all exec sessions.
+
+### `await sandbox.exec.kill(session_id, signal=9): None`
+
+Kill an exec session.
 
 ### Not Available in Python
 
-{/* attach(), streaming callbacks (onStdout, onStderr, onExit), maxRunAfterDisconnect, ExecSession object */}
+- `exec.attach()` — reconnect to running session
+- Streaming callbacks (`on_stdout`, `on_stderr`, `on_exit`)
+- `ExecSession` object with `send_stdin()` and `done`
+- `max_run_after_disconnect`
+
+### ProcessResult
+
+```python
+@dataclass
+class ProcessResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+```
+
+### ExecSessionInfo
+
+```python
+@dataclass
+class ExecSessionInfo:
+    session_id: str
+    sandbox_id: str
+    command: str
+    args: list[str]
+    running: bool
+    exit_code: int | None
+    started_at: str
+    attached_clients: int
+```
+
+---
 
 ## Filesystem
 
+Accessed via `sandbox.files`.
+
 ### `await sandbox.files.read(path): str`
+
+Read a file as a UTF-8 string.
 
 ### `await sandbox.files.read_bytes(path): bytes`
 
+Read a file as raw bytes.
+
 ### `await sandbox.files.write(path, content): None`
 
-### `await sandbox.files.list(path?): list[EntryInfo]`
+Write content to a file. Accepts `str` or `bytes`.
+
+### `await sandbox.files.list(path="/"): list[EntryInfo]`
+
+List directory contents.
 
 ### `await sandbox.files.make_dir(path): None`
 
+Create a directory.
+
 ### `await sandbox.files.remove(path): None`
+
+Delete a file or directory.
 
 ### `await sandbox.files.exists(path): bool`
 
+Check if a path exists. Client-side wrapper — attempts a read and returns `False` on error.
+
 ### EntryInfo
 
-{/* name, is_dir, path, size */}
+```python
+@dataclass
+class EntryInfo:
+    name: str
+    is_dir: bool
+    path: str
+    size: int = 0
+```
+
+---
 
 ## Pty
 
-### `await sandbox.pty.create(cols?, rows?, on_output?): PtySession`
+Accessed via `sandbox.pty`.
+
+### `await sandbox.pty.create(cols=80, rows=24, on_output=None): PtySession`
+
+Create an interactive terminal session.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `cols` | int | `80` | Terminal columns |
+| `rows` | int | `24` | Terminal rows |
+| `on_output` | Callable[[bytes], None] | None | Output callback |
 
 ### PtySession
 
-{/* session_id, send(data), recv() (Python-unique: returns bytes), close() */}
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | str | Session ID |
+| `sandbox_id` | str | Sandbox ID |
+| `send(data)` | method | Send input (str or bytes) |
+| `await recv()` | method | Receive output bytes (Python-unique) |
+| `await close()` | method | Close the PTY |
+
+<Note>
+  `recv()` is Python-unique — a pull-based alternative to the `on_output` callback. Returns raw `bytes`.
+</Note>
+
+---
 
 ## Template
 
-<Note>
-  `Template` is a standalone type (singular, not `Templates`), but the current SDK does not expose an obvious public constructor/helper in the same way the other surfaces do. Before publishing examples here, either document the real public entry point or improve the SDK ergonomics and then document that.
-</Note>
+`Template` is a standalone class (singular, not `Templates`).
 
-### Template API
+<Warning>
+  The Python SDK's `Template` class does not expose a public constructor. Template management is available via the instance methods below (accessed internally), but for direct template operations from Python, use the [HTTP API](/reference/api#templates) instead.
+</Warning>
 
-{/* Do not publish fictional classmethods like Template.build(...) unless they actually exist.
-  Document the real callable surface or explicitly route readers to the HTTP API until the Python SDK ergonomics are fixed.
-*/}
+### Instance Methods
+
+If you have a `Template` instance (e.g., obtained internally by the SDK):
+
+#### `await template.build(name, dockerfile): TemplateInfo`
+
+Build a template from a Dockerfile string.
+
+#### `await template.list(): list[TemplateInfo]`
+
+List all templates.
+
+#### `await template.get(name): TemplateInfo`
+
+Get a template by name.
+
+#### `await template.delete(name): None`
+
+Delete a template.
+
+### TemplateInfo
+
+```python
+@dataclass
+class TemplateInfo:
+    template_id: str
+    name: str
+    tag: str
+    status: str  # "ready" | "building" | "error"
+```

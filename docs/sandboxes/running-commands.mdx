@@ -3,87 +3,209 @@ title: "Running Commands"
 description: "Execute shell commands inside a sandbox"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Comprehensive guide to executing shell commands inside sandboxes.
-  Two modes: run() (wait for result) and start() (streaming/async).
-
-  ABSORBS: sdks/typescript/commands.mdx, sdks/python/commands.mdx, running-commands.mdx (root).
-
-  KEY NOTES:
-  - Use sandbox.exec.* consistently (NOT sandbox.commands — deprecated alias)
-  - Be honest about Python SDK gaps in streaming — don't pretend parity exists
-  - TS exec.start() returns ExecSession with callbacks; Python returns str (session ID only)
-  - TS-only: attach(), streaming callbacks (onStdout, onStderr, onExit), maxRunAfterDisconnect
-*/}
-
-## Quick Commands: `sandbox.exec.run()`
-
-{/* Run a shell command and wait for the result. TS + Python CodeGroup. */}
+Two modes: `exec.run()` waits for the result, `exec.start()` creates a session for long-running or streaming commands.
 
 <CodeGroup>
 
 ```typescript TypeScript
-// TODO: sandbox.exec.run('echo "hello"') -> result.stdout
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+const result = await sandbox.exec.run("echo Hello, World!");
+console.log(result.stdout); // "Hello, World!\n"
+await sandbox.kill();
 ```
 
 ```python Python
-# TODO: sandbox.exec.run('echo "hello"') -> result.stdout
+from opencomputer import Sandbox
+
+async with await Sandbox.create() as sandbox:
+    result = await sandbox.exec.run("echo Hello, World!")
+    print(result.stdout)  # "Hello, World!\n"
+```
+
+</CodeGroup>
+
+## Quick Commands: `exec.run()`
+
+Run a shell command and wait for the result. The command runs via `sh -c`, so pipes, redirects, and shell expansion work.
+
+<CodeGroup>
+
+```typescript TypeScript
+// Working directory and environment variables
+const result = await sandbox.exec.run("npm run build", {
+  cwd: "/app",
+  env: { NODE_ENV: "production" },
+  timeout: 120,
+});
+
+if (result.exitCode !== 0) {
+  console.error("Build failed:", result.stderr);
+}
+```
+
+```python Python
+result = await sandbox.exec.run(
+    "npm run build",
+    cwd="/app",
+    env={"NODE_ENV": "production"},
+    timeout=120,
+)
+
+if result.exit_code != 0:
+    print("Build failed:", result.stderr)
 ```
 
 </CodeGroup>
 
 ### Parameters
 
-{/* ParamField: command (required), timeout (default 60), env, cwd */}
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `command` | string | — | Shell command to run (**required**) |
+| `timeout` | number | `60` | Timeout in seconds |
+| `env` | object | — | Environment variables |
+| `cwd` | string | — | Working directory |
 
 ### ProcessResult
 
-{/* Table: exitCode/exit_code, stdout, stderr */}
+| Field | TypeScript | Python | Type |
+| --- | --- | --- | --- |
+| Exit code | `exitCode` | `exit_code` | number |
+| Standard output | `stdout` | `stdout` | string |
+| Standard error | `stderr` | `stderr` | string |
 
-### Examples
+## Async Commands: `exec.start()`
 
-{/* Working directory, env vars, timeout, chaining commands. TS + Python CodeGroup. */}
-
-## Async Commands: `sandbox.exec.start()`
-
-{/* Start long-running command, stream output.
-  - TS: full streaming — returns ExecSession with onStdout, onStderr, onExit callbacks, sendStdin(), kill(), close(). Supports maxRunAfterDisconnect.
-  - Python: returns str (session ID only). No streaming callbacks, no ExecSession. Use exec.list() and exec.kill().
-*/}
+Start a command as an exec session for long-running processes or streaming output. The TypeScript and Python SDKs differ significantly here.
 
 ### TypeScript — Full Streaming
 
-{/* TS example with onStdout, onStderr, onExit, sendStdin, kill */}
+Returns an `ExecSession` with callbacks for stdout, stderr, and exit:
+
+```typescript
+const session = await sandbox.exec.start("node server.js", {
+  cwd: "/app",
+  env: { PORT: "3000" },
+  onStdout: (data) => process.stdout.write(data),
+  onStderr: (data) => process.stderr.write(data),
+  onExit: (code) => console.log("Server exited:", code),
+  maxRunAfterDisconnect: 300, // keep running 5min after disconnect
+});
+
+// Send input
+session.sendStdin("some input\n");
+
+// Wait for completion (or kill)
+await session.kill();
+```
+
+#### ExecStartOpts
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `args` | string[] | Command arguments |
+| `env` | object | Environment variables |
+| `cwd` | string | Working directory |
+| `timeout` | number | Timeout in seconds |
+| `maxRunAfterDisconnect` | number | Seconds to keep running after disconnect |
+| `onStdout` | callback | `(data: Uint8Array) => void` |
+| `onStderr` | callback | `(data: Uint8Array) => void` |
+| `onExit` | callback | `(exitCode: number) => void` |
+
+#### ExecSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | string | Session ID |
+| `done` | `Promise<number>` | Resolves with exit code |
+| `sendStdin(data)` | method | Send input to the process |
+| `kill(signal?)` | method | Kill the process (default: SIGKILL) |
+| `close()` | method | Close the WebSocket connection |
 
 ### Python — Session ID
 
-{/* Python example: start() returns session_id, then list/kill */}
+Python's `exec.start()` returns a session ID string. There are no streaming callbacks or ExecSession object.
 
-### ExecSession (TypeScript)
+```python
+session_id = await sandbox.exec.start(
+    "node server.js",
+    args=None,
+    env={"PORT": "3000"},
+    cwd="/app",
+)
 
-{/* Table: sessionId, done, sendStdin, kill, close */}
+# Check session status
+sessions = await sandbox.exec.list()
+for s in sessions:
+    print(s.session_id, "running" if s.running else f"exited ({s.exit_code})")
+
+# Kill when done
+await sandbox.exec.kill(session_id)
+```
+
+<Note>
+  Python does not support `exec.attach()`, streaming callbacks, `maxRunAfterDisconnect`, or the `ExecSession` object. For streaming in Python, use the [WebSocket binary protocol](/reference/api#websocket-binary-protocol) directly.
+</Note>
 
 ## Managing Sessions
 
-{/* exec.list() — both SDKs. exec.attach() — TS only. exec.kill() — both SDKs. */}
-
 ### List Sessions
 
-{/* TS + Python CodeGroup */}
+<CodeGroup>
+
+```typescript TypeScript
+const sessions = await sandbox.exec.list();
+for (const s of sessions) {
+  console.log(s.sessionID, s.running ? "running" : `exited (${s.exitCode})`);
+  console.log(`  command: ${s.command}, clients: ${s.attachedClients}`);
+}
+```
+
+```python Python
+sessions = await sandbox.exec.list()
+for s in sessions:
+    status = "running" if s.running else f"exited ({s.exit_code})"
+    print(s.session_id, status, f"clients: {s.attached_clients}")
+```
+
+</CodeGroup>
 
 ### Attach to Running Session (TypeScript only)
 
-{/* Reconnect to running session by ID. TS example with onStdout, onScrollbackEnd. */}
+Reconnect to a running exec session to resume streaming output:
+
+```typescript
+const session = await sandbox.exec.attach(sessionId, {
+  onStdout: (data) => process.stdout.write(data),
+  onStderr: (data) => process.stderr.write(data),
+  onExit: (code) => console.log("Exited:", code),
+  onScrollbackEnd: () => console.log("--- live output ---"),
+});
+```
+
+On attach, the server replays the scrollback buffer (historical output), sends a scrollback-end marker, then streams live output.
 
 ### Kill a Session
 
-{/* TS + Python CodeGroup */}
+<CodeGroup>
 
-## Examples
+```typescript TypeScript
+await sandbox.exec.kill(sessionId);
+await sandbox.exec.kill(sessionId, 15); // SIGTERM
+```
 
-{/* Dev server (TS streaming), long-running process, reconnect pattern (TS only) */}
+```python Python
+await sandbox.exec.kill(session_id)
+await sandbox.exec.kill(session_id, signal=15)  # SIGTERM
+```
+
+</CodeGroup>
+
+<Warning>
+  `sandbox.commands` is a deprecated alias for `sandbox.exec`. Use `sandbox.exec` in all new code.
+</Warning>
 
 <Tip>
   CLI equivalent: [`oc exec`](/cli/exec). Full reference: [TypeScript SDK](/reference/typescript-sdk#exec) · [Python SDK](/reference/python-sdk#exec) · [HTTP API](/reference/api#commands-exec).

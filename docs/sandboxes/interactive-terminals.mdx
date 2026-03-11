@@ -3,64 +3,97 @@ title: "Interactive Terminals"
 description: "Full PTY sessions inside sandboxes"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Full guide to interactive terminal sessions inside sandboxes.
-  Promoted from SDK-only pages — most users discover PTY through oc shell.
-
-  ABSORBS: sdks/typescript/pty.mdx, sdks/python/pty.mdx.
-
-  KEY NOTES:
-  - recv() is Python-only (pull-based alternative to onOutput callback)
-  - resize() not available in SDKs. HTTP API has POST /sandboxes/:id/pty/:sessionID/resize but no SDK wrapper.
-  - CLI: oc shell <sandbox-id> supports --shell flag (default /bin/bash)
-*/}
-
-## What is a PTY Session
-
-{/* A full interactive terminal inside the sandbox. Supports colors, full-screen apps (vim, top). Like SSH but over WebSocket. */}
-
-## Quick Example
-
-{/* Create PTY, send command, read output. TS + Python CodeGroup. */}
+A PTY session is a full interactive terminal inside the sandbox — like SSH but over WebSocket. Supports colors, cursor movement, and full-screen applications (vim, htop).
 
 <CodeGroup>
 
 ```typescript TypeScript
-// TODO: sandbox.pty.create({ onOutput }) -> session.send('ls\n') -> close
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+const pty = await sandbox.pty.create({
+  onOutput: (data) => process.stdout.write(data),
+});
+
+pty.send("ls -la /app\n");
+// ... wait for output ...
+pty.close();
+await sandbox.kill();
 ```
 
 ```python Python
-# TODO: sandbox.pty.create(on_output=...) -> session.send('ls\n') -> recv() -> close
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+pty = await sandbox.pty.create(
+    on_output=lambda data: print(data.decode(), end=""),
+)
+
+pty.send("ls -la /app\n")
+output = await pty.recv()  # pull-based alternative
+pty.close()
+await sandbox.kill()
 ```
 
 </CodeGroup>
 
 ## Creating a PTY
 
-{/* sandbox.pty.create(opts) */}
+<CodeGroup>
 
-### PtyOpts
+```typescript TypeScript
+const pty = await sandbox.pty.create({
+  cols: 120,
+  rows: 40,
+  onOutput: (data) => process.stdout.write(data),
+});
+```
 
-{/* ParamField: cols (default 80), rows (default 24), onOutput callback */}
+```python Python
+pty = await sandbox.pty.create(
+    cols=120,
+    rows=40,
+    on_output=lambda data: print(data.decode(), end=""),
+)
+```
+
+</CodeGroup>
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `cols` | number | `80` | Terminal columns |
+| `rows` | number | `24` | Terminal rows |
+| `onOutput` | callback | — | Called with output data (TS: `Uint8Array`, Python: `bytes`) |
 
 ## PtySession
 
-{/* Methods table:
-  - send(data) — both SDKs
-  - close() — both SDKs
-  - recv() — Python-only (returns bytes; pull-based alternative to onOutput callback)
-  - Note: resize() not available in SDKs. HTTP API has POST /sandboxes/:id/pty/:sessionID/resize but no SDK wrapper.
-*/}
+| Member | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Session ID | `pty.sessionId` | `pty.session_id` | Unique session ID |
+| Send input | `pty.send(data)` | `pty.send(data)` | Send keystrokes or commands |
+| Receive output | via `onOutput` callback | `await pty.recv()` | Get terminal output |
+| Close | `pty.close()` | `await pty.close()` | Close the PTY session |
 
-## Examples
+<Note>
+  `recv()` is Python-only — a pull-based alternative to the `on_output` callback. Returns raw bytes.
+</Note>
 
-{/* Run interactive commands, pipe stdin. */}
+### Resize
+
+PTY resize is available via the [HTTP API](/reference/api#pty) only (`POST /api/sandboxes/:id/pty/:sessionID/resize`). The SDKs do not expose a resize method — the CLI handles resize automatically for interactive sessions.
 
 ## CLI
 
-{/* oc shell <sandbox-id> — opens interactive terminal. Supports --shell flag (default /bin/bash). */}
+The fastest way to get an interactive shell:
+
+```bash
+oc shell sb-abc123
+oc shell sb-abc123 --shell /bin/zsh
+```
+
+Terminal size is auto-detected and resize events are forwarded. See [`oc shell`](/cli/shell) for details.
 
 <Tip>
   CLI equivalent: [`oc shell`](/cli/shell). Full reference: [TypeScript SDK](/reference/typescript-sdk#pty) · [Python SDK](/reference/python-sdk#pty) · [HTTP API](/reference/api#pty).

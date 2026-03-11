@@ -3,83 +3,175 @@ title: "Checkpoints"
 description: "Snapshot and fork sandbox state"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Complete guide to checkpoints — named VM snapshots you can fork from.
-  Entity page: concept + API + examples.
-
-  ABSORBS: sdks/typescript/checkpoints.mdx, sdks/python/checkpoints.mdx.
-
-  KEY NOTES:
-  - CheckpointInfo fields differ per surface: TS has sandboxConfig + orgId, HTTP has sizeBytes, Python returns raw dict
-  - Status: processing → ready (or failed)
-  - Key difference from hibernation: hibernation resumes SAME sandbox, checkpoints create NEW sandboxes
-  - Avoid "exactly where it left off" wording. Warm restore exists, but fork/restore can fall back to cold boot.
-*/}
-
-## What is a Checkpoint
-
-{/* Named snapshot of a running sandbox's state. Fork new sandboxes from it to start from the same saved environment. Like git commits for VMs. Be precise about guarantees: preserved filesystem state and a reproducible starting point, with warm restore when available. */}
-
-## Quick Example
-
-{/* Create checkpoint -> fork new sandbox -> verify state preserved. TS + Python CodeGroup. */}
+A checkpoint is a named snapshot of a running sandbox. Fork new sandboxes from it to start from a known-good environment — like git branches for VMs.
 
 <CodeGroup>
 
 ```typescript TypeScript
-// TODO: sandbox.createCheckpoint('before-deploy') -> Sandbox.createFromCheckpoint(id) -> verify
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+await sandbox.exec.run("npm install && npm run build", { cwd: "/app" });
+
+// Checkpoint after setup
+const cp = await sandbox.createCheckpoint("after-build");
+
+// Fork two independent sandboxes
+const a = await Sandbox.createFromCheckpoint(cp.id);
+const b = await Sandbox.createFromCheckpoint(cp.id);
+
+await a.exec.run("npm run test:unit", { cwd: "/app" });
+await b.exec.run("npm run test:e2e", { cwd: "/app" });
 ```
 
 ```python Python
-# TODO: sandbox.create_checkpoint('before-deploy') -> Sandbox.create_from_checkpoint(id) -> verify
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+await sandbox.exec.run("npm install && npm run build", cwd="/app")
+
+cp = await sandbox.create_checkpoint("after-build")
+
+a = await Sandbox.create_from_checkpoint(cp["id"])
+b = await Sandbox.create_from_checkpoint(cp["id"])
+
+await a.exec.run("npm run test:unit", cwd="/app")
+await b.exec.run("npm run test:e2e", cwd="/app")
 ```
 
 </CodeGroup>
 
 ## Checkpoints vs Hibernation
 
-{/* Key difference:
-  - Hibernation pauses and resumes the SAME sandbox
-  - Checkpoints create NEW sandboxes from saved state
-  - A sandbox can have many checkpoints; hibernation is a single pause/resume
-*/}
+| | Checkpoint | Hibernation |
+| --- | --- | --- |
+| Purpose | Fork new sandboxes from saved state | Pause and resume the **same** sandbox |
+| Original sandbox | Keeps running | Stopped |
+| Can fork | Yes — unlimited new sandboxes | No |
+| Count | Up to 10 per sandbox | One hibernation state |
+| Use case | Parallel testing, branching experiments | Cost savings, idle timeout |
+
+## What Gets Preserved
+
+Checkpoints capture the filesystem and installed state. Forked sandboxes start with a fresh boot from that disk state — the platform attempts warm restore when possible, but may fall back to a cold boot. Don't assume running processes carry over.
 
 ## API Reference
 
 ### Create Checkpoint
 
-{/* sandbox.createCheckpoint(name) / create_checkpoint(name). ParamField. */}
+<CodeGroup>
+
+```typescript TypeScript
+const checkpoint = await sandbox.createCheckpoint("before-migration");
+// checkpoint.id, checkpoint.status ("processing" → "ready")
+```
+
+```python Python
+checkpoint = await sandbox.create_checkpoint("before-migration")
+# checkpoint["id"], checkpoint["status"]
+```
+
+</CodeGroup>
+
+Checkpoint name must be unique within the sandbox. Status transitions from `processing` to `ready` (or `failed`).
 
 ### List Checkpoints
 
-{/* sandbox.listCheckpoints() / list_checkpoints(). Returns CheckpointInfo[]. */}
+<CodeGroup>
+
+```typescript TypeScript
+const checkpoints = await sandbox.listCheckpoints();
+```
+
+```python Python
+checkpoints = await sandbox.list_checkpoints()
+```
+
+</CodeGroup>
 
 ### Fork from Checkpoint
 
-{/* Sandbox.createFromCheckpoint(checkpointId) / create_from_checkpoint(). Creates new sandbox. */}
+Creates a new sandbox from a checkpoint:
+
+<CodeGroup>
+
+```typescript TypeScript
+const forked = await Sandbox.createFromCheckpoint(checkpointId, {
+  timeout: 600,
+});
+```
+
+```python Python
+forked = await Sandbox.create_from_checkpoint(checkpoint_id, timeout=600)
+```
+
+</CodeGroup>
 
 ### Restore Checkpoint
 
-{/* sandbox.restoreCheckpoint(checkpointId) / restore_checkpoint(). Reverts sandbox in-place. */}
+Revert a sandbox in-place. All changes since the checkpoint are lost:
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.restoreCheckpoint(checkpointId);
+```
+
+```python Python
+await sandbox.restore_checkpoint(checkpoint_id)
+```
+
+</CodeGroup>
 
 ### Delete Checkpoint
 
-{/* sandbox.deleteCheckpoint(checkpointId) / delete_checkpoint(). */}
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.deleteCheckpoint(checkpointId);
+```
+
+```python Python
+await sandbox.delete_checkpoint(checkpoint_id)
+```
+
+</CodeGroup>
 
 ## CheckpointInfo
 
-{/* Fields:
-  - TS: id, sandboxId, orgId, name, sandboxConfig, status, sizeBytes, createdAt
-  - Python: returns raw dict from API
-  - HTTP: id, sandboxId, orgId, name, status, sizeBytes, createdAt
-  Status: processing -> ready (or failed)
-*/}
+| Field | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| ID | `id` | `id` | Checkpoint UUID |
+| Sandbox ID | `sandboxId` | `sandboxID` | Source sandbox |
+| Name | `name` | `name` | Human-readable name |
+| Status | `status` | `status` | `processing`, `ready`, or `failed` |
+| Size | `sizeBytes` | `sizeBytes` | Snapshot size in bytes |
+| Created | `createdAt` | `createdAt` | Timestamp |
 
-## Examples
+<Note>
+  The TypeScript SDK returns typed `CheckpointInfo` objects. Python returns raw dictionaries with the HTTP API field names.
+</Note>
 
-{/* Checkpoint before risky operation. Fork for parallel exploration (try 5 approaches from same state). */}
+## Example: Parallel Exploration
+
+Try multiple approaches from the same starting point:
+
+```typescript
+const sandbox = await Sandbox.create();
+await sandbox.exec.run("git clone https://github.com/user/repo /app");
+const cp = await sandbox.createCheckpoint("fresh-clone");
+
+// Try three different migration strategies in parallel
+const strategies = ["--strategy=ours", "--strategy=theirs", "--strategy=recursive"];
+const results = await Promise.all(
+  strategies.map(async (strategy) => {
+    const fork = await Sandbox.createFromCheckpoint(cp.id);
+    const result = await fork.exec.run(`cd /app && git merge origin/main ${strategy}`);
+    await fork.kill();
+    return { strategy, exitCode: result.exitCode };
+  }),
+);
+```
 
 <Tip>
   CLI equivalent: [`oc checkpoint`](/cli/checkpoint). Full reference: [TypeScript SDK](/reference/typescript-sdk#sandbox) · [Python SDK](/reference/python-sdk#sandbox) · [HTTP API](/reference/api#checkpoints).

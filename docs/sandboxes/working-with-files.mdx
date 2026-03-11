@@ -3,59 +3,183 @@ title: "Working with Files"
 description: "Read, write, and manage files inside a sandbox"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
+<CodeGroup>
 
-  GOAL: Complete guide to reading, writing, and managing files inside sandboxes.
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
 
-  ABSORBS: sdks/typescript/filesystem.mdx, sdks/python/filesystem.mdx, working-with-files.mdx (root).
+const sandbox = await Sandbox.create();
 
-  KEY NOTES:
-  - Current structure is already good — merge TS/Python into CodeGroups and ensure consistency.
-  - exists() is a client-side SDK wrapper built on a normal file read request, not a separate HTTP endpoint.
-*/}
+await sandbox.files.write("/app/hello.txt", "Hello, World!");
+const content = await sandbox.files.read("/app/hello.txt");
+console.log(content); // "Hello, World!"
+
+await sandbox.kill();
+```
+
+```python Python
+from opencomputer import Sandbox
+
+async with await Sandbox.create() as sandbox:
+    await sandbox.files.write("/app/hello.txt", "Hello, World!")
+    content = await sandbox.files.read("/app/hello.txt")
+    print(content)  # "Hello, World!"
+```
+
+</CodeGroup>
 
 ## Reading Files
 
-{/* sandbox.files.read(path) — returns string content. TS + Python CodeGroup. */}
+<CodeGroup>
 
-### Read as Bytes
+```typescript TypeScript
+// Read as string
+const text = await sandbox.files.read("/app/config.json");
 
-{/* sandbox.files.readBytes(path) / read_bytes(path) — returns binary. TS + Python CodeGroup. */}
+// Read as bytes
+const bytes = await sandbox.files.readBytes("/app/image.png");
+```
+
+```python Python
+# Read as string
+text = await sandbox.files.read("/app/config.json")
+
+# Read as bytes
+data = await sandbox.files.read_bytes("/app/image.png")
+```
+
+</CodeGroup>
 
 ## Writing Files
 
-{/* sandbox.files.write(path, content) — text and binary. TS + Python CodeGroup. */}
+Content can be a string or binary data:
+
+<CodeGroup>
+
+```typescript TypeScript
+// Write text
+await sandbox.files.write("/app/config.json", JSON.stringify({ port: 3000 }));
+
+// Write binary
+const imageData = new Uint8Array([...]);
+await sandbox.files.write("/app/logo.png", imageData);
+```
+
+```python Python
+# Write text
+await sandbox.files.write("/app/config.json", '{"port": 3000}')
+
+# Write binary
+await sandbox.files.write("/app/logo.png", image_bytes)
+```
+
+</CodeGroup>
 
 ## Listing Directories
 
-{/* sandbox.files.list(path) — returns EntryInfo[]. TS + Python CodeGroup. */}
+<CodeGroup>
+
+```typescript TypeScript
+const entries = await sandbox.files.list("/app");
+for (const entry of entries) {
+  console.log(entry.isDir ? "📁" : "📄", entry.name, entry.size);
+}
+```
+
+```python Python
+entries = await sandbox.files.list("/app")
+for entry in entries:
+    kind = "dir" if entry.is_dir else "file"
+    print(f"{kind}: {entry.name} ({entry.size} bytes)")
+```
+
+</CodeGroup>
 
 ### EntryInfo
 
-{/* Table: name, isDir/is_dir, path, size.
-  Do not document modTime/mod_time on EntryInfo unless the SDK starts returning it.
-*/}
+| Field | TypeScript | Python | Type |
+| --- | --- | --- | --- |
+| Name | `name` | `name` | string |
+| Is directory | `isDir` | `is_dir` | boolean |
+| Full path | `path` | `path` | string |
+| Size in bytes | `size` | `size` | number |
 
 ## Managing Files
 
-{/* make_dir, remove, exists. TS + Python CodeGroup for each. */}
-
 ### Create Directory
 
-{/* sandbox.files.makeDir(path) / make_dir(path) */}
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.files.makeDir("/app/data");
+```
+
+```python Python
+await sandbox.files.make_dir("/app/data")
+```
+
+</CodeGroup>
 
 ### Remove
 
-{/* sandbox.files.remove(path) */}
+Deletes a file or directory:
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.files.remove("/app/temp");
+```
+
+```python Python
+await sandbox.files.remove("/app/temp")
+```
+
+</CodeGroup>
 
 ### Check Existence
 
-{/* sandbox.files.exists(path) — client-side convenience wrapper, not a dedicated HTTP endpoint. Both SDKs. */}
+<CodeGroup>
+
+```typescript TypeScript
+if (await sandbox.files.exists("/app/config.json")) {
+  const config = await sandbox.files.read("/app/config.json");
+}
+```
+
+```python Python
+if await sandbox.files.exists("/app/config.json"):
+    config = await sandbox.files.read("/app/config.json")
+```
+
+</CodeGroup>
+
+<Note>
+  `exists()` is a client-side convenience — it attempts a file read and returns `false` on error. There is no dedicated HTTP endpoint for existence checks.
+</Note>
 
 ## Examples
 
-{/* Upload & run a script. Copy files between paths. */}
+### Upload and Run a Script
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.files.write("/tmp/setup.sh", `#!/bin/bash
+apt-get update && apt-get install -y redis-server
+redis-server --daemonize yes
+`);
+await sandbox.exec.run("chmod +x /tmp/setup.sh && /tmp/setup.sh");
+```
+
+```python Python
+await sandbox.files.write("/tmp/setup.sh", """#!/bin/bash
+apt-get update && apt-get install -y redis-server
+redis-server --daemonize yes
+""")
+await sandbox.exec.run("chmod +x /tmp/setup.sh && /tmp/setup.sh")
+```
+
+</CodeGroup>
 
 <Tip>
   Full reference: [TypeScript SDK](/reference/typescript-sdk#filesystem) · [Python SDK](/reference/python-sdk#filesystem) · [HTTP API](/reference/api#filesystem).

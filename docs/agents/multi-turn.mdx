@@ -3,61 +3,175 @@ title: "Multi-turn"
 description: "Follow-ups, resume, and session management"
 ---
 
-{/*
-  TODO: Expand this stub into full content.
-
-  GOAL: Everything about conversations that go beyond a single prompt —
-  follow-ups, resuming across sessions, and managing running sessions.
-
-  KEY NOTES:
-  - resume is TS-only in the SDK surface. If showing an HTTP workaround, document the real flow:
-    create agent session with resume, then attach via exec-session WebSocket.
-  - Distinguish attach (reconnect to running session) vs resume (new session continuing old conversation, TS only).
-  - Agent sessions are SDK-only — no CLI command yet.
-*/}
+Agent conversations can extend beyond a single prompt. Send follow-up prompts within the same session, resume a conversation in a new session, or reconnect to a running agent.
 
 ## Follow-up Prompts
 
-{/* session.sendPrompt(text) to continue within same session.
-  Example: start a task, wait for completion, send follow-up. TS + Python CodeGroup. */}
+Use `sendPrompt()` to continue a conversation within the same running session:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Create a REST API with Express",
+  onEvent: (event) => console.log(`[${event.type}]`, event),
+});
+
+await session.done;
+
+// Send a follow-up in the same session
+session.sendPrompt("Now add input validation to all endpoints");
+await session.done;
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Create a REST API with Express",
+    on_event=lambda event: print(f"[{event.type}]", event),
+)
+
+await session.wait()
+
+# Send a follow-up in the same session
+session.send_prompt("Now add input validation to all endpoints")
+await session.wait()
+```
+
+</CodeGroup>
 
 ## Resuming Across Sessions
 
-{/* TS only. resume parameter in agent.start().
-  - Capture claude_session_id from turn_complete event
-  - Pass as resume in new agent.start() call
-  - Example: save session ID, create sandbox from checkpoint, resume conversation
-  - Note: Python SDK does not support resume. If including HTTP, use the real agent-create + exec-attach flow.
-*/}
+Resume continues a previous conversation in a **new** agent session. This is useful when the original session has ended or you want to fork the conversation.
+
+Capture the `claude_session_id` from the `turn_complete` event, then pass it as `resume` when starting a new session:
+
+```typescript
+let claudeSessionId: string;
+
+const session1 = await sandbox.agent.start({
+  prompt: "Set up a Next.js project with Tailwind",
+  onEvent: (event) => {
+    if (event.type === "turn_complete") {
+      claudeSessionId = event.claude_session_id;
+    }
+  },
+});
+await session1.done;
+
+// Later — possibly in a different sandbox forked from the same checkpoint
+const session2 = await sandbox.agent.start({
+  prompt: "Now add a dark mode toggle",
+  resume: claudeSessionId,
+  onEvent: (event) => console.log(event),
+});
+await session2.done;
+```
 
 <Note>
-  Resume is currently available in the TypeScript SDK only. Python SDK support is planned.
+  `resume` is available in the TypeScript SDK only. Python SDK support is planned — use the [HTTP API](/reference/api#agent-sessions) directly to pass the `resume` field.
 </Note>
+
+### Attach vs Resume
+
+| | Attach | Resume |
+| --- | --- | --- |
+| Session state | Still running | Ended or running |
+| What happens | Reconnect to event stream | New session, continues conversation |
+| SDK support | TypeScript, Python | TypeScript only |
 
 ## Interrupting
 
-{/* session.interrupt() to stop the current turn. Both SDKs. */}
+Stop the agent's current turn:
+
+<CodeGroup>
+
+```typescript TypeScript
+session.interrupt();
+// The session emits an "interrupted" event
+```
+
+```python Python
+session.interrupt()
+```
+
+</CodeGroup>
+
+The agent stops working but the session stays alive — you can send a new prompt to continue.
 
 ## Reconfiguring Mid-Session
 
-{/* session.configure() to change model, tools, etc. while session is running. */}
+Change model, tools, or working directory while the session is running:
+
+<CodeGroup>
+
+```typescript TypeScript
+session.configure({
+  model: "claude-sonnet-4-20250514",
+  maxTurns: 20,
+  allowedTools: ["Read", "Bash"],
+});
+```
+
+```python Python
+session.configure(
+    model="claude-sonnet-4-20250514",
+    max_turns=20,
+    allowed_tools=["Read", "Bash"],
+)
+```
+
+</CodeGroup>
+
+The new configuration takes effect on the next turn.
 
 ## Managing Sessions
 
-{/* List, attach, and manage running agent sessions. */}
-
 ### Listing Sessions
 
-{/* sandbox.agent.list() — both SDKs. */}
+<CodeGroup>
+
+```typescript TypeScript
+const sessions = await sandbox.agent.list();
+for (const s of sessions) {
+  console.log(s.sessionID, s.running ? "running" : "stopped");
+}
+```
+
+```python Python
+sessions = await sandbox.agent.list()
+for s in sessions:
+    print(s.session_id, "running" if s.running else "stopped")
+```
+
+</CodeGroup>
 
 ### Attaching to a Running Session
 
-{/* sandbox.agent.attach(sessionId) — reconnect to running session. Both SDKs.
-  When to use attach vs resume:
-  - attach = same session still running, reconnect to event stream
-  - resume = new session continuing old conversation (TS only)
-*/}
+Reconnect to an agent session that's already running — useful after a network disconnect or when monitoring from a different client:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.attach(sessionId, {
+  onEvent: (event) => console.log(event),
+  onError: (data) => console.error(data),
+});
+```
+
+```python Python
+session = await sandbox.agent.attach(
+    session_id,
+    on_event=lambda event: print(event),
+    on_error=lambda data: print("error:", data),
+)
+```
+
+</CodeGroup>
 
 <Note>
   Agent sessions are SDK-only — there is no CLI command for agents yet.
 </Note>
+
+<Tip>
+  Back to [Agents overview](/agents/overview). See also: [Events](/agents/events) · [Tools](/agents/tools).
+</Tip>
