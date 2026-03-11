@@ -74,6 +74,7 @@ docs/
 │   ├── exec.mdx
 │   ├── shell.mdx
 │   ├── checkpoint.mdx
+│   ├── patch.mdx
 │   └── preview.mdx
 │
 ├── guides/                         ← KEEP
@@ -139,6 +140,7 @@ docs/
         "cli/exec",
         "cli/shell",
         "cli/checkpoint",
+        "cli/patch",
         "cli/preview"
       ]
     },
@@ -229,10 +231,12 @@ Each entity page follows this template:
 2. **Quick example:** `sandbox.agent.start()` with event handling (TS + Python CodeGroup) — the simplest working agent
 3. **How it works** — brief (3-4 sentences): the SDK spawns Claude inside the sandbox VM, Claude gets bash/file tools, it works in a loop (think → act → observe), events stream back to your code via WebSocket.
 4. **`sandbox.agent.start(opts)`** — full param reference:
-   - prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, resume, onEvent, onError, onExit
+   - prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, onEvent, onError
+   - **TS-only:** resume, onExit, onScrollbackEnd (Python SDK does not support these yet)
 5. **AgentSession** — properties and methods table:
-   - sessionId, done, sendPrompt, interrupt, configure, kill, close
-   - **Python-specific:** `collect_events()`, `wait()`
+   - sessionId, done, sendPrompt, interrupt, configure, kill, close (both SDKs)
+   - **Python-specific:** `collect_events()`, `wait()` (convenient alternatives to callbacks)
+   - **TS-specific:** `done` returns Promise<number>; Python uses `await session.wait()` instead
 6. **Quick links** to sub-pages: Events, Tools, Multi-turn
 
 **Absorbs content from:** current `agents.mdx`, `sdks/typescript/agent.mdx` (overview parts), `sdks/python/agent.mdx` (overview parts).
@@ -276,16 +280,16 @@ Each entity page follows this template:
 **Structure:**
 1. **Follow-up prompts** — `session.sendPrompt(text)` to continue a conversation within the same session
    - Example: start a task, wait for completion, send follow-up
-2. **Resuming across sessions** — `resume` parameter in `agent.start()`
+2. **Resuming across sessions** (TypeScript only) — `resume` parameter in `agent.start()`
    - How it works: capture `claude_session_id` from `turn_complete` event, pass it as `resume` in a new `agent.start()` call
    - Example: save session ID, create new sandbox from checkpoint, resume conversation
-   - **NEW: first time this is documented**
+   - **Note:** Python SDK does not yet support `resume`. Show HTTP API workaround or mark as TS-only.
 3. **Interrupting** — `session.interrupt()` to stop the current turn
 4. **Reconfiguring mid-session** — `session.configure()` to change model, tools, etc.
 5. **Managing sessions:**
    - `sandbox.agent.list()` — list active sessions
-   - `sandbox.agent.attach(sessionId)` — reconnect to a running session (get events you missed)
-   - When to use attach vs resume
+   - `sandbox.agent.attach(sessionId)` — reconnect to a running session (both SDKs)
+   - When to use attach vs resume (attach = same session still running; resume = new session continuing old conversation — TS only)
 6. **Note:** Agent sessions are SDK-only (no CLI command yet)
 
 ---
@@ -301,26 +305,30 @@ Each entity page follows this template:
 2. **Quick example:** create → run command → kill (TS + Python CodeGroup)
 3. **Specs table:**
    - OS: Ubuntu-based Linux
-   - Default CPU: 1 vCPU (configurable up to 4 via `cpuCount`)
-   - Default memory: 512MB (configurable up to 2GB via `memoryMB`)
+   - Default CPU: 1 vCPU (configurable up to 4 via `cpuCount` — TS SDK + HTTP API; not yet in Python SDK)
+   - Default memory: 512MB (configurable up to 2048MB via `memoryMB` — TS SDK + HTTP API; not yet in Python SDK)
    - Storage: 20GB workspace
    - Network: full outbound internet access
    - Pre-installed: Python 3, Node.js, common CLI tools
 4. **Creating a sandbox** — `Sandbox.create(opts)` with full param reference:
-   - template, timeout, apiKey, apiUrl, envs, metadata, cpuCount, memoryMB
+   - Both SDKs: template, timeout, apiKey/api_key, apiUrl/api_url, envs, metadata
+   - **TS-only:** cpuCount, memoryMB (Python SDK does not expose these yet; use HTTP API directly for custom resources)
 5. **Connecting to an existing sandbox** — `Sandbox.connect(sandboxId)`
 6. **Sandbox lifecycle:**
-   - Status states: `creating → running → hibernated → killed`
-   - Lifecycle diagram (text-based)
+   - Status states: `running`, `hibernated`, `stopped`, `error`
+   - Lifecycle diagram (text-based): running ↔ hibernated → stopped; running → error
    - Rolling timeout: resets on every operation, default 300s
-   - What happens on timeout: auto-hibernate if possible, else kill
-7. **Hibernation & wake** — `sandbox.hibernate()`, `sandbox.wake()`
+   - What happens on timeout: auto-hibernate if possible, else stop
+7. **Hibernation & wake** (TypeScript SDK only for now)
+   - `sandbox.hibernate()`, `sandbox.wake()` — TS SDK methods
    - Like closing a laptop lid: memory + disk snapshotted, sandbox ID stays the same
    - Resume in seconds, no cost while hibernated
    - Auto-triggered on idle timeout
    - Difference from checkpoints: hibernation is transparent resume, checkpoints are named snapshots you fork from
-8. **Other methods** — `kill()`, `isRunning()`, `setTimeout()`
+   - **Note:** Python SDK does not yet have `hibernate()`/`wake()`. Use HTTP API directly: `POST /api/sandboxes/:id/hibernate`, `POST /api/sandboxes/:id/wake`. CLI: `oc sandbox hibernate`, `oc sandbox wake`.
+8. **Other methods** — `kill()`, `isRunning()`/`is_running()`, `setTimeout()`/`set_timeout()`
 9. **Sandbox properties** — sandboxId, agent, exec, files, pty
+   - **Python-specific:** `async with Sandbox.create() as sandbox:` context manager (auto-kills on exit)
 
 **Absorbs content from:** `sdks/typescript/sandbox.mdx`, `sdks/python/sandbox.mdx`.
 
@@ -332,17 +340,18 @@ Each entity page follows this template:
    - Full param reference (command, timeout, env, cwd)
    - ProcessResult table
    - Examples: cwd, env vars, timeout, chaining
-3. **Async commands: `sandbox.exec.start()`** — CodeGroup TS + Python
-   - Full param reference (command, args, env, cwd, timeout, maxRunAfterDisconnect, onStdout, onStderr, onExit)
-   - **NEW: document `maxRunAfterDisconnect`** — process continues running N seconds after WebSocket disconnect
-   - ExecSession table (sessionId, done, sendStdin, kill, close)
+3. **Async commands: `sandbox.exec.start()`**
+   - **TypeScript:** Full streaming — returns `ExecSession` with `onStdout`, `onStderr`, `onExit` callbacks, `sendStdin()`, `kill()`, `close()`. Supports `maxRunAfterDisconnect` (process continues N seconds after WS disconnect).
+   - **Python:** Returns `str` (session ID only). No streaming callbacks, no ExecSession object. Use `exec.list()` and `exec.kill()` to manage sessions.
+   - Show TS example with full streaming, Python example with `start()` → poll/kill pattern.
+   - ExecSession table (TS only): sessionId, done, sendStdin, kill, close
 4. **Managing sessions:**
-   - `sandbox.exec.list()` — list running sessions
-   - `sandbox.exec.attach()` — reconnect to running session
-   - `sandbox.exec.kill()` — kill a session
-5. Examples: dev server, long-running process, reconnect pattern
+   - `sandbox.exec.list()` — list running sessions (both SDKs)
+   - `sandbox.exec.attach()` — reconnect to running session (TS only)
+   - `sandbox.exec.kill()` — kill a session (both SDKs)
+5. Examples: dev server (TS streaming), long-running process, reconnect pattern (TS only)
 
-**Key improvement:** Use `sandbox.exec.*` consistently (not `sandbox.commands`). Document `maxRunAfterDisconnect`. Add session management.
+**Key improvement:** Use `sandbox.exec.*` consistently (not `sandbox.commands`). Be honest about Python SDK gaps in streaming — don't pretend parity exists.
 
 #### `sandboxes/working-with-files.mdx` — REWRITE
 
@@ -358,12 +367,16 @@ Each entity page follows this template:
 #### `sandboxes/interactive-terminals.mdx` — NEW (promote from SDK-only)
 
 **Structure:**
-1. **What is a PTY session** — A full interactive terminal inside the sandbox, like SSH but over WebSocket. Supports colors, resize, full-screen apps (vim, top).
+1. **What is a PTY session** — A full interactive terminal inside the sandbox, like SSH but over WebSocket. Supports colors, full-screen apps (vim, top).
 2. Create a PTY session (TS + Python CodeGroup)
-3. PtyOpts reference (cols, rows, onOutput)
-4. PtySession methods (send, close)
+3. PtyOpts reference: cols (default 80), rows (default 24), onOutput callback
+4. PtySession methods:
+   - `send(data)` — both SDKs
+   - `close()` — both SDKs
+   - `recv()` — **Python-only** (returns bytes; alternative to onOutput callback)
+   - **Note:** Neither SDK exposes `resize()`. HTTP API has `POST /sandboxes/:id/pty/:sessionID/resize` but no SDK wrapper yet.
 5. Examples: run interactive commands, pipe stdin
-6. CLI equivalent: `oc shell <sandbox-id>`
+6. CLI equivalent: `oc shell <sandbox-id>` (supports `--shell` flag)
 
 #### `sandboxes/checkpoints.mdx` — REWRITE (entity page)
 
@@ -380,8 +393,11 @@ Each entity page follows this template:
    - `Sandbox.createFromCheckpoint(id)` — fork a new sandbox
    - `sandbox.restoreCheckpoint(id)` — revert in-place
    - `sandbox.deleteCheckpoint(id)` — delete
-5. CheckpointInfo structure (id, name, status, sandboxId, createdAt)
-6. Status: `processing → ready`
+5. CheckpointInfo structure:
+   - TS SDK: `id`, `sandboxId`, `orgId`, `name`, `sandboxConfig`, `status`, `sizeBytes`, `createdAt`
+   - Python SDK: returns raw dict from API
+   - HTTP API: `id`, `sandboxId`, `orgId`, `name`, `status`, `sizeBytes`, `createdAt`
+6. Status: `processing` → `ready` (or `failed`)
 7. Examples: checkpoint before risky operation, fork for parallel exploration
 
 #### `sandboxes/templates.mdx` — REWRITE (entity page)
@@ -391,12 +407,14 @@ Each entity page follows this template:
 2. Quick example: build template → create sandbox from it (TS + Python CodeGroup)
 3. **Default template** — what's pre-installed (derive from `Dockerfile.default`)
 4. **API reference:**
-   - `Template.build(name, dockerfile)` — build from Dockerfile
-   - `Template.list()` — list available
-   - `Template.get(name)` — get details
-   - `Template.delete(name)` — delete
+   - **Note:** Templates is a standalone class, not a property on Sandbox. TS: `Templates` (plural), Python: `Template` (singular).
+   - `templates.build(name, dockerfile)` — build from Dockerfile
+   - `templates.list()` — list available
+   - `templates.get(name)` — get details
+   - `templates.delete(name)` — delete
    - Using in `Sandbox.create({ template: "my-template" })`
-5. TemplateInfo structure
+5. TemplateInfo structure: `templateID`/`template_id`, `name`, `tag`, `status`
+   - Status values: `building`, `ready`, `error`
 6. Example: template with specific language/framework pre-installed
 
 #### `sandboxes/patches.mdx` — REWRITE (entity page)
@@ -408,8 +426,8 @@ Each entity page follows this template:
    - `Sandbox.createCheckpointPatch(checkpointId, { script, description })`
    - `Sandbox.listCheckpointPatches(checkpointId)`
    - `Sandbox.deleteCheckpointPatch(checkpointId, patchId)`
-4. When patches run (table: fork = yes, restore = yes/no)
-5. Execution order: patches run in sequence order
+4. When patches run: applied on wake/boot from checkpoint (strategy is always `on_wake`)
+5. Execution order: patches run in creation order
 6. Failure handling: what happens if a patch script fails
 7. Example: inject API keys, update packages at fork time
 
@@ -422,10 +440,10 @@ Each entity page follows this template:
    - `sandbox.createPreviewURL({ port, domain?, authConfig? })`
    - `sandbox.listPreviewURLs()`
    - `sandbox.deletePreviewURL(port)`
-4. **Custom domains:**
-   - How to verify your domain
-   - DNS setup (TXT for verification, CNAME for routing)
-   - SSL is automatic
+4. **Custom domains** (requires Cloudflare integration on the deployment):
+   - Pass `domain` param when creating preview URL
+   - SSL is automatic via Cloudflare
+   - Note: custom domain setup is org-level configuration (done via dashboard, not SDK)
 5. Preview URLs persist across hibernation/wake cycles
 6. Examples: share a dev server, multiple ports, custom domain
 
@@ -442,10 +460,12 @@ These are exhaustive, lookup-oriented pages. No tutorials, no "why" — just eve
 **Structure:**
 1. **Base URL & Authentication**
    - Base: `https://app.opencomputer.dev/api`
-   - Auth: `Authorization: Bearer <API_KEY>` header
-   - All requests/responses are JSON
+   - **Control plane auth:** `X-API-Key: <API_KEY>` header (or `api_key` query param). Used for all `/api/*` routes.
+   - **Worker direct auth:** `Authorization: Bearer <JWT>` header (or `token` query param for WebSocket). The JWT is sandbox-scoped and returned in the create sandbox response.
+   - Most SDK users only need the API key — the SDK handles JWT auth transparently.
+   - All requests/responses are JSON (except file read which returns plain text)
 2. **Sandbox Lifecycle**
-   - `POST /api/sandboxes` — create (params: template, timeout, envs, metadata, cpuCount, memoryMB)
+   - `POST /api/sandboxes` — create (params: templateID, timeout, envs, metadata, cpuCount, memoryMB, alias, port, networkEnabled). Response includes: sandboxID, status, connectURL, token, hostPort, cpuCount, memoryMB, startedAt, endAt.
    - `GET /api/sandboxes` — list all
    - `GET /api/sandboxes/:id` — get details
    - `DELETE /api/sandboxes/:id` — kill
@@ -494,11 +514,16 @@ These are exhaustive, lookup-oriented pages. No tutorials, no "why" — just eve
     - `GET /api/sandboxes/:id/pty/:sessionID` — WebSocket
     - `POST /api/sandboxes/:id/pty/:sessionID/resize` — resize
     - `DELETE /api/sandboxes/:id/pty/:sessionID` — kill
-11. **Error format** — standard error response structure, common status codes
+11. **WebSocket Binary Protocol** (essential for non-SDK users)
+    - Exec/PTY sessions use binary WebSocket frames
+    - Input: prefix byte `0x00` + stdin data
+    - Output prefix bytes: `0x01` (stdout), `0x02` (stderr), `0x03` (exit code, 4-byte big-endian int32), `0x04` (scrollback end marker)
+    - On connect: server replays scrollback buffer (historical output), then sends `0x04`, then live-streams
+12. **Error format** — `{"error": "message"}` envelope, common status codes (400, 401, 403, 404, 409, 500)
 
 Each endpoint: method, path, request body (JSON), response body (JSON), status codes, curl example.
 
-**Source:** `internal/api/router.go` (lines 131-191 define every route).
+**Source:** `internal/api/router.go` (routes), `internal/api/sandbox.go` + `exec_session.go` + `agent_session.go` + `filesystem.go` + `templates.go` (handlers).
 
 #### `reference/typescript-sdk.mdx` — NEW
 
@@ -510,15 +535,15 @@ Each endpoint: method, path, request body (JSON), response body (JSON), status c
    - Static: `create(opts?)`, `connect(sandboxId, opts?)`, `createFromCheckpoint(checkpointId, opts?)`, `createCheckpointPatch(checkpointId, opts)`, `listCheckpointPatches(checkpointId, opts?)`, `deleteCheckpointPatch(checkpointId, patchId, opts?)`
    - Instance: `kill()`, `isRunning()`, `hibernate()`, `wake(opts?)`, `setTimeout(timeout)`, `createCheckpoint(name)`, `listCheckpoints()`, `restoreCheckpoint(checkpointId)`, `deleteCheckpoint(checkpointId)`, `createPreviewURL(opts)`, `listPreviewURLs()`, `deletePreviewURL(port)`
    - Properties: `sandboxId`, `agent`, `exec`, `files`, `pty`
-   - All types: `SandboxOpts`, `CheckpointInfo`, `PreviewURLResult`
+   - All types: `SandboxOpts`, `CheckpointInfo`, `PatchInfo`, `PatchResult`, `PreviewURLResult`
 3. **Agent** class
    - `start(opts?)`, `attach(sessionId, opts?)`, `list()`
    - `AgentSession`: `sessionId`, `done`, `sendPrompt()`, `interrupt()`, `configure()`, `kill()`, `close()`
-   - Types: `AgentStartOpts`, `AgentConfig`, `AgentEvent`
+   - Types: `AgentStartOpts`, `AgentConfig`, `AgentEvent`, `McpServerConfig`
 4. **Exec** class
    - `run(command, opts?)`, `start(command, opts?)`, `attach(sessionId, opts?)`, `list()`, `kill(sessionId, signal?)`
    - `ExecSession`: `sessionId`, `done`, `sendStdin()`, `kill()`, `close()`
-   - Types: `RunOpts`, `ExecStartOpts`, `ProcessResult`, `ExecSessionInfo`
+   - Types: `RunOpts`, `ExecStartOpts`, `ExecAttachOpts` (with `onScrollbackEnd`), `ProcessResult`, `ExecSessionInfo`
 5. **Filesystem** class
    - `read(path)`, `readBytes(path)`, `write(path, content)`, `list(path?)`, `makeDir(path)`, `remove(path)`, `exists(path)`
    - Types: `EntryInfo`
@@ -526,7 +551,7 @@ Each endpoint: method, path, request body (JSON), response body (JSON), status c
    - `create(opts?)`
    - `PtySession`: `sessionId`, `send()`, `close()`
    - Types: `PtyOpts`
-7. **Template** class
+7. **Templates** class (note: plural, standalone — not a Sandbox property)
    - `build(name, dockerfile)`, `list()`, `get(name)`, `delete(name)`
    - Types: `TemplateInfo`
 
@@ -538,21 +563,30 @@ Each method: full signature, params with types and defaults, return type, one-li
 
 **Goal:** Same as TypeScript reference but for Python. Exhaustive, every class/method/type.
 
-**Structure:** Mirrors TypeScript reference exactly, with Python idioms:
+**Structure:** Documents the Python SDK accurately, noting gaps vs TypeScript.
 1. **Installation & setup** — `pip install opencomputer-sdk`, env vars
 2. **Sandbox** class — all static and instance methods (snake_case)
-   - `create()`, `connect()`, `create_from_checkpoint()`, `create_checkpoint_patch()`, etc.
-   - `kill()`, `is_running()`, `hibernate()`, `wake()`, `set_timeout()`, etc.
+   - Class methods: `create(template, timeout, api_key, api_url, envs, metadata)`, `connect()`, `create_from_checkpoint()`
+   - Static: `create_checkpoint_patch()`, `list_checkpoint_patches()`, `delete_checkpoint_patch()`
+   - Instance: `kill()`, `is_running()`, `set_timeout()`, `create_checkpoint()`, `list_checkpoints()`, `restore_checkpoint()`, `delete_checkpoint()`, `create_preview_url()`, `list_preview_urls()`, `delete_preview_url()`, `close()`
+   - Context manager: `async with Sandbox.create() as sandbox:` (auto-kills on exit)
+   - **Not available in Python (use HTTP API):** `hibernate()`, `wake()`, `cpuCount`/`memoryMB` create params
 3. **Agent** class
-   - `start()`, `attach()`, `list()`
+   - `start(prompt, model, system_prompt, allowed_tools, permission_mode, max_turns, cwd, mcp_servers, on_event, on_error)` — **no `resume` param**
+   - `attach(session_id, on_event, on_error)`, `list()`
    - `AgentSession`: `session_id`, `collect_events()`, `wait()`, `send_prompt()`, `interrupt()`, `configure()`, `kill()`, `close()`
+   - `AgentEvent` dataclass with `type`, `data` fields + dict-like `[]` and `.get()` access
 4. **Exec** class
-   - `run()`, `start()`, `list()`, `kill()`
-   - Types: `ProcessResult` (dataclass)
+   - `run(command, timeout, env, cwd)` → `ProcessResult`
+   - `start(command, args, env, cwd, timeout)` → `str` (session ID, **not** an ExecSession object)
+   - `list()`, `kill(session_id, signal)`
+   - **Not available in Python:** `attach()`, streaming callbacks, `maxRunAfterDisconnect`
 5. **Filesystem** class
    - `read()`, `read_bytes()`, `write()`, `list()`, `make_dir()`, `remove()`, `exists()`
-6. **Pty** class — `create()`, `PtySession`
-7. **Template** class — `build()`, `list()`, `get()`, `delete()`
+6. **Pty** class — `create(cols, rows, on_output)`, `PtySession` with `send()`, `recv()`, `close()`
+   - **Python-unique:** `recv()` method on PtySession (pull-based alternative to callback)
+7. **Template** class (note: singular, standalone)
+   - `build()`, `list()`, `get()`, `delete()`
 
 Each method: full async signature, params with types and defaults, return type, one-line example.
 
@@ -572,12 +606,17 @@ CLI pages stay as a separate nav group. These are reference-only (no conceptual 
 - JSON output mode
 
 #### `cli/sandbox.mdx` — KEEP (minor edits)
+- Includes: create, list, get, kill, hibernate, wake, set-timeout
 #### `cli/exec.mdx` — RENAME from commands.mdx, update to match `oc exec` naming
+- Includes: exec (default), list, attach, kill subcommands
 #### `cli/shell.mdx` — KEEP (minor edits)
-#### `cli/checkpoint.mdx` — MERGE current checkpoint + patch pages
+- Supports `--shell` flag (default `/bin/bash`)
+#### `cli/checkpoint.mdx` — KEEP (minor edits)
+- Includes: create, list, restore, spawn, delete
+#### `cli/patch.mdx` — RENAME from patches.mdx (singular)
+- `oc patch` is a separate command group from `oc checkpoint`
+- Includes: create (--script file/stdin), list, delete
 #### `cli/preview.mdx` — RENAME from previews.mdx (singular)
-
-**Deleted CLI pages:** `cli/patches.mdx` (merged into checkpoint)
 
 ---
 
@@ -643,92 +682,67 @@ agents.mdx                       → agents/overview.mdx
 running-commands.mdx             → sandboxes/running-commands.mdx
 working-with-files.mdx           → sandboxes/working-with-files.mdx
 
-# CLI renames/merges (3)
+# CLI renames (3)
 cli/commands.mdx                 → cli/exec.mdx
-cli/patches.mdx                  → merged into cli/checkpoint.mdx
+cli/patches.mdx                  → cli/patch.mdx
 cli/previews.mdx                 → cli/preview.mdx
 ```
 
-Total: 16 SDK pages deleted, 3 root pages moved, 3 CLI pages renamed/merged.
+Total: 16 SDK pages deleted, 3 root pages moved, 3 CLI pages renamed.
 
 ---
 
-## Audit: Plan vs Code (2026-03-11)
+## Audit: Plan vs Code (2026-03-11, updated 2026-03-11)
 
-Cross-referenced the plan against exact TS SDK, Python SDK, and HTTP API handler source code. Issues grouped by severity.
+Cross-referenced the plan against exact TS SDK, Python SDK, HTTP API handler, and CLI source code. All page specs above have been updated to reflect reality. This section tracks remaining known issues.
 
-### CRITICAL: Plan claims parity that doesn't exist
+### Python SDK gaps vs TypeScript (confirmed, annotated in page specs above)
 
-The plan assumes TS and Python SDKs are interchangeable. They are NOT. Several features exist in TypeScript but are missing from Python:
+| Feature | TypeScript | Python | HTTP API | Handled in plan |
+|---------|-----------|--------|----------|-----------------|
+| `Sandbox.create({ cpuCount, memoryMB })` | Yes | NO | Yes | sandboxes/overview.mdx — noted TS-only |
+| `sandbox.hibernate()` / `sandbox.wake()` | Yes | NO | Yes | sandboxes/overview.mdx — noted TS-only, shows HTTP/CLI alternatives |
+| `exec.start()` streaming ExecSession | Yes (WS + callbacks) | Returns `str` only | WS available | sandboxes/running-commands.mdx — separate TS/Python examples |
+| `exec.attach(sessionId)` | Yes | NO | WS available | sandboxes/running-commands.mdx — noted TS-only |
+| `maxRunAfterDisconnect` in exec | Yes | NO | Yes | sandboxes/running-commands.mdx — noted TS-only |
+| Agent `resume` parameter | Yes (via AgentConfig) | NO | Yes | agents/multi-turn.mdx — noted TS-only |
+| Agent `onExit` callback | Yes | NO | N/A | agents/overview.mdx — noted TS-only |
+| Agent `onScrollbackEnd` callback | Yes | NO | N/A | agents/overview.mdx — noted TS-only |
 
-| Feature | TypeScript | Python | HTTP API |
-|---------|-----------|--------|----------|
-| `Sandbox.create({ cpuCount, memoryMB })` | Yes | **NO** (not a param) | Yes |
-| `sandbox.hibernate()` / `sandbox.wake()` | Yes | **NO** (methods don't exist) | Yes |
-| `exec.start()` returns streaming `ExecSession` | Yes (WebSocket + callbacks) | **Returns `str` (session ID only)** | WebSocket available |
-| `exec.attach(sessionId)` | Yes | **NO** (method doesn't exist) | WebSocket available |
-| `maxRunAfterDisconnect` in exec | Yes | **NO** | Yes |
-| Agent `resume` parameter | Yes (via `AgentConfig`) | **NO** (not in `start()` signature) | Yes |
-| Agent `onExit` callback | Yes | **NO** | N/A |
-| Agent `onScrollbackEnd` callback | Yes | **NO** | N/A |
-| Exec `onScrollbackEnd` callback | Yes (in `ExecAttachOpts`) | **NO** | N/A |
+### Python SDK features unique to Python (documented)
 
-**Impact on plan:** Every page that says "TS + Python CodeGroup" must handle these asymmetries. Can't just show identical code in two tabs for exec.start, hibernation, or agent resume. Options:
-1. Show TS-only features clearly marked as such
-2. Note Python gaps with "coming soon" or "use HTTP API directly"
-3. File issues on the Python SDK to add missing features before docs ship
+| Feature | Status in plan |
+|---------|---------------|
+| `Sandbox` async context manager (`async with`) | sandboxes/overview.mdx, reference/python-sdk.mdx |
+| `AgentSession.collect_events()` | agents/overview.mdx, reference/python-sdk.mdx |
+| `AgentSession.wait()` | agents/overview.mdx, reference/python-sdk.mdx |
+| `AgentEvent` dict-like `[]` and `.get()` access | reference/python-sdk.mdx |
+| `PtySession.recv()` | sandboxes/interactive-terminals.mdx, reference/python-sdk.mdx |
+| `Agent.attach()` exists in Python | agents/multi-turn.mdx (both SDKs) |
 
-### Naming/type mismatches
+### Naming/type issues (to handle carefully in docs)
 
-| Issue | Details |
-|-------|---------|
-| `Templates` class name | TS exports `Templates` (plural). Python exports `Template` (singular). Plan uses `Template` — inconsistent with TS. |
-| `Templates` not on Sandbox | Unlike `agent`, `exec`, `files`, `pty` — `Templates` is standalone (not `sandbox.templates`). Plan's reference section should reflect this. |
-| `CheckpointInfo` fields | Plan says: `id, name, status, sandboxId, createdAt`. Actual TS: `id, sandboxId, orgId, name, rootfsS3Key?, workspaceS3Key?, sandboxConfig, status, sizeBytes, createdAt`. HTTP response: `checkpointID, sandboxID, includeMemory, sizeBytes, createdAt` (no `name`!). Needs reconciliation. |
-| HTTP API uses `checkpointID`/`sandboxID` | SDK uses `id`/`sandboxId`. Plan must be clear about which is which per surface. |
-| `ExecAttachOpts` type | TS has a separate type for attach (with `onScrollbackEnd`). Plan doesn't mention it. |
-| `PatchInfo.strategy` field | Exists in type definition but never set by server. Unclear meaning. |
+| Issue | Resolution |
+|-------|------------|
+| TS `Templates` (plural) vs Python `Template` (singular) | Noted in templates page and both reference pages |
+| `Templates` is standalone (not `sandbox.templates`) | Noted in templates page spec |
+| `CheckpointInfo` field differences across surfaces | Checkpoint page lists per-surface fields |
+| `PatchInfo.strategy` always "on_wake" | Mentioned as fixed value, not as configurable option |
+| HTTP uses `sandboxID`/`checkpointID`, SDKs use `sandboxId`/`id` | Reference pages document per-surface naming |
 
-### Undocumented features (exist in code, not in plan)
+### Remaining items not yet in page specs (handle during writing)
 
-| Feature | Where | Should go |
-|---------|-------|-----------|
-| `onScrollbackEnd` callback (agent + exec) | TS SDK | agents/events.mdx, sandboxes/running-commands.mdx |
-| `POST /api/sandboxes/:sandboxId/save-as-template` | HTTP API | sandboxes/templates.mdx, reference/api.mdx |
-| Python `PtySession.recv()` method | Python SDK | sandboxes/interactive-terminals.mdx, reference/python-sdk.mdx |
-| Python `Sandbox` async context manager (`async with`) | Python SDK | sandboxes/overview.mdx, reference/python-sdk.mdx |
-| WebSocket binary protocol (stream markers 0x00-0x04) | Both SDKs internally, HTTP API | reference/api.mdx (essential for raw API users) |
-| Dual auth model (API key for control plane, JWT for worker) | HTTP API | reference/api.mdx |
-| `POST /api/sandboxes/:id/token/refresh` | Worker HTTP API | reference/api.mdx |
-| HTTP create sandbox extra params: `alias`, `port`, `networkEnabled`, `imageRef`, `templateRootfsKey`, `templateWorkspaceKey` | HTTP API | reference/api.mdx (some may be internal-only) |
-| Create sandbox response: `connectURL`, `token`, `clientID`, `hostPort`, `machineID` | HTTP API | reference/api.mdx |
-| Python `AgentEvent.__getitem__` / `.get()` dict-like access | Python SDK | reference/python-sdk.mdx |
-| Python `commands.py` legacy file still exists (deprecated) | Python SDK | Note in reference, don't document |
-| PTY `shell` param in HTTP create body | HTTP API | reference/api.mdx |
-| PTY resize endpoint | HTTP API + CLI | sandboxes/interactive-terminals.mdx |
-| `ExecSessionInfo.attachedClients` field | Both SDKs | reference pages |
-
-### Plan references things that don't exist or are wrong
-
-| Claim in plan | Reality |
-|---------------|---------|
-| "Sandbox.create({ ... cpuCount, memoryMB })" for Python | Python `create()` doesn't accept these params |
-| "sandbox.hibernate(), sandbox.wake()" for both SDKs | Python SDK doesn't have these methods |
-| "sandbox.exec.attach()" as available in both | Python has no `attach()` on Exec |
-| "resume param" documented for both SDKs | Python Agent.start() has no `resume` param |
-| Agent HTTP API has WebSocket streaming | There's no WebSocket endpoint for agents — SDKs use exec sessions internally. Agent events are SDK-abstracted. |
-| Plan says HTTP auth is `Authorization: Bearer <API_KEY>` | Control plane uses API key middleware; worker uses sandbox-scoped JWT. Two different auth flows. |
-
-### Recommended fixes to plan
-
-1. **Add "SDK parity" column to all feature tables.** Where Python is missing a feature, clearly mark it TS-only and show the HTTP API alternative.
-2. **Fix reference/api.mdx auth section.** Document both auth flows (API key for `/api/*` on control plane, Bearer JWT for direct worker access).
-3. **Add WebSocket protocol section to reference/api.mdx.** Binary frame format with stream markers is essential for anyone not using an SDK.
-4. **Add `saveAsTemplate` to templates page and API reference.**
-5. **Fix CheckpointInfo structure** to match actual code across all three surfaces.
-6. **Add Python-specific features** to reference/python-sdk.mdx: context manager, `recv()`, `collect_events()`, `AgentEvent` dict-like access.
-7. **Don't document `PatchInfo.strategy`** until it's actually used.
-8. **Note `Templates`/`Template` naming difference** in reference pages.
+| Item | Where | Action |
+|------|-------|--------|
+| `saveAsTemplate` endpoint | Dashboard-only route, not in public API | Mention in templates page as dashboard feature; omit from public API reference |
+| HTTP create sandbox internal params: `imageRef`, `templateRootfsKey`, `templateWorkspaceKey` | Internal use | Omit from docs — not user-facing |
+| HTTP create sandbox params: `alias`, `port`, `networkEnabled` | Possibly user-facing | Verify during writing; include in API ref if user-useful |
+| `POST /sandboxes/:id/token/refresh` | Worker-only | Include in API reference under worker auth section |
+| `ExecSessionInfo.attachedClients` field | Both SDKs | Include in reference pages |
+| `commands.py` legacy file in Python SDK | Deprecated, not exported | Do not document; if mentioned anywhere say "use `sandbox.exec` instead" |
+| PTY `shell` param in HTTP create body | HTTP API | Include in API reference PTY section |
+| PTY resize: HTTP endpoint exists, no SDK wrapper | Gap | Document HTTP endpoint in API ref; note no SDK method in terminals page |
+| Agent sessions have no dedicated WebSocket | SDKs use exec WS internally | Don't claim agent WS endpoint exists in API ref; explain agent events are SDK-abstracted |
 
 ---
 
@@ -748,7 +762,7 @@ These are specific pieces of information that exist in the codebase but are miss
 | Sandbox resource options (`cpuCount`, `memoryMB`) | `sdks/typescript/src/sandbox.ts` | sandboxes/overview.mdx |
 | Sandbox `metadata` option | `sdks/typescript/src/sandbox.ts` | sandboxes/overview.mdx |
 | Sandbox `envs` option (persistent env vars) | `sdks/typescript/src/sandbox.ts` | sandboxes/overview.mdx |
-| Hibernation API (`sandbox.hibernate()`, `sandbox.wake()`) | Both SDKs | sandboxes/overview.mdx |
+| Hibernation API (`sandbox.hibernate()`, `sandbox.wake()`) | TS SDK only (+ HTTP API) | sandboxes/overview.mdx |
 | Sandbox status states & transitions | `internal/sandbox/router.go` | sandboxes/overview.mdx |
 | Rolling timeout behavior | `internal/sandbox/router.go` | sandboxes/overview.mdx |
 | Sandbox `connect()` (attach to existing) | Both SDKs | sandboxes/overview.mdx |
@@ -790,17 +804,18 @@ These are specific pieces of information that exist in the codebase but are miss
 19. Update `cli/sandbox.mdx`
 20. Create `cli/exec.mdx` (rename from commands)
 21. Update `cli/shell.mdx`
-22. Create `cli/checkpoint.mdx` (merge checkpoint + patch)
-23. Create `cli/preview.mdx` (rename from previews)
-24. Create `troubleshooting.mdx`
-25. Create `changelog.mdx` (stub)
+22. Update `cli/checkpoint.mdx`
+23. Create `cli/patch.mdx` (rename from patches)
+24. Create `cli/preview.mdx` (rename from previews)
+25. Create `troubleshooting.mdx`
+26. Create `changelog.mdx` (stub)
 
 ### Phase 6: Cleanup
-26. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
-27. Delete all `sdks/` pages
-28. Delete old root-level feature pages (agents.mdx, running-commands.mdx, working-with-files.mdx)
-29. Delete obsolete CLI pages
-30. Update `mint.json` with new navigation
+27. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
+28. Delete all `sdks/` pages
+29. Delete old root-level feature pages (agents.mdx, running-commands.mdx, working-with-files.mdx)
+30. Delete obsolete CLI pages
+31. Update `mint.json` with new navigation
 
 ---
 
@@ -812,15 +827,15 @@ These are specific pieces of information that exist in the codebase but are miss
 | Agents | 1* | 4 | +3 |
 | Sandboxes | 2* | 8 | +6 |
 | Reference | 0 | 3 | +3 |
-| CLI | 7 | 6 | -1 |
+| CLI | 7 | 7 | 0 |
 | Guides | 2 | 2 | 0 |
 | Resources | 0 | 2 | +2 |
 | SDK (tabs) | 16 | 0 | -16 |
-| **Total** | **30** | **27** | **-3** |
+| **Total** | **30** | **28** | **-2** |
 
 *Current agents.mdx + running-commands.mdx + working-with-files.mdx exist at root level without clear grouping.
 
-Net result: 3 fewer pages. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
+Net result: 2 fewer pages. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
 
 ---
 
@@ -832,7 +847,9 @@ Each page must pass these checks before shipping:
 - [ ] HTTP API tab included for operations that map cleanly to a single endpoint
 - [ ] Streaming/WebSocket operations can omit HTTP tab (SDK-only is fine)
 - [ ] No deprecated API names (`commands` → `exec`)
-- [ ] All parameters documented match actual SDK code
+- [ ] All parameters documented match actual SDK source code (verified per-SDK, not assumed identical)
+- [ ] TS-only features clearly marked — no Python tab that shows nonexistent API
+- [ ] Python-unique features (context manager, collect_events, recv) documented where relevant
 - [ ] No "coming soon" for features that now exist
 - [ ] No filler sentences ("In this section we will..." — just do it)
 - [ ] Cross-links to reference pages for full method signatures
