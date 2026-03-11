@@ -12,7 +12,7 @@ description: "Read, write, and manage files inside a sandbox"
 
   KEY NOTES:
   - Current structure is already good — merge TS/Python into CodeGroups and ensure consistency.
-  - exists() is a client-side SDK wrapper (HEAD request), not a separate HTTP endpoint.
+  - exists() is a client-side SDK wrapper built on a normal file read request, not a separate HTTP endpoint.
 */}
 
 ## Reading Files
@@ -33,7 +33,9 @@ description: "Read, write, and manage files inside a sandbox"
 
 ### EntryInfo
 
-{/* Table: name, isDir/is_dir, size, modTime/mod_time */}
+{/* Table: name, isDir/is_dir, path, size.
+  Do not document modTime/mod_time on EntryInfo unless the SDK starts returning it.
+*/}
 
 ## Managing Files
 
@@ -49,7 +51,7 @@ description: "Read, write, and manage files inside a sandbox"
 
 ### Check Existence
 
-{/* sandbox.files.exists(path) — client-side wrapper (HEAD request). Both SDKs. */}
+{/* sandbox.files.exists(path) — client-side convenience wrapper, not a dedicated HTTP endpoint. Both SDKs. */}
 
 ## Examples
 

@@ -12,10 +12,11 @@ description: "The compute primitive — full Linux VMs in the cloud"
   ABSORBS: sdks/typescript/sandbox.mdx, sdks/python/sandbox.mdx.
 
   KEY NOTES:
-  - Python context manager: async with Sandbox.create() as sandbox: (auto-kills on exit)
+  - Python context manager: async with await Sandbox.create() as sandbox: (auto-kills on exit)
   - TS-only: cpuCount, memoryMB on create. Python must use HTTP API for custom resources.
   - Lifecycle states: running, hibernated, stopped, error
   - Rolling timeout resets on every operation, default 300s
+  - Distinguish sandbox guarantees from default-template contents and deployment-specific resource defaults
 */}
 
 ## What is a Sandbox
@@ -41,12 +42,9 @@ description: "The compute primitive — full Linux VMs in the cloud"
 ## Specs
 
 {/* Table:
-  - OS: Ubuntu-based Linux
-  - Default CPU: 1 vCPU (configurable up to 4 via cpuCount — TS + HTTP; not yet Python)
-  - Default memory: 512MB (configurable up to 2048MB via memoryMB — TS + HTTP; not yet Python)
-  - Storage: 20GB workspace
-  - Network: full outbound internet
-  - Pre-installed: Python 3, Node.js, common CLI tools
+  - Keep this focused on sandbox/runtime guarantees: isolated VM, filesystem, network, lifecycle, configurable resources
+  - Do not hard-code hosted defaults for CPU/memory unless verified against the current hosted deployment
+  - Move package lists (Python, Node, common CLI tools) to the default-template section/page, not the sandbox primitive
 */}
 
 ## Creating a Sandbox
@@ -71,9 +69,9 @@ description: "The compute primitive — full Linux VMs in the cloud"
 
 ## Hibernation & Wake
 
-{/* Like closing a laptop lid: memory + disk snapshotted, sandbox ID stays same.
+{/* Like closing a laptop lid: sandbox identity stays the same and the platform attempts a fast snapshot-based resume.
   - sandbox.hibernate(), sandbox.wake() — TS SDK
-  - Resume in seconds, no cost while hibernated
+  - Usually resumes quickly, no cost while hibernated
   - Auto-triggered on idle timeout
   - Difference from checkpoints: hibernation = transparent resume; checkpoints = named snapshots you fork from
   - Note: Python SDK doesn't have hibernate/wake. HTTP API: POST /api/sandboxes/:id/hibernate, wake. CLI: oc sandbox hibernate, wake.
@@ -85,12 +83,14 @@ description: "The compute primitive — full Linux VMs in the cloud"
 
 ## Other Methods
 
-{/* kill(), isRunning()/is_running(), setTimeout()/set_timeout() */}
+{/* kill(), isRunning()/is_running(), setTimeout()/set_timeout()
+  Note: document the SDK normally; reserve the worker-direct hosted API nuance for reference/api.
+*/}
 
 ## Properties
 
 {/* sandboxId, agent, exec, files, pty
-  Python-specific: async with Sandbox.create() as sandbox: (context manager, auto-kills on exit)
+  Python-specific: async with await Sandbox.create() as sandbox: (context manager, auto-kills on exit)
 */}
 
 ## Related

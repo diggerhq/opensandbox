@@ -15,11 +15,12 @@ description: "Snapshot and fork sandbox state"
   - CheckpointInfo fields differ per surface: TS has sandboxConfig + orgId, HTTP has sizeBytes, Python returns raw dict
   - Status: processing → ready (or failed)
   - Key difference from hibernation: hibernation resumes SAME sandbox, checkpoints create NEW sandboxes
+  - Avoid "exactly where it left off" wording. Warm restore exists, but fork/restore can fall back to cold boot.
 */}
 
 ## What is a Checkpoint
 
-{/* Named snapshot of a running sandbox's full state (memory, disk, processes). Fork new sandboxes from it — each fork starts exactly where the checkpoint left off. Like git commits for VMs. */}
+{/* Named snapshot of a running sandbox's state. Fork new sandboxes from it to start from the same saved environment. Like git commits for VMs. Be precise about guarantees: preserved filesystem state and a reproducible starting point, with warm restore when available. */}
 
 ## Quick Example
 

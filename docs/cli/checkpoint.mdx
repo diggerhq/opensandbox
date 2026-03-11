@@ -24,12 +24,12 @@ oc checkpoint create sb-abc123 --name before-migration
 
 ```bash
 # Spawn two independent sandboxes from the same checkpoint
-ID1=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.id')
-ID2=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.id')
+ID1=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.sandboxID')
+ID2=$(oc checkpoint spawn cp-7f3a1b2c --json | jq -r '.sandboxID')
 
 # Run different experiments
-oc exec $ID1 -- ./experiment-a.sh
-oc exec $ID2 -- ./experiment-b.sh
+oc exec $ID1 --wait -- ./experiment-a.sh
+oc exec $ID2 --wait -- ./experiment-b.sh
 ```
 
 ## Restoring

@@ -10,7 +10,8 @@ description: "Follow-ups, resume, and session management"
   follow-ups, resuming across sessions, and managing running sessions.
 
   KEY NOTES:
-  - resume is TS-only. Show HTTP API workaround or mark as TS-only for Python.
+  - resume is TS-only in the SDK surface. If showing an HTTP workaround, document the real flow:
+    create agent session with resume, then attach via exec-session WebSocket.
   - Distinguish attach (reconnect to running session) vs resume (new session continuing old conversation, TS only).
   - Agent sessions are SDK-only — no CLI command yet.
 */}
@@ -26,7 +27,7 @@ description: "Follow-ups, resume, and session management"
   - Capture claude_session_id from turn_complete event
   - Pass as resume in new agent.start() call
   - Example: save session ID, create sandbox from checkpoint, resume conversation
-  - Note: Python SDK does not support resume. Show HTTP API tab as workaround.
+  - Note: Python SDK does not support resume. If including HTTP, use the real agent-create + exec-attach flow.
 */}
 
 <Note>

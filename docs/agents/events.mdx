@@ -6,8 +6,9 @@ description: "Understanding the agent event stream"
 {/*
   TODO: Expand this stub into full content.
 
-  GOAL: Complete reference for understanding what comes back from an agent session.
-  A developer should be able to look at any event and know exactly what it means and how to handle it.
+  GOAL: Explain the common agent events and how to handle them safely.
+  The wrapper mostly forwards Claude Agent SDK messages through as-is, so this page should document
+  the common events and patterns without pretending the event taxonomy is narrower or more stable than it is.
 */}
 
 ## Overview
@@ -16,13 +17,16 @@ description: "Understanding the agent event stream"
 
 ## Event Lifecycle
 
-{/* Typical order for a successful session:
-  ready -> configured -> assistant -> tool_use_summary -> assistant -> ... -> result -> turn_complete
+{/* Show a typical successful flow, but note this is illustrative rather than exhaustive:
+  ready -> configured -> assistant/system/tool_use_summary/... -> result -> turn_complete
 */}
 
 ## Event Reference
 
-{/* One subsection per event type. Each with: what it means, when it fires, fields/payload, code example. */}
+{/* Cover the common event families. Each subsection should explain what it means, when it fires,
+  the fields people usually care about, and a code example.
+  Add a note near the top: preserve unknown fields and tolerate unknown event types.
+*/}
 
 ### `ready`
 
@@ -34,19 +38,25 @@ description: "Understanding the agent event stream"
 
 ### `assistant`
 
-{/* Claude's text output. Fields: content. The most common event — this is the agent "talking". */}
+{/* Claude's text output. Do not hard-code a single payload shape; current wrapper comments show `message`,
+  and upstream Claude SDK event fields may evolve. Document the common fields and show how to inspect raw events.
+*/}
 
 ### `tool_use_summary`
 
-{/* Agent used a tool (bash, file, etc.). Fields: tool, input summary, output summary. */}
+{/* Tool summary event from the wrapper/SDK stream. Document common fields only; do not overfit the exact shape. */}
 
 ### `system`
 
-{/* System-level message from the agent process. */}
+{/* System-level messages from the SDK stream. Call out common subtypes like init, task_started, and task_progress. */}
+
+### `tool_progress`
+
+{/* Long-running tool progress updates. Call out common fields like tool_name and elapsed_time_seconds. */}
 
 ### `result`
 
-{/* Final structured result. Fields: result. Only emitted if the agent produces a final answer. */}
+{/* Final result event. Document common fields like subtype plus result or structured_output, but note the payload varies by run/output mode. */}
 
 ### `turn_complete`
 
@@ -58,14 +68,15 @@ description: "Understanding the agent event stream"
 
 ### `error`
 
-{/* Agent encountered an error. Fields: error message. */}
+{/* Agent emitted an explicit error event. Message field is common, but preserve unknown fields. */}
 
 ## Filtering Events
 
 {/* Practical patterns:
   - Log only assistant messages
   - Capture the final result
-  - Build a progress indicator from tool_use_summary events
+  - Build progress indicators from system/task/tool_progress events
+  - Preserve unknown events for forward compatibility
 */}
 
 ## Error Handling

@@ -12,9 +12,12 @@ description: "Pre-built base images for sandboxes"
   ABSORBS: sdks/typescript/templates.mdx, sdks/python/templates.mdx.
 
   KEY NOTES:
-  - Templates is a standalone class, NOT a Sandbox property
+  - Templates is not a Sandbox property
   - TS: Templates (plural), Python: Template (singular)
-  - TemplateInfo: templateID/template_id, name, tag, status (building → ready | error)
+  - Do not invent static helper APIs. Document the actual exported construction/usage pattern for each SDK.
+  - Python template ergonomics are currently awkward; if no public construction helper exists, either improve the SDK first or make this section HTTP-first.
+  - Template status depends on template type. Dockerfile builds currently return ready immediately; sandbox-snapshot templates use processing -> ready.
+  - Be explicit about `default` vs legacy `base` naming where relevant
   - Default template: derive pre-installed list from Dockerfile.default
 */}
 
@@ -24,16 +27,18 @@ description: "Pre-built base images for sandboxes"
 
 ## Quick Example
 
-{/* Build template -> create sandbox from it. TS + Python CodeGroup. */}
+{/* Build template -> create sandbox from it.
+  Use real SDK construction only. If Python still lacks a public ergonomic entry point, use HTTP for the primary example and call the SDK gap out explicitly.
+*/}
 
 <CodeGroup>
 
 ```typescript TypeScript
-// TODO: Templates.build('my-env', dockerfile) -> Sandbox.create({ template: 'my-env' })
+// TODO: use the real exported Templates construction pattern, then build/list/get/delete from that instance
 ```
 
 ```python Python
-# TODO: Template.build('my-env', dockerfile) -> Sandbox.create(template='my-env')
+# TODO: only add a Python SDK example if there is a public construction path worth documenting; otherwise use HTTP and note the SDK ergonomics gap
 ```
 
 </CodeGroup>
@@ -50,19 +55,23 @@ description: "Pre-built base images for sandboxes"
 
 ### Build Template
 
-{/* templates.build(name, dockerfile) / Template.build(name, dockerfile). ParamField. */}
+{/* Document the real SDK invocation pattern and the HTTP API.
+  Do not publish fictional static helpers if the SDK requires an instance.
+*/}
 
 ### List Templates
 
-{/* templates.list() / Template.list(). Returns TemplateInfo[]. */}
+{/* Document the real SDK callable surface for listing templates plus the HTTP API.
+  Avoid implying Python classmethods if the SDK does not expose them.
+*/}
 
 ### Get Template
 
-{/* templates.get(name) / Template.get(name). */}
+{/* Document the real SDK callable surface for fetching a template plus the HTTP API. */}
 
 ### Delete Template
 
-{/* templates.delete(name) / Template.delete(name). */}
+{/* Document the real SDK callable surface for deleting a template plus the HTTP API. */}
 
 ### Using with Sandbox.create
 
@@ -70,8 +79,8 @@ description: "Pre-built base images for sandboxes"
 
 ## TemplateInfo
 
-{/* Fields: templateID/template_id, name, tag, status.
-  Status: building -> ready (or error).
+{/* Fields: verify against the current handler/SDK mapping before writing the final page.
+  Status is not one universal enum across all template creation flows.
 */}
 
 ## Example

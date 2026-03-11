@@ -16,7 +16,7 @@ description: "Complete Python SDK reference"
   - Not available: hibernate/wake, cpuCount/memoryMB, exec streaming, exec.attach, agent resume
   - Python-unique: collect_events(), wait(), recv(), context manager
   - Include ExecSessionInfo.attachedClients
-  - Template class is singular (not Templates)
+  - Template class is singular (not Templates), but verify the public construction story before documenting usage examples
 */}
 
 ## Installation
@@ -77,7 +77,7 @@ async with await Sandbox.create() as sandbox:
 
 #### `await sandbox.delete_preview_url(port): None`
 
-#### `sandbox.close(): None`
+#### `await sandbox.close(): None`
 
 ### Not Available in Python
 
@@ -95,7 +95,7 @@ async with await Sandbox.create() as sandbox:
 
 ### `await sandbox.agent.attach(session_id, on_event?, on_error?): AgentSession`
 
-### `await sandbox.agent.list(): list[dict]`
+### `await sandbox.agent.list(): list[AgentSessionInfo]`
 
 ### AgentSession
 
@@ -111,7 +111,9 @@ async with await Sandbox.create() as sandbox:
 
 ### AgentEvent
 
-{/* Dataclass: type, data. Dict-like access: event['type'], event.get('content'). */}
+{/* Dataclass: type, data. Dict-like access: event['type'], event.get(...).
+  Do not hard-code a single event payload shape; assistant/result/system payloads vary.
+*/}
 
 ## Exec
 
@@ -123,7 +125,7 @@ async with await Sandbox.create() as sandbox:
 
 {/* Returns session ID (string), NOT an ExecSession object. No streaming callbacks. */}
 
-### `await sandbox.exec.list(): list[dict]`
+### `await sandbox.exec.list(): list[ExecSessionInfo]`
 
 ### `await sandbox.exec.kill(session_id, signal?): None`
 
@@ -149,7 +151,7 @@ async with await Sandbox.create() as sandbox:
 
 ### EntryInfo
 
-{/* name, is_dir, size, mod_time */}
+{/* name, is_dir, path, size */}
 
 ## Pty
 
@@ -162,13 +164,11 @@ async with await Sandbox.create() as sandbox:
 ## Template
 
 <Note>
-  `Template` is a standalone class (singular, not `Templates`). Import: `from opencomputer import Template`.
+  `Template` is a standalone type (singular, not `Templates`), but the current SDK does not expose an obvious public constructor/helper in the same way the other surfaces do. Before publishing examples here, either document the real public entry point or improve the SDK ergonomics and then document that.
 </Note>
 
-### `await Template.build(name, dockerfile, api_key?, api_url?): dict`
+### Template API
 
-### `await Template.list(api_key?, api_url?): list[dict]`
-
-### `await Template.get(name, api_key?, api_url?): dict`
-
-### `await Template.delete(name, api_key?, api_url?): None`
+{/* Do not publish fictional classmethods like Template.build(...) unless they actually exist.
+  Document the real callable surface or explicitly route readers to the HTTP API until the Python SDK ergonomics are fixed.
+*/}

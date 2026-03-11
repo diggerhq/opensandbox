@@ -8,14 +8,22 @@ description: "Execute shell commands from the CLI"
 
   GOAL: Guide-like page for running commands via CLI.
   When to use exec vs shell, scripting patterns, session management.
+
+  KEY NOTES:
+  - `oc exec` defaults to creating an exec session, not waiting for command completion
+  - `--wait` switches to synchronous exec/run behavior and mirrors the remote exit code
+  - `oc exec attach` is not implemented yet in the CLI; say that explicitly
 */}
 
 ## Running a Command
 
-{/* oc exec <id> -- <command>. How it works: command runs inside sandbox, stdout/stderr stream to terminal, CLI exits with same exit code. */}
+{/* Start with the synchronous mode most readers expect:
+  oc exec <id> --wait -- <command>
+  Explain that plain `oc exec` creates a session and prints attach instructions instead.
+*/}
 
 ```bash
-oc exec sb-abc123 -- echo "Hello, World!"
+oc exec sb-abc123 --wait -- echo "Hello, World!"
 ```
 
 ## Working Directory & Environment
@@ -23,25 +31,29 @@ oc exec sb-abc123 -- echo "Hello, World!"
 {/* --cwd and --env flags. When to use them. */}
 
 ```bash
-oc exec sb-abc123 --cwd /app --env NODE_ENV=production -- npm run build
+oc exec sb-abc123 --wait --cwd /app --env NODE_ENV=production -- npm run build
 ```
 
 ## Timeouts
 
 {/* --timeout flag. Default 60s. What happens when exceeded. */}
 
+## Creating an Exec Session
+
+{/* Plain `oc exec` creates a session for long-running commands and prints the session ID plus attach hint. */}
+
 ## Capturing Output as JSON
 
-{/* --json flag gives ProcessResult object. Pipe to jq for scripting. */}
+{/* `--json` with `--wait` gives ProcessResult output for scripting. */}
 
 ```bash
-RESULT=$(oc exec sb-abc123 --json -- node -e 'console.log("hello")')
+RESULT=$(oc exec sb-abc123 --json --wait -- node -e 'console.log("hello")')
 echo $RESULT | jq '.stdout'
 ```
 
 ## Managing Exec Sessions
 
-{/* oc exec list, attach, kill — for long-running processes started via SDK. */}
+{/* oc exec list and kill are available. `oc exec attach` exists as a command name but is not implemented yet in the CLI; point users to the SDK or raw WebSocket if needed. */}
 
 ## Shell vs Exec
 

@@ -17,7 +17,9 @@ description: "Create, manage, and control sandbox lifecycles from the CLI"
 
 ## Creating a Sandbox
 
-{/* oc create (shortcut for oc sandbox create). Template, resources, env vars. */}
+{/* oc create (shortcut for oc sandbox create). Timeout, resources, env vars, metadata.
+  Do not mention a --template flag unless the CLI grows one.
+*/}
 
 ```bash
 oc create
@@ -35,7 +37,7 @@ oc sandbox get sb-abc123
 
 ## Hibernation & Wake
 
-{/* Save state and stop paying. Resume exactly where you left off. */}
+{/* Save state and stop paying. Resume the same sandbox later; keep the wording practical rather than over-promising exact process continuity. */}
 
 ```bash
 oc sandbox hibernate sb-abc123

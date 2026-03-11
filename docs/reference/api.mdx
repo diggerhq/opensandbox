@@ -13,28 +13,34 @@ description: "Complete REST API reference"
   agent_session.go, filesystem.go, templates.go (handlers).
 
   KEY NOTES:
-  - Each endpoint: method, path, request body (JSON), response body (JSON), status codes, curl example
+  - Each endpoint: method, path, request body, response body, status codes, curl example
+  - Separate control plane routes from worker-direct routes. Hosted/server mode uses both surfaces.
+  - Derive exact field names from current handler/types source. Do not normalize casing by hand.
   - Dual auth: X-API-Key for control plane, JWT Bearer for worker direct access
   - WebSocket binary protocol section is essential for non-SDK users
-  - Token refresh: POST /sandboxes/:id/token/refresh — returns new JWT
+  - Token refresh: POST /sandboxes/:id/token/refresh — worker-only, returns new JWT
 */}
 
 ## Base URL & Authentication
 
-{/* Base: https://app.opencomputer.dev/api
-  - Control plane auth: X-API-Key header (or api_key query param)
+{/* Document both surfaces explicitly:
+  - Control plane base: https://app.opencomputer.dev/api
+  - Worker direct base: connectURL from sandbox create/get response (no /api prefix)
+  - Control plane auth: X-API-Key header
   - Worker direct auth: Authorization: Bearer <JWT> (or token query param for WS)
   - SDK users only need API key — SDK handles JWT transparently
-  - All JSON except file read (plain text)
-  - Token refresh: POST /sandboxes/:id/token/refresh — returns new JWT (worker auth)
+  - Add a route-availability matrix: control plane only / worker only / both
+  - File reads return raw content, not JSON. File writes use raw request body + path query param.
+  - Token refresh: POST /sandboxes/:id/token/refresh — worker auth only
 */}
 
 ## Sandbox Lifecycle
 
 ### `POST /api/sandboxes` — Create
 
-{/* Params: templateID, timeout, envs, metadata, cpuCount, memoryMB.
-  Response: sandboxID, status, connectURL, token, cpuCount, memoryMB, startedAt, endAt.
+{/* Body matches SandboxConfig: templateID, timeout, envs, metadata, cpuCount, memoryMB.
+  Hosted/server-mode response is currently minimal: sandboxID, status, connectURL, token, region, workerID.
+  Do not promise cpuCount/memoryMB/startedAt/endAt on create unless verified for the served surface.
   Curl example. */}
 
 ### `GET /api/sandboxes` — List
@@ -51,7 +57,9 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/timeout` — Set Timeout
 
-{/* Body: { timeout: seconds }. */}
+{/* Body: { timeout }.
+  Important: in hosted/server mode this must be sent to the worker via connectURL; control plane returns an error telling the client to use the worker directly.
+*/}
 
 ### `POST /api/sandboxes/:id/hibernate` — Hibernate
 
@@ -65,11 +73,15 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/exec/run` — Run Command
 
-{/* Body: { command, timeout?, env?, cwd? }. Response: { exitCode, stdout, stderr }. */}
+{/* Body matches ProcessConfig: cmd, optional args, envs, cwd, timeout.
+  Response: { exitCode, stdout, stderr }.
+*/}
 
 ### `POST /api/sandboxes/:id/exec` — Create Exec Session
 
-{/* Body: { command, args?, env?, cwd?, timeout? }. Response: { sessionId }. */}
+{/* Body matches ExecSessionCreateRequest: cmd, optional args, envs, cwd, timeout, maxRunAfterDisconnect.
+  Response is ExecSessionInfo with sessionID casing, not sessionId.
+*/}
 
 ### `GET /api/sandboxes/:id/exec` — List Sessions
 
@@ -87,7 +99,9 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/agent` — Create Agent Session
 
-{/* Body: { prompt, model?, systemPrompt?, allowedTools?, permissionMode?, maxTurns?, cwd?, mcpServers?, resume? }. */}
+{/* Body matches AgentSessionCreateRequest: prompt, model, systemPrompt, allowedTools, permissionMode, maxTurns, cwd, mcpServers, resume.
+  Note: there is no separate agent WebSocket endpoint; attach uses the exec session WebSocket transport.
+*/}
 
 ### `GET /api/sandboxes/:id/agent` — List Agent Sessions
 
@@ -95,7 +109,7 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/agent/:sid/prompt` — Send Follow-up
 
-{/* Body: { prompt }. */}
+{/* Body: { text }. */}
 
 ### `POST /api/sandboxes/:id/agent/:sid/interrupt` — Interrupt
 
@@ -113,7 +127,7 @@ description: "Complete REST API reference"
 
 ### `PUT /api/sandboxes/:id/files` — Write File
 
-{/* Body: { path, content }. */}
+{/* Raw request body is written as file contents. `path` is a required query parameter. */}
 
 ### `GET /api/sandboxes/:id/files/list?path=...` — List Directory
 
@@ -121,7 +135,7 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/files/mkdir` — Create Directory
 
-{/* Body: { path }. */}
+{/* `path` is a required query parameter. */}
 
 ### `DELETE /api/sandboxes/:id/files?path=...` — Remove
 
@@ -167,7 +181,9 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/preview` — Create
 
-{/* Body: { port, domain? }. Response: { url }. */}
+{/* Body: { port, domain?, authConfig? }.
+  Response is the full preview object: id, sandboxId, orgId, hostname, optional customHostname, port, sslStatus, authConfig, createdAt, and optional cfHostnameId.
+*/}
 
 ### `GET /api/sandboxes/:id/preview` — List
 
@@ -181,7 +197,9 @@ description: "Complete REST API reference"
 
 ### `POST /api/templates` — Build
 
-{/* Body: { name, dockerfile }. Response: TemplateInfo. */}
+{/* Body: { name, dockerfile, tag? }.
+  Response shape comes from the current template store record. Verify field names from the handler/store before writing the final page.
+*/}
 
 ### `GET /api/templates` — List
 
@@ -199,7 +217,7 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/pty` — Create
 
-{/* Body: { cols?, rows?, shell? }. Response: { sessionId }. */}
+{/* Body: { cols?, rows?, shell? }. Response uses sessionID casing. */}
 
 ### `GET /api/sandboxes/:id/pty/:sessionID` — WebSocket
 

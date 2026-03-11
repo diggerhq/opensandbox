@@ -31,7 +31,7 @@ description: "Every command, subcommand, and flag"
 
 ### `oc sandbox create` / `oc create`
 
-{/* Flags: --template, --timeout, --cpu, --memory, --env, --metadata. Output: sandbox ID. */}
+{/* Flags: --timeout, --cpu, --memory, --env, --metadata. Output: sandbox ID. */}
 
 ### `oc sandbox list` / `oc ls`
 
@@ -55,11 +55,15 @@ description: "Every command, subcommand, and flag"
 
 ### `oc exec <id> -- <command...>`
 
-{/* Flags: --cwd, --timeout, --env. Exit code passthrough. JSON output: ProcessResult. */}
+{/* Flags: --cwd, --timeout, --env, --wait.
+  Important: plain `oc exec` creates a session. `--wait` uses synchronous exec/run behavior with exit-code passthrough.
+*/}
 
 ### `oc exec list <id>`
 
 ### `oc exec attach <id> <session-id>`
+
+{/* Command exists, but the CLI implementation is currently a stub that prints guidance instead of attaching. */}
 
 ### `oc exec kill <id> <session-id>`
 

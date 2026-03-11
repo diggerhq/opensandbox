@@ -13,6 +13,7 @@ description: "Manage sandboxes from your terminal"
   - 4 platform install: macOS Apple Silicon/Intel, Linux x86_64/ARM64
   - Config resolution: flags > env > config file > defaults
   - Top-level shortcuts: oc create = oc sandbox create, oc ls = oc sandbox list
+  - `oc exec` creates a session by default; use `--wait` for synchronous command execution
   - JSON output mode + jq patterns for scripting
 */}
 
@@ -85,8 +86,8 @@ chmod +x /usr/local/bin/oc
 # Create a sandbox
 oc create
 
-# Run a command
-oc exec sb-abc123 -- echo "Hello from the cloud"
+# Run a command and wait for the result
+oc exec sb-abc123 --wait -- echo "Hello from the cloud"
 
 # Open an interactive shell
 oc shell sb-abc123
@@ -123,3 +124,4 @@ oc ls --json | jq -r '.[].sandboxID'
 | [checkpoint](/cli/checkpoint) | Snapshot, fork, restore |
 | [patch](/cli/patch) | Checkpoint-attached scripts |
 | [preview](/cli/preview) | Expose ports to the internet |
+| [config](/reference/cli#oc-config) | Configure API key and API URL |

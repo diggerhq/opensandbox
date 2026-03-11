@@ -3,13 +3,14 @@
 ## Guiding Principles
 
 1. **Single sidebar, no tabs.** Every page lives in one navigation tree.
-2. **Entity-first.** Pages organized around things the user encounters (sandboxes, agents, checkpoints, templates), not by SDK or abstract category. Each entity page is self-contained: what it is, how to use it, full API reference.
+2. **Entity-first.** Pages organized around things the user encounters (sandboxes, agents, checkpoints, templates), not by SDK or abstract category. Each entity page should be self-contained conceptually: what it is, when to use it, and the common workflows.
 3. **Three-tab examples.** Every code example wraps in tabs: TypeScript / Python / HTTP API (where applicable). The user picks their preferred surface once and sees it everywhere. Some examples are SDK-only (no HTTP equivalent for streaming); some are HTTP-only (auth headers). Use judgement — include a tab only when it adds value.
 4. **Quality over quantity.** If it can be said in fewer words, it should be. No filler sections. Every page earns its place.
-5. **Entity → Example → Reference** flow on each page. Open with what the entity *is* (2-3 sentences), show a working code example, then provide the full API reference below.
+5. **Entity → Example → API At A Glance** flow on each page. Open with what the entity *is* (2-3 sentences), show a working code example, then summarize the methods most readers need before linking down to exhaustive reference.
 6. **Code-forward.** The first thing on every entity page (after the short explanation) should be a working code example. Parameters and types come after.
-7. **Reference section is exhaustive.** The Agents/Sandboxes pages teach with curated examples. The Reference pages document every endpoint, method, type, and parameter — the source of truth when the entity pages aren't enough.
-8. **Honest about gaps.** Don't document features that don't exist yet. Mark experimental/beta features clearly.
+7. **Reference pages are contract-authoritative.** The Agents/Sandboxes pages teach with curated examples and stable behavioral guidance. The Reference pages document exact endpoints, methods, types, parameters, flags, and payloads.
+8. **Contracts come from code, not guesswork.** Do not hand-spec request/response fields, status enums, defaults, or CLI flags unless they were checked against the current handlers, SDK types, and command source.
+9. **Honest about gaps.** Don't document features that don't exist yet. Mark experimental/beta features clearly.
 
 ---
 
@@ -26,7 +27,7 @@
 ### Key problems (why we're rewriting)
 1. **Tab separation creates duplication.** "Running Commands" exists as a feature page, a TS SDK page, a Python SDK page, and a CLI page. Four places for one concept.
 2. **No conceptual foundation.** Docs jump straight to API calls without explaining what a sandbox *is*, its lifecycle, resource model, or how persistence works.
-3. **Missing critical content.** No sandbox specs (OS, storage, network), no error reference, no troubleshooting, no architecture overview.
+3. **Missing critical content.** No connection-model explanation (control plane vs worker), no error reference, no troubleshooting, no architecture overview.
 4. **SDK/code gaps.** `resume` in Agent sessions, `maxRunAfterDisconnect` in exec, hibernation semantics, preview URL domain verification — all in code but undocumented.
 5. **Inconsistent API naming between SDKs.** `sandbox.exec` vs `sandbox.commands` (deprecated alias still used in Python quickstart examples).
 
@@ -148,9 +149,16 @@ The page stubs are the **source of truth** for page-level content decisions.
 Each entity page follows this pattern:
 1. **What is this** — 2-3 sentences explaining the entity
 2. **Primary code example** in tabs (TypeScript / Python / HTTP API where applicable)
-3. **API reference** with `<ParamField>` for each method
+3. **API at a glance** — the common methods, parameters, and caveats
 4. **Additional examples** (also tabbed where applicable)
 5. **Cross-links** — `<Tip>` at the bottom with CLI equivalent + Reference page links
+
+### Contract discipline
+
+- **Reference pages own exact contracts.** Request bodies, response shapes, enum values, CLI flags, and route availability live in `reference/*`.
+- **Entity and CLI guide pages stay curated.** They explain workflows, tradeoffs, and the few methods/flags most readers need, but they should not mirror exhaustive contract detail.
+- **Document surface differences explicitly.** When behavior differs across TS / Python / HTTP / CLI, call it out with availability notes instead of forcing parity in prose.
+- **Explain the connection model centrally.** `how-it-works` and `reference/api` must both cover control plane vs worker-direct access, `connectURL`, JWT auth, and worker-only operations.
 
 ### Cross-linking pattern
 
@@ -167,6 +175,11 @@ Two-tier model:
 2. **Reference nav group** — one `reference/cli.mdx` page with every command, subcommand, and flag.
 
 Each CLI guide page ends with a `<Tip>` linking to the SDK entity page + `reference/cli.mdx`.
+
+### Migration discipline
+
+- Remove or redirect the replaced page in the same change that lands its replacement. Do not keep old and new canonical pages alive in parallel longer than necessary.
+- Add migration callouts when the public story changed (`sandbox.commands` -> `sandbox.exec`, legacy `/commands`, `base` vs `default`, CLI renames).
 
 ---
 

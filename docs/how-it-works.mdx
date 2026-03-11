@@ -15,7 +15,7 @@ description: "Architecture and key technical decisions"
 
 ## Overview
 
-{/* One paragraph: Your code talks to the OpenComputer API. The API provisions a Firecracker microVM. Your agent (or commands) run inside that VM. Events stream back to your code. */}
+{/* One paragraph: your code talks to the control plane, which provisions a Firecracker microVM and returns a worker connectURL/token for data-plane operations. Agents and commands run inside that VM. Events and I/O stream back over WebSocket. */}
 
 ## Firecracker microVMs
 
@@ -23,11 +23,11 @@ description: "Architecture and key technical decisions"
 
 ## Hibernation
 
-{/* VM's full state (memory + disk) snapshotted to S3. Resume is fast — kernel doesn't reboot, picks up where it left off. Tradeoff: snapshot size scales with memory allocation. */}
+{/* VM state is snapshotted so wake is usually fast. Explain warm-restore behavior and the cold-boot fallback path when exact snapshot restore is unavailable. Tradeoff: snapshot size scales with memory allocation. */}
 
 ## Checkpoints & Forking
 
-{/* Named snapshots. Forking creates a new VM from a checkpoint with copy-on-write semantics. Enables parallel exploration (try 5 approaches from same starting point) and reproducibility. */}
+{/* Named snapshots. Forking tries warm restore first and falls back to cold boot if needed. Emphasize the user-visible guarantee: preserved filesystem state and a reproducible starting point, not always literal process continuity. */}
 
 ## Templates
 

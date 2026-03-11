@@ -159,16 +159,18 @@ import { Sandbox, Templates } from "@opencomputer/sdk";
 ## Templates
 
 <Note>
-  `Templates` is a standalone class (not a Sandbox property). Import: `import { Templates } from "@opencomputer/sdk"`.
+  `Templates` is not a Sandbox property. Document the real public construction pattern: `const templates = new Templates(apiUrl, apiKey)`.
 </Note>
 
-### `Templates.build(name, dockerfile, opts?): Promise<TemplateInfo>`
+### `new Templates(apiUrl, apiKey)`
 
-### `Templates.list(opts?): Promise<TemplateInfo[]>`
+### `templates.build(name, dockerfile): Promise<TemplateInfo>`
 
-### `Templates.get(name, opts?): Promise<TemplateInfo>`
+### `templates.list(): Promise<TemplateInfo[]>`
 
-### `Templates.delete(name, opts?): Promise<void>`
+### `templates.get(name): Promise<TemplateInfo>`
+
+### `templates.delete(name): Promise<void>`
 
 ### Types
 
