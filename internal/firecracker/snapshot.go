@@ -514,6 +514,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 	vm.agent = agentClient
 
+	// Sync guest clock — frozen at snapshot time
+	if err := syncGuestClock(context.Background(), agentClient); err != nil {
+		log.Printf("firecracker: wake %s: clock sync failed: %v", sandboxID, err)
+	}
+
 	// Register VM
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
@@ -708,6 +713,11 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 	}
 	vm.agent = agentClient
 
+	// Sync guest clock — golden snapshot time is stale
+	if err := syncGuestClock(context.Background(), agentClient); err != nil {
+		log.Printf("firecracker: cold-boot-local %s: clock sync failed: %v", sandboxID, err)
+	}
+
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
@@ -873,6 +883,10 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 		log.Printf("firecracker: SaveAsTemplate %s: agent reconnect failed: %v (VM still running)", vm.ID, reconnErr)
 	} else {
 		vm.agent = agent
+		// Sync guest clock — paused during snapshot
+		if err := syncGuestClock(ctx, agent); err != nil {
+			log.Printf("firecracker: SaveAsTemplate %s: clock sync failed: %v", vm.ID, err)
+		}
 	}
 
 	// Step 7: Async compress + upload (cached drives stay on disk for fast local creation)
@@ -1100,6 +1114,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			if err := reconfigureGuestNetwork(ctx, agent, vm.network.GuestIP, vm.network.HostIP, vm.network.CIDR); err != nil {
 				log.Printf("firecracker: CreateCheckpoint %s: eth0 restore failed: %v", vm.ID, err)
 			}
+		}
+		// Sync guest clock — paused during snapshot
+		if err := syncGuestClock(ctx, agent); err != nil {
+			log.Printf("firecracker: CreateCheckpoint %s: clock sync failed: %v", vm.ID, err)
 		}
 	}
 
@@ -1374,6 +1392,11 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	// Step 7: Bring eth0 back up (snapshot drains virtqueues by taking eth0 down)
 	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: warmRestore %s: network reconfig failed: %v (VM still running, network may not work)", sandboxID, err)
+	}
+
+	// Sync guest clock — frozen at checkpoint time
+	if err := syncGuestClock(ctx, agentClient); err != nil {
+		log.Printf("firecracker: warmRestore %s: clock sync failed: %v", sandboxID, err)
 	}
 
 	// Step 8: Register restored VM in tracking map
@@ -1679,6 +1702,26 @@ func reconfigureGuestNetwork(ctx context.Context, agent *AgentClient, guestIP, h
 	return nil
 }
 
+// syncGuestClock sets the guest clock to the current host time via agent exec.
+// After snapshot restore the guest clock is frozen at the time the snapshot was taken.
+// Without correction, TLS, timeouts, and time-sensitive operations will break.
+func syncGuestClock(ctx context.Context, agent *AgentClient) error {
+	now := time.Now().Unix()
+	cmd := fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)
+	resp, err := agent.Exec(ctx, &pb.ExecRequest{
+		Command:        "/bin/sh",
+		Args:           []string{"-c", cmd},
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		return fmt.Errorf("exec clock sync: %w", err)
+	}
+	if resp.ExitCode != 0 {
+		return fmt.Errorf("clock sync failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+	}
+	return nil
+}
+
 // ForkFromCheckpoint creates a new sandbox from an existing checkpoint.
 // Tries warm fork first (LoadSnapshot with binary-patched vmstate, ~300ms),
 // falls back to cold boot (~1.8s) if warm fork fails or snapshot files are missing.
@@ -1879,6 +1922,11 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: warmFork %s: network reconfig failed: %v (VM still running, network may not work)", newID, err)
 		// Don't fail — the VM is running and accessible via vsock, just external network may be broken
+	}
+
+	// Sync guest clock — frozen at checkpoint time
+	if err := syncGuestClock(ctx, agentClient); err != nil {
+		log.Printf("firecracker: warmFork %s: clock sync failed: %v", newID, err)
 	}
 
 	// Send sandbox-level env vars into the forked VM agent
@@ -2347,6 +2395,11 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 	// Step 8: Reconfigure guest network
 	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: goldenCreate %s: network reconfig failed: %v (VM still running)", id, err)
+	}
+
+	// Sync guest clock — golden snapshot time is stale
+	if err := syncGuestClock(ctx, agentClient); err != nil {
+		log.Printf("firecracker: goldenCreate %s: clock sync failed: %v", id, err)
 	}
 
 	// Send sandbox-level env vars into the VM agent
