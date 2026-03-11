@@ -11,8 +11,10 @@ import (
 )
 
 // Encryptor provides AES-256-GCM encryption/decryption using a 32-byte key.
+// If keyRing is set, Encrypt/Decrypt delegate to it for versioned key support.
 type Encryptor struct {
-	gcm cipher.AEAD
+	gcm     cipher.AEAD
+	keyRing *KeyRing // non-nil when created via KeyRing.AsEncryptor()
 }
 
 // NewEncryptor creates an Encryptor from a hex-encoded 32-byte key.
@@ -39,7 +41,11 @@ func NewEncryptor(hexKey string) (*Encryptor, error) {
 }
 
 // Encrypt returns nonce || ciphertext (suitable for storing as BYTEA).
+// If a KeyRing is attached, delegates to it for versioned encryption.
 func (e *Encryptor) Encrypt(plaintext []byte) ([]byte, error) {
+	if e.keyRing != nil {
+		return e.keyRing.Encrypt(plaintext)
+	}
 	nonce := make([]byte, e.gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
@@ -48,7 +54,11 @@ func (e *Encryptor) Encrypt(plaintext []byte) ([]byte, error) {
 }
 
 // Decrypt expects nonce || ciphertext as produced by Encrypt.
+// If a KeyRing is attached, delegates to it for versioned decryption.
 func (e *Encryptor) Decrypt(data []byte) ([]byte, error) {
+	if e.keyRing != nil {
+		return e.keyRing.Decrypt(data)
+	}
 	nonceSize := e.gcm.NonceSize()
 	if len(data) < nonceSize {
 		return nil, fmt.Errorf("ciphertext too short")

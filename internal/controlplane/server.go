@@ -10,10 +10,10 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/grpctls"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
@@ -122,6 +122,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	// Resolve project: inherit config defaults + decrypt and merge secrets
 	var projectID *string
+	var egressAllowlist []string
 	if req.Project != "" {
 		project, err := s.store.GetProjectByName(c.Request().Context(), orgID, req.Project)
 		if err != nil {
@@ -143,6 +144,9 @@ func (s *Server) createSandbox(c echo.Context) error {
 		if req.Timeout == 0 {
 			req.Timeout = project.TimeoutSec
 		}
+
+		// Inherit egress allowlist from project
+		egressAllowlist = project.EgressAllowlist
 
 		// Decrypt project secrets and merge into envs (request envs override project secrets)
 		secrets, err := s.store.DecryptProjectSecrets(c.Request().Context(), project.ID)
@@ -183,7 +187,11 @@ func (s *Server) createSandbox(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 60*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := grpctls.ClientCredentials()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load TLS credentials"})
+	}
+	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to connect to worker"})
 	}
@@ -191,12 +199,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	client := pb.NewSandboxWorkerClient(conn)
 	grpcResp, err := client.CreateSandbox(ctx, &pb.CreateSandboxRequest{
-		Template:       req.TemplateID,
-		Timeout:        int32(req.Timeout),
-		Envs:           req.Envs,
-		MemoryMb:       int32(req.MemoryMB),
-		CpuCount:       int32(req.CpuCount),
-		NetworkEnabled: req.NetworkEnabled,
+		Template:        req.TemplateID,
+		Timeout:         int32(req.Timeout),
+		Envs:            req.Envs,
+		MemoryMb:        int32(req.MemoryMB),
+		CpuCount:        int32(req.CpuCount),
+		NetworkEnabled:  req.NetworkEnabled,
+		EgressAllowlist: egressAllowlist,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "worker create failed: " + err.Error()})
@@ -285,7 +294,11 @@ func (s *Server) destroySandbox(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds2, err := grpctls.ClientCredentials()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load TLS credentials"})
+	}
+	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(creds2))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to connect to worker"})
 	}

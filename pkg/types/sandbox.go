@@ -48,6 +48,10 @@ type SandboxConfig struct {
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
 	// Project name — resolves config defaults + secrets from the project.
 	Project string `json:"project,omitempty"`
+	// EgressAllowlist restricts outbound HTTPS from the sandbox to these hosts.
+	// Supports exact matches ("api.anthropic.com") and wildcards ("*.openai.com").
+	// Empty = all hosts allowed (no restriction).
+	EgressAllowlist []string `json:"egressAllowlist,omitempty"`
 	// SandboxID allows pre-determining the sandbox ID for async creation.
 	// If empty, a new ID is generated automatically.
 	SandboxID string `json:"-"`

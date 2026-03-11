@@ -53,6 +53,10 @@ message CreateSandboxRequest {
   string checkpoint_id = 11;
   // Server-assigned sandbox ID. If non-empty, worker uses this instead of generating one.
   string sandbox_id = 12;
+  // Egress allowlist: restrict outbound HTTPS to these hosts.
+  // Supports exact ("api.anthropic.com") and wildcard ("*.openai.com") patterns.
+  // Empty = all hosts allowed.
+  repeated string egress_allowlist = 13;
 }
 
 message CreateSandboxResponse {

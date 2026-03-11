@@ -435,7 +435,7 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 	// them back to real values on outbound HTTPS requests.
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, nil, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			// Redirect VM HTTPS traffic through the proxy

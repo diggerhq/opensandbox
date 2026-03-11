@@ -1877,7 +1877,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	// Secrets proxy integration: seal env vars and set up proxy redirect
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(newID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, nil, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(newID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			if err := AddProxyRedirect(netCfg); err != nil {
@@ -2357,7 +2357,7 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 	// Secrets proxy integration: seal env vars and set up proxy redirect
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, nil, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			if err := AddProxyRedirect(netCfg); err != nil {
