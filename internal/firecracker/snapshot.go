@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,10 +83,15 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	}
 	log.Printf("firecracker: hibernate %s: guest sync done (%dms)", vm.ID, time.Since(t0).Milliseconds())
 
-	// Step 2: Close gRPC connection — vsock must be inactive before snapshot
+	// Step 2: Close gRPC connection — vsock must be inactive before snapshot.
+	// Allow time for the vsock virtqueues to drain after closing the connection.
+	// Without this delay, FIN-ACK packets from the guest may still be in the
+	// vsock TX virtqueue when the VM is paused, leaving vhost-vsock in a broken
+	// state after snapshot restore (connections hang indefinitely).
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -401,6 +407,27 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 			return nil, fmt.Errorf("load snapshot: %w", err)
 		}
 		log.Printf("firecracker: wake %s: snapshot restored (hot)", sandboxID)
+
+		// Wait for vsock.sock to appear — Firecracker recreates it from vmstate
+		vsockDeadline := time.Now().Add(5 * time.Second)
+		for !fileExists(vsockPath) && time.Now().Before(vsockDeadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !fileExists(vsockPath) {
+			// Log Firecracker output for diagnosis
+			if logData, err := os.ReadFile(filepath.Join(sandboxDir, "firecracker.log")); err == nil {
+				log.Printf("firecracker: wake %s: vsock.sock NOT found at %s after 5s — FC log:\n%s",
+					sandboxID, vsockPath, string(logData))
+			}
+			// Check if Firecracker process is still alive
+			if cmd.Process != nil {
+				if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+					log.Printf("firecracker: wake %s: FC process died: %v", sandboxID, err)
+				}
+			}
+		} else {
+			log.Printf("firecracker: wake %s: vsock.sock ready at %s", sandboxID, vsockPath)
+		}
 	} else {
 		// Cold boot: configure + boot fresh VM with restored drives.
 		// Filesystem state is preserved but running processes are not.
@@ -786,10 +813,12 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 		}
 	}
 
-	// Step 2: Close gRPC connection (vsock must be inactive before Firecracker pause)
+	// Step 2: Close gRPC connection (vsock must be inactive before Firecracker pause).
+	// Drain delay prevents stale vsock virtqueue entries from breaking vhost-vsock after restore.
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -971,10 +1000,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		})
 	}
 
-	// Step 2: Close gRPC connection (vsock must be inactive before pause)
+	// Step 2: Close gRPC connection (vsock must be inactive before pause).
+	// Drain delay prevents stale vsock virtqueue entries from breaking vhost-vsock after restore.
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -2080,6 +2111,7 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	})
 
 	agent.Close()
+	time.Sleep(500 * time.Millisecond) // drain vsock virtqueues before pause
 
 	if err := fcClient.PauseVM(); err != nil {
 		cmd.Process.Kill()

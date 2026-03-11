@@ -449,6 +449,13 @@ func (m *Manager) waitForAgent(ctx context.Context, vsockPath string, timeout ti
 	var lastErr error
 	attempts := 0
 
+	// Log initial vsock file state for diagnostics
+	if _, err := os.Stat(vsockPath); err != nil {
+		log.Printf("firecracker: waitForAgent: vsock.sock does not exist yet at %s", vsockPath)
+	} else {
+		log.Printf("firecracker: waitForAgent: vsock.sock exists at %s", vsockPath)
+	}
+
 	for time.Now().Before(deadline) {
 		attempts++
 		tAttempt := time.Now()
