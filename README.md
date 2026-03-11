@@ -1,3 +1,7 @@
+[![npm](https://img.shields.io/npm/v/@opencomputer/sdk)](https://www.npmjs.com/package/@opencomputer/sdk)
+[![PyPI](https://img.shields.io/pypi/v/opencomputer-sdk)](https://pypi.org/project/opencomputer-sdk/)
+[![GitHub stars](https://img.shields.io/github/stars/diggerhq/opencomputer)](https://github.com/diggerhq/opencomputer)
+
 # OpenComputer
 
 Long-running cloud infrastructure for AI agents. Real computers, not sandboxes.
@@ -12,7 +16,7 @@ Think of it as the compute equivalent of a laptop that sleeps when you close the
 - **Checkpoints** - Instant snapshots. Fork or restore to any point. Break something, roll back in a second.
 - **Preview URLs** - Expose ports externally with auth (Clerk) and custom domains. Give every environment a live URL.
 - **Per-tenant package control** - Manage and hot-swap software versions inside running VMs. Every tenant gets exactly the stack they need.
-- **Claude agent SDK** - optimised for claude agent sdk workloads, higher level primitives available to achieve streaming.
+- **Claude Agent SDK** - Optimised for Claude Agent SDK workloads, with higher-level primitives for streaming.
 
 ## Quick start
 
@@ -58,10 +62,87 @@ console.log(output.stdout); // hello
 await sandbox.kill();
 ```
 
-## Documentation
+### Agent SDK
 
-https://docs.opencomputer.dev/
+Run a full Claude agent session inside the VM with real-time event streaming:
 
-## Website
+```typescript
+import { Sandbox } from '@opencomputer/sdk';
 
-https://opencomputer.dev/
+const sandbox = await Sandbox.create({
+  template: 'default',
+  apiKey: 'YOUR_API_KEY',
+  envs: { ANTHROPIC_API_KEY: 'YOUR_ANTHROPIC_KEY' },
+});
+
+// Start a Claude agent session inside the sandbox
+const session = await sandbox.agent.start({
+  prompt: 'Create a todo app with React',
+  systemPrompt: 'You are a senior fullstack developer...',
+  maxTurns: 30,
+  cwd: '/workspace',
+  onEvent: (event) => {
+    switch (event.type) {
+      case 'assistant':
+        console.log('Agent:', event.message?.content);
+        break;
+      case 'turn_complete':
+        console.log('Done!');
+        break;
+      case 'error':
+        console.error(event.message);
+        break;
+    }
+  },
+});
+
+// Get a live preview URL
+const preview = await sandbox.createPreviewURL({ port: 80 });
+console.log('Preview:', preview);
+```
+
+## How it works
+
+OpenComputer gives each agent a full Linux VM (not a container). The agent loop runs *inside* the VM alongside the filesystem and preview server — no network hops between your agent and the code it's writing.
+
+```
+┌─────────────────────────────────┐
+│        OpenComputer VM          │
+│                                 │
+│  ┌───────────────────────────┐  │
+│  │   Claude Agent SDK        │  │
+│  │   (agent loop + tools)    │  │
+│  └─────────┬─────────────────┘  │
+│            │                    │
+│  ┌─────────▼──┐  ┌───────────┐  │
+│  │ Filesystem │  │  Preview   │  │
+│  │ /workspace │  │  Server    │  │
+│  └────────────┘  └───────────┘  │
+│                                 │
+│  Hibernates when idle           │
+│  Wakes in seconds               │
+└─────────────────────────────────┘
+```
+
+VMs hibernate instead of dying. State survives across sessions without manual snapshot/restore. No more re-installing node_modules because the container timed out.
+
+## Why not containers?
+
+|                | Ephemeral sandboxes              | OpenComputer                        |
+| -------------- | -------------------------------- | ----------------------------------- |
+| Persistence    | Starts from scratch every time   | Hibernates and resumes              |
+| Runtime        | Containers with time limits      | Full VMs, no timeouts               |
+| Agent loop     | Runs externally, talks over network | Runs inside the VM               |
+| File I/O       | Network round-trips              | Local, instant                      |
+| State          | Lost on timeout                  | Survives across sessions            |
+
+## Guides
+
+- [Building an Open Lovable - part 1](https://opencomputer.dev/guides/building-open-lovable-part-1) — Build a Lovable clone using Claude Agent SDK and OpenComputer
+
+## Links
+
+- [Documentation](https://docs.opencomputer.dev/)
+- [Website](https://opencomputer.dev/)
+- [Guides](https://opencomputer.dev/guides)
+- [Talk to founders](https://cal.com/team/digger/opencomputer-founder-chat)
