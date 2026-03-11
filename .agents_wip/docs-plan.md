@@ -46,6 +46,7 @@ docs/
 │
 │── introduction.mdx               ← REWRITE
 │── quickstart.mdx                 ← REWRITE
+│── how-it-works.mdx               ← NEW (architecture + key technical decisions)
 │
 ├── agents/                         ← NEW directory
 │   ├── overview.mdx               ← REWRITE (entity: what agents are, how they work)
@@ -82,7 +83,6 @@ docs/
 │   └── agent-skill.mdx
 │
 │── troubleshooting.mdx            ← NEW
-│── changelog.mdx                  ← NEW (stub)
 │
 ├── sdks/                           ← DELETE entire directory
 │   ├── typescript/                  (content merged into entity pages)
@@ -99,7 +99,8 @@ docs/
       "group": "Getting Started",
       "pages": [
         "introduction",
-        "quickstart"
+        "quickstart",
+        "how-it-works"
       ]
     },
     {
@@ -154,8 +155,7 @@ docs/
     {
       "group": "Resources",
       "pages": [
-        "troubleshooting",
-        "changelog"
+        "troubleshooting"
       ]
     }
   ]
@@ -189,25 +189,43 @@ docs/
    - Long-running (hours/days, not minutes)
    - Checkpoint/fork like git branches
    - Full Linux VM (not a container)
-4. Install (CodeGroup: npm + pip + CLI)
+4. Install (CodeGroup: npm + pip + CLI) + set `OPENCOMPUTER_API_KEY` env var
 5. Minimal example: create sandbox → run agent → get result (TS + Python side by side)
-6. Next steps cards → Quickstart, Agents, Sandboxes
+6. Next steps cards → Quickstart, How it works, Agents, Sandboxes
 
-**Changes from current:** Add install for CLI. Tighten copy. Add "Full Linux VM" card. Remove "Run agent tasks easily" card (redundant with Agent SDK card).
+**Changes from current:** Add install for CLI. Pin env var name (`OPENCOMPUTER_API_KEY`). Tighten copy. Add "Full Linux VM" card. Remove "Run agent tasks easily" card (redundant with Agent SDK card). Add how-it-works link.
 
 #### `quickstart.mdx` — REWRITE
 
-**Goal:** Working code in 5 minutes. Three examples of increasing complexity.
+**Goal:** Working agent in 2 minutes. One example, zero detours.
 
 **Structure:**
 1. Prerequisites: API key + SDK installed (link to intro for install)
-2. Set API key (env var)
-3. **Example 1: Run a command** — Simplest possible thing. Create sandbox, run `echo`, print output, kill. (TS + Python)
-4. **Example 2: Run an agent** — Create sandbox, `agent.start()` with a real task, stream events. (TS + Python)
-5. **Example 3: Checkpoint and fork** — Create sandbox, do work, checkpoint, fork, verify state. (TS + Python)
-6. Next steps: link to Agents (deep dive), Sandboxes (the primitive), Checkpoints (persistence)
+2. Set API key: `export OPENCOMPUTER_API_KEY=your-key`
+3. **One example: Run an agent** — Create sandbox, `agent.start()` with a real task, stream events, print result. (TS + Python CodeGroup)
+4. **What just happened** — 2-3 sentences: you created a cloud VM, Claude ran inside it, you got structured output back.
+5. **Next steps** — cards linking to:
+   - How it works (architecture)
+   - Agents (deep dive on events, tools, multi-turn)
+   - Sandboxes (the compute primitive, lifecycle, running commands)
+   - Checkpoints (snapshot and fork)
 
-**Changes from current:** Add command example before agent example (simpler onramp). Add checkpoint example. Fix Python quickstart (currently shows `sandbox.commands.run` instead of agent example — mismatch with TS).
+**Changes from current:** Single focused example instead of three. Fix Python quickstart (`sandbox.commands.run` → agent example). Don't overload — link out to entity pages for depth.
+
+#### `how-it-works.mdx` — NEW
+
+**Goal:** Give technically curious users a clear mental model of the system in under 3 minutes. Cover architecture and the key technical decisions users would have opinions about.
+
+**Structure:**
+1. **One-paragraph overview** — Your code talks to the OpenComputer API. The API provisions a Firecracker microVM. Your agent (or commands) run inside that VM. Events stream back to your code.
+2. **Firecracker microVMs** — Why not containers? Each sandbox is a real VM with its own kernel, memory, and disk. Hardware-level isolation (KVM). Boot in ~150ms. This is the same technology AWS Lambda uses under the hood.
+3. **Hibernation** — The VM's full state (memory + disk) is snapshotted to S3. Resume is fast because the kernel doesn't reboot — it picks up exactly where it left off. Tradeoff: snapshot size scales with memory allocation.
+4. **Checkpoints & forking** — Checkpoints are named snapshots. Forking creates a new VM from a checkpoint with copy-on-write semantics. This enables parallel exploration (try 5 approaches from the same starting point) and reproducibility.
+5. **Templates** — Built from Dockerfiles but converted to VM root filesystems (not run as containers). The build process uses Docker to produce a filesystem image, then Firecracker boots from that image directly.
+6. **Networking** — Each VM gets a TAP device with NAT. Full outbound internet. Inbound access via preview URLs (reverse-proxied through the host).
+7. **Agent sessions** — Claude Agent SDK runs inside the VM as a regular process. The SDK spawns Claude, gives it bash + file tools, and manages the think→act→observe loop. Events are parsed from stdout and streamed to your code over WebSocket.
+
+**Tone:** Concise, technical, opinionated. No marketing. A senior engineer should read this and think "these are reasonable choices, I understand the tradeoffs."
 
 ---
 
@@ -227,7 +245,7 @@ Each entity page follows this template:
 **Goal:** Explain what agent sessions are, how they work, and get the reader to a working agent in 60 seconds.
 
 **Structure:**
-1. **What is an agent session** — A Claude Agent SDK instance running inside a sandbox. The agent has full access to the sandbox's filesystem and shell. You send it a prompt, it works autonomously — writing files, running commands, iterating on errors — and streams events back as it goes.
+1. **What is an agent session** — A Claude Agent SDK instance running inside a [sandbox](/sandboxes/overview) (a cloud VM with its own filesystem and shell). You send it a prompt, it works autonomously — writing files, running commands, iterating on errors — and streams events back as it goes.
 2. **Quick example:** `sandbox.agent.start()` with event handling (TS + Python CodeGroup) — the simplest working agent
 3. **How it works** — brief (3-4 sentences): the SDK spawns Claude inside the sandbox VM, Claude gets bash/file tools, it works in a loop (think → act → observe), events stream back to your code via WebSocket.
 4. **`sandbox.agent.start(opts)`** — full param reference:
@@ -465,7 +483,7 @@ These are exhaustive, lookup-oriented pages. No tutorials, no "why" — just eve
    - Most SDK users only need the API key — the SDK handles JWT auth transparently.
    - All requests/responses are JSON (except file read which returns plain text)
 2. **Sandbox Lifecycle**
-   - `POST /api/sandboxes` — create (params: templateID, timeout, envs, metadata, cpuCount, memoryMB, alias, port, networkEnabled). Response includes: sandboxID, status, connectURL, token, hostPort, cpuCount, memoryMB, startedAt, endAt.
+   - `POST /api/sandboxes` — create (params: templateID, timeout, envs, metadata, cpuCount, memoryMB). Response includes: sandboxID, status, connectURL, token, cpuCount, memoryMB, startedAt, endAt.
    - `GET /api/sandboxes` — list all
    - `GET /api/sandboxes/:id` — get details
    - `DELETE /api/sandboxes/:id` — kill
@@ -648,10 +666,6 @@ Minimal, functional. No changes needed.
    - Agent stderr via `onError` callback
 3. Getting help: GitHub issues link, support channels
 
-#### `changelog.mdx` — NEW (stub)
-
-Placeholder page with latest version info and link to GitHub releases. Keep minimal — will grow organically.
-
 ---
 
 ## Pages to Delete
@@ -732,41 +746,41 @@ The Python SDK is **not feature-equivalent** to TypeScript. Every page spec abov
 
 ## Execution Order
 
-### Phase 1: Entity overview pages (do first — everything else references these)
+### Phase 1: Core pages (do first — everything else references these)
 1. Create `agents/overview.mdx` (the headline entity — most users start here)
 2. Create `sandboxes/overview.mdx` (the foundational primitive)
-3. Rewrite `introduction.mdx` (links to agents + sandboxes)
-4. Rewrite `quickstart.mdx`
+3. Create `how-it-works.mdx` (architecture + technical decisions)
+4. Rewrite `introduction.mdx` (links to agents, sandboxes, how-it-works)
+5. Rewrite `quickstart.mdx` (single agent example)
 
 ### Phase 2: Agent sub-pages
-5. Create `agents/events.mdx`
-6. Create `agents/tools.mdx`
-7. Create `agents/multi-turn.mdx`
+6. Create `agents/events.mdx`
+7. Create `agents/tools.mdx`
+8. Create `agents/multi-turn.mdx`
 
 ### Phase 3: Sandbox sub-entity and operation pages
-8. Rewrite `sandboxes/running-commands.mdx` (merge TS + Python exec pages)
-9. Rewrite `sandboxes/working-with-files.mdx` (merge TS + Python filesystem pages)
-10. Create `sandboxes/interactive-terminals.mdx` (promote from SDK-only)
-11. Rewrite `sandboxes/checkpoints.mdx` (entity page: concept + API)
-12. Rewrite `sandboxes/templates.mdx` (entity page: concept + API)
-13. Rewrite `sandboxes/patches.mdx` (entity page: concept + API)
-14. Create `sandboxes/preview-urls.mdx` (entity page: concept + API)
+9. Rewrite `sandboxes/running-commands.mdx` (merge TS + Python exec pages)
+10. Rewrite `sandboxes/working-with-files.mdx` (merge TS + Python filesystem pages)
+11. Create `sandboxes/interactive-terminals.mdx` (promote from SDK-only)
+12. Rewrite `sandboxes/checkpoints.mdx` (entity page: concept + API)
+13. Rewrite `sandboxes/templates.mdx` (entity page: concept + API)
+14. Rewrite `sandboxes/patches.mdx` (entity page: concept + API)
+15. Create `sandboxes/preview-urls.mdx` (entity page: concept + API)
 
 ### Phase 4: Reference Pages
-15. Create `reference/api.mdx` (HTTP API — derived from router.go)
-16. Create `reference/typescript-sdk.mdx` (derived from sdks/typescript/src/)
-17. Create `reference/python-sdk.mdx` (derived from sdks/python/opencomputer/)
+16. Create `reference/api.mdx` (HTTP API — derived from router.go)
+17. Create `reference/typescript-sdk.mdx` (derived from sdks/typescript/src/)
+18. Create `reference/python-sdk.mdx` (derived from sdks/python/opencomputer/)
 
 ### Phase 5: CLI + Support Pages
-18. Rewrite `cli/overview.mdx`
-19. Update `cli/sandbox.mdx`
-20. Create `cli/exec.mdx` (rename from commands)
-21. Update `cli/shell.mdx`
-22. Update `cli/checkpoint.mdx`
-23. Create `cli/patch.mdx` (rename from patches)
-24. Create `cli/preview.mdx` (rename from previews)
-25. Create `troubleshooting.mdx`
-26. Create `changelog.mdx` (stub)
+19. Rewrite `cli/overview.mdx`
+20. Update `cli/sandbox.mdx`
+21. Create `cli/exec.mdx` (rename from commands)
+22. Update `cli/shell.mdx`
+23. Update `cli/checkpoint.mdx`
+24. Create `cli/patch.mdx` (rename from patches)
+25. Create `cli/preview.mdx` (rename from previews)
+26. Create `troubleshooting.mdx`
 
 ### Phase 6: Cleanup
 27. Update `guides/build-a-lovable-clone.mdx` (minor fixes)
@@ -781,19 +795,19 @@ The Python SDK is **not feature-equivalent** to TypeScript. Every page spec abov
 
 | Section | Current | Proposed | Delta |
 |---------|---------|----------|-------|
-| Getting Started | 2 | 2 | 0 |
+| Getting Started | 2 | 3 | +1 |
 | Agents | 1* | 4 | +3 |
 | Sandboxes | 2* | 8 | +6 |
 | Reference | 0 | 3 | +3 |
 | CLI | 7 | 7 | 0 |
 | Guides | 2 | 2 | 0 |
-| Resources | 0 | 2 | +2 |
+| Resources | 0 | 1 | +1 |
 | SDK (tabs) | 16 | 0 | -16 |
 | **Total** | **30** | **28** | **-2** |
 
 *Current agents.mdx + running-commands.mdx + working-with-files.mdx exist at root level without clear grouping.
 
-Net result: 2 fewer pages. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
+Net result: 2 fewer pages, but every page earns its place. Entity pages teach with curated examples; Reference pages are exhaustive lookup. Zero duplication between SDK tabs.
 
 ---
 
