@@ -324,7 +324,7 @@ curl -X PUT {connectURL}/sandboxes/{id}/files?path=/app/hello.txt \
   -d "Hello, World!"
 ```
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ### `GET /api/sandboxes/:id/files/list?path=...` — List Directory
 
@@ -345,13 +345,13 @@ Each entry has: `name` (string), `isDir` (boolean), `size` (int64), `path` (stri
 
 The `path` query parameter specifies the directory to create.
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ### `DELETE /api/sandboxes/:id/files?path=...` — Remove
 
 Delete a file or directory. The `path` query parameter is required.
 
-**Response** `200`: Empty object.
+**Response** `204`: No content.
 
 ---
 
