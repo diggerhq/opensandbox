@@ -27,6 +27,7 @@ export interface AgentConfig {
   maxTurns?: number;
   cwd?: string;
   mcpServers?: Record<string, McpServerConfig>;
+  resume?: string;
 }
 
 export interface AgentStartOpts extends AgentConfig {
@@ -75,6 +76,7 @@ export class Agent {
     if (opts.maxTurns != null) body.maxTurns = opts.maxTurns;
     if (opts.cwd) body.cwd = opts.cwd;
     if (opts.mcpServers) body.mcpServers = opts.mcpServers;
+    if (opts.resume) body.resume = opts.resume;
 
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/agent`, {
       method: "POST",
