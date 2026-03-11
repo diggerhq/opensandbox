@@ -12,6 +12,7 @@ description: "Complete REST API reference"
   - Worker direct auth: Authorization: Bearer <JWT> (or token query param for WS)
   - SDK users only need API key — SDK handles JWT transparently
   - All JSON except file read (plain text)
+  - Token refresh: POST /sandboxes/:id/token/refresh — returns new JWT (worker auth)
 */}
 
 ## Sandbox Lifecycle
@@ -184,7 +185,7 @@ description: "Complete REST API reference"
 
 ### `POST /api/sandboxes/:id/pty` — Create
 
-{/* Body: { cols?, rows? }. Response: { sessionId }. */}
+{/* Body: { cols?, rows?, shell? }. Response: { sessionId }. */}
 
 ### `GET /api/sandboxes/:id/pty/:sessionID` — WebSocket
 

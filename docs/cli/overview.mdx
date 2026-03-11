@@ -1,13 +1,16 @@
 ---
-title: "CLI Reference"
-description: "Full reference for the oc command-line interface"
+title: "CLI"
+description: "Manage sandboxes from your terminal"
 ---
+
+{/* STUB — Progressive JPEG pass 1. Conceptual CLI page: install, config, key workflows.
+  Per-command reference (flags, subcommands) lives in Reference section. */}
 
 The `oc` CLI lets you manage OpenComputer sandboxes directly from your terminal — create sandboxes, run commands, open interactive shells, manage checkpoints, and more.
 
 ## Installation
 
-Download the latest binary for your platform from [GitHub Releases](https://github.com/diggerhq/opencomputer/releases):
+{/* 4 platforms: macOS Apple Silicon, macOS Intel, Linux x86_64, Linux ARM64. CodeGroup with curl commands. */}
 
 <CodeGroup>
 
@@ -33,35 +36,13 @@ chmod +x /usr/local/bin/oc
 
 </CodeGroup>
 
-Verify the installation:
-
-```bash
-oc --version
-```
-
 ## Configuration
 
-Set your API key (stored in `~/.oc/config.json`):
-
-```bash
-oc config set api-key YOUR_API_KEY
-```
-
-Optionally set a custom API URL:
-
-```bash
-oc config set api-url https://app.opencomputer.dev
-```
-
-View current configuration:
-
-```bash
-oc config show
-```
+{/* oc config set api-key / api-url. Config file: ~/.oc/config.json. oc config show. */}
 
 ### Resolution Order
 
-Configuration values are resolved in this order (highest priority first):
+{/* Table: flags > env > config > defaults */}
 
 | Priority | Source | Example |
 | --- | --- | --- |
@@ -72,15 +53,23 @@ Configuration values are resolved in this order (highest priority first):
 
 ## Global Flags
 
-Every command supports these flags:
-
 | Flag | Environment Variable | Description |
 | --- | --- | --- |
 | `--api-key` | `OPENCOMPUTER_API_KEY` | API key for authentication |
 | `--api-url` | `OPENCOMPUTER_API_URL` | Control plane URL |
 | `--json` | — | Output as JSON instead of tables |
 
-## Quick Example
+## Key Workflows
+
+{/* Practical patterns — how to actually use the CLI effectively.
+  - Create and shell in one line: oc shell $(oc create --json | jq -r '.sandboxID')
+  - Scripting with --json and jq
+  - Hibernate/wake for cost savings
+  - Checkpoint -> fork -> parallel testing pattern
+  - Top-level shortcuts: oc create = oc sandbox create, oc ls = oc sandbox list
+*/}
+
+### Quick Start
 
 ```bash
 # Create a sandbox
@@ -96,20 +85,9 @@ oc shell sb-abc123
 oc sandbox kill sb-abc123
 ```
 
-## Modules
+### JSON Output & Scripting
 
-| Module | Description |
-| --- | --- |
-| [Sandbox](/cli/sandbox) | Create, list, and manage sandbox lifecycles |
-| [Commands](/cli/commands) | Execute shell commands in a sandbox |
-| [Shell](/cli/shell) | Interactive PTY terminal sessions |
-| [Checkpoints](/cli/checkpoints) | Snapshot, fork, and restore sandboxes |
-| [Patches](/cli/patches) | Apply scripted modifications to checkpoints |
-| [Preview URLs](/cli/previews) | Expose sandbox ports to the internet |
-
-## JSON Output
-
-Every command supports `--json` for machine-readable output, making it easy to script with `jq`:
+{/* --json flag + jq patterns. Capture IDs, filter by status. */}
 
 ```bash
 # Get a sandbox ID programmatically
@@ -118,3 +96,20 @@ ID=$(oc create --json | jq -r '.sandboxID')
 # List all running sandbox IDs
 oc ls --json | jq -r '.[].sandboxID'
 ```
+
+### Top-level Shortcuts
+
+{/* oc create = oc sandbox create, oc ls = oc sandbox list */}
+
+## Command Reference
+
+{/* Links to per-command reference pages (in Reference section) */}
+
+| Command | Description |
+| --- | --- |
+| [sandbox](/cli/sandbox) | Create, list, kill, hibernate, wake |
+| [exec](/cli/exec) | Run commands, manage exec sessions |
+| [shell](/cli/shell) | Interactive PTY terminal |
+| [checkpoint](/cli/checkpoint) | Snapshot, fork, restore |
+| [patch](/cli/patch) | Checkpoint-attached scripts |
+| [preview](/cli/preview) | Expose ports to the internet |
