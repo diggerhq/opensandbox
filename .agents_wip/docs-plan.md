@@ -653,6 +653,85 @@ Total: 16 SDK pages deleted, 3 root pages moved, 3 CLI pages renamed/merged.
 
 ---
 
+## Audit: Plan vs Code (2026-03-11)
+
+Cross-referenced the plan against exact TS SDK, Python SDK, and HTTP API handler source code. Issues grouped by severity.
+
+### CRITICAL: Plan claims parity that doesn't exist
+
+The plan assumes TS and Python SDKs are interchangeable. They are NOT. Several features exist in TypeScript but are missing from Python:
+
+| Feature | TypeScript | Python | HTTP API |
+|---------|-----------|--------|----------|
+| `Sandbox.create({ cpuCount, memoryMB })` | Yes | **NO** (not a param) | Yes |
+| `sandbox.hibernate()` / `sandbox.wake()` | Yes | **NO** (methods don't exist) | Yes |
+| `exec.start()` returns streaming `ExecSession` | Yes (WebSocket + callbacks) | **Returns `str` (session ID only)** | WebSocket available |
+| `exec.attach(sessionId)` | Yes | **NO** (method doesn't exist) | WebSocket available |
+| `maxRunAfterDisconnect` in exec | Yes | **NO** | Yes |
+| Agent `resume` parameter | Yes (via `AgentConfig`) | **NO** (not in `start()` signature) | Yes |
+| Agent `onExit` callback | Yes | **NO** | N/A |
+| Agent `onScrollbackEnd` callback | Yes | **NO** | N/A |
+| Exec `onScrollbackEnd` callback | Yes (in `ExecAttachOpts`) | **NO** | N/A |
+
+**Impact on plan:** Every page that says "TS + Python CodeGroup" must handle these asymmetries. Can't just show identical code in two tabs for exec.start, hibernation, or agent resume. Options:
+1. Show TS-only features clearly marked as such
+2. Note Python gaps with "coming soon" or "use HTTP API directly"
+3. File issues on the Python SDK to add missing features before docs ship
+
+### Naming/type mismatches
+
+| Issue | Details |
+|-------|---------|
+| `Templates` class name | TS exports `Templates` (plural). Python exports `Template` (singular). Plan uses `Template` — inconsistent with TS. |
+| `Templates` not on Sandbox | Unlike `agent`, `exec`, `files`, `pty` — `Templates` is standalone (not `sandbox.templates`). Plan's reference section should reflect this. |
+| `CheckpointInfo` fields | Plan says: `id, name, status, sandboxId, createdAt`. Actual TS: `id, sandboxId, orgId, name, rootfsS3Key?, workspaceS3Key?, sandboxConfig, status, sizeBytes, createdAt`. HTTP response: `checkpointID, sandboxID, includeMemory, sizeBytes, createdAt` (no `name`!). Needs reconciliation. |
+| HTTP API uses `checkpointID`/`sandboxID` | SDK uses `id`/`sandboxId`. Plan must be clear about which is which per surface. |
+| `ExecAttachOpts` type | TS has a separate type for attach (with `onScrollbackEnd`). Plan doesn't mention it. |
+| `PatchInfo.strategy` field | Exists in type definition but never set by server. Unclear meaning. |
+
+### Undocumented features (exist in code, not in plan)
+
+| Feature | Where | Should go |
+|---------|-------|-----------|
+| `onScrollbackEnd` callback (agent + exec) | TS SDK | agents/events.mdx, sandboxes/running-commands.mdx |
+| `POST /api/sandboxes/:sandboxId/save-as-template` | HTTP API | sandboxes/templates.mdx, reference/api.mdx |
+| Python `PtySession.recv()` method | Python SDK | sandboxes/interactive-terminals.mdx, reference/python-sdk.mdx |
+| Python `Sandbox` async context manager (`async with`) | Python SDK | sandboxes/overview.mdx, reference/python-sdk.mdx |
+| WebSocket binary protocol (stream markers 0x00-0x04) | Both SDKs internally, HTTP API | reference/api.mdx (essential for raw API users) |
+| Dual auth model (API key for control plane, JWT for worker) | HTTP API | reference/api.mdx |
+| `POST /api/sandboxes/:id/token/refresh` | Worker HTTP API | reference/api.mdx |
+| HTTP create sandbox extra params: `alias`, `port`, `networkEnabled`, `imageRef`, `templateRootfsKey`, `templateWorkspaceKey` | HTTP API | reference/api.mdx (some may be internal-only) |
+| Create sandbox response: `connectURL`, `token`, `clientID`, `hostPort`, `machineID` | HTTP API | reference/api.mdx |
+| Python `AgentEvent.__getitem__` / `.get()` dict-like access | Python SDK | reference/python-sdk.mdx |
+| Python `commands.py` legacy file still exists (deprecated) | Python SDK | Note in reference, don't document |
+| PTY `shell` param in HTTP create body | HTTP API | reference/api.mdx |
+| PTY resize endpoint | HTTP API + CLI | sandboxes/interactive-terminals.mdx |
+| `ExecSessionInfo.attachedClients` field | Both SDKs | reference pages |
+
+### Plan references things that don't exist or are wrong
+
+| Claim in plan | Reality |
+|---------------|---------|
+| "Sandbox.create({ ... cpuCount, memoryMB })" for Python | Python `create()` doesn't accept these params |
+| "sandbox.hibernate(), sandbox.wake()" for both SDKs | Python SDK doesn't have these methods |
+| "sandbox.exec.attach()" as available in both | Python has no `attach()` on Exec |
+| "resume param" documented for both SDKs | Python Agent.start() has no `resume` param |
+| Agent HTTP API has WebSocket streaming | There's no WebSocket endpoint for agents — SDKs use exec sessions internally. Agent events are SDK-abstracted. |
+| Plan says HTTP auth is `Authorization: Bearer <API_KEY>` | Control plane uses API key middleware; worker uses sandbox-scoped JWT. Two different auth flows. |
+
+### Recommended fixes to plan
+
+1. **Add "SDK parity" column to all feature tables.** Where Python is missing a feature, clearly mark it TS-only and show the HTTP API alternative.
+2. **Fix reference/api.mdx auth section.** Document both auth flows (API key for `/api/*` on control plane, Bearer JWT for direct worker access).
+3. **Add WebSocket protocol section to reference/api.mdx.** Binary frame format with stream markers is essential for anyone not using an SDK.
+4. **Add `saveAsTemplate` to templates page and API reference.**
+5. **Fix CheckpointInfo structure** to match actual code across all three surfaces.
+6. **Add Python-specific features** to reference/python-sdk.mdx: context manager, `recv()`, `collect_events()`, `AgentEvent` dict-like access.
+7. **Don't document `PatchInfo.strategy`** until it's actually used.
+8. **Note `Templates`/`Template` naming difference** in reference pages.
+
+---
+
 ## Content Gaps to Fill
 
 These are specific pieces of information that exist in the codebase but are missing from docs:
