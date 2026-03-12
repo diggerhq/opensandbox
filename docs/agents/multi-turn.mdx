@@ -1,0 +1,177 @@
+---
+title: "Multi-turn"
+description: "Follow-ups, resume, and session management"
+---
+
+Agent conversations can extend beyond a single prompt. Send follow-up prompts within the same session, resume a conversation in a new session, or reconnect to a running agent.
+
+## Follow-up Prompts
+
+Use `sendPrompt()` to continue a conversation within the same running session:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.start({
+  prompt: "Create a REST API with Express",
+  onEvent: (event) => console.log(`[${event.type}]`, event),
+});
+
+await session.done;
+
+// Send a follow-up in the same session
+session.sendPrompt("Now add input validation to all endpoints");
+await session.done;
+```
+
+```python Python
+session = await sandbox.agent.start(
+    prompt="Create a REST API with Express",
+    on_event=lambda event: print(f"[{event.type}]", event),
+)
+
+await session.wait()
+
+# Send a follow-up in the same session
+session.send_prompt("Now add input validation to all endpoints")
+await session.wait()
+```
+
+</CodeGroup>
+
+## Resuming Across Sessions
+
+Resume continues a previous conversation in a **new** agent session. This is useful when the original session has ended or you want to fork the conversation.
+
+Capture the `claude_session_id` from the `turn_complete` event, then pass it as `resume` when starting a new session:
+
+```typescript
+let claudeSessionId: string;
+
+const session1 = await sandbox.agent.start({
+  prompt: "Set up a Next.js project with Tailwind",
+  onEvent: (event) => {
+    if (event.type === "turn_complete") {
+      claudeSessionId = event.claude_session_id;
+    }
+  },
+});
+await session1.done;
+
+// Later — possibly in a different sandbox forked from the same checkpoint
+const session2 = await sandbox.agent.start({
+  prompt: "Now add a dark mode toggle",
+  resume: claudeSessionId,
+  onEvent: (event) => console.log(event),
+});
+await session2.done;
+```
+
+<Note>
+  `resume` is available in the TypeScript SDK only. Python SDK support is planned — use the [HTTP API](/reference/api#agent-sessions) directly to pass the `resume` field.
+</Note>
+
+### Attach vs Resume
+
+| | Attach | Resume |
+| --- | --- | --- |
+| Session state | Still running | Ended or running |
+| What happens | Reconnect to event stream | New session, continues conversation |
+| SDK support | TypeScript, Python | TypeScript only |
+
+## Interrupting
+
+Stop the agent's current turn:
+
+<CodeGroup>
+
+```typescript TypeScript
+session.interrupt();
+// The session emits an "interrupted" event
+```
+
+```python Python
+session.interrupt()
+```
+
+</CodeGroup>
+
+The agent stops working but the session stays alive — you can send a new prompt to continue.
+
+## Reconfiguring Mid-Session
+
+Change model, tools, or working directory while the session is running:
+
+<CodeGroup>
+
+```typescript TypeScript
+session.configure({
+  model: "claude-sonnet-4-20250514",
+  maxTurns: 20,
+  allowedTools: ["Read", "Bash"],
+});
+```
+
+```python Python
+session.configure(
+    model="claude-sonnet-4-20250514",
+    max_turns=20,
+    allowed_tools=["Read", "Bash"],
+)
+```
+
+</CodeGroup>
+
+The new configuration takes effect on the next turn.
+
+## Managing Sessions
+
+### Listing Sessions
+
+<CodeGroup>
+
+```typescript TypeScript
+const sessions = await sandbox.agent.list();
+for (const s of sessions) {
+  console.log(s.sessionID, s.running ? "running" : "stopped");
+}
+```
+
+```python Python
+sessions = await sandbox.agent.list()
+for s in sessions:
+    print(s.session_id, "running" if s.running else "stopped")
+```
+
+</CodeGroup>
+
+### Attaching to a Running Session
+
+Reconnect to an agent session that's already running — useful after a network disconnect or when monitoring from a different client:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.attach(sessionId, {
+  onEvent: (event) => console.log(event),
+  onError: (data) => console.error(data),
+});
+```
+
+```python Python
+session = await sandbox.agent.attach(
+    session_id,
+    on_event=lambda event: print(event),
+    on_error=lambda data: print("error:", data),
+)
+```
+
+</CodeGroup>
+
+<Note>
+  Agent sessions are SDK-only — there is no CLI command for agents yet.
+</Note>
+
+<Tip>
+  Back to [Agents overview](/agents/overview). See also: [Events](/agents/events) · [Tools](/agents/tools).
+</Tip>

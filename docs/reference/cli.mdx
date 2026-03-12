@@ -1,0 +1,253 @@
+---
+title: "CLI Reference"
+description: "Every command, subcommand, and flag"
+---
+
+## Global Flags
+
+These flags apply to all commands.
+
+| Flag | Type | Env Variable | Description |
+| --- | --- | --- | --- |
+| `--api-key` | string | `OPENCOMPUTER_API_KEY` | API key for authentication |
+| `--api-url` | string | `OPENCOMPUTER_API_URL` | Control plane URL |
+| `--json` | boolean | — | Output as JSON |
+
+---
+
+## `oc sandbox`
+
+Manage sandbox lifecycle.
+
+### `oc sandbox create`
+
+Create a new sandbox. **Alias:** `oc create`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--timeout` | int | `300` | Idle timeout in seconds |
+| `--cpu` | int | `0` | CPU cores (0 = platform default) |
+| `--memory` | int | `0` | Memory in MB (0 = platform default) |
+| `--env` | string | — | Environment variable `KEY=VALUE` (repeatable) |
+| `--metadata` | string | — | Metadata `KEY=VALUE` (repeatable) |
+
+```bash
+oc create --timeout 600 --cpu 2 --memory 1024 --env NODE_ENV=production
+```
+
+### `oc sandbox list`
+
+List all running sandboxes. **Alias:** `oc ls`
+
+Output columns: `ID`, `TEMPLATE`, `STATUS`, `CPU`, `MEM`, `AGE`
+
+```bash
+oc ls
+oc ls --json
+```
+
+### `oc sandbox get <id>`
+
+Show detailed information for a sandbox.
+
+Output: ID, Template, Status, CPU, Memory, Started, Ends.
+
+### `oc sandbox kill <id>`
+
+Terminate and remove a sandbox.
+
+### `oc sandbox hibernate <id>`
+
+Snapshot VM state and stop the sandbox. Displays snapshot size on success.
+
+### `oc sandbox wake <id>`
+
+Resume a hibernated sandbox.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--timeout` | int | `300` | Idle timeout in seconds after wake |
+
+### `oc sandbox set-timeout <id> <seconds>`
+
+Update the idle timeout for a running sandbox.
+
+```bash
+oc sandbox set-timeout sb-abc123 600
+```
+
+---
+
+## `oc exec`
+
+Execute commands inside a sandbox.
+
+### `oc exec <id> [flags] -- <command...>`
+
+By default, creates an **exec session** and prints the session ID with attach instructions. Use `--wait` to run synchronously — output streams to your terminal and the CLI exits with the process exit code.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--wait` | boolean | `false` | Wait for completion, stream output, mirror exit code |
+| `--cwd` | string | — | Working directory |
+| `--timeout` | int | `0` | Timeout in seconds (0 = none) |
+| `--env` | string | — | Environment variable `KEY=VALUE` (repeatable) |
+
+```bash
+# Synchronous — streams output, exits with process exit code
+oc exec sb-abc --wait -- npm run build
+
+# Asynchronous — creates session, prints session ID
+oc exec sb-abc -- node server.js
+# → Session es-xyz created. Attach with: oc exec attach sb-abc es-xyz
+```
+
+### `oc exec list <id>`
+
+List active exec sessions for a sandbox.
+
+Output: session ID, status (`running` or `exited (code)`), command, client count.
+
+### `oc exec attach <id> <session-id>`
+
+<Warning>
+  Not yet implemented. The command exists but prints guidance to use the SDK or a WebSocket client (`websocat`).
+</Warning>
+
+### `oc exec kill <id> <session-id>`
+
+Kill an exec session.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--signal` | int | `9` | Signal number (default: SIGKILL) |
+
+---
+
+## `oc shell`
+
+### `oc shell <id>`
+
+Open an interactive terminal (PTY) session via WebSocket.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--shell` | string | `/bin/bash` | Shell to use |
+
+Terminal size is auto-detected and resize events are forwarded. Press `Ctrl+D` or type `exit` to disconnect. The PTY session is cleaned up automatically on exit.
+
+```bash
+oc shell sb-abc123
+oc shell sb-abc123 --shell /bin/zsh
+```
+
+---
+
+## `oc checkpoint`
+
+Manage sandbox checkpoints. **Alias:** `oc cp`
+
+### `oc checkpoint create <sandbox-id>`
+
+Create a named checkpoint of a running sandbox.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--name` | string | — | Checkpoint name (**required**) |
+
+```bash
+oc cp create sb-abc --name before-migration
+```
+
+### `oc checkpoint list <sandbox-id>`
+
+List checkpoints for a sandbox.
+
+Output columns: `ID`, `NAME`, `STATUS`, `SIZE`, `CREATED`
+
+### `oc checkpoint restore <sandbox-id> <checkpoint-id>`
+
+Revert a sandbox in-place to a checkpoint. All changes since the checkpoint are lost.
+
+### `oc checkpoint spawn <checkpoint-id>`
+
+Create a new sandbox from a checkpoint (fork).
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--timeout` | int | `300` | Idle timeout for the new sandbox |
+
+```bash
+ID=$(oc cp spawn cp-xyz --json | jq -r '.sandboxID')
+oc exec "$ID" --wait -- echo "forked sandbox ready"
+```
+
+### `oc checkpoint delete <sandbox-id> <checkpoint-id>`
+
+Delete a checkpoint.
+
+---
+
+## `oc patch`
+
+Manage checkpoint patches — scripts that run when a sandbox is spawned from a checkpoint.
+
+### `oc patch create <checkpoint-id>`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--script` | string | — | Path to script file, or `-` for stdin (**required**) |
+| `--description` | string | — | Patch description |
+
+```bash
+oc patch create cp-xyz --script=./setup.sh --description="Install deps"
+echo "apt install -y curl" | oc patch create cp-xyz --script=-
+```
+
+### `oc patch list <checkpoint-id>`
+
+Output columns: `ID`, `SEQ`, `DESCRIPTION`, `STRATEGY`, `CREATED`
+
+### `oc patch delete <checkpoint-id> <patch-id>`
+
+---
+
+## `oc preview`
+
+Manage preview URLs for exposing sandbox ports to the internet.
+
+### `oc preview create <sandbox-id>`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--port` | int | — | Container port to expose (**required**) |
+| `--domain` | string | — | Custom domain |
+
+```bash
+oc preview create sb-abc --port 3000
+```
+
+### `oc preview list <sandbox-id>`
+
+Output columns: `PORT`, `HOSTNAME`, `SSL`, `CREATED`
+
+### `oc preview delete <sandbox-id> <port>`
+
+---
+
+## `oc config`
+
+Manage CLI configuration. Settings are persisted to a local config file.
+
+### `oc config set <key> <value>`
+
+Supported keys: `api-key`, `api-url`.
+
+```bash
+oc config set api-key sk-1234...
+oc config set api-url https://app.opencomputer.dev
+```
+
+### `oc config show`
+
+Display current configuration. The API key is masked (first 4 and last 4 characters shown).

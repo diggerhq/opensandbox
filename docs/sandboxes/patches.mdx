@@ -1,0 +1,144 @@
+---
+title: "Patches"
+description: "Scripts that run when forking from a checkpoint"
+---
+
+A patch is a shell script attached to a checkpoint. Every time a sandbox is forked from that checkpoint, patches run automatically — inject configuration, update dependencies, or customize state without modifying the checkpoint itself.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+// Attach a patch to an existing checkpoint
+const result = await Sandbox.createCheckpointPatch(checkpointId, {
+  script: 'echo "export API_KEY=$1" >> /root/.bashrc',
+  description: "Inject API key at fork time",
+});
+console.log(result.patch.id, result.patch.sequence);
+
+// Fork — patch runs automatically
+const sandbox = await Sandbox.createFromCheckpoint(checkpointId);
+```
+
+```python Python
+from opencomputer import Sandbox
+
+result = await Sandbox.create_checkpoint_patch(
+    checkpoint_id,
+    script='echo "export API_KEY=$1" >> /root/.bashrc',
+    description="Inject API key at fork time",
+)
+
+sandbox = await Sandbox.create_from_checkpoint(checkpoint_id)
+```
+
+</CodeGroup>
+
+## API Reference
+
+### Create Patch
+
+Patch methods are **static** on the Sandbox class — they operate on checkpoints, not sandbox instances.
+
+<CodeGroup>
+
+```typescript TypeScript
+const result = await Sandbox.createCheckpointPatch(checkpointId, {
+  script: "apt-get update && apt-get install -y redis-server",
+  description: "Install Redis",
+});
+// result.patch.id, result.patch.sequence
+```
+
+```python Python
+result = await Sandbox.create_checkpoint_patch(
+    checkpoint_id,
+    script="apt-get update && apt-get install -y redis-server",
+    description="Install Redis",
+)
+```
+
+</CodeGroup>
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checkpointId` | string | Yes | Target checkpoint |
+| `script` | string | Yes | Bash script to execute on fork |
+| `description` | string | No | Human-readable description |
+
+### List Patches
+
+<CodeGroup>
+
+```typescript TypeScript
+const patches = await Sandbox.listCheckpointPatches(checkpointId);
+for (const p of patches) {
+  console.log(p.sequence, p.description);
+}
+```
+
+```python Python
+patches = await Sandbox.list_checkpoint_patches(checkpoint_id)
+```
+
+</CodeGroup>
+
+### Delete Patch
+
+<CodeGroup>
+
+```typescript TypeScript
+await Sandbox.deleteCheckpointPatch(checkpointId, patchId);
+```
+
+```python Python
+await Sandbox.delete_checkpoint_patch(checkpoint_id, patch_id)
+```
+
+</CodeGroup>
+
+## When Patches Run
+
+Patches execute when a sandbox is **forked** from the checkpoint (via `Sandbox.createFromCheckpoint()` or `oc checkpoint spawn`). The strategy is always `on_wake`.
+
+## Execution Order
+
+Patches run in creation order (by `sequence` number). If you create three patches, they execute as patch 1 → patch 2 → patch 3 every time a sandbox is forked.
+
+## PatchInfo
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Patch UUID |
+| `checkpointId` | string | Parent checkpoint |
+| `script` | string | Bash script content |
+| `description` | string | Human-readable description |
+| `strategy` | string | Always `"on_wake"` |
+| `sequence` | number | Execution order |
+| `createdAt` | string | Timestamp |
+
+## Example: Environment-Specific Forks
+
+Use patches to create different environments from one checkpoint:
+
+```typescript
+// Base checkpoint has the app installed
+const cpId = "cp-abc123";
+
+// Patch for staging
+await Sandbox.createCheckpointPatch(cpId, {
+  script: `
+    echo 'DATABASE_URL=postgres://staging-db/app' >> /app/.env
+    echo 'LOG_LEVEL=debug' >> /app/.env
+  `,
+  description: "Staging environment config",
+});
+
+// Every fork now gets staging config
+const staging = await Sandbox.createFromCheckpoint(cpId);
+```
+
+<Tip>
+  CLI equivalent: [`oc patch`](/cli/patch). Full reference: [TypeScript SDK](/reference/typescript-sdk#sandbox) · [Python SDK](/reference/python-sdk#sandbox) · [HTTP API](/reference/api#checkpoint-patches).
+</Tip>
