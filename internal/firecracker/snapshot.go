@@ -40,10 +40,10 @@ type SnapshotMeta struct {
 	SnapshotedAt  time.Time         `json:"snapshotedAt,omitempty"`
 	// SealedTokens maps sealed token → real value for re-registering the proxy session on wake.
 	SealedTokens  map[string]string `json:"sealedTokens,omitempty"`
-	// ProxyAllowlist and ProxySecretHosts are persisted so the proxy session
+	// ProxyAllowlist and ProxyTokenHosts are persisted so the proxy session
 	// can be fully restored with the same restrictions after hibernate → wake.
-	ProxyAllowlist   []string `json:"proxyAllowlist,omitempty"`
-	ProxySecretHosts []string `json:"proxySecretHosts,omitempty"`
+	ProxyAllowlist  []string            `json:"proxyAllowlist,omitempty"`
+	ProxyTokenHosts map[string][]string `json:"proxyTokenHosts,omitempty"`
 }
 
 // doHibernate pauses a running VM, creates a full memory snapshot, and kicks off
@@ -135,7 +135,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	if m.secretsProxy != nil && vm.network != nil {
 		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
 		meta.ProxyAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
-		meta.ProxySecretHosts = m.secretsProxy.GetSessionSecretHosts(vm.network.GuestIP)
+		meta.ProxyTokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -505,7 +505,7 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 
 	// Re-register secrets proxy session if token map was persisted
 	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
-		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.ProxyAllowlist, meta.ProxySecretHosts)
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.ProxyAllowlist, meta.ProxyTokenHosts)
 		if err := AddProxyRedirect(netCfg); err != nil {
 			log.Printf("firecracker: warning: proxy redirect failed for %s on wake: %v", sandboxID, err)
 		}
@@ -1877,7 +1877,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	// Secrets proxy integration: seal env vars and set up proxy redirect
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(newID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(newID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			if err := AddProxyRedirect(netCfg); err != nil {
@@ -2357,7 +2357,7 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 	// Secrets proxy integration: seal env vars and set up proxy redirect
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			if err := AddProxyRedirect(netCfg); err != nil {

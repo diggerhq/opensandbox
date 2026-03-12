@@ -92,6 +92,24 @@ func (s *GRPCServer) Stop() {
 	s.server.GracefulStop()
 }
 
+// parseSecretAllowedHosts converts the proto map (env var → comma-separated hosts)
+// to the internal map (env var → host slice). Returns nil if input is empty.
+func parseSecretAllowedHosts(m map[string]string) map[string][]string {
+	if len(m) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(m))
+	for name, hosts := range m {
+		if hosts != "" {
+			result[name] = strings.Split(hosts, ",")
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxRequest) (*pb.CreateSandboxResponse, error) {
 	cfg := types.SandboxConfig{
 		Template:        req.Template,
@@ -103,7 +121,8 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		ImageRef:        req.ImageRef,
 		Port:            int(req.Port),
 		SandboxID:       req.SandboxId, // use server-assigned ID if provided
-		EgressAllowlist: req.EgressAllowlist,
+		EgressAllowlist:    req.EgressAllowlist,
+		SecretAllowedHosts: parseSecretAllowedHosts(req.SecretAllowedHosts),
 	}
 
 	// Warm fork: if checkpoint_id is set, try snapshot-based fork first.

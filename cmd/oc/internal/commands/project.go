@@ -9,35 +9,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type projectInfo struct {
+type secretStoreInfo struct {
 	ID              string   `json:"id"`
 	OrgID           string   `json:"orgId"`
 	Name            string   `json:"name"`
-	Template        string   `json:"template"`
-	CpuCount        int      `json:"cpuCount"`
-	MemoryMB        int      `json:"memoryMB"`
-	TimeoutSec      int      `json:"timeoutSec"`
 	EgressAllowlist []string `json:"egressAllowlist"`
 	CreatedAt       string   `json:"createdAt"`
 	UpdatedAt       string   `json:"updatedAt"`
 }
 
-var projectCmd = &cobra.Command{
-	Use:   "project",
-	Short: "Manage projects",
+var secretStoreCmd = &cobra.Command{
+	Use:   "secret-store",
+	Short: "Manage secret stores",
 }
 
-var projectCreateCmd = &cobra.Command{
+var secretStoreCreateCmd = &cobra.Command{
 	Use:   "create",
-	Short: "Create a new project",
+	Short: "Create a new secret store",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
 
 		name, _ := cmd.Flags().GetString("name")
-		template, _ := cmd.Flags().GetString("template")
-		cpu, _ := cmd.Flags().GetInt("cpu")
-		memory, _ := cmd.Flags().GetInt("memory")
-		timeout, _ := cmd.Flags().GetInt("timeout")
 		allowlist, _ := cmd.Flags().GetStringSlice("egress-allowlist")
 
 		if name == "" {
@@ -45,65 +37,54 @@ var projectCreateCmd = &cobra.Command{
 		}
 
 		body := map[string]interface{}{"name": name}
-		if template != "" {
-			body["template"] = template
-		}
-		if cpu > 0 {
-			body["cpuCount"] = cpu
-		}
-		if memory > 0 {
-			body["memoryMB"] = memory
-		}
-		if timeout > 0 {
-			body["timeoutSec"] = timeout
-		}
 		if len(allowlist) > 0 {
 			body["egressAllowlist"] = allowlist
 		}
 
-		var project projectInfo
-		if err := c.Post(cmd.Context(), "/projects", body, &project); err != nil {
+		var store secretStoreInfo
+		if err := c.Post(cmd.Context(), "/secret-stores", body, &store); err != nil {
 			return err
 		}
 
-		printer.Print(project, func() {
-			fmt.Printf("Created project %s (id: %s)\n", project.Name, project.ID)
+		printer.Print(store, func() {
+			fmt.Printf("Created secret store %s (id: %s)\n", store.Name, store.ID)
 		})
 		return nil
 	},
 }
 
-var projectListCmd = &cobra.Command{
+var secretStoreListCmd = &cobra.Command{
 	Use:     "list",
 	Aliases: []string{"ls"},
-	Short:   "List projects",
+	Short:   "List secret stores",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
 
-		var projects []projectInfo
-		if err := c.Get(cmd.Context(), "/projects", &projects); err != nil {
+		var stores []secretStoreInfo
+		if err := c.Get(cmd.Context(), "/secret-stores", &stores); err != nil {
 			return err
 		}
 
-		printer.Print(projects, func() {
-			if len(projects) == 0 {
-				fmt.Println("No projects found.")
+		printer.Print(stores, func() {
+			if len(stores) == 0 {
+				fmt.Println("No secret stores found.")
 				return
 			}
-			headers := []string{"ID", "NAME", "TEMPLATE", "CPU", "MEM", "TIMEOUT", "CREATED"}
+			headers := []string{"ID", "NAME", "EGRESS ALLOWLIST", "CREATED"}
 			var rows [][]string
-			for _, p := range projects {
-				created := p.CreatedAt
-				if t, err := time.Parse(time.RFC3339Nano, p.CreatedAt); err == nil {
+			for _, s := range stores {
+				created := s.CreatedAt
+				if t, err := time.Parse(time.RFC3339Nano, s.CreatedAt); err == nil {
 					created = time.Since(t).Truncate(time.Second).String() + " ago"
 				}
+				egress := "(all)"
+				if len(s.EgressAllowlist) > 0 {
+					egress = strings.Join(s.EgressAllowlist, ", ")
+				}
 				rows = append(rows, []string{
-					p.ID,
-					p.Name,
-					p.Template,
-					fmt.Sprintf("%d", p.CpuCount),
-					fmt.Sprintf("%dMB", p.MemoryMB),
-					fmt.Sprintf("%ds", p.TimeoutSec),
+					s.ID,
+					s.Name,
+					egress,
 					created,
 				})
 			}
@@ -113,36 +94,32 @@ var projectListCmd = &cobra.Command{
 	},
 }
 
-var projectGetCmd = &cobra.Command{
-	Use:   "get <project-id>",
-	Short: "Get project details",
+var secretStoreGetCmd = &cobra.Command{
+	Use:   "get <store-id>",
+	Short: "Get secret store details",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
 
-		var project projectInfo
-		if err := c.Get(cmd.Context(), "/projects/"+args[0], &project); err != nil {
+		var store secretStoreInfo
+		if err := c.Get(cmd.Context(), "/secret-stores/"+args[0], &store); err != nil {
 			return err
 		}
 
-		printer.Print(project, func() {
-			fmt.Printf("ID:        %s\n", project.ID)
-			fmt.Printf("Name:      %s\n", project.Name)
-			fmt.Printf("Template:  %s\n", project.Template)
-			fmt.Printf("CPU:       %d\n", project.CpuCount)
-			fmt.Printf("Memory:    %dMB\n", project.MemoryMB)
-			fmt.Printf("Timeout:   %ds\n", project.TimeoutSec)
-			if len(project.EgressAllowlist) > 0 {
-				fmt.Printf("Egress:    %s\n", strings.Join(project.EgressAllowlist, ", "))
+		printer.Print(store, func() {
+			fmt.Printf("ID:      %s\n", store.ID)
+			fmt.Printf("Name:    %s\n", store.Name)
+			if len(store.EgressAllowlist) > 0 {
+				fmt.Printf("Egress:  %s\n", strings.Join(store.EgressAllowlist, ", "))
 			}
 		})
 		return nil
 	},
 }
 
-var projectUpdateCmd = &cobra.Command{
-	Use:   "update <project-id>",
-	Short: "Update a project",
+var secretStoreUpdateCmd = &cobra.Command{
+	Use:   "update <store-id>",
+	Short: "Update a secret store",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
@@ -152,77 +129,51 @@ var projectUpdateCmd = &cobra.Command{
 			v, _ := cmd.Flags().GetString("name")
 			body["name"] = v
 		}
-		if cmd.Flags().Changed("template") {
-			v, _ := cmd.Flags().GetString("template")
-			body["template"] = v
-		}
-		if cmd.Flags().Changed("cpu") {
-			v, _ := cmd.Flags().GetInt("cpu")
-			body["cpuCount"] = v
-		}
-		if cmd.Flags().Changed("memory") {
-			v, _ := cmd.Flags().GetInt("memory")
-			body["memoryMB"] = v
-		}
-		if cmd.Flags().Changed("timeout") {
-			v, _ := cmd.Flags().GetInt("timeout")
-			body["timeoutSec"] = v
-		}
 		if cmd.Flags().Changed("egress-allowlist") {
 			v, _ := cmd.Flags().GetStringSlice("egress-allowlist")
 			body["egressAllowlist"] = v
 		}
 
 		if len(body) == 0 {
-			return fmt.Errorf("no fields to update (use --name, --template, --cpu, --memory, --timeout, --egress-allowlist)")
+			return fmt.Errorf("no fields to update (use --name, --egress-allowlist)")
 		}
 
-		var project projectInfo
-		if err := c.PutJSON(cmd.Context(), "/projects/"+args[0], body, &project); err != nil {
+		var store secretStoreInfo
+		if err := c.PutJSON(cmd.Context(), "/secret-stores/"+args[0], body, &store); err != nil {
 			return err
 		}
 
-		printer.Print(project, func() {
-			fmt.Printf("Updated project %s\n", project.Name)
+		printer.Print(store, func() {
+			fmt.Printf("Updated secret store %s\n", store.Name)
 		})
 		return nil
 	},
 }
 
-var projectDeleteCmd = &cobra.Command{
-	Use:   "delete <project-id>",
-	Short: "Delete a project and all its secrets",
+var secretStoreDeleteCmd = &cobra.Command{
+	Use:   "delete <store-id>",
+	Short: "Delete a secret store and all its secrets",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c := client.FromContext(cmd.Context())
-		if err := c.Delete(cmd.Context(), "/projects/"+args[0]); err != nil {
+		if err := c.Delete(cmd.Context(), "/secret-stores/"+args[0]); err != nil {
 			return err
 		}
-		fmt.Printf("Project %s deleted.\n", args[0])
+		fmt.Printf("Secret store %s deleted.\n", args[0])
 		return nil
 	},
 }
 
 func init() {
-	// project create flags
-	projectCreateCmd.Flags().String("name", "", "Project name (required)")
-	projectCreateCmd.Flags().String("template", "", "Default template")
-	projectCreateCmd.Flags().Int("cpu", 0, "Default CPU count")
-	projectCreateCmd.Flags().Int("memory", 0, "Default memory in MB")
-	projectCreateCmd.Flags().Int("timeout", 0, "Default timeout in seconds")
-	projectCreateCmd.Flags().StringSlice("egress-allowlist", nil, "Allowed egress hosts")
+	secretStoreCreateCmd.Flags().String("name", "", "Store name (required)")
+	secretStoreCreateCmd.Flags().StringSlice("egress-allowlist", nil, "Allowed egress hosts")
 
-	// project update flags (same as create)
-	projectUpdateCmd.Flags().String("name", "", "Project name")
-	projectUpdateCmd.Flags().String("template", "", "Default template")
-	projectUpdateCmd.Flags().Int("cpu", 0, "Default CPU count")
-	projectUpdateCmd.Flags().Int("memory", 0, "Default memory in MB")
-	projectUpdateCmd.Flags().Int("timeout", 0, "Default timeout in seconds")
-	projectUpdateCmd.Flags().StringSlice("egress-allowlist", nil, "Allowed egress hosts")
+	secretStoreUpdateCmd.Flags().String("name", "", "Store name")
+	secretStoreUpdateCmd.Flags().StringSlice("egress-allowlist", nil, "Allowed egress hosts")
 
-	projectCmd.AddCommand(projectCreateCmd)
-	projectCmd.AddCommand(projectListCmd)
-	projectCmd.AddCommand(projectGetCmd)
-	projectCmd.AddCommand(projectUpdateCmd)
-	projectCmd.AddCommand(projectDeleteCmd)
+	secretStoreCmd.AddCommand(secretStoreCreateCmd)
+	secretStoreCmd.AddCommand(secretStoreListCmd)
+	secretStoreCmd.AddCommand(secretStoreGetCmd)
+	secretStoreCmd.AddCommand(secretStoreUpdateCmd)
+	secretStoreCmd.AddCommand(secretStoreDeleteCmd)
 }

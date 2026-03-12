@@ -1249,174 +1249,169 @@ func (s *Store) DeletePreviewURLsBySandbox(ctx context.Context, sandboxID string
 	return urls, nil
 }
 
-// ── Projects ──────────────────────────────────────────────────────────────────
+// ── Secret Stores ─────────────────────────────────────────────────────────────
 
-// Project represents a project that groups sandboxes and holds secrets.
-type Project struct {
+// SecretStore represents a named collection of secrets scoped to an org.
+type SecretStore struct {
 	ID              uuid.UUID `json:"id"`
 	OrgID           uuid.UUID `json:"orgId"`
 	Name            string    `json:"name"`
-	Template        string    `json:"template"`
-	CpuCount        int       `json:"cpuCount"`
-	MemoryMB        int       `json:"memoryMB"`
-	TimeoutSec      int       `json:"timeoutSec"`
 	EgressAllowlist []string  `json:"egressAllowlist"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
-// ProjectSecret represents an encrypted secret belonging to a project.
-type ProjectSecret struct {
-	ID        uuid.UUID `json:"id"`
-	ProjectID uuid.UUID `json:"projectId"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
+// SecretEntry represents an encrypted secret in a store (values are never returned to clients).
+type SecretEntry struct {
+	ID           uuid.UUID `json:"id"`
+	StoreID      uuid.UUID `json:"storeId"`
+	Name         string    `json:"name"`
+	AllowedHosts []string  `json:"allowedHosts"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
-// CreateProject creates a new project for an org.
-func (s *Store) CreateProject(ctx context.Context, orgID uuid.UUID, name, template string, cpuCount, memoryMB, timeoutSec int, allowlist []string) (*Project, error) {
-	if template == "" {
-		template = "default"
-	}
-	if cpuCount <= 0 {
-		cpuCount = 1
-	}
-	if memoryMB <= 0 {
-		memoryMB = 1024
-	}
-	if timeoutSec <= 0 {
-		timeoutSec = 300
-	}
-	if allowlist == nil {
-		allowlist = []string{}
+// DecryptedSecret holds a plaintext secret value and its host restrictions.
+type DecryptedSecret struct {
+	Name         string
+	Value        string
+	AllowedHosts []string
+}
+
+// CreateSecretStore creates a new secret store for an org.
+func (s *Store) CreateSecretStore(ctx context.Context, orgID uuid.UUID, name string, egressAllowlist []string) (*SecretStore, error) {
+	if egressAllowlist == nil {
+		egressAllowlist = []string{}
 	}
 
-	var p Project
+	var ss SecretStore
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO projects (org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at`,
-		orgID, name, template, cpuCount, memoryMB, timeoutSec, allowlist,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+		`INSERT INTO secret_stores (org_id, name, egress_allowlist)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, org_id, name, egress_allowlist, created_at, updated_at`,
+		orgID, name, egressAllowlist,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("create project: %w", err)
+		return nil, fmt.Errorf("create secret store: %w", err)
 	}
-	return &p, nil
+	return &ss, nil
 }
 
-// GetProject returns a project by ID, scoped to an org.
-func (s *Store) GetProject(ctx context.Context, orgID, projectID uuid.UUID) (*Project, error) {
-	var p Project
+// GetSecretStore returns a secret store by ID, scoped to an org.
+func (s *Store) GetSecretStore(ctx context.Context, orgID, storeID uuid.UUID) (*SecretStore, error) {
+	var ss SecretStore
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
-		 FROM projects WHERE id = $1 AND org_id = $2`,
-		projectID, orgID,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE id = $1 AND org_id = $2`,
+		storeID, orgID,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get project: %w", err)
+		return nil, fmt.Errorf("get secret store: %w", err)
 	}
-	return &p, nil
+	return &ss, nil
 }
 
-// GetProjectByName returns a project by name, scoped to an org.
-func (s *Store) GetProjectByName(ctx context.Context, orgID uuid.UUID, name string) (*Project, error) {
-	var p Project
+// GetSecretStoreByName returns a secret store by name, scoped to an org.
+func (s *Store) GetSecretStoreByName(ctx context.Context, orgID uuid.UUID, name string) (*SecretStore, error) {
+	var ss SecretStore
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
-		 FROM projects WHERE org_id = $1 AND name = $2`,
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE org_id = $1 AND name = $2`,
 		orgID, name,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("get project by name: %w", err)
+		return nil, fmt.Errorf("get secret store by name: %w", err)
 	}
-	return &p, nil
+	return &ss, nil
 }
 
-// ListProjects returns all projects for an org.
-func (s *Store) ListProjects(ctx context.Context, orgID uuid.UUID) ([]Project, error) {
+// ListSecretStores returns all secret stores for an org.
+func (s *Store) ListSecretStores(ctx context.Context, orgID uuid.UUID) ([]SecretStore, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at
-		 FROM projects WHERE org_id = $1 ORDER BY name`,
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE org_id = $1 ORDER BY name`,
 		orgID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
+		return nil, fmt.Errorf("list secret stores: %w", err)
 	}
 	defer rows.Close()
 
-	var projects []Project
+	var stores []SecretStore
 	for rows.Next() {
-		var p Project
-		if err := rows.Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		var ss SecretStore
+		if err := rows.Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt); err != nil {
 			return nil, err
 		}
-		projects = append(projects, p)
+		stores = append(stores, ss)
 	}
-	return projects, nil
+	return stores, nil
 }
 
-// UpdateProject updates a project's configuration.
-func (s *Store) UpdateProject(ctx context.Context, orgID, projectID uuid.UUID, name, template string, cpuCount, memoryMB, timeoutSec int, allowlist []string) (*Project, error) {
-	if allowlist == nil {
-		allowlist = []string{}
+// UpdateSecretStore updates a secret store's configuration.
+func (s *Store) UpdateSecretStore(ctx context.Context, orgID, storeID uuid.UUID, name string, egressAllowlist []string) (*SecretStore, error) {
+	if egressAllowlist == nil {
+		egressAllowlist = []string{}
 	}
-	var p Project
+	var ss SecretStore
 	err := s.pool.QueryRow(ctx,
-		`UPDATE projects SET name = $3, template = $4, cpu_count = $5, memory_mb = $6, timeout_sec = $7, egress_allowlist = $8, updated_at = now()
+		`UPDATE secret_stores SET name = $3, egress_allowlist = $4, updated_at = now()
 		 WHERE id = $1 AND org_id = $2
-		 RETURNING id, org_id, name, template, cpu_count, memory_mb, timeout_sec, egress_allowlist, created_at, updated_at`,
-		projectID, orgID, name, template, cpuCount, memoryMB, timeoutSec, allowlist,
-	).Scan(&p.ID, &p.OrgID, &p.Name, &p.Template, &p.CpuCount, &p.MemoryMB, &p.TimeoutSec, &p.EgressAllowlist, &p.CreatedAt, &p.UpdatedAt)
+		 RETURNING id, org_id, name, egress_allowlist, created_at, updated_at`,
+		storeID, orgID, name, egressAllowlist,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("update project: %w", err)
+		return nil, fmt.Errorf("update secret store: %w", err)
 	}
-	return &p, nil
+	return &ss, nil
 }
 
-// DeleteProject deletes a project and all its secrets (cascading).
-func (s *Store) DeleteProject(ctx context.Context, orgID, projectID uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1 AND org_id = $2`, projectID, orgID)
+// DeleteSecretStore deletes a secret store and all its entries (cascading).
+func (s *Store) DeleteSecretStore(ctx context.Context, orgID, storeID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM secret_stores WHERE id = $1 AND org_id = $2`, storeID, orgID)
 	if err != nil {
-		return fmt.Errorf("delete project: %w", err)
+		return fmt.Errorf("delete secret store: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("project not found")
+		return fmt.Errorf("secret store not found")
 	}
 	return nil
 }
 
-// ── Project Secrets ───────────────────────────────────────────────────────────
+// ── Secret Store Entries ──────────────────────────────────────────────────────
 
-// SetProjectSecret creates or updates a secret on a project. The value is encrypted at rest.
-func (s *Store) SetProjectSecret(ctx context.Context, projectID uuid.UUID, name string, value []byte) error {
+// SetSecretEntry creates or updates a secret in a store. The value is encrypted at rest.
+func (s *Store) SetSecretEntry(ctx context.Context, storeID uuid.UUID, name string, value []byte, allowedHosts []string) error {
 	if s.encryptor == nil {
 		return fmt.Errorf("encryption not configured (set OPENSANDBOX_SECRET_ENCRYPTION_KEY)")
+	}
+	if allowedHosts == nil {
+		allowedHosts = []string{}
 	}
 	encrypted, err := s.encryptor.Encrypt(value)
 	if err != nil {
 		return fmt.Errorf("encrypt secret: %w", err)
 	}
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO project_secrets (project_id, name, encrypted_value)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (project_id, name) DO UPDATE SET encrypted_value = $3, updated_at = now()`,
-		projectID, name, encrypted,
+		`INSERT INTO secret_store_entries (store_id, name, encrypted_value, allowed_hosts)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (store_id, name) DO UPDATE SET encrypted_value = $3, allowed_hosts = $4, updated_at = now()`,
+		storeID, name, encrypted, allowedHosts,
 	)
 	if err != nil {
-		return fmt.Errorf("set project secret: %w", err)
+		return fmt.Errorf("set secret entry: %w", err)
 	}
 	return nil
 }
 
-// DeleteProjectSecret removes a secret from a project.
-func (s *Store) DeleteProjectSecret(ctx context.Context, projectID uuid.UUID, name string) error {
+// DeleteSecretEntry removes a secret from a store.
+func (s *Store) DeleteSecretEntry(ctx context.Context, storeID uuid.UUID, name string) error {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM project_secrets WHERE project_id = $1 AND name = $2`,
-		projectID, name,
+		`DELETE FROM secret_store_entries WHERE store_id = $1 AND name = $2`,
+		storeID, name,
 	)
 	if err != nil {
-		return fmt.Errorf("delete project secret: %w", err)
+		return fmt.Errorf("delete secret entry: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("secret not found")
@@ -1424,57 +1419,62 @@ func (s *Store) DeleteProjectSecret(ctx context.Context, projectID uuid.UUID, na
 	return nil
 }
 
-// ListProjectSecretNames returns the names (not values) of all secrets on a project.
-func (s *Store) ListProjectSecretNames(ctx context.Context, projectID uuid.UUID) ([]ProjectSecret, error) {
+// ListSecretEntries returns all entries in a store (names and allowed hosts, no values).
+func (s *Store) ListSecretEntries(ctx context.Context, storeID uuid.UUID) ([]SecretEntry, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, project_id, name, created_at, updated_at
-		 FROM project_secrets WHERE project_id = $1 ORDER BY name`,
-		projectID,
+		`SELECT id, store_id, name, allowed_hosts, created_at, updated_at
+		 FROM secret_store_entries WHERE store_id = $1 ORDER BY name`,
+		storeID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list project secrets: %w", err)
+		return nil, fmt.Errorf("list secret entries: %w", err)
 	}
 	defer rows.Close()
 
-	var secrets []ProjectSecret
+	var entries []SecretEntry
 	for rows.Next() {
-		var ps ProjectSecret
-		if err := rows.Scan(&ps.ID, &ps.ProjectID, &ps.Name, &ps.CreatedAt, &ps.UpdatedAt); err != nil {
+		var se SecretEntry
+		if err := rows.Scan(&se.ID, &se.StoreID, &se.Name, &se.AllowedHosts, &se.CreatedAt, &se.UpdatedAt); err != nil {
 			return nil, err
 		}
-		secrets = append(secrets, ps)
+		entries = append(entries, se)
 	}
-	return secrets, nil
+	return entries, nil
 }
 
-// DecryptProjectSecrets returns all secrets for a project as plaintext name→value pairs.
+// DecryptSecretEntries returns all secrets in a store as plaintext with host restrictions.
 // Used server-side when creating a sandbox to pass decrypted values to the worker.
-func (s *Store) DecryptProjectSecrets(ctx context.Context, projectID uuid.UUID) (map[string]string, error) {
+func (s *Store) DecryptSecretEntries(ctx context.Context, storeID uuid.UUID) ([]DecryptedSecret, error) {
 	if s.encryptor == nil {
 		return nil, fmt.Errorf("encryption not configured")
 	}
 
 	rows, err := s.pool.Query(ctx,
-		`SELECT name, encrypted_value FROM project_secrets WHERE project_id = $1`,
-		projectID,
+		`SELECT name, encrypted_value, allowed_hosts FROM secret_store_entries WHERE store_id = $1`,
+		storeID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query project secrets: %w", err)
+		return nil, fmt.Errorf("query secret entries: %w", err)
 	}
 	defer rows.Close()
 
-	secrets := make(map[string]string)
+	var secrets []DecryptedSecret
 	for rows.Next() {
 		var name string
 		var encrypted []byte
-		if err := rows.Scan(&name, &encrypted); err != nil {
+		var allowedHosts []string
+		if err := rows.Scan(&name, &encrypted, &allowedHosts); err != nil {
 			return nil, err
 		}
 		plaintext, err := s.encryptor.Decrypt(encrypted)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt secret %q: %w", name, err)
 		}
-		secrets[name] = string(plaintext)
+		secrets = append(secrets, DecryptedSecret{
+			Name:         name,
+			Value:        string(plaintext),
+			AllowedHosts: allowedHosts,
+		})
 	}
 	return secrets, nil
 }

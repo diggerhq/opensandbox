@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -64,17 +65,17 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 	// Workers
 	api.GET("/workers", s.listWorkers)
 
-	// Projects
-	api.POST("/projects", s.createProject)
-	api.GET("/projects", s.listProjects)
-	api.GET("/projects/:id", s.getProject)
-	api.PUT("/projects/:id", s.updateProject)
-	api.DELETE("/projects/:id", s.deleteProject)
+	// Secret stores
+	api.POST("/secret-stores", s.createSecretStore)
+	api.GET("/secret-stores", s.listSecretStores)
+	api.GET("/secret-stores/:id", s.getSecretStore)
+	api.PUT("/secret-stores/:id", s.updateSecretStore)
+	api.DELETE("/secret-stores/:id", s.deleteSecretStore)
 
-	// Project secrets
-	api.PUT("/projects/:id/secrets/:name", s.setProjectSecret)
-	api.DELETE("/projects/:id/secrets/:name", s.deleteProjectSecret)
-	api.GET("/projects/:id/secrets", s.listProjectSecrets)
+	// Secret store entries
+	api.PUT("/secret-stores/:id/secrets/:name", s.setSecretEntry)
+	api.DELETE("/secret-stores/:id/secrets/:name", s.deleteSecretEntry)
+	api.GET("/secret-stores/:id/secrets", s.listSecretEntries)
 
 	return s
 }
@@ -99,7 +100,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		CpuCount   int               `json:"cpuCount"`
 		Metadata   map[string]string `json:"metadata"`
 		NetworkEnabled bool          `json:"networkEnabled"`
-		Project    string            `json:"project"` // project name — resolves config + secrets
+		SecretStore    string        `json:"secretStore"` // secret store name — resolves secrets + egress config
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
@@ -120,52 +121,41 @@ func (s *Server) createSandbox(c echo.Context) error {
 		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "concurrent sandbox limit reached"})
 	}
 
-	// Resolve project: inherit config defaults + decrypt and merge secrets
-	var projectID *string
+	// Resolve secret store: decrypt secrets + inherit egress allowlist
 	var egressAllowlist []string
-	if req.Project != "" {
-		project, err := s.store.GetProjectByName(c.Request().Context(), orgID, req.Project)
+	var secretAllowedHosts map[string]string // env var name → comma-separated hosts (for proto)
+	if req.SecretStore != "" {
+		store, err := s.store.GetSecretStoreByName(c.Request().Context(), orgID, req.SecretStore)
 		if err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "project not found: " + req.Project})
-		}
-		pid := project.ID.String()
-		projectID = &pid
-
-		// Project config serves as defaults — request fields override
-		if req.TemplateID == "" {
-			req.TemplateID = project.Template
-		}
-		if req.CpuCount == 0 {
-			req.CpuCount = project.CpuCount
-		}
-		if req.MemoryMB == 0 {
-			req.MemoryMB = project.MemoryMB
-		}
-		if req.Timeout == 0 {
-			req.Timeout = project.TimeoutSec
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret store not found: " + req.SecretStore})
 		}
 
-		// Inherit egress allowlist from project
-		egressAllowlist = project.EgressAllowlist
+		egressAllowlist = store.EgressAllowlist
 
-		// Decrypt project secrets and merge into envs (request envs override project secrets)
-		secrets, err := s.store.DecryptProjectSecrets(c.Request().Context(), project.ID)
+		// Decrypt secrets and merge into envs (request envs override store secrets)
+		secrets, err := s.store.DecryptSecretEntries(c.Request().Context(), store.ID)
 		if err != nil {
-			log.Printf("controlplane: decrypt project secrets failed for %s: %v", req.Project, err)
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to decrypt project secrets"})
+			log.Printf("controlplane: decrypt secrets failed for store %s: %v", req.SecretStore, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to decrypt secrets"})
 		}
 		if len(secrets) > 0 {
 			if req.Envs == nil {
 				req.Envs = make(map[string]string)
 			}
-			for k, v := range secrets {
-				if _, exists := req.Envs[k]; !exists {
-					req.Envs[k] = v
+			for _, secret := range secrets {
+				if _, exists := req.Envs[secret.Name]; !exists {
+					req.Envs[secret.Name] = secret.Value
+				}
+				// Build per-secret host restrictions for proto
+				if len(secret.AllowedHosts) > 0 {
+					if secretAllowedHosts == nil {
+						secretAllowedHosts = make(map[string]string)
+					}
+					secretAllowedHosts[secret.Name] = strings.Join(secret.AllowedHosts, ",")
 				}
 			}
 		}
 	}
-	_ = projectID // TODO: store on sandbox_sessions.project_id
 
 	// Select region (explicit, or from Fly-Region header, or default)
 	region := req.Region
@@ -199,13 +189,14 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	client := pb.NewSandboxWorkerClient(conn)
 	grpcResp, err := client.CreateSandbox(ctx, &pb.CreateSandboxRequest{
-		Template:        req.TemplateID,
-		Timeout:         int32(req.Timeout),
-		Envs:            req.Envs,
-		MemoryMb:        int32(req.MemoryMB),
-		CpuCount:        int32(req.CpuCount),
-		NetworkEnabled:  req.NetworkEnabled,
-		EgressAllowlist: egressAllowlist,
+		Template:           req.TemplateID,
+		Timeout:            int32(req.Timeout),
+		Envs:               req.Envs,
+		MemoryMb:           int32(req.MemoryMB),
+		CpuCount:           int32(req.CpuCount),
+		NetworkEnabled:     req.NetworkEnabled,
+		EgressAllowlist:    egressAllowlist,
+		SecretAllowedHosts: secretAllowedHosts,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "worker create failed: " + err.Error()})

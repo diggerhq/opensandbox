@@ -55,11 +55,27 @@ const (
 
 // Session holds the sealed→real token mapping for one sandbox.
 type Session struct {
-	SandboxID   string
-	Secrets     map[string]string // "osb_sealed_xxx" → real value
-	Allowlist   []string          // nil = all hosts allowed; supports "*." prefix wildcards
-	SecretHosts []string          // hosts where token replacement is performed; nil = replace on all allowed hosts
-	ExpiresAt   time.Time
+	SandboxID  string
+	Secrets    map[string]string   // "osb_sealed_xxx" → real value
+	TokenHosts map[string][]string // sealed token → allowed hosts; nil/empty entry = all allowed hosts
+	Allowlist  []string            // nil = all hosts allowed; supports "*." prefix wildcards
+	ExpiresAt  time.Time
+}
+
+// secretsForHost returns the subset of sealed tokens that are allowed to be replaced for this host.
+// Tokens with no host restriction (empty/nil entry in TokenHosts) are always included.
+func (s *Session) secretsForHost(host string) map[string]string {
+	if len(s.TokenHosts) == 0 {
+		return s.Secrets // no per-token restrictions
+	}
+	filtered := make(map[string]string, len(s.Secrets))
+	for token, real := range s.Secrets {
+		hosts := s.TokenHosts[token]
+		if len(hosts) == 0 || hostAllowed(host, hosts) {
+			filtered[token] = real
+		}
+	}
+	return filtered
 }
 
 // SecretsProxy is an HTTP CONNECT proxy that intercepts HTTPS traffic from
@@ -146,32 +162,32 @@ func (p *SecretsProxy) GetSessionAllowlist(guestIP string) []string {
 	return session.Allowlist
 }
 
-// GetSessionSecretHosts returns the secret hosts list for the given guest IP's session.
-func (p *SecretsProxy) GetSessionSecretHosts(guestIP string) []string {
+// GetSessionTokenHosts returns the per-token host restrictions for the given guest IP's session.
+func (p *SecretsProxy) GetSessionTokenHosts(guestIP string) map[string][]string {
 	p.mu.RLock()
 	session := p.sessions[guestIP]
 	p.mu.RUnlock()
 	if session == nil {
 		return nil
 	}
-	return session.SecretHosts
+	return session.TokenHosts
 }
 
 // ReregisterSession creates a new proxy session from a previously persisted token map.
 // Used on wake to restore the proxy session without re-generating tokens.
-func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist, secretHosts []string) {
+func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string) {
 	session := &Session{
-		SandboxID:   sandboxID,
-		Secrets:     tokens,
-		Allowlist:   allowlist,
-		SecretHosts: secretHosts,
-		ExpiresAt:   time.Now().Add(defaultSessionTTL),
+		SandboxID:  sandboxID,
+		Secrets:    tokens,
+		TokenHosts: tokenHosts,
+		Allowlist:  allowlist,
+		ExpiresAt:  time.Now().Add(defaultSessionTTL),
 	}
 	p.mu.Lock()
 	p.sessions[guestIP] = session
 	p.mu.Unlock()
-	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d secretHosts=%d",
-		sandboxID, guestIP, len(tokens), len(allowlist), len(secretHosts))
+	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d tokenHosts=%d",
+		sandboxID, guestIP, len(tokens), len(allowlist), len(tokenHosts))
 }
 
 // CreateSealedEnvs generates sealed tokens for the given env vars, registers a
@@ -180,8 +196,8 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 // Returns nil if envVars is empty.
 //
 // allowlist controls which hosts the sandbox can reach (nil = all).
-// secretHosts controls which hosts get token replacement (nil = all allowed hosts).
-func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist, secretHosts []string) map[string]string {
+// secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
+func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
 	if len(envVars) == 0 {
 		return nil
 	}
@@ -195,11 +211,22 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, en
 		tokenMap[token] = realValue
 	}
 
+	// Build per-token host restrictions from per-env-var restrictions
+	var tokenHosts map[string][]string
+	if len(secretAllowedHosts) > 0 {
+		tokenHosts = make(map[string][]string, len(secretAllowedHosts))
+		for envVar, token := range sealed {
+			if hosts, ok := secretAllowedHosts[envVar]; ok && len(hosts) > 0 {
+				tokenHosts[token] = hosts
+			}
+		}
+	}
+
 	p.RegisterSession(guestIP, &Session{
-		SandboxID:   sandboxID,
-		Secrets:     tokenMap,
-		Allowlist:   allowlist,
-		SecretHosts: secretHosts,
+		SandboxID:  sandboxID,
+		Secrets:    tokenMap,
+		TokenHosts: tokenHosts,
+		Allowlist:  allowlist,
 	})
 
 	// Build the complete env map for the VM
@@ -317,11 +344,11 @@ func (p *SecretsProxy) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Determine if we should replace tokens for this host
-	shouldReplace := shouldReplaceTokens(targetHost, session)
+	// Filter secrets to only those allowed for this host
+	hostSecrets := session.secretsForHost(targetHost)
 
-	log.Printf("secrets-proxy: audit sandbox=%s src=%s host=%s action=connect secrets=%d replace=%v",
-		session.SandboxID, clientIP, targetHost, len(session.Secrets), shouldReplace)
+	log.Printf("secrets-proxy: audit sandbox=%s src=%s host=%s action=connect secrets=%d filtered=%d",
+		session.SandboxID, clientIP, targetHost, len(session.Secrets), len(hostSecrets))
 
 	// Acknowledge the CONNECT tunnel
 	conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
@@ -356,9 +383,9 @@ func (p *SecretsProxy) handleConn(conn net.Conn) {
 	}
 	defer upstreamConn.Close()
 
-	if shouldReplace && len(session.Secrets) > 0 {
+	if len(hostSecrets) > 0 {
 		// HTTP-aware proxy: parse requests, replace tokens in headers + body
-		p.proxyHTTPRequests(clientTLS, upstreamConn, session, targetHost)
+		p.proxyHTTPRequests(clientTLS, upstreamConn, hostSecrets, targetHost)
 	} else {
 		// No replacement needed — raw bidirectional pipe (faster)
 		p.proxyRaw(clientTLS, upstreamConn)
@@ -414,18 +441,9 @@ func checkPrivateIP(host string) error {
 	return nil
 }
 
-// shouldReplaceTokens returns true if token replacement should be performed for this host.
-// If SecretHosts is set, only replace on those hosts. Otherwise replace on all allowed hosts.
-func shouldReplaceTokens(host string, session *Session) bool {
-	if len(session.SecretHosts) == 0 {
-		return true // no restriction — replace on all hosts
-	}
-	return hostAllowed(host, session.SecretHosts)
-}
-
 // proxyHTTPRequests performs HTTP-aware proxying with token replacement in
 // both headers and body.
-func (p *SecretsProxy) proxyHTTPRequests(clientTLS *tls.Conn, upstreamTLS *tls.Conn, session *Session, targetHost string) {
+func (p *SecretsProxy) proxyHTTPRequests(clientTLS *tls.Conn, upstreamTLS *tls.Conn, secrets map[string]string, targetHost string) {
 	clientReader := bufio.NewReader(clientTLS)
 	upstreamReader := bufio.NewReader(upstreamTLS)
 
@@ -439,14 +457,14 @@ func (p *SecretsProxy) proxyHTTPRequests(clientTLS *tls.Conn, upstreamTLS *tls.C
 		clientTLS.SetReadDeadline(time.Time{})
 
 		// Replace tokens in request headers
-		replaceHeaderTokens(req.Header, session.Secrets)
+		replaceHeaderTokens(req.Header, secrets)
 
 		// Replace tokens in request body
 		if req.Body != nil && req.ContentLength != 0 {
 			// Buffer the replaced body to compute correct Content-Length.
 			// Sealed tokens (43 bytes) may differ in size from real values,
 			// so the original Content-Length would be wrong after replacement.
-			replacer := newStreamReplacer(req.Body, session.Secrets)
+			replacer := newStreamReplacer(req.Body, secrets)
 			replaced, err := io.ReadAll(replacer)
 			req.Body.Close()
 			if err != nil {
