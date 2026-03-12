@@ -224,27 +224,50 @@ func TestIsPrivateIP(t *testing.T) {
 	}
 }
 
-func TestShouldReplaceTokens(t *testing.T) {
+func TestSecretsForHost(t *testing.T) {
+	allSecrets := map[string]string{
+		"osb_sealed_aaa": "real-a",
+		"osb_sealed_bbb": "real-b",
+	}
+
 	tests := []struct {
-		name        string
-		host        string
-		secretHosts []string
-		want        bool
+		name       string
+		host       string
+		tokenHosts map[string][]string
+		wantCount  int
 	}{
-		{"nil secret hosts replaces all", "anything.com", nil, true},
-		{"empty secret hosts replaces all", "anything.com", []string{}, true},
-		{"exact match", "api.anthropic.com", []string{"api.anthropic.com"}, true},
-		{"no match", "evil.com", []string{"api.anthropic.com"}, false},
-		{"wildcard match", "api.anthropic.com", []string{"*.anthropic.com"}, true},
-		{"wildcard no match", "evil.com", []string{"*.anthropic.com"}, false},
+		{"nil token hosts returns all", "anything.com", nil, 2},
+		{"empty token hosts returns all", "anything.com", map[string][]string{}, 2},
+		{"exact match filters correctly", "api.anthropic.com", map[string][]string{
+			"osb_sealed_aaa": {"api.anthropic.com"},
+		}, 2}, // aaa matches, bbb has no restriction so included
+		{"no match filters out", "evil.com", map[string][]string{
+			"osb_sealed_aaa": {"api.anthropic.com"},
+			"osb_sealed_bbb": {"api.anthropic.com"},
+		}, 0},
+		{"wildcard match", "api.anthropic.com", map[string][]string{
+			"osb_sealed_aaa": {"*.anthropic.com"},
+			"osb_sealed_bbb": {"*.anthropic.com"},
+		}, 2},
+		{"wildcard no match", "evil.com", map[string][]string{
+			"osb_sealed_aaa": {"*.anthropic.com"},
+			"osb_sealed_bbb": {"*.anthropic.com"},
+		}, 0},
+		{"mixed restrictions", "api.anthropic.com", map[string][]string{
+			"osb_sealed_aaa": {"api.anthropic.com"},
+			"osb_sealed_bbb": {"other.com"},
+		}, 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			session := &Session{SecretHosts: tt.secretHosts}
-			got := shouldReplaceTokens(tt.host, session)
-			if got != tt.want {
-				t.Errorf("shouldReplaceTokens(%q, %v) = %v, want %v", tt.host, tt.secretHosts, got, tt.want)
+			session := &Session{
+				Secrets:    allSecrets,
+				TokenHosts: tt.tokenHosts,
+			}
+			got := session.secretsForHost(tt.host)
+			if len(got) != tt.wantCount {
+				t.Errorf("secretsForHost(%q) returned %d secrets, want %d", tt.host, len(got), tt.wantCount)
 			}
 		})
 	}

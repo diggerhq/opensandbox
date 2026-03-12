@@ -46,12 +46,16 @@ type SandboxConfig struct {
 	// When set, the sandbox boots from these drives instead of the standard base image.
 	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
-	// Project name — resolves config defaults + secrets from the project.
-	Project string `json:"project,omitempty"`
+	// SecretStore name — resolves secrets from the named secret store.
+	SecretStore string `json:"secretStore,omitempty"`
 	// EgressAllowlist restricts outbound HTTPS from the sandbox to these hosts.
 	// Supports exact matches ("api.anthropic.com") and wildcards ("*.openai.com").
 	// Empty = all hosts allowed (no restriction).
 	EgressAllowlist []string `json:"egressAllowlist,omitempty"`
+	// SecretAllowedHosts maps env var name → allowed hosts for that secret.
+	// Secrets are only substituted in requests to matching hosts.
+	// Missing key or empty slice = substitute on all allowed hosts.
+	SecretAllowedHosts map[string][]string `json:"secretAllowedHosts,omitempty"`
 	// SandboxID allows pre-determining the sandbox ID for async creation.
 	// If empty, a new ID is generated automatically.
 	SandboxID string `json:"-"`

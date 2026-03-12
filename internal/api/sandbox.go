@@ -60,44 +60,37 @@ func (s *Server) createSandbox(c echo.Context) error {
 		}
 	}
 
-	// Resolve project: inherit config defaults + decrypt and merge secrets
-	if cfg.Project != "" && s.store != nil && hasOrg {
-		project, err := s.store.GetProjectByName(ctx, orgID, cfg.Project)
+	// Resolve secret store: decrypt secrets + inherit egress config
+	if cfg.SecretStore != "" && s.store != nil && hasOrg {
+		store, err := s.store.GetSecretStoreByName(ctx, orgID, cfg.SecretStore)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{
-				"error": "project not found: " + cfg.Project,
+				"error": "secret store not found: " + cfg.SecretStore,
 			})
 		}
 
-		// Project config serves as defaults — request fields override
-		if cfg.Template == "" {
-			cfg.Template = project.Template
-		}
-		if cfg.CpuCount == 0 {
-			cfg.CpuCount = project.CpuCount
-		}
-		if cfg.MemoryMB == 0 {
-			cfg.MemoryMB = project.MemoryMB
-		}
-		if cfg.Timeout == 0 {
-			cfg.Timeout = project.TimeoutSec
-		}
+		cfg.EgressAllowlist = store.EgressAllowlist
 
-		// Decrypt project secrets and merge into envs (request envs override project secrets)
-		secrets, err := s.store.DecryptProjectSecrets(ctx, project.ID)
+		secrets, err := s.store.DecryptSecretEntries(ctx, store.ID)
 		if err != nil {
-			log.Printf("api: decrypt project secrets failed for %s: %v", cfg.Project, err)
+			log.Printf("api: decrypt secrets failed for store %s: %v", cfg.SecretStore, err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "failed to decrypt project secrets",
+				"error": "failed to decrypt secrets",
 			})
 		}
 		if len(secrets) > 0 {
 			if cfg.Envs == nil {
 				cfg.Envs = make(map[string]string)
 			}
-			for k, v := range secrets {
-				if _, exists := cfg.Envs[k]; !exists {
-					cfg.Envs[k] = v
+			for _, secret := range secrets {
+				if _, exists := cfg.Envs[secret.Name]; !exists {
+					cfg.Envs[secret.Name] = secret.Value
+				}
+				if len(secret.AllowedHosts) > 0 {
+					if cfg.SecretAllowedHosts == nil {
+						cfg.SecretAllowedHosts = make(map[string][]string)
+					}
+					cfg.SecretAllowedHosts[secret.Name] = secret.AllowedHosts
 				}
 			}
 		}

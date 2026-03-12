@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -9,13 +10,11 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 )
 
-func (s *Server) createProject(c echo.Context) error {
+// ── Secret Stores ─────────────────────────────────────────────────────────────
+
+func (s *Server) createSecretStore(c echo.Context) error {
 	var req struct {
 		Name            string   `json:"name"`
-		Template        string   `json:"template"`
-		CpuCount        int      `json:"cpuCount"`
-		MemoryMB        int      `json:"memoryMB"`
-		TimeoutSec      int      `json:"timeoutSec"`
 		EgressAllowlist []string `json:"egressAllowlist"`
 	}
 	if err := c.Bind(&req); err != nil {
@@ -30,194 +29,185 @@ func (s *Server) createProject(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	project, err := s.store.CreateProject(c.Request().Context(), orgID, req.Name, req.Template, req.CpuCount, req.MemoryMB, req.TimeoutSec, req.EgressAllowlist)
+	store, err := s.store.CreateSecretStore(c.Request().Context(), orgID, req.Name, req.EgressAllowlist)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusCreated, project)
+	return c.JSON(http.StatusCreated, store)
 }
 
-func (s *Server) listProjects(c echo.Context) error {
+func (s *Server) listSecretStores(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projects, err := s.store.ListProjects(c.Request().Context(), orgID)
+	stores, err := s.store.ListSecretStores(c.Request().Context(), orgID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, projects)
+	return c.JSON(http.StatusOK, stores)
 }
 
-func (s *Server) getProject(c echo.Context) error {
+func (s *Server) getSecretStore(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 
-	project, err := s.store.GetProject(c.Request().Context(), orgID, projectID)
+	store, err := s.store.GetSecretStore(c.Request().Context(), orgID, storeID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found"})
 	}
-	return c.JSON(http.StatusOK, project)
+	return c.JSON(http.StatusOK, store)
 }
 
-func (s *Server) updateProject(c echo.Context) error {
+func (s *Server) updateSecretStore(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 
 	var req struct {
 		Name            *string  `json:"name"`
-		Template        *string  `json:"template"`
-		CpuCount        *int     `json:"cpuCount"`
-		MemoryMB        *int     `json:"memoryMB"`
-		TimeoutSec      *int     `json:"timeoutSec"`
 		EgressAllowlist []string `json:"egressAllowlist"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
 	}
 
-	// Fetch existing project to merge partial updates
-	existing, err := s.store.GetProject(c.Request().Context(), orgID, projectID)
+	existing, err := s.store.GetSecretStore(c.Request().Context(), orgID, storeID)
 	if err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found"})
 	}
 
 	name := existing.Name
-	template := existing.Template
-	cpuCount := existing.CpuCount
-	memoryMB := existing.MemoryMB
-	timeoutSec := existing.TimeoutSec
 	allowlist := existing.EgressAllowlist
 
-	if req.Name != nil { name = *req.Name }
-	if req.Template != nil { template = *req.Template }
-	if req.CpuCount != nil { cpuCount = *req.CpuCount }
-	if req.MemoryMB != nil { memoryMB = *req.MemoryMB }
-	if req.TimeoutSec != nil { timeoutSec = *req.TimeoutSec }
-	if req.EgressAllowlist != nil { allowlist = req.EgressAllowlist }
+	if req.Name != nil {
+		name = *req.Name
+	}
+	if req.EgressAllowlist != nil {
+		allowlist = req.EgressAllowlist
+	}
 
-	project, err := s.store.UpdateProject(c.Request().Context(), orgID, projectID, name, template, cpuCount, memoryMB, timeoutSec, allowlist)
+	store, err := s.store.UpdateSecretStore(c.Request().Context(), orgID, storeID, name, allowlist)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	return c.JSON(http.StatusOK, project)
+	return c.JSON(http.StatusOK, store)
 }
 
-func (s *Server) deleteProject(c echo.Context) error {
+func (s *Server) deleteSecretStore(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 
-	if err := s.store.DeleteProject(c.Request().Context(), orgID, projectID); err != nil {
+	if err := s.store.DeleteSecretStore(c.Request().Context(), orgID, storeID); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-// ── Project Secrets ───────────────────────────────────────────────────────────
+// ── Secret Store Entries ──────────────────────────────────────────────────────
 
-func (s *Server) setProjectSecret(c echo.Context) error {
+func (s *Server) setSecretEntry(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 	name := c.Param("name")
 	if name == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret name required"})
 	}
 
-	// Verify project belongs to org
-	if _, err := s.store.GetProject(c.Request().Context(), orgID, projectID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+	if _, err := s.store.GetSecretStore(c.Request().Context(), orgID, storeID); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found"})
 	}
 
-	// Read secret value from JSON body
 	var req struct {
-		Value string `json:"value"`
+		Value        string   `json:"value"`
+		AllowedHosts []string `json:"allowedHosts"`
 	}
 	if err := c.Bind(&req); err != nil || req.Value == "" {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret value required: {\"value\": \"...\"}"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret value required: {\"value\": \"...\", \"allowedHosts\": [...]}"})
 	}
-	body := []byte(req.Value)
 
-	if err := s.store.SetProjectSecret(c.Request().Context(), projectID, name, body); err != nil {
+	// Validate allowedHosts format
+	for _, h := range req.AllowedHosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "allowedHosts entries cannot be empty"})
+		}
+	}
+
+	if err := s.store.SetSecretEntry(c.Request().Context(), storeID, name, []byte(req.Value), req.AllowedHosts); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"name": name, "status": "set"})
 }
 
-func (s *Server) deleteProjectSecret(c echo.Context) error {
+func (s *Server) deleteSecretEntry(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 	name := c.Param("name")
 
-	// Verify project belongs to org
-	if _, err := s.store.GetProject(c.Request().Context(), orgID, projectID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+	if _, err := s.store.GetSecretStore(c.Request().Context(), orgID, storeID); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found"})
 	}
 
-	if err := s.store.DeleteProjectSecret(c.Request().Context(), projectID, name); err != nil {
+	if err := s.store.DeleteSecretEntry(c.Request().Context(), storeID, name); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (s *Server) listProjectSecrets(c echo.Context) error {
+func (s *Server) listSecretEntries(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "auth required"})
 	}
 
-	projectID, err := uuid.Parse(c.Param("id"))
+	storeID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid project ID"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid store ID"})
 	}
 
-	// Verify project belongs to org
-	if _, err := s.store.GetProject(c.Request().Context(), orgID, projectID); err != nil {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "project not found"})
+	if _, err := s.store.GetSecretStore(c.Request().Context(), orgID, storeID); err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found"})
 	}
 
-	secrets, err := s.store.ListProjectSecretNames(c.Request().Context(), projectID)
+	entries, err := s.store.ListSecretEntries(c.Request().Context(), storeID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
-	names := make([]string, len(secrets))
-	for i, s := range secrets {
-		names[i] = s.Name
-	}
-	return c.JSON(http.StatusOK, names)
+	return c.JSON(http.StatusOK, entries)
 }

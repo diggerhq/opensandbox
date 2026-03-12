@@ -70,17 +70,18 @@ type SandboxMeta struct {
 type SecretsProxyIntegration interface {
 	// CreateSealedEnvs generates sealed tokens for env vars, registers a proxy session,
 	// and returns the full env map (sealed tokens + proxy config vars) to inject into the VM.
-	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist, secretHosts []string) map[string]string
+	// secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
+	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
 	// UnregisterSession removes the proxy session for the given guest IP.
 	UnregisterSession(guestIP string)
 	// GetSessionTokens returns the sealed token → real value map for persisting during hibernate.
 	GetSessionTokens(guestIP string) map[string]string
 	// GetSessionAllowlist returns the egress allowlist for persisting during hibernate.
 	GetSessionAllowlist(guestIP string) []string
-	// GetSessionSecretHosts returns the secret hosts list for persisting during hibernate.
-	GetSessionSecretHosts(guestIP string) []string
+	// GetSessionTokenHosts returns the per-token host restrictions for persisting during hibernate.
+	GetSessionTokenHosts(guestIP string) map[string][]string
 	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
-	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist, secretHosts []string)
+	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string)
 	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
 	CACertPEM() []byte
 }
@@ -435,7 +436,7 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 	// them back to real values on outbound HTTPS requests.
 	envsToInject := cfg.Envs
 	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, nil)
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			// Redirect VM HTTPS traffic through the proxy

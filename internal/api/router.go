@@ -189,17 +189,17 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.DELETE("/templates/:name", s.deleteTemplate)
 	api.POST("/sandboxes/:sandboxId/save-as-template", s.dashboardSaveAsTemplate)
 
-	// Projects
-	api.POST("/projects", s.createProject)
-	api.GET("/projects", s.listProjects)
-	api.GET("/projects/:id", s.getProject)
-	api.PUT("/projects/:id", s.updateProject)
-	api.DELETE("/projects/:id", s.deleteProject)
+	// Secret stores
+	api.POST("/secret-stores", s.createSecretStore)
+	api.GET("/secret-stores", s.listSecretStores)
+	api.GET("/secret-stores/:id", s.getSecretStore)
+	api.PUT("/secret-stores/:id", s.updateSecretStore)
+	api.DELETE("/secret-stores/:id", s.deleteSecretStore)
 
-	// Project secrets
-	api.PUT("/projects/:id/secrets/:name", s.setProjectSecret)
-	api.DELETE("/projects/:id/secrets/:name", s.deleteProjectSecret)
-	api.GET("/projects/:id/secrets", s.listProjectSecrets)
+	// Secret store entries
+	api.PUT("/secret-stores/:id/secrets/:name", s.setSecretEntry)
+	api.DELETE("/secret-stores/:id/secrets/:name", s.deleteSecretEntry)
+	api.GET("/secret-stores/:id/secrets", s.listSecretEntries)
 
 	// Workers (server mode only — queries worker registry)
 	api.GET("/workers", s.listWorkers)

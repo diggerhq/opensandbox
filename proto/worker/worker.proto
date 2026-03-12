@@ -57,6 +57,10 @@ message CreateSandboxRequest {
   // Supports exact ("api.anthropic.com") and wildcard ("*.openai.com") patterns.
   // Empty = all hosts allowed.
   repeated string egress_allowlist = 13;
+  // Per-secret host restrictions: env var name → comma-separated allowed hosts.
+  // Secrets are only substituted in requests to matching hosts.
+  // Empty value or missing key = substitute on all allowed hosts.
+  map<string, string> secret_allowed_hosts = 14;
 }
 
 message CreateSandboxResponse {
