@@ -10,14 +10,16 @@ type AgentSessionCreateRequest struct {
 	MaxTurns       int                    `json:"maxTurns,omitempty"`
 	Cwd            string                 `json:"cwd,omitempty"`
 	McpServers     map[string]interface{} `json:"mcpServers,omitempty"`
+	Resume         string                 `json:"resume,omitempty"`
 }
 
 // AgentSessionInfo is the response body for agent session metadata.
 type AgentSessionInfo struct {
-	SessionID string `json:"sessionID"`
-	SandboxID string `json:"sandboxID"`
-	Running   bool   `json:"running"`
-	StartedAt string `json:"startedAt"`
+	SessionID      string `json:"sessionID"`
+	SandboxID      string `json:"sandboxID"`
+	Running        bool   `json:"running"`
+	StartedAt      string `json:"startedAt"`
+	ClaudeSessionID string `json:"claudeSessionID,omitempty"`
 }
 
 // AgentPromptRequest is the request body for sending a prompt to an agent session.

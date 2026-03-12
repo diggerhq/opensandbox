@@ -1,0 +1,82 @@
+---
+title: "Running Commands"
+description: "Execute shell commands from the CLI"
+---
+
+## Running a Command
+
+Use `--wait` to run a command synchronously — output streams to your terminal and the CLI exits with the process exit code:
+
+```bash
+oc exec sb-abc123 --wait -- echo "Hello, World!"
+oc exec sb-abc123 --wait -- npm run build
+```
+
+Without `--wait`, `oc exec` creates an **exec session** and prints the session ID with attach instructions. This is useful for long-running commands:
+
+```bash
+oc exec sb-abc123 -- node server.js
+# → Session es-xyz created. Attach with: oc exec attach sb-abc es-xyz
+```
+
+## Working Directory & Environment
+
+```bash
+oc exec sb-abc123 --wait --cwd /app --env NODE_ENV=production -- npm run build
+oc exec sb-abc123 --wait --env API_KEY=xxx --env DEBUG=true -- ./run.sh
+```
+
+## Timeouts
+
+Set a timeout with `--timeout` (in seconds). Default is 0 (no timeout). When exceeded, the command is killed:
+
+```bash
+oc exec sb-abc123 --wait --timeout 30 -- npm test
+```
+
+## Creating an Exec Session
+
+Plain `oc exec` (without `--wait`) creates a session for long-running commands. The command keeps running even after you disconnect:
+
+```bash
+oc exec sb-abc123 -- python train.py
+# Session es-abc created
+```
+
+## Capturing Output as JSON
+
+Combine `--json` with `--wait` for scripting:
+
+```bash
+RESULT=$(oc exec sb-abc123 --json --wait -- node -e 'console.log("hello")')
+echo $RESULT | jq '.stdout'   # "hello\n"
+echo $RESULT | jq '.exitCode' # 0
+```
+
+## Managing Exec Sessions
+
+```bash
+# List active sessions
+oc exec list sb-abc123
+
+# Kill a session
+oc exec kill sb-abc123 es-xyz
+oc exec kill sb-abc123 es-xyz --signal 15  # SIGTERM
+```
+
+<Warning>
+  `oc exec attach` exists as a command but is not yet implemented. It prints guidance to use the SDK or a WebSocket client. Use `oc exec list` and `oc exec kill` to manage sessions from the CLI.
+</Warning>
+
+## Shell vs Exec
+
+| Use Case | Command |
+| --- | --- |
+| Single command, capture output | `oc exec --wait` |
+| Scripting and automation | `oc exec --wait --json` |
+| Long-running background process | `oc exec` (no `--wait`) |
+| Interactive development, debugging | [`oc shell`](/cli/shell) |
+
+<Tip>
+  SDK usage: [Running Commands](/sandboxes/running-commands). Full flags: [CLI Reference](/reference/cli#oc-exec).
+</Tip>

@@ -1,0 +1,92 @@
+---
+title: "How It Works"
+description: "Architecture and key technical decisions"
+---
+
+Your code talks to a **control plane** API, which provisions a Firecracker microVM on a worker node. The response includes a `connectURL` and short-lived JWT for direct worker access. Commands, file operations, and agent sessions run inside that VM — events and I/O stream back over WebSocket.
+
+SDK users only need an API key. The SDK handles worker routing and JWT refresh transparently.
+
+<Steps>
+  <Step title="Create">
+    Your code calls the control plane (`X-API-Key` auth). A Firecracker microVM boots in ~150ms.
+  </Step>
+  <Step title="Connect">
+    The response includes `connectURL` and a sandbox-scoped JWT `token`. Subsequent operations go directly to the worker (`Bearer` auth) for lower latency.
+  </Step>
+  <Step title="Operate">
+    Run commands, read/write files, start agent sessions. All execution happens inside the VM.
+  </Step>
+</Steps>
+
+## Firecracker microVMs
+
+Each sandbox is a real virtual machine with its own Linux kernel, memory, and disk. Isolation is hardware-level (KVM), not namespace-based like containers.
+
+Why not containers? Containers share a kernel. A kernel exploit in one container compromises every other container on the host. Firecracker VMs eliminate that attack surface entirely — the same isolation model that powers AWS Lambda.
+
+## Hibernation
+
+`hibernate()` snapshots the VM's memory and disk state, then stops it. No compute costs while hibernated. `wake()` restores the sandbox — the platform attempts a fast snapshot-based resume and falls back to a cold boot from the saved disk state if needed.
+
+The sandbox keeps the same ID across hibernate/wake cycles. A rolling idle timeout (default 300s) auto-hibernates sandboxes that go unused.
+
+## Checkpoints & Forking
+
+A checkpoint is a named snapshot of a running sandbox. You can:
+
+- **Restore** — revert the sandbox in-place (all changes since the checkpoint are lost)
+- **Fork** — create a new sandbox from the checkpoint
+
+Forking preserves the filesystem and installed packages. The new sandbox starts with a fresh boot from that disk state — don't assume running processes carry over.
+
+```bash
+# Checkpoint, then fork two independent sandboxes
+oc checkpoint create sb-abc --name ready-state
+oc checkpoint spawn cp-xyz   # → sandbox A
+oc checkpoint spawn cp-xyz   # → sandbox B
+```
+
+Maximum 10 checkpoints per sandbox.
+
+## Templates
+
+Templates are built from Dockerfiles, but sandboxes are not containers. The Docker build produces a filesystem image that becomes the VM's root disk. The default template includes Ubuntu, Python 3, Node.js, and common CLI tools.
+
+Custom templates skip repeated setup:
+
+```typescript
+const sandbox = await Sandbox.create({ template: "my-custom-stack" });
+```
+
+See [Templates](/sandboxes/templates) for building your own.
+
+## Networking
+
+Every sandbox gets full outbound internet access via a TAP device with NAT. No firewall or allowlist to configure.
+
+For inbound access, create a **preview URL** that reverse-proxies public traffic to a port inside the sandbox:
+
+```bash
+oc preview create sb-abc --port 3000
+```
+
+See [Preview URLs](/sandboxes/preview-urls) for custom domains and auth.
+
+## Agent Sessions
+
+An agent session runs the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code-sdk-overview) inside the VM as a regular process. The SDK gives Claude bash and file tools, then manages the think → act → observe loop. Events stream to your code over WebSocket as JSON lines.
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "Set up a Next.js app with Tailwind CSS",
+  onEvent: (event) => console.log(event.type),
+});
+await session.done;
+```
+
+See [Agents](/agents/overview) for the full guide.
+
+<Tip>
+  Connection model details: [HTTP API Reference](/reference/api#base-url--authentication).
+</Tip>

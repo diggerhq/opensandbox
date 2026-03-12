@@ -1,143 +1,93 @@
 ---
 title: "Quickstart"
-description: "Get up and running with OpenComputer in 5 minutes"
+description: "Working agent in 2 minutes"
 ---
 
-## 1. Get Your API Key
+## Prerequisites
 
-Sign up at [app.opencomputer.dev](https://app.opencomputer.dev) and grab your API key from the dashboard.
-
-## 2. Install
-
-<CodeGroup>
-
-```bash CLI
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-```
-
-```bash npm
-npm install @opencomputer/sdk
-```
-
-```bash pip
-pip install opencomputer-sdk
-```
-
-```bash Agent Skill
-npx skills add diggerhq/opencomputer
-```
-
-</CodeGroup>
-
-## 3. Set Your API Key
+An OpenComputer API key and the SDK installed. See [Introduction](/introduction) for install instructions.
 
 ```bash
-export OPENCOMPUTER_API_KEY="your-api-key"
+export OPENCOMPUTER_API_KEY=your-api-key
 ```
 
-## 4. Create a Sandbox
+## Run an Agent
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from '@opencomputer/sdk';
+import { Sandbox } from "@opencomputer/sdk";
 
-const sandbox = await Sandbox.create({
-  template: 'default',
-  timeout: 300,
+const sandbox = await Sandbox.create();
+
+const session = await sandbox.agent.start({
+  prompt: "Create a Next.js app with a landing page that says 'Hello from OpenComputer'. Run the dev server on port 3000.",
+  onEvent: (event) => {
+    if (event.type === "assistant") {
+      process.stdout.write(String(event.message ?? ""));
+    }
+    if (event.type === "result") {
+      console.log("\n\nResult:", JSON.stringify(event, null, 2));
+    }
+  },
 });
 
-console.log(`Sandbox created: ${sandbox.sandboxId}`);
-```
+const exitCode = await session.done;
+console.log("Agent finished with exit code:", exitCode);
 
-```python Python
-from opencomputer import Sandbox
+// Expose the dev server
+const preview = await sandbox.createPreviewURL({ port: 3000 });
+console.log("Preview:", `https://${preview.hostname}`);
 
-sandbox = await Sandbox.create(template='default', timeout=300)
-print(f"Sandbox created: {sandbox.sandbox_id}")
-```
-
-</CodeGroup>
-
-## 5. Run a Command
-
-<CodeGroup>
-
-```typescript TypeScript
-const result = await sandbox.commands.run('echo "Hello, World!"');
-
-console.log(result.stdout);   // Hello, World!
-console.log(result.exitCode); // 0
-```
-
-```python Python
-result = await sandbox.commands.run('echo "Hello, World!"')
-
-print(result.stdout)     # Hello, World!
-print(result.exit_code)  # 0
-```
-
-</CodeGroup>
-
-## 6. Read and Write Files
-
-<CodeGroup>
-
-```typescript TypeScript
-// Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!');
-
-// Read it back
-const content = await sandbox.files.read('/tmp/hello.txt');
-console.log(content); // Hello from OpenComputer!
-
-// List a directory
-const entries = await sandbox.files.list('/tmp');
-entries.forEach(e => console.log(`${e.isDir ? 'd' : 'f'} ${e.name}`));
-```
-
-```python Python
-# Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!')
-
-# Read it back
-content = await sandbox.files.read('/tmp/hello.txt')
-print(content)  # Hello from OpenComputer!
-
-# List a directory
-entries = await sandbox.files.list('/tmp')
-for e in entries:
-    print(f"{'d' if e.is_dir else 'f'} {e.name}")
-```
-
-</CodeGroup>
-
-## 7. Clean Up
-
-<CodeGroup>
-
-```typescript TypeScript
 await sandbox.kill();
 ```
 
 ```python Python
-await sandbox.kill()
+import asyncio
+from opencomputer import Sandbox
 
-# Or use try/finally for automatic cleanup:
 async def main():
     sandbox = await Sandbox.create()
-    try:
-        result = await sandbox.commands.run('whoami')
-    finally:
-        await sandbox.kill()
-        await sandbox.close()
+
+    session = await sandbox.agent.start(
+        prompt="Create a Next.js app with a landing page that says 'Hello from OpenComputer'. Run the dev server on port 3000.",
+    )
+
+    events = await session.collect_events()
+    for event in events:
+        if event.type == "assistant":
+            print(event.data.get("message", ""), end="")
+        if event.type == "result":
+            print("\n\nResult:", event.data)
+
+    # Expose the dev server
+    preview = await sandbox.create_preview_url(port=3000)
+    print("Preview:", f"https://{preview['hostname']}")
+
+    await sandbox.kill()
 
 asyncio.run(main())
 ```
 
 </CodeGroup>
 
+## What Just Happened
+
+You created a cloud VM (Firecracker microVM), ran Claude inside it with bash and file tools, and Claude autonomously scaffolded a Next.js app, installed dependencies, and started the dev server. Events streamed back to your code in real-time over WebSocket. The preview URL exposes the running dev server to the internet.
+
 ## Next Steps
 
-- [TypeScript SDK Reference](/sdks/typescript/overview) — full API docs for the TypeScript SDK
-- [Python SDK Reference](/sdks/python/overview) — full API docs for the Python SDK
+<CardGroup cols={2}>
+  <Card title="How It Works" icon="microchip" href="/how-it-works">
+    Architecture and technical decisions
+  </Card>
+  <Card title="Agents" icon="robot" href="/agents/overview">
+    Events, tools, multi-turn conversations
+  </Card>
+  <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
+    Lifecycle, running commands, files
+  </Card>
+  <Card title="Checkpoints" icon="code-branch" href="/sandboxes/checkpoints">
+    Snapshot and fork VMs
+  </Card>
+</CardGroup>

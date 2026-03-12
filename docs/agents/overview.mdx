@@ -1,0 +1,144 @@
+---
+title: "Agents"
+description: "Run Claude inside sandboxes"
+---
+
+An agent session is a Claude Agent SDK instance running inside a sandbox. You send a prompt, the agent works autonomously — writing files, running commands, iterating on errors — and streams events back to your code.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+const session = await sandbox.agent.start({
+  prompt: "Create a Next.js app with a landing page",
+  onEvent: (event) => console.log(`[${event.type}]`, event),
+});
+
+const exitCode = await session.done;
+await sandbox.kill();
+```
+
+```python Python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+session = await sandbox.agent.start(
+    prompt="Create a Next.js app with a landing page",
+    on_event=lambda event: print(f"[{event.type}]", event),
+)
+
+exit_code = await session.wait()
+await sandbox.kill()
+```
+
+</CodeGroup>
+
+## How It Works
+
+The SDK spawns the Claude Agent SDK inside the sandbox VM as a regular process. Claude gets bash and file tools, then works in a think → act → observe loop. Events stream back to your code over WebSocket as JSON lines.
+
+The agent has full access to the sandbox filesystem, network, and shell — the same environment you'd get with `sandbox.exec` or `oc shell`.
+
+## Starting an Agent
+
+`sandbox.agent.start()` creates an agent session and returns immediately. Events arrive via callbacks.
+
+### Parameters
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `prompt` | string | Initial prompt for the agent |
+| `model` | string | Claude model (default: `claude-sonnet-4-20250514`) |
+| `systemPrompt` | string | System prompt |
+| `allowedTools` | string[] | Restrict which tools the agent can use |
+| `permissionMode` | string | Permission mode for tool use |
+| `maxTurns` | number | Maximum conversation turns (default: 50) |
+| `cwd` | string | Working directory inside the sandbox |
+| `mcpServers` | object | MCP server configuration (see [Tools](/agents/tools)) |
+| `onEvent` | callback | Called for each [event](/agents/events) |
+| `onError` | callback | Called on error |
+
+**TypeScript only:**
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `resume` | string | Resume a previous session by ID |
+| `onExit` | callback | Called when agent process exits |
+| `onScrollbackEnd` | callback | Called when scrollback replay completes |
+
+<Note>
+  Python uses snake_case: `system_prompt`, `allowed_tools`, `permission_mode`, `max_turns`, `mcp_servers`, `on_event`, `on_error`.
+</Note>
+
+## AgentSession
+
+The returned session object lets you interact with the running agent.
+
+| Method | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Send follow-up | `sendPrompt(text)` | `send_prompt(text)` | Send a follow-up prompt |
+| Wait for completion | `await session.done` | `await session.wait()` | Returns exit code |
+| Collect all events | — | `await session.collect_events()` | Collect events until exit |
+| Interrupt | `session.interrupt()` | `session.interrupt()` | Stop the current turn |
+| Reconfigure | `session.configure(opts)` | `session.configure(...)` | Update model, tools, cwd |
+| Kill | `await session.kill()` | `await session.kill()` | Terminate the process (SIGKILL) |
+| Close | `session.close()` | `await session.close()` | Close WebSocket connection |
+
+| Property | TypeScript | Python |
+| --- | --- | --- |
+| Session ID | `session.sessionId` | `session.session_id` |
+
+## Attaching to an Existing Session
+
+Reconnect to a running agent session to resume receiving events:
+
+<CodeGroup>
+
+```typescript TypeScript
+const session = await sandbox.agent.attach(sessionId, {
+  onEvent: (event) => console.log(event),
+});
+```
+
+```python Python
+session = await sandbox.agent.attach(
+    session_id,
+    on_event=lambda event: print(event),
+)
+```
+
+</CodeGroup>
+
+## Listing Sessions
+
+<CodeGroup>
+
+```typescript TypeScript
+const sessions = await sandbox.agent.list();
+// [{ sessionID, sandboxID, running, startedAt }]
+```
+
+```python Python
+sessions = await sandbox.agent.list()
+# [AgentSessionInfo(session_id, sandbox_id, running, started_at)]
+```
+
+</CodeGroup>
+
+<CardGroup cols={3}>
+  <Card title="Events" icon="stream" href="/agents/events">
+    Understanding the event stream
+  </Card>
+  <Card title="Tools" icon="wrench" href="/agents/tools">
+    Configure tools and MCP servers
+  </Card>
+  <Card title="Multi-turn" icon="comments" href="/agents/multi-turn">
+    Follow-ups, resume, session management
+  </Card>
+</CardGroup>
+
+<Tip>
+  Full reference: [TypeScript SDK](/reference/typescript-sdk#agent) · [Python SDK](/reference/python-sdk#agent) · [HTTP API](/reference/api#agent-sessions).
+</Tip>

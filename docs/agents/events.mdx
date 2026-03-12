@@ -1,0 +1,150 @@
+---
+title: "Events"
+description: "Understanding the agent event stream"
+---
+
+Agent sessions emit events via the `onEvent` callback. Each event has a `type` field. The wrapper forwards Claude Agent SDK messages as-is — tolerate unknown event types and preserve unknown fields for forward compatibility.
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "Build a REST API",
+  onEvent: (event) => {
+    switch (event.type) {
+      case "assistant":
+        process.stdout.write(String(event.message ?? ""));
+        break;
+      case "result":
+        console.log("Done:", event);
+        break;
+      default:
+        // Log unknown events rather than ignoring them
+        console.log(`[${event.type}]`, event);
+    }
+  },
+});
+```
+
+## Event Lifecycle
+
+A typical successful session emits events in this order:
+
+```
+ready → configured → assistant / system / tool_use_summary → result → turn_complete
+```
+
+This is illustrative — the exact sequence depends on what the agent does. Multiple `assistant`, `system`, and `tool_use_summary` events may interleave as the agent works.
+
+## Event Reference
+
+### `ready`
+
+The agent process started and is waiting for configuration. Emitted once at session start.
+
+### `configured`
+
+Configuration applied, agent is working on the prompt.
+
+### `assistant`
+
+Claude's text output. This is the agent "thinking out loud" or explaining what it's doing. The `message` field contains the text, but the exact payload shape comes from the upstream Claude SDK and may evolve.
+
+### `system`
+
+System-level messages from the SDK. Common subtypes include initialization, task progress, and status updates.
+
+### `tool_use_summary`
+
+Summary of a tool the agent just used — typically includes tool name and a brief description of what it did.
+
+### `tool_progress`
+
+Progress updates from long-running tools. Common fields include `tool_name` and `elapsed_time_seconds`.
+
+### `result`
+
+Final result of the agent's work. The `subtype` field indicates the kind of result. Payload varies by run mode — may include structured output, a summary, or error details.
+
+### `turn_complete`
+
+The agent finished its current turn. Includes `claude_session_id` which you can use to [resume the conversation](/agents/multi-turn#resuming-across-sessions) in a new session.
+
+```typescript
+onEvent: (event) => {
+  if (event.type === "turn_complete") {
+    savedSessionId = event.claude_session_id;
+  }
+}
+```
+
+### `interrupted`
+
+The agent was stopped via `session.interrupt()`.
+
+### `error`
+
+The agent emitted an error. The `message` field describes what went wrong.
+
+## Filtering Events
+
+Common patterns:
+
+<CodeGroup>
+
+```typescript TypeScript
+// Capture only assistant output
+const session = await sandbox.agent.start({
+  prompt: "Explain this codebase",
+  onEvent: (event) => {
+    if (event.type === "assistant") {
+      process.stdout.write(String(event.message ?? ""));
+    }
+  },
+});
+```
+
+```python Python
+# Collect all events and filter afterward
+session = await sandbox.agent.start(prompt="Explain this codebase")
+events = await session.collect_events()
+
+assistant_messages = [e for e in events if e.type == "assistant"]
+result = next((e for e in events if e.type == "result"), None)
+```
+
+</CodeGroup>
+
+## Error Handling
+
+There are three error surfaces:
+
+| Surface | When | Example |
+| --- | --- | --- |
+| `error` event | Agent reports an error during execution | Invalid tool use, model error |
+| `onError` callback | Raw stderr output from the agent process | Crash logs, unhandled exceptions |
+| Promise rejection | WebSocket or API failure | Network error, auth expired |
+
+Handle all three for robust agent monitoring:
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "...",
+  onEvent: (event) => {
+    if (event.type === "error") {
+      console.error("Agent error:", event.message);
+    }
+  },
+  onError: (data) => {
+    console.error("Process stderr:", data);
+  },
+});
+
+try {
+  await session.done;
+} catch (err) {
+  console.error("Connection error:", err);
+}
+```
+
+<Tip>
+  Back to [Agents overview](/agents/overview). Full reference: [TypeScript SDK](/reference/typescript-sdk#agent) · [Python SDK](/reference/python-sdk#agent).
+</Tip>

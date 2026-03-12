@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -88,10 +89,15 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	}
 	log.Printf("firecracker: hibernate %s: guest sync done (%dms)", vm.ID, time.Since(t0).Milliseconds())
 
-	// Step 2: Close gRPC connection — vsock must be inactive before snapshot
+	// Step 2: Close gRPC connection — vsock must be inactive before snapshot.
+	// Allow time for the vsock virtqueues to drain after closing the connection.
+	// Without this delay, FIN-ACK packets from the guest may still be in the
+	// vsock TX virtqueue when the VM is paused, leaving vhost-vsock in a broken
+	// state after snapshot restore (connections hang indefinitely).
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -410,13 +416,34 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 
 	if snapshotRestore {
 		// Hot restore: load snapshot, VM resumes exactly where it was paused
-		if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
+		if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 			cmd.Process.Kill()
 			cmd.Wait()
 			m.cleanupVM(netCfg, "")
 			return nil, fmt.Errorf("load snapshot: %w", err)
 		}
 		log.Printf("firecracker: wake %s: snapshot restored (hot)", sandboxID)
+
+		// Wait for vsock.sock to appear — Firecracker recreates it from vmstate
+		vsockDeadline := time.Now().Add(5 * time.Second)
+		for !fileExists(vsockPath) && time.Now().Before(vsockDeadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !fileExists(vsockPath) {
+			// Log Firecracker output for diagnosis
+			if logData, err := os.ReadFile(filepath.Join(sandboxDir, "firecracker.log")); err == nil {
+				log.Printf("firecracker: wake %s: vsock.sock NOT found at %s after 5s — FC log:\n%s",
+					sandboxID, vsockPath, string(logData))
+			}
+			// Check if Firecracker process is still alive
+			if cmd.Process != nil {
+				if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+					log.Printf("firecracker: wake %s: FC process died: %v", sandboxID, err)
+				}
+			}
+		} else {
+			log.Printf("firecracker: wake %s: vsock.sock ready at %s", sandboxID, vsockPath)
+		}
 	} else {
 		// Cold boot: configure + boot fresh VM with restored drives.
 		// Filesystem state is preserved but running processes are not.
@@ -502,6 +529,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("agent not ready after wake: %w", err)
 	}
 	vm.agent = agentClient
+
+	// Sync guest clock — frozen at snapshot time
+	if err := syncGuestClock(context.Background(), agentClient); err != nil {
+		log.Printf("firecracker: wake %s: clock sync failed: %v", sandboxID, err)
+	}
 
 	// Re-register secrets proxy session if token map was persisted
 	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
@@ -705,6 +737,11 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 	}
 	vm.agent = agentClient
 
+	// Sync guest clock — golden snapshot time is stale
+	if err := syncGuestClock(context.Background(), agentClient); err != nil {
+		log.Printf("firecracker: cold-boot-local %s: clock sync failed: %v", sandboxID, err)
+	}
+
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
@@ -742,23 +779,6 @@ func extractArchive(archivePath, destDir string) error {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-// snapshotClockDeltaUs returns the microseconds elapsed since the snapshot was taken,
-// for use as clock_delta_us when restoring. If SnapshotedAt is not recorded in metadata
-// (legacy snapshots), it falls back to the mtime of the mem file — Firecracker writes
-// it at snapshot time so it's a reliable proxy.
-func snapshotClockDeltaUs(meta SnapshotMeta, memFile string) int64 {
-	t := meta.SnapshotedAt
-	if t.IsZero() {
-		if info, err := os.Stat(memFile); err == nil {
-			t = info.ModTime()
-		}
-	}
-	if t.IsZero() {
-		return 0
-	}
-	return time.Since(t).Microseconds()
 }
 
 // --- Save as Template ---
@@ -810,10 +830,12 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 		}
 	}
 
-	// Step 2: Close gRPC connection (vsock must be inactive before Firecracker pause)
+	// Step 2: Close gRPC connection (vsock must be inactive before Firecracker pause).
+	// Drain delay prevents stale vsock virtqueue entries from breaking vhost-vsock after restore.
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -868,6 +890,10 @@ func (m *Manager) doSaveAsTemplate(ctx context.Context, vm *VMInstance, template
 		log.Printf("firecracker: SaveAsTemplate %s: agent reconnect failed: %v (VM still running)", vm.ID, reconnErr)
 	} else {
 		vm.agent = agent
+		// Sync guest clock — paused during snapshot
+		if err := syncGuestClock(ctx, agent); err != nil {
+			log.Printf("firecracker: SaveAsTemplate %s: clock sync failed: %v", vm.ID, err)
+		}
 	}
 
 	// Step 7: Async compress + upload (cached drives stay on disk for fast local creation)
@@ -995,10 +1021,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		})
 	}
 
-	// Step 2: Close gRPC connection (vsock must be inactive before pause)
+	// Step 2: Close gRPC connection (vsock must be inactive before pause).
+	// Drain delay prevents stale vsock virtqueue entries from breaking vhost-vsock after restore.
 	if vm.agent != nil {
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	// Step 3: Pause the VM
@@ -1093,6 +1121,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			if err := reconfigureGuestNetwork(ctx, agent, vm.network.GuestIP, vm.network.HostIP, vm.network.CIDR); err != nil {
 				log.Printf("firecracker: CreateCheckpoint %s: eth0 restore failed: %v", vm.ID, err)
 			}
+		}
+		// Sync guest clock — paused during snapshot
+		if err := syncGuestClock(ctx, agent); err != nil {
+			log.Printf("firecracker: CreateCheckpoint %s: clock sync failed: %v", vm.ID, err)
 		}
 	}
 
@@ -1346,7 +1378,7 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	log.Printf("firecracker: warmRestore %s: FC started (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
 	// Step 5: Load snapshot — VM resumes exactly where it was paused during checkpoint
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, "")
@@ -1367,6 +1399,11 @@ func (m *Manager) warmRestoreFromCheckpoint(ctx context.Context, vm *VMInstance,
 	// Step 7: Bring eth0 back up (snapshot drains virtqueues by taking eth0 down)
 	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: warmRestore %s: network reconfig failed: %v (VM still running, network may not work)", sandboxID, err)
+	}
+
+	// Sync guest clock — frozen at checkpoint time
+	if err := syncGuestClock(ctx, agentClient); err != nil {
+		log.Printf("firecracker: warmRestore %s: clock sync failed: %v", sandboxID, err)
 	}
 
 	// Step 8: Register restored VM in tracking map
@@ -1672,6 +1709,26 @@ func reconfigureGuestNetwork(ctx context.Context, agent *AgentClient, guestIP, h
 	return nil
 }
 
+// syncGuestClock sets the guest clock to the current host time via agent exec.
+// After snapshot restore the guest clock is frozen at the time the snapshot was taken.
+// Without correction, TLS, timeouts, and time-sensitive operations will break.
+func syncGuestClock(ctx context.Context, agent *AgentClient) error {
+	now := time.Now().Unix()
+	cmd := fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)
+	resp, err := agent.Exec(ctx, &pb.ExecRequest{
+		Command:        "/bin/sh",
+		Args:           []string{"-c", cmd},
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		return fmt.Errorf("exec clock sync: %w", err)
+	}
+	if resp.ExitCode != 0 {
+		return fmt.Errorf("clock sync failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+	}
+	return nil
+}
+
 // ForkFromCheckpoint creates a new sandbox from an existing checkpoint.
 // Tries warm fork first (LoadSnapshot with binary-patched vmstate, ~300ms),
 // falls back to cold boot (~1.8s) if warm fork fails or snapshot files are missing.
@@ -1851,7 +1908,7 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	}
 
 	// Step 8: Load snapshot — VM resumes from checkpoint state
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, sandboxDir)
@@ -1872,6 +1929,11 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: warmFork %s: network reconfig failed: %v (VM still running, network may not work)", newID, err)
 		// Don't fail — the VM is running and accessible via vsock, just external network may be broken
+	}
+
+	// Sync guest clock — frozen at checkpoint time
+	if err := syncGuestClock(ctx, agentClient); err != nil {
+		log.Printf("firecracker: warmFork %s: clock sync failed: %v", newID, err)
 	}
 
 	// Secrets proxy integration: seal env vars and set up proxy redirect
@@ -2117,6 +2179,7 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	})
 
 	agent.Close()
+	time.Sleep(500 * time.Millisecond) // drain vsock virtqueues before pause
 
 	if err := fcClient.PauseVM(); err != nil {
 		cmd.Process.Kill()
@@ -2332,7 +2395,7 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 	}
 
 	// Step 6: Load snapshot, advancing guest clock to compensate for time since golden snapshot was taken
-	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true, snapshotClockDeltaUs(meta, memFile)); err != nil {
+	if err := fcClient.LoadSnapshot(vmstateFile, memFile, true); err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, sandboxDir)
@@ -2350,8 +2413,15 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 	}
 
 	// Step 8: Reconfigure guest network
-	if err := reconfigureGuestNetwork(ctx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
+	// Use background context — the HTTP request context may be cancelled by the client
+	bgCtx := context.Background()
+	if err := reconfigureGuestNetwork(bgCtx, agentClient, netCfg.GuestIP, netCfg.HostIP, netCfg.CIDR); err != nil {
 		log.Printf("firecracker: goldenCreate %s: network reconfig failed: %v (VM still running)", id, err)
+	}
+
+	// Sync guest clock — golden snapshot time is stale
+	if err := syncGuestClock(bgCtx, agentClient); err != nil {
+		log.Printf("firecracker: goldenCreate %s: clock sync failed: %v", id, err)
 	}
 
 	// Secrets proxy integration: seal env vars and set up proxy redirect

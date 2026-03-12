@@ -1,52 +1,26 @@
 ---
 title: "Introduction"
-description: "Secure cloud sandboxes for AI agents and developers"
+description: "Cloud sandboxes for AI agents"
 ---
 
-# OpenComputer
-
-OpenComputer gives you **secure, isolated cloud sandboxes** that spin up in milliseconds. Run untrusted code, build AI agent tooling, or create interactive development environments — all within containerized sandboxes you fully control.
-
-## Why OpenComputer?
+OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated Firecracker microVM with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
 
 <CardGroup cols={2}>
-  <Card title="Fast Startup" icon="bolt">
-    Sandboxes boot in under a second. Your agents and users never wait.
+  <Card title="Claude Agent SDK built in" icon="robot">
+    Claude runs inside the VM with full filesystem and shell access. Think → act → observe loop, streaming events back to your code.
   </Card>
-  <Card title="Secure Isolation" icon="shield">
-    Every sandbox runs in its own container with strict resource limits and network isolation.
+  <Card title="Long-running" icon="clock">
+    Hours or days, not minutes. Install packages, build projects, run test suites, iterate — no cold starts between steps.
   </Card>
-  <Card title="Full Environment" icon="terminal">
-    Each sandbox includes a filesystem, command execution, and interactive terminal (PTY) access.
+  <Card title="Checkpoint & fork" icon="code-branch">
+    Named snapshots you can fork from. Try five approaches in parallel from the same starting point — like git branches for VMs.
   </Card>
-  <Card title="Custom Templates" icon="layer-group">
-    Build reusable templates from Dockerfiles with pre-installed tools and dependencies.
+  <Card title="Full Linux VM" icon="server">
+    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via Firecracker — the same technology behind AWS Lambda.
   </Card>
 </CardGroup>
 
-## CLI
-
-Download the `oc` binary from [GitHub Releases](https://github.com/diggerhq/opencomputer/releases):
-
-```bash
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-```
-
-See the [CLI Reference](/cli/overview) for full usage.
-
-## Agent Skill
-
-Install the OpenComputer skill for Claude Code and other AI agents:
-
-```bash
-npx skills add diggerhq/opencomputer
-```
-
-This gives your AI agent the ability to create and manage cloud sandboxes using the `oc` CLI.
-
-## SDKs
-
-OpenComputer provides first-class SDKs for TypeScript and Python with identical API surfaces.
+## Install
 
 <CodeGroup>
 
@@ -58,34 +32,48 @@ npm install @opencomputer/sdk
 pip install opencomputer-sdk
 ```
 
+```bash CLI
+# See cli/overview for platform-specific install
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+```
+
 </CodeGroup>
+
+```bash
+export OPENCOMPUTER_API_KEY=your-api-key
+```
 
 ## Quick Example
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from '@opencomputer/sdk';
+import { Sandbox } from "@opencomputer/sdk";
 
-const sandbox = await Sandbox.create({ template: 'default' });
+const sandbox = await Sandbox.create();
+const session = await sandbox.agent.start({
+  prompt: "Create a hello world Express app and test it",
+  onEvent: (event) => {
+    if (event.type === "assistant") console.log(event.message);
+  },
+});
 
-const result = await sandbox.commands.run('echo "Hello from OpenComputer!"');
-console.log(result.stdout); // Hello from OpenComputer!
-
+await session.done;
 await sandbox.kill();
 ```
 
 ```python Python
-import asyncio
 from opencomputer import Sandbox
 
-async def main():
-    sandbox = await Sandbox.create(template='default')
-    result = await sandbox.commands.run('echo "Hello from OpenComputer!"')
-    print(result.stdout)  # Hello from OpenComputer!
-    await sandbox.kill()
+sandbox = await Sandbox.create()
+session = await sandbox.agent.start(
+    prompt="Create a hello world Express app and test it",
+    on_event=lambda event: print(event.data.get("message", ""))
+    if event.type == "assistant" else None,
+)
 
-asyncio.run(main())
+await session.wait()
+await sandbox.kill()
 ```
 
 </CodeGroup>
@@ -94,12 +82,15 @@ asyncio.run(main())
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Get up and running in 5 minutes.
+    Working agent in 2 minutes
   </Card>
-  <Card title="TypeScript SDK" icon="js" href="/sdks/typescript/overview">
-    Full TypeScript/JavaScript SDK reference.
+  <Card title="How It Works" icon="microchip" href="/how-it-works">
+    Architecture: Firecracker VMs, hibernation, checkpoints
   </Card>
-  <Card title="Python SDK" icon="python" href="/sdks/python/overview">
-    Full Python SDK reference.
+  <Card title="Agents" icon="robot" href="/agents/overview">
+    Run Claude inside sandboxes
+  </Card>
+  <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
+    The compute primitive
   </Card>
 </CardGroup>

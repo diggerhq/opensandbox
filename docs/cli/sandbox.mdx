@@ -1,138 +1,85 @@
 ---
-title: "Sandbox"
-description: "Create, list, and manage sandbox lifecycles"
+title: "Sandbox Management"
+description: "Create, manage, and control sandbox lifecycles from the CLI"
 ---
 
-The `sandbox` command group manages the full lifecycle of OpenComputer sandboxes. The most common operations — `create` and `ls` — are also available as top-level shortcuts.
+## Creating a Sandbox
 
-## Create a Sandbox
+`oc create` (shortcut for `oc sandbox create`) provisions a new Firecracker microVM:
 
 ```bash
 oc create
-```
-
-Or with options:
-
-```bash
 oc create --timeout 600 --cpu 2 --memory 2048 --env NODE_ENV=production
 ```
 
-### `oc create`
-
-Alias for `oc sandbox create`. Creates a new sandbox and prints its ID.
-
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--template` | string | `default` | Template to use |
-| `--timeout` | int | `300` | Sandbox TTL in seconds |
-| `--cpu` | int | `1` | Number of vCPUs |
-| `--memory` | int | `1024` | Memory in MB |
-| `--env` | string | — | Environment variable (`KEY=VALUE`, repeatable) |
-| `--metadata` | string | — | Metadata (`KEY=VALUE`, repeatable) |
-| `--project` | string | — | Project name. Inherits config defaults and [sealed secrets](/cli/projects) |
-
-## List Sandboxes
+The sandbox ID is printed on success. Use `--json` to capture it programmatically:
 
 ```bash
+ID=$(oc create --json | jq -r '.sandboxID')
+```
+
+## Listing & Inspecting
+
+```bash
+# List all sandboxes
 oc ls
-```
 
-Output:
-
-```
-ID           TEMPLATE  STATUS   CPU  MEM     AGE
-sb-e148d1b0            running  1    1024MB  2m30s
-sb-a3f91c27            running  2    2048MB  15m0s
-```
-
-### `oc ls`
-
-Alias for `oc sandbox list`. Lists all sandboxes for your organization.
-
-## Get Sandbox Details
-
-```bash
+# Detailed info for a specific sandbox
 oc sandbox get sb-abc123
 ```
 
-### `oc sandbox get <id>`
+`oc ls` shows a table with ID, template, status, CPU, memory, and age. Add `--json` for machine-readable output.
 
-Displays detailed information about a sandbox including status, resources, and timestamps.
+## Hibernation & Wake
 
-## Kill a Sandbox
+Save state and stop paying for compute. Wake resumes the same sandbox — the platform attempts fast snapshot restore with a cold-boot fallback if needed.
+
+```bash
+oc sandbox hibernate sb-abc123
+
+# ... hours later ...
+oc sandbox wake sb-abc123
+oc shell sb-abc123
+```
+
+The sandbox keeps the same ID across hibernate/wake cycles. Preview URLs remain active.
+
+## Adjusting Timeout
+
+The idle timeout resets on every operation (exec, file access, agent activity). Default: 300s.
+
+```bash
+oc sandbox set-timeout sb-abc123 3600  # 1 hour
+```
+
+## Killing a Sandbox
 
 ```bash
 oc sandbox kill sb-abc123
 ```
 
-### `oc sandbox kill <id>`
+All data is lost unless you've created a [checkpoint](/cli/checkpoint) first.
 
-Immediately terminates a sandbox. All data is lost unless a [checkpoint](/cli/checkpoints) was created.
+## Common Patterns
 
-## Hibernate
-
-```bash
-oc sandbox hibernate sb-abc123
-```
-
-### `oc sandbox hibernate <id>`
-
-Saves the sandbox's full state (memory + disk) to S3 and stops the VM. The sandbox can be resumed later with `wake`.
-
-## Wake
+### Create and Shell In
 
 ```bash
-oc sandbox wake sb-abc123
+oc shell $(oc create --json | jq -r '.sandboxID')
 ```
 
-Or with a new timeout:
-
-```bash
-oc sandbox wake sb-abc123 --timeout 600
-```
-
-### `oc sandbox wake <id>`
-
-Resumes a hibernated sandbox. All processes and state are restored exactly as they were.
-
-| Flag | Type | Default | Description |
-| --- | --- | --- | --- |
-| `--timeout` | int | `300` | New TTL in seconds after waking |
-
-## Set Timeout
-
-```bash
-oc sandbox set-timeout sb-abc123 600
-```
-
-### `oc sandbox set-timeout <id> <seconds>`
-
-Updates the sandbox's idle timeout and resets the TTL countdown.
-
-## Examples
-
-### Create and Immediately Shell In
-
-```bash
-ID=$(oc create --json | jq -r '.sandboxID')
-oc shell $ID
-```
-
-### Hibernate and Resume Later
-
-```bash
-# Save state and stop
-oc sandbox hibernate sb-abc123
-
-# ... hours later ...
-
-# Resume exactly where you left off
-oc sandbox wake sb-abc123
-oc shell sb-abc123
-```
-
-### List Running Sandboxes as JSON
+### Filter Running Sandboxes
 
 ```bash
 oc ls --json | jq '.[] | select(.status == "running") | .sandboxID'
 ```
+
+### Batch Cleanup
+
+```bash
+oc ls --json | jq -r '.[].sandboxID' | xargs -I{} oc sandbox kill {}
+```
+
+<Tip>
+  SDK usage: [Sandboxes](/sandboxes/overview). Full flags: [CLI Reference](/reference/cli#oc-sandbox).
+</Tip>

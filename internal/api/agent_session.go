@@ -49,7 +49,8 @@ func (s *Server) createAgentSession(c echo.Context) error {
 
 	// Send configure command if any config options provided
 	hasConfig := req.Model != "" || req.SystemPrompt != "" || len(req.AllowedTools) > 0 ||
-		req.PermissionMode != "" || req.MaxTurns > 0 || req.Cwd != "" || len(req.McpServers) > 0
+		req.PermissionMode != "" || req.MaxTurns > 0 || req.Cwd != "" || len(req.McpServers) > 0 ||
+		req.Resume != ""
 	if hasConfig && session.StdinWriter != nil {
 		configCmd := map[string]interface{}{"type": "configure"}
 		if req.Model != "" {
@@ -73,6 +74,9 @@ func (s *Server) createAgentSession(c echo.Context) error {
 		if len(req.McpServers) > 0 {
 			configCmd["mcpServers"] = req.McpServers
 		}
+		if req.Resume != "" {
+			configCmd["resume"] = req.Resume
+		}
 		configJSON, _ := json.Marshal(configCmd)
 		session.StdinWriter.Write(append(configJSON, '\n'))
 	}
@@ -82,6 +86,9 @@ func (s *Server) createAgentSession(c echo.Context) error {
 		promptCmd := map[string]interface{}{
 			"type": "prompt",
 			"text": req.Prompt,
+		}
+		if req.Resume != "" {
+			promptCmd["resume"] = req.Resume
 		}
 		promptJSON, _ := json.Marshal(promptCmd)
 		session.StdinWriter.Write(append(promptJSON, '\n'))
