@@ -90,6 +90,11 @@ type SecretsProxy struct {
 
 	wg     sync.WaitGroup // tracks active connections
 	closed chan struct{}
+
+	// dialFunc overrides the default dialUpstream for testing.
+	// If nil, the default dialUpstream is used.
+	dialFunc          func(target, serverName string) (*tls.Conn, error)
+	skipPrivateIPCheck bool // for testing with loopback
 }
 
 // NewSecretsProxy creates a new secrets proxy. Call Start() to begin accepting.
@@ -337,11 +342,13 @@ func (p *SecretsProxy) handleConn(conn net.Conn) {
 	}
 
 	// Private IP blocking — prevent SSRF via proxy
-	if err := checkPrivateIP(targetHost); err != nil {
-		writeHTTPError(conn, 403, "private IP blocked")
-		log.Printf("secrets-proxy: audit sandbox=%s src=%s host=%s action=blocked reason=private_ip duration=%s",
-			session.SandboxID, clientIP, targetHost, time.Since(start))
-		return
+	if !p.skipPrivateIPCheck {
+		if err := checkPrivateIP(targetHost); err != nil {
+			writeHTTPError(conn, 403, "private IP blocked")
+			log.Printf("secrets-proxy: audit sandbox=%s src=%s host=%s action=blocked reason=private_ip duration=%s",
+				session.SandboxID, clientIP, targetHost, time.Since(start))
+			return
+		}
 	}
 
 	// Filter secrets to only those allowed for this host
@@ -376,7 +383,11 @@ func (p *SecretsProxy) handleConn(conn net.Conn) {
 	defer clientTLS.Close()
 
 	// Connect to the real upstream (always TLS)
-	upstreamConn, err := dialUpstream(target, targetHost)
+	dial := dialUpstream
+	if p.dialFunc != nil {
+		dial = p.dialFunc
+	}
+	upstreamConn, err := dial(target, targetHost)
 	if err != nil {
 		log.Printf("secrets-proxy: dial %s failed: %v", target, err)
 		return
