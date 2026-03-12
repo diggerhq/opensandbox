@@ -1,19 +1,15 @@
 ---
 title: "Quickstart"
-description: "Get up and running with OpenComputer in 5 minutes"
+description: "Run your first AI agent inside a sandbox"
 ---
 
-## 1. Get Your API Key
+## 1. Get your API key
 
 Sign up at [app.opencomputer.dev](https://app.opencomputer.dev) and grab your API key from the dashboard.
 
-## 2. Install
+## 2. Install the SDK
 
 <CodeGroup>
-
-```bash CLI
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-```
 
 ```bash npm
 npm install @opencomputer/sdk
@@ -23,121 +19,66 @@ npm install @opencomputer/sdk
 pip install opencomputer-sdk
 ```
 
-```bash Agent Skill
-npx skills add diggerhq/opencomputer
-```
-
 </CodeGroup>
 
-## 3. Set Your API Key
+## 3. Set your API key
 
 ```bash
 export OPENCOMPUTER_API_KEY="your-api-key"
 ```
 
-## 4. Create a Sandbox
+## 4. Run your first agent
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox } from '@opencomputer/sdk';
+import { Sandbox } from "@opencomputer/sdk";
 
-const sandbox = await Sandbox.create({
-  template: 'default',
-  timeout: 300,
+// Create a sandbox
+const sandbox = await Sandbox.create({ template: "default" });
+
+// Start an agent session with a task
+const session = await sandbox.agent.start({
+  prompt: "Create a Python script that prints the Fibonacci sequence up to 100, then run it",
+  onEvent: (event) => {
+    if (event.type === "assistant") {
+      console.log(event.content);
+    }
+    if (event.type === "result") {
+      console.log("Result:", event.result);
+    }
+  },
 });
 
-console.log(`Sandbox created: ${sandbox.sandboxId}`);
-```
+// Wait for the agent to finish
+const exitCode = await session.done;
+console.log(`Agent exited with code: ${exitCode}`);
 
-```python Python
-from opencomputer import Sandbox
-
-sandbox = await Sandbox.create(template='default', timeout=300)
-print(f"Sandbox created: {sandbox.sandbox_id}")
-```
-
-</CodeGroup>
-
-## 5. Run a Command
-
-<CodeGroup>
-
-```typescript TypeScript
-const result = await sandbox.commands.run('echo "Hello, World!"');
-
-console.log(result.stdout);   // Hello, World!
-console.log(result.exitCode); // 0
-```
-
-```python Python
-result = await sandbox.commands.run('echo "Hello, World!"')
-
-print(result.stdout)     # Hello, World!
-print(result.exit_code)  # 0
-```
-
-</CodeGroup>
-
-## 6. Read and Write Files
-
-<CodeGroup>
-
-```typescript TypeScript
-// Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!');
-
-// Read it back
-const content = await sandbox.files.read('/tmp/hello.txt');
-console.log(content); // Hello from OpenComputer!
-
-// List a directory
-const entries = await sandbox.files.list('/tmp');
-entries.forEach(e => console.log(`${e.isDir ? 'd' : 'f'} ${e.name}`));
-```
-
-```python Python
-# Write a file
-await sandbox.files.write('/tmp/hello.txt', 'Hello from OpenComputer!')
-
-# Read it back
-content = await sandbox.files.read('/tmp/hello.txt')
-print(content)  # Hello from OpenComputer!
-
-# List a directory
-entries = await sandbox.files.list('/tmp')
-for e in entries:
-    print(f"{'d' if e.is_dir else 'f'} {e.name}")
-```
-
-</CodeGroup>
-
-## 7. Clean Up
-
-<CodeGroup>
-
-```typescript TypeScript
+// Clean up
 await sandbox.kill();
 ```
 
 ```python Python
-await sandbox.kill()
+import asyncio
+from opencomputer import Sandbox
 
-# Or use try/finally for automatic cleanup:
 async def main():
-    sandbox = await Sandbox.create()
-    try:
-        result = await sandbox.commands.run('whoami')
-    finally:
-        await sandbox.kill()
-        await sandbox.close()
+    sandbox = await Sandbox.create(template="default")
+
+    result = await sandbox.commands.run('echo "Hello from OpenComputer!"')
+    print(result.stdout)
+
+    await sandbox.kill()
 
 asyncio.run(main())
 ```
 
 </CodeGroup>
 
-## Next Steps
+The agent will create the file, write the code, and execute it — all inside the sandbox.
 
-- [TypeScript SDK Reference](/sdks/typescript/overview) — full API docs for the TypeScript SDK
-- [Python SDK Reference](/sdks/python/overview) — full API docs for the Python SDK
+## Next steps
+
+- [Agents](/agents) — full reference for `sandbox.agent`
+- [Running Commands](/running-commands) — run shell commands directly with `sandbox.exec`
+- [Working with Files](/working-with-files) — read, write, and manage files
