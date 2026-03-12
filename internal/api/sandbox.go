@@ -219,12 +219,11 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 	}
 
 	resp := map[string]interface{}{
-		"sandboxID":  grpcResp.SandboxId,
-		"connectURL": worker.HTTPAddr,
-		"token":      token,
-		"status":     grpcResp.Status,
-		"region":     region,
-		"workerID":   worker.ID,
+		"sandboxID": grpcResp.SandboxId,
+		"token":     token,
+		"status":    grpcResp.Status,
+		"region":    region,
+		"workerID":  worker.ID,
 	}
 
 	return c.JSON(http.StatusCreated, resp)
@@ -293,13 +292,6 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		return c.JSON(http.StatusOK, resp)
 	}
 
-	// Look up worker address
-	worker := s.workerRegistry.GetWorker(session.WorkerID)
-	connectURL := ""
-	if worker != nil {
-		connectURL = worker.HTTPAddr
-	}
-
 	// Issue a fresh token
 	var token string
 	if s.jwtIssuer != nil {
@@ -310,14 +302,13 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 	}
 
 	resp := map[string]interface{}{
-		"sandboxID":  sandboxID,
-		"connectURL": connectURL,
-		"token":      token,
-		"status":     session.Status,
-		"region":     session.Region,
-		"workerID":   session.WorkerID,
-		"startedAt":  session.StartedAt,
-		"template":   session.Template,
+		"sandboxID": sandboxID,
+		"token":     token,
+		"status":    session.Status,
+		"region":    session.Region,
+		"workerID":  session.WorkerID,
+		"startedAt": session.StartedAt,
+		"template":  session.Template,
 	}
 
 	return c.JSON(http.StatusOK, resp)
@@ -452,12 +443,6 @@ func (s *Server) listSandboxesRemote(c echo.Context) error {
 			"startedAt": sess.StartedAt,
 		}
 
-		// Attach connectURL from registry
-		worker := s.workerRegistry.GetWorker(sess.WorkerID)
-		if worker != nil {
-			entry["connectURL"] = worker.HTTPAddr
-		}
-
 		// Issue fresh JWT
 		if s.jwtIssuer != nil {
 			token, err := s.jwtIssuer.IssueSandboxToken(orgID, sess.SandboxID, sess.WorkerID, 24*time.Hour)
@@ -473,13 +458,6 @@ func (s *Server) listSandboxesRemote(c echo.Context) error {
 }
 
 func (s *Server) setTimeout(c echo.Context) error {
-	// In server mode, timeout must be set directly on the worker via connectURL
-	if s.workerRegistry != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "timeout must be set directly on the worker via connectURL",
-		})
-	}
-
 	if s.router == nil {
 		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
 	}

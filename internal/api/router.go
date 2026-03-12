@@ -46,6 +46,7 @@ type Server struct {
 	ecrConfig       *ecr.Config                       // nil if ECR not configured
 	cfClient        *cloudflare.Client                // nil if Cloudflare not configured
 	pendingCreates  sync.Map                          // map[sandboxID]*pendingCreate — async sandbox creation tracking
+	sandboxAPIProxy *proxy.SandboxAPIProxy            // nil except in server mode (proxies data-plane to workers)
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -73,6 +74,7 @@ type ServerOpts struct {
 	CheckpointStore *storage.CheckpointStore           // nil if hibernation not configured
 	ECRConfig       *ecr.Config                        // nil if ECR not configured
 	CFClient        *cloudflare.Client                 // nil if Cloudflare not configured
+	SandboxAPIProxy *proxy.SandboxAPIProxy             // nil except in server mode (proxies data-plane to workers)
 }
 
 // NewServer creates a new API server with all routes configured.
@@ -102,6 +104,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.sandboxDomain = opts.SandboxDomain
 		s.ecrConfig = opts.ECRConfig
 		s.cfClient = opts.CFClient
+		s.sandboxAPIProxy = opts.SandboxAPIProxy
 	}
 
 	// Global middleware
@@ -132,7 +135,6 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes", s.listSandboxes)
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
-	api.POST("/sandboxes/:id/timeout", s.setTimeout)
 
 	// Hibernation
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
@@ -155,32 +157,70 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id/preview", s.listPreviewURLs)
 	api.DELETE("/sandboxes/:id/preview/:port", s.deletePreviewURL)
 
-	// Exec sessions (replaces old /commands)
-	api.POST("/sandboxes/:id/exec", s.createExecSession)
-	api.GET("/sandboxes/:id/exec", s.listExecSessions)
-	api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
-	api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
-	api.POST("/sandboxes/:id/exec/run", s.execRun)
+	// Data-plane routes: in server mode, proxy to workers; otherwise handle locally
+	if s.sandboxAPIProxy != nil {
+		// Server mode: proxy all data-plane requests to the worker that owns the sandbox
+		pxy := s.sandboxAPIProxy.ProxyHandler
 
-	// Agent sessions (Claude Agent SDK)
-	api.POST("/sandboxes/:id/agent", s.createAgentSession)
-	api.GET("/sandboxes/:id/agent", s.listAgentSessions)
-	api.POST("/sandboxes/:id/agent/:sid/prompt", s.sendAgentPrompt)
-	api.POST("/sandboxes/:id/agent/:sid/interrupt", s.interruptAgent)
-	api.POST("/sandboxes/:id/agent/:sid/kill", s.killAgentSession)
+		// Exec
+		api.POST("/sandboxes/:id/exec", pxy)
+		api.GET("/sandboxes/:id/exec", pxy)
+		api.GET("/sandboxes/:id/exec/:sessionID", pxy)
+		api.POST("/sandboxes/:id/exec/:sessionID/kill", pxy)
+		api.POST("/sandboxes/:id/exec/run", pxy)
 
-	// Filesystem
-	api.GET("/sandboxes/:id/files", s.readFile)
-	api.PUT("/sandboxes/:id/files", s.writeFile)
-	api.GET("/sandboxes/:id/files/list", s.listDir)
-	api.POST("/sandboxes/:id/files/mkdir", s.makeDir)
-	api.DELETE("/sandboxes/:id/files", s.removeFile)
+		// Agent
+		api.POST("/sandboxes/:id/agent", pxy)
+		api.GET("/sandboxes/:id/agent", pxy)
+		api.POST("/sandboxes/:id/agent/:sid/prompt", pxy)
+		api.POST("/sandboxes/:id/agent/:sid/interrupt", pxy)
+		api.POST("/sandboxes/:id/agent/:sid/kill", pxy)
 
-	// PTY
-	api.POST("/sandboxes/:id/pty", s.createPTY)
-	api.GET("/sandboxes/:id/pty/:sessionID", s.ptyWebSocket)
-	api.POST("/sandboxes/:id/pty/:sessionID/resize", s.resizePTY)
-	api.DELETE("/sandboxes/:id/pty/:sessionID", s.killPTY)
+		// Filesystem
+		api.GET("/sandboxes/:id/files", pxy)
+		api.PUT("/sandboxes/:id/files", pxy)
+		api.GET("/sandboxes/:id/files/list", pxy)
+		api.POST("/sandboxes/:id/files/mkdir", pxy)
+		api.DELETE("/sandboxes/:id/files", pxy)
+
+		// PTY
+		api.POST("/sandboxes/:id/pty", pxy)
+		api.GET("/sandboxes/:id/pty/:sessionID", pxy)
+		api.POST("/sandboxes/:id/pty/:sessionID/resize", pxy)
+		api.DELETE("/sandboxes/:id/pty/:sessionID", pxy)
+
+		// Timeout
+		api.POST("/sandboxes/:id/timeout", pxy)
+
+		// Token refresh
+		api.POST("/sandboxes/:id/token/refresh", pxy)
+	} else {
+		// Combined/worker mode: handle locally
+		api.POST("/sandboxes/:id/exec", s.createExecSession)
+		api.GET("/sandboxes/:id/exec", s.listExecSessions)
+		api.GET("/sandboxes/:id/exec/:sessionID", s.execSessionWebSocket)
+		api.POST("/sandboxes/:id/exec/:sessionID/kill", s.killExecSession)
+		api.POST("/sandboxes/:id/exec/run", s.execRun)
+
+		api.POST("/sandboxes/:id/agent", s.createAgentSession)
+		api.GET("/sandboxes/:id/agent", s.listAgentSessions)
+		api.POST("/sandboxes/:id/agent/:sid/prompt", s.sendAgentPrompt)
+		api.POST("/sandboxes/:id/agent/:sid/interrupt", s.interruptAgent)
+		api.POST("/sandboxes/:id/agent/:sid/kill", s.killAgentSession)
+
+		api.GET("/sandboxes/:id/files", s.readFile)
+		api.PUT("/sandboxes/:id/files", s.writeFile)
+		api.GET("/sandboxes/:id/files/list", s.listDir)
+		api.POST("/sandboxes/:id/files/mkdir", s.makeDir)
+		api.DELETE("/sandboxes/:id/files", s.removeFile)
+
+		api.POST("/sandboxes/:id/pty", s.createPTY)
+		api.GET("/sandboxes/:id/pty/:sessionID", s.ptyWebSocket)
+		api.POST("/sandboxes/:id/pty/:sessionID/resize", s.resizePTY)
+		api.DELETE("/sandboxes/:id/pty/:sessionID", s.killPTY)
+
+		api.POST("/sandboxes/:id/timeout", s.setTimeout)
+	}
 
 	// Templates
 	api.POST("/templates", s.buildTemplate)

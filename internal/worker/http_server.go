@@ -2,7 +2,6 @@ package worker
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -55,23 +54,6 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 	// Health check (no auth)
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok", "role": "worker"})
-	})
-
-	// Caddy on-demand TLS check — validates that a domain is a valid sandbox subdomain
-	e.GET("/caddy/check", func(c echo.Context) error {
-		domain := c.QueryParam("domain")
-		if domain == "" {
-			return c.String(http.StatusForbidden, "missing domain")
-		}
-		suffix := "." + s.sandboxDomain
-		if !strings.HasSuffix(domain, suffix) {
-			return c.String(http.StatusForbidden, "invalid domain")
-		}
-		sub := strings.TrimSuffix(domain, suffix)
-		if sub == "" || strings.Contains(sub, ".") {
-			return c.String(http.StatusForbidden, "invalid subdomain")
-		}
-		return c.String(http.StatusOK, "ok")
 	})
 
 	// All sandbox routes require JWT auth

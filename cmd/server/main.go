@@ -137,6 +137,12 @@ func main() {
 		defer redisRegistry.Stop()
 		opts.WorkerRegistry = redisRegistry
 		log.Println("opensandbox: Redis worker registry started")
+
+		// Create sandbox API proxy for routing data-plane requests to workers
+		if opts.Store != nil && opts.JWTIssuer != nil {
+			opts.SandboxAPIProxy = proxy.NewSandboxAPIProxy(opts.Store, redisRegistry, opts.JWTIssuer)
+			log.Println("opensandbox: sandbox API proxy enabled (data-plane requests proxied to workers)")
+		}
 	}
 
 	// Initialize EC2 compute pool + autoscaler (server mode with AWS configured)
