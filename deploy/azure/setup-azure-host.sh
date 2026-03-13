@@ -44,19 +44,45 @@ EOF
 export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 echo "Go: $(/usr/local/go/bin/go version)"
 
-# --- Kernel for QEMU ---
-# Use the same kernel as Firecracker — vmlinux-docker-5.10.bin from AWS S3 quickstart.
-# This kernel has CONFIG_VIRTIO_VSOCKETS, CONFIG_VIRTIO_BLK, CONFIG_VIRTIO_NET enabled.
-echo "Downloading guest kernel..."
+# --- Guest kernel for QEMU ---
+# Use the host's generic Ubuntu kernel (has VIRTIO_BLK=y, VIRTIO_NET=y, VIRTIO_PCI=y built-in).
+# We also need vsock and overlay as modules — those get baked into the rootfs image.
+echo "Setting up guest kernel..."
 KERNEL_DIR="/opt/opensandbox"
 mkdir -p "$KERNEL_DIR"
-KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/${KERNEL_ARCH}/kernels/vmlinux-docker-5.10.bin"
-if [ ! -f "$KERNEL_DIR/vmlinux" ]; then
-    curl -fsSL "$KERNEL_URL" -o "$KERNEL_DIR/vmlinux"
+
+# Install generic kernel package (has virtio built-in, unlike the azure kernel)
+apt-get install -y -qq linux-image-generic
+
+# Find the generic kernel and copy it
+GENERIC_VMLINUZ=$(ls -t /boot/vmlinuz-*-generic 2>/dev/null | head -1)
+if [ -n "$GENERIC_VMLINUZ" ]; then
+    cp "$GENERIC_VMLINUZ" "$KERNEL_DIR/vmlinux"
     chmod 644 "$KERNEL_DIR/vmlinux"
-    echo "Kernel downloaded: $KERNEL_DIR/vmlinux"
+    GENERIC_KVER=$(basename "$GENERIC_VMLINUZ" | sed 's/vmlinuz-//')
+    echo "Guest kernel: $GENERIC_VMLINUZ ($GENERIC_KVER)"
+
+    # Extract vsock and overlay modules for the guest rootfs (loaded via insmod at boot)
+    MODDIR="/lib/modules/$GENERIC_KVER"
+    GUEST_MODDIR="$KERNEL_DIR/guest-modules"
+    mkdir -p "$GUEST_MODDIR"
+    for mod in \
+        "$MODDIR/kernel/fs/overlayfs/overlay.ko"* \
+        "$MODDIR/kernel/net/vmw_vsock/vsock.ko"* \
+        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko"* \
+        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko"*; do
+        [ -f "$mod" ] || continue
+        base=$(basename "$mod")
+        if [[ "$base" == *.zst ]]; then
+            zstd -d "$mod" -o "$GUEST_MODDIR/${base%.zst}" 2>/dev/null
+        else
+            cp "$mod" "$GUEST_MODDIR/"
+        fi
+    done
+    echo "Guest modules extracted to $GUEST_MODDIR:"
+    ls "$GUEST_MODDIR/"
 else
-    echo "Kernel already exists: $KERNEL_DIR/vmlinux"
+    echo "WARNING: No generic kernel found. Guest VMs may not boot correctly."
 fi
 
 # --- KVM + vhost-vsock ---
@@ -158,7 +184,7 @@ ExecStart=/usr/local/bin/opensandbox-worker
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1000000
-LimitNPROC=unlimited
+LimitNPROC=infinity
 KillMode=mixed
 TimeoutStopSec=180
 

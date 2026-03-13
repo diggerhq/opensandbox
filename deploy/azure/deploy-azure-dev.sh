@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-azure-dev.sh — Quick dev deployment on Azure D96as_v5 with QEMU backend.
+# deploy-azure-dev.sh — Quick dev deployment on Azure with QEMU backend.
 # Usage: ./deploy-azure-dev.sh [create|deploy|ssh|status|destroy]
 set -euo pipefail
 
@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # --- Defaults ---
 AZURE_LOCATION="${AZURE_LOCATION:-eastus}"
-AZURE_VM_SIZE="${AZURE_VM_SIZE:-Standard_D96as_v5}"
+AZURE_VM_SIZE="${AZURE_VM_SIZE:-Standard_D48as_v6}"
 AZURE_RG="${AZURE_RG:-opensandbox-dev}"
 AZURE_VM_NAME="${AZURE_VM_NAME:-opensandbox-dev}"
 AZURE_IMAGE="${AZURE_IMAGE:-Canonical:ubuntu-24_04-lts:server:latest}"
@@ -170,6 +170,10 @@ CGO_ENABLED=0 go build -o bin/opensandbox-worker ./cmd/worker/
 echo "Building agent..."
 CGO_ENABLED=0 GOARCH=amd64 go build -o bin/osb-agent ./cmd/agent/
 
+# Stop services before overwriting binaries (avoids "text file busy")
+sudo systemctl stop opensandbox-worker 2>/dev/null || true
+sudo systemctl stop opensandbox-server 2>/dev/null || true
+
 sudo cp bin/opensandbox-server /usr/local/bin/
 sudo cp bin/opensandbox-worker /usr/local/bin/
 sudo cp bin/osb-agent /usr/local/bin/
@@ -179,13 +183,48 @@ BUILD
     # Build rootfs if needed
     ssh_cmd << 'ROOTFS'
 set -euo pipefail
+export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 if [ ! -f /data/firecracker/images/default.ext4 ]; then
     echo "Building rootfs image..."
     cd ~/opensandbox
-    export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
-    sudo bash deploy/ec2/build-rootfs-docker.sh
+    sudo -E bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default
 else
     echo "Rootfs image already exists."
+fi
+
+# Patch rootfs with guest kernel modules (vsock, overlay) and insmod symlink
+GUEST_MODDIR="/opt/opensandbox/guest-modules"
+if [ -d "$GUEST_MODDIR" ] && [ -f /data/firecracker/images/default.ext4 ]; then
+    echo "Patching rootfs with guest kernel modules..."
+    MNTDIR=$(mktemp -d)
+    sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
+
+    # Copy modules
+    sudo mkdir -p "$MNTDIR/lib/modules/vsock"
+    sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
+
+    # Create insmod symlink (busybox applet)
+    if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
+        sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+    fi
+
+    # Update init script: load modules early (before overlay mount)
+    if ! grep -q 'lib/modules/vsock' "$MNTDIR/sbin/init" 2>/dev/null; then
+        # Insert module loading after the first "mount -t devtmpfs" line
+        sudo sed -i '/^mount -t devtmpfs devtmpfs \/dev$/a\
+\
+# Load kernel modules (needed for QEMU with modular kernel)\
+if [ -d /lib/modules/vsock ]; then\
+    for mod in /lib/modules/vsock/overlay.ko /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do\
+        [ -f "$mod" ] \&\& insmod "$mod" 2>/dev/null || true\
+    done\
+    echo "init: kernel modules loaded"\
+fi' "$MNTDIR/sbin/init"
+    fi
+
+    sudo umount "$MNTDIR"
+    rmdir "$MNTDIR"
+    echo "Rootfs patched."
 fi
 ROOTFS
 
@@ -259,14 +298,22 @@ RESTART
     ssh_cmd << SEED
 set -euo pipefail
 export PGPASSWORD=opensandbox
-# Create org and API key if not exists
+KEY_HASH=\$(echo -n "${OPENSANDBOX_API_KEY}" | sha256sum | cut -d' ' -f1)
+
+# Create org (UUID id, table is "orgs")
 psql -h localhost -U opensandbox -d opensandbox -c "
-    INSERT INTO organizations (id, name, slug) VALUES ('org-dev', 'Dev Org', 'dev')
+    INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-000000000001', 'Dev Org', 'dev')
     ON CONFLICT DO NOTHING;
-    INSERT INTO api_keys (id, org_id, key_hash, name)
-    VALUES ('key-dev', 'org-dev', '$(echo -n "${OPENSANDBOX_API_KEY}" | sha256sum | cut -d' ' -f1)', 'dev-key')
+" 2>/dev/null || echo "DB seed: orgs table not ready yet"
+
+# Create API key (UUID id, requires key_prefix)
+psql -h localhost -U opensandbox -d opensandbox -c "
+    INSERT INTO api_keys (id, org_id, key_hash, key_prefix, name)
+    VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', '\${KEY_HASH}', '$(echo -n "${OPENSANDBOX_API_KEY}" | cut -c1-8)', 'dev-key')
     ON CONFLICT DO NOTHING;
-" 2>/dev/null || echo "DB seed skipped (tables may not exist yet)"
+" 2>/dev/null || echo "DB seed: api_keys table not ready yet"
+
+echo "DB seeded (org + API key)"
 SEED
 
     log "=== Deployment complete ==="
@@ -274,7 +321,7 @@ SEED
     log "  Worker: http://${VM_PUBLIC_IP}:8081"
     log "  API key: ${OPENSANDBOX_API_KEY}"
     log ""
-    log "Test: curl -X POST http://${VM_PUBLIC_IP}:8080/api/sandboxes -H 'Authorization: Bearer ${OPENSANDBOX_API_KEY}'"
+    log "Test: curl -X POST http://${VM_PUBLIC_IP}:8080/api/sandboxes -H 'X-API-Key: ${OPENSANDBOX_API_KEY}'"
 }
 
 # --- SSH ---
@@ -342,7 +389,7 @@ case "$CMD" in
         echo ""
         echo "Environment variables:"
         echo "  AZURE_LOCATION     Azure region (default: eastus)"
-        echo "  AZURE_VM_SIZE      VM size (default: Standard_D96as_v5)"
+        echo "  AZURE_VM_SIZE      VM size (default: Standard_D48as_v6)"
         echo "  AZURE_DATA_DISK_GB Data disk size (default: 500)"
         ;;
 esac
