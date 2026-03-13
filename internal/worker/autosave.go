@@ -6,9 +6,13 @@ import (
 	"sync"
 	"time"
 
-	fc "github.com/opensandbox/opensandbox/internal/firecracker"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 )
+
+// SyncFSer is implemented by any VM manager that can flush filesystem buffers.
+type SyncFSer interface {
+	SyncFS(ctx context.Context, sandboxID string) error
+}
 
 // WorkspaceAutosaver periodically flushes filesystem buffers inside each
 // running VM. This ensures workspace.ext4 on the host NVMe is crash-consistent.
@@ -16,7 +20,7 @@ import (
 // workspace.ext4 on disk (processes lost, but user files in /workspace are safe).
 type WorkspaceAutosaver struct {
 	manager     sandbox.Manager
-	fcMgr       *fc.Manager
+	syncer      SyncFSer
 	interval    time.Duration
 	concurrency int
 	stop        chan struct{}
@@ -26,12 +30,12 @@ type WorkspaceAutosaver struct {
 // NewWorkspaceAutosaver creates a new autosaver.
 func NewWorkspaceAutosaver(
 	mgr sandbox.Manager,
-	fcMgr *fc.Manager,
+	syncer SyncFSer,
 	interval time.Duration,
 ) *WorkspaceAutosaver {
 	return &WorkspaceAutosaver{
 		manager:     mgr,
-		fcMgr:       fcMgr,
+		syncer:      syncer,
 		interval:    interval,
 		concurrency: 10,
 		stop:        make(chan struct{}),
@@ -96,7 +100,7 @@ func (a *WorkspaceAutosaver) syncAll() {
 
 			syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := a.fcMgr.SyncFS(syncCtx, sandboxID); err != nil {
+			if err := a.syncer.SyncFS(syncCtx, sandboxID); err != nil {
 				log.Printf("autosave: syncfs failed for %s: %v", sandboxID, err)
 				mu.Lock()
 				failCount++
