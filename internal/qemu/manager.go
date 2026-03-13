@@ -84,6 +84,10 @@ type Manager struct {
 	vms      map[string]*VMInstance
 	nextCID  uint32
 	uploadWg sync.WaitGroup
+
+	// Golden snapshot for fast VM creation
+	goldenDir string // path to golden snapshot dir (empty = not available)
+	goldenCID uint32 // CID used when the golden snapshot was created
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -132,6 +136,505 @@ func NewManager(cfg Config) (*Manager, error) {
 	}, nil
 }
 
+// PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
+// hibernates it to create a reusable snapshot. Subsequent Create() calls
+// restore from this snapshot instead of cold-booting, cutting start time
+// from ~10s to ~1-2s.
+func (m *Manager) PrepareGoldenSnapshot() error {
+	goldenDir := filepath.Join(m.cfg.DataDir, "golden")
+	memFile := filepath.Join(goldenDir, "mem")
+	rootfsFile := filepath.Join(goldenDir, "rootfs.ext4")
+
+	// If golden snapshot already exists, just use it
+	if (fileExists(memFile) || fileExists(memFile+".zst")) && fileExists(rootfsFile) {
+		m.goldenDir = goldenDir
+		// Read saved golden CID
+		if cidBytes, err := os.ReadFile(filepath.Join(goldenDir, "cid")); err == nil {
+			fmt.Sscanf(string(cidBytes), "%d", &m.goldenCID)
+		}
+		log.Printf("qemu: golden snapshot already exists at %s (CID=%d)", goldenDir, m.goldenCID)
+		return nil
+	}
+
+	log.Printf("qemu: preparing golden snapshot...")
+	t0 := time.Now()
+
+	if err := os.MkdirAll(goldenDir, 0755); err != nil {
+		return fmt.Errorf("mkdir golden dir: %w", err)
+	}
+
+	// Prepare rootfs from default template
+	baseImage, err := ResolveBaseImage(m.cfg.ImagesDir, "default")
+	if err != nil {
+		return fmt.Errorf("resolve base image for golden: %w", err)
+	}
+	if err := PrepareRootfs(baseImage, rootfsFile); err != nil {
+		return fmt.Errorf("prepare golden rootfs: %w", err)
+	}
+
+	// Create a small workspace (won't be used, just needs to exist for QEMU args)
+	workspaceFile := filepath.Join(goldenDir, "workspace.ext4")
+	if err := CreateWorkspace(workspaceFile, 64); err != nil {
+		return fmt.Errorf("create golden workspace: %w", err)
+	}
+
+	// Allocate a temporary network for golden boot
+	netCfg, err := m.subnets.Allocate()
+	if err != nil {
+		return fmt.Errorf("allocate golden subnet: %w", err)
+	}
+	if err := CreateTAP(netCfg); err != nil {
+		m.subnets.Release(netCfg.TAPName)
+		return fmt.Errorf("create golden TAP: %w", err)
+	}
+	defer func() {
+		RemoveDNAT(netCfg)
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+	}()
+
+	goldenCID := m.allocateCID() // temporary CID for golden VM boot
+	goldenMAC := "AA:CE:00:00:FF:FF"
+	bootArgs := fmt.Sprintf(
+		"console=ttyS0 reboot=k panic=1 "+
+			"root=/dev/vda rw "+
+			"ip=%s::%s:%s::eth0:off "+
+			"init=/sbin/init "+
+			"osb.gateway=%s",
+		netCfg.GuestIP, netCfg.HostIP, netCfg.Mask, netCfg.HostIP,
+	)
+
+	qmpSockPath := filepath.Join(goldenDir, "qmp.sock")
+	os.Remove(qmpSockPath)
+
+	logPath := filepath.Join(goldenDir, "qemu.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return fmt.Errorf("create golden log: %w", err)
+	}
+
+	args := m.buildQEMUArgs(m.cfg.DefaultCPUs, m.cfg.DefaultMemoryMB,
+		rootfsFile, workspaceFile, netCfg.TAPName, goldenMAC, goldenCID, qmpSockPath, bootArgs)
+
+	cmd := exec.Command(m.cfg.QEMUBin, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("start golden qemu: %w", err)
+	}
+	logFile.Close()
+
+	// Connect QMP
+	qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
+	if err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("golden QMP connect: %w", err)
+	}
+
+	// Wait for agent to be ready
+	agentClient, err := m.waitForAgent(context.Background(), goldenCID, 30*time.Second)
+	if err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("golden agent not ready: %w", err)
+	}
+	log.Printf("qemu: golden VM booted, agent ready (%dms)", time.Since(t0).Milliseconds())
+
+	// Close agent connection before migration
+	agentClient.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	// QMP stop + migrate
+	if err := qmpClient.Stop(); err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("golden QMP stop: %w", err)
+	}
+
+	migrateURI := fmt.Sprintf("exec:cat > %s", memFile)
+	if err := qmpClient.Migrate(migrateURI); err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("golden QMP migrate: %w", err)
+	}
+	if err := qmpClient.WaitMigration(5 * time.Minute); err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		return fmt.Errorf("golden migration wait: %w", err)
+	}
+
+	_ = qmpClient.Quit()
+	qmpClient.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		<-done
+	}
+
+	// Clean up temp files
+	os.Remove(workspaceFile)
+	os.Remove(qmpSockPath)
+
+	// Compress golden mem with zstd for faster restore
+	zstCmd := exec.Command("zstd", "-3", "--rm", memFile, "-o", memFile+".zst")
+	if out, err := zstCmd.CombinedOutput(); err != nil {
+		log.Printf("qemu: golden zstd compress failed (will use raw): %v (%s)", err, string(out))
+	} else {
+		log.Printf("qemu: golden mem compressed with zstd")
+	}
+
+	m.goldenDir = goldenDir
+	m.goldenCID = goldenCID
+	_ = os.WriteFile(filepath.Join(goldenDir, "cid"), []byte(fmt.Sprintf("%d", goldenCID)), 0644)
+	log.Printf("qemu: golden snapshot ready (%dms total, mem=%s, CID=%d)",
+		time.Since(t0).Milliseconds(), memFile, goldenCID)
+	return nil
+}
+
+// createFromGolden creates a new VM by restoring from the golden snapshot.
+// This skips kernel boot entirely — the VM resumes with the agent already running.
+// After restore, we patch the network config inside the guest.
+func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig, id string) (*types.Sandbox, error) {
+	t0 := time.Now()
+
+	template := cfg.Template
+	if template == "" || template == "base" {
+		template = "default"
+	}
+
+	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", id)
+	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
+		return nil, fmt.Errorf("mkdir sandbox dir: %w", err)
+	}
+
+	// Copy golden rootfs (this is the base — each VM gets its own copy)
+	rootfsPath := filepath.Join(sandboxDir, "rootfs.ext4")
+	if err := copyFileReflink(filepath.Join(m.goldenDir, "rootfs.ext4"), rootfsPath); err != nil {
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("copy golden rootfs: %w", err)
+	}
+
+	// Create fresh workspace
+	workspacePath := filepath.Join(sandboxDir, "workspace.ext4")
+	diskMB := m.cfg.DefaultDiskMB
+	if err := CreateWorkspace(workspacePath, diskMB); err != nil {
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("create workspace: %w", err)
+	}
+	log.Printf("qemu: golden-create %s: rootfs+workspace ready (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Allocate network
+	netCfg, err := m.subnets.Allocate()
+	if err != nil {
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("allocate subnet: %w", err)
+	}
+	if err := CreateTAP(netCfg); err != nil {
+		m.subnets.Release(netCfg.TAPName)
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("create TAP: %w", err)
+	}
+
+	guestPort := cfg.Port
+	if guestPort == 0 {
+		guestPort = m.cfg.DefaultPort
+	}
+	hostPort, err := FindFreePort()
+	if err != nil {
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("find free port: %w", err)
+	}
+	netCfg.HostPort = hostPort
+	netCfg.GuestPort = guestPort
+
+	if err := AddDNAT(netCfg); err != nil {
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+		os.RemoveAll(sandboxDir)
+		return nil, fmt.Errorf("add DNAT: %w", err)
+	}
+
+	cpus := cfg.CpuCount
+	if cpus <= 0 {
+		cpus = m.cfg.DefaultCPUs
+	}
+	memMB := cfg.MemoryMB
+	if memMB <= 0 {
+		memMB = m.cfg.DefaultMemoryMB
+	}
+
+	guestCID := m.allocateCID()
+	guestMAC := generateMAC(id)
+
+	// Boot args don't matter for network (we'll patch via agent) but QEMU needs them
+	// Use the golden boot args format — the actual IPs will be patched post-restore
+	bootArgs := fmt.Sprintf(
+		"console=ttyS0 reboot=k panic=1 "+
+			"root=/dev/vda rw "+
+			"ip=%s::%s:%s::eth0:off "+
+			"init=/sbin/init "+
+			"osb.gateway=%s",
+		netCfg.GuestIP, netCfg.HostIP, netCfg.Mask, netCfg.HostIP,
+	)
+
+	qmpSockPath := filepath.Join(sandboxDir, "qmp.sock")
+	os.Remove(qmpSockPath)
+
+	logPath := filepath.Join(sandboxDir, "qemu.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("create log file: %w", err)
+	}
+
+	// Build QEMU args with -incoming to restore from golden snapshot.
+	// Use zstd-compressed mem file if available (typically ~40% of raw size).
+	goldenMemZst := filepath.Join(m.goldenDir, "mem.zst")
+	goldenMemRaw := filepath.Join(m.goldenDir, "mem")
+	var incomingURI string
+	if fileExists(goldenMemZst) {
+		incomingURI = fmt.Sprintf("exec:zstdcat %s", goldenMemZst)
+	} else {
+		incomingURI = fmt.Sprintf("exec:cat %s", goldenMemRaw)
+	}
+	args := m.buildQEMUArgs(cpus, memMB, rootfsPath, workspacePath,
+		netCfg.TAPName, guestMAC, guestCID, qmpSockPath, bootArgs)
+	args = append(args, "-incoming", incomingURI)
+
+	cmd := exec.Command(m.cfg.QEMUBin, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("start qemu from golden: %w", err)
+	}
+	logFile.Close()
+	log.Printf("qemu: golden-create %s: QEMU started (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Connect QMP
+	qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
+	if err != nil {
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("golden QMP connect: %w", err)
+	}
+	log.Printf("qemu: golden-create %s: QMP connected (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Wait for incoming migration to complete before resuming.
+	// With -incoming, QEMU loads the state file and enters "paused" status when done.
+	if err := m.waitForMigrationReady(qmpClient, 30*time.Second); err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("golden migration load: %w", err)
+	}
+	log.Printf("qemu: golden-create %s: migration loaded (%dms)", id, time.Since(t0).Milliseconds())
+
+	if err := qmpClient.Cont(); err != nil {
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("golden QMP cont: %w", err)
+	}
+	log.Printf("qemu: golden-create %s: VM resumed (%dms)", id, time.Since(t0).Milliseconds())
+
+	now := time.Now()
+	timeout := time.Duration(cfg.Timeout) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+
+	vm := &VMInstance{
+		ID:          id,
+		Template:    template,
+		Status:      types.SandboxStatusRunning,
+		StartedAt:   now,
+		EndAt:       now.Add(timeout),
+		CpuCount:    cpus,
+		MemoryMB:    memMB,
+		HostPort:    hostPort,
+		GuestPort:   guestPort,
+		pid:         cmd.Process.Pid,
+		cmd:         cmd,
+		network:     netCfg,
+		sandboxDir:  sandboxDir,
+		qmpSockPath: qmpSockPath,
+		qmp:         qmpClient,
+		guestMAC:    guestMAC,
+		guestCID:    guestCID,
+		bootArgs:    bootArgs,
+	}
+
+	// After migration restore, the vsock CID from the snapshot (golden CID) may
+	// override the CLI arg. Try both the new CID and the golden CID.
+	var agentClient *AgentClient
+	// Try new CID first (quick attempt)
+	agentClient, err = m.waitForAgent(context.Background(), guestCID, 3*time.Second)
+	if err != nil {
+		log.Printf("qemu: golden-create %s: CID=%d failed, trying golden CID=%d", id, guestCID, m.goldenCID)
+		agentClient, err = m.waitForAgent(context.Background(), m.goldenCID, 5*time.Second)
+		if err == nil {
+			log.Printf("qemu: golden-create %s: connected via golden CID=%d (migration preserved CID)", id, m.goldenCID)
+			guestCID = m.goldenCID
+			vm.guestCID = guestCID
+		}
+	}
+	if err != nil {
+		log.Printf("qemu: golden-create %s: agent not ready, falling back to cold boot: %v", id, err)
+		qmpClient.Close()
+		cmd.Process.Kill()
+		cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, err
+	}
+	vm.agent = agentClient
+	log.Printf("qemu: golden-create %s: agent connected (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Patch network inside the guest — the snapshot had the golden VM's IP
+	if err := patchGuestNetwork(context.Background(), agentClient, netCfg); err != nil {
+		log.Printf("qemu: golden-create %s: network patch failed: %v", id, err)
+		// Non-fatal for now — connectivity might still work via TAP
+	}
+	log.Printf("qemu: golden-create %s: network patched (%dms)", id, time.Since(t0).Milliseconds())
+
+	if len(cfg.Envs) > 0 {
+		envCtx, envCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := agentClient.SetEnvs(envCtx, cfg.Envs); err != nil {
+			envCancel()
+			log.Printf("qemu: warning: SetEnvs failed for %s: %v", id, err)
+		}
+		envCancel()
+	}
+
+	m.mu.Lock()
+	m.vms[id] = vm
+	m.mu.Unlock()
+
+	sbMeta := SandboxMeta{
+		SandboxID: id,
+		Template:  template,
+		CpuCount:  cpus,
+		MemoryMB:  memMB,
+		GuestPort: guestPort,
+	}
+	if metaJSON, err := json.Marshal(sbMeta); err == nil {
+		_ = os.WriteFile(filepath.Join(sandboxDir, "sandbox-meta.json"), metaJSON, 0644)
+	}
+
+	log.Printf("qemu: golden-create %s: DONE (%dms total, port=%d→%d, tap=%s, cid=%d)",
+		id, time.Since(t0).Milliseconds(), hostPort, guestPort, netCfg.TAPName, guestCID)
+
+	return &types.Sandbox{
+		ID:        id,
+		Template:  template,
+		Status:    types.SandboxStatusRunning,
+		StartedAt: now,
+		EndAt:     now.Add(timeout),
+		CpuCount:  cpus,
+		MemoryMB:  memMB,
+		HostPort:  hostPort,
+	}, nil
+}
+
+// patchGuestNetwork reconfigures the guest's eth0 with the new IP/gateway.
+// This is needed because the golden snapshot was booted with a different IP.
+func patchGuestNetwork(ctx context.Context, agent *AgentClient, netCfg *NetworkConfig) error {
+	// Calculate prefix length from mask (e.g. "255.255.255.252" → 30)
+	prefixLen := maskToPrefixLen(netCfg.Mask)
+
+	script := fmt.Sprintf(
+		"ip addr flush dev eth0 && "+
+			"ip addr add %s/%d dev eth0 && "+
+			"ip link set eth0 up && "+
+			"ip route add default via %s",
+		netCfg.GuestIP, prefixLen, netCfg.HostIP,
+	)
+
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	resp, err := agent.Exec(execCtx, &pb.ExecRequest{
+		Command:        "/bin/sh",
+		Args:           []string{"-c", script},
+		TimeoutSeconds: 5,
+	})
+	if err != nil {
+		return fmt.Errorf("exec network patch: %w", err)
+	}
+	if resp.ExitCode != 0 {
+		return fmt.Errorf("network patch failed (exit %d): %s", resp.ExitCode, resp.Stderr)
+	}
+	return nil
+}
+
+// maskToPrefixLen converts a dotted-decimal netmask to a CIDR prefix length.
+func maskToPrefixLen(mask string) int {
+	switch mask {
+	case "255.255.255.252":
+		return 30
+	case "255.255.255.248":
+		return 29
+	case "255.255.255.240":
+		return 28
+	case "255.255.255.224":
+		return 27
+	case "255.255.255.192":
+		return 26
+	case "255.255.255.128":
+		return 25
+	case "255.255.255.0":
+		return 24
+	default:
+		return 30 // safe default for /30 subnets
+	}
+}
+
+// waitForMigrationReady polls query-status until the VM enters "paused" or "running"
+// state, indicating that the incoming migration has finished loading.
+func (m *Manager) waitForMigrationReady(qmp *QMPClient, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := qmp.QueryStatus()
+		if err != nil {
+			// QEMU might not be ready to respond yet during migration load
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		// "paused" = migration loaded, waiting for cont
+		// "postmigrate" = also valid (some QEMU versions)
+		// "inmigrate" = still loading
+		switch status.Status {
+		case "paused", "postmigrate":
+			return nil
+		case "running":
+			return nil // already resumed somehow
+		case "inmigrate", "prelaunch":
+			time.Sleep(200 * time.Millisecond)
+			continue
+		default:
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+	}
+	return fmt.Errorf("migration not ready after %v", timeout)
+}
+
 // allocateCID returns a unique guest CID for a new VM.
 func (m *Manager) allocateCID() uint32 {
 	m.mu.Lock()
@@ -154,7 +657,7 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", workspacePath),
 		"-netdev", fmt.Sprintf("tap,id=net0,ifname=%s,script=no,downscript=no", tapName),
 		"-device", fmt.Sprintf("virtio-net-pci,netdev=net0,mac=%s", mac),
-		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d", cid),
+		"-device", fmt.Sprintf("vhost-vsock-pci,guest-cid=%d,id=vsock0", cid),
 		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSock),
 		"-nographic",
 		"-nodefaults",
@@ -169,9 +672,19 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 		id = "sb-" + uuid.New().String()[:8]
 	}
 
+	// Fast path: restore from golden snapshot if available and using default template
 	template := cfg.Template
 	if template == "" || template == "base" {
 		template = "default"
+	}
+	if m.goldenDir != "" && template == "default" && cfg.TemplateRootfsKey == "" {
+		sb, err := m.createFromGolden(ctx, cfg, id)
+		if err != nil {
+			log.Printf("qemu: golden restore failed for %s, falling back to cold boot: %v", id, err)
+			// Fall through to cold boot below
+		} else {
+			return sb, nil
+		}
 	}
 
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", id)
