@@ -213,6 +213,16 @@ func (q *QMPClient) WaitMigration(timeout time.Duration) error {
 	return fmt.Errorf("migration timed out after %v", timeout)
 }
 
+// Execute sends an arbitrary QMP command with the given arguments.
+func (q *QMPClient) Execute(command string, args map[string]interface{}) error {
+	cmd := qmpCommand{Execute: command}
+	if len(args) > 0 {
+		cmd.Arguments = args
+	}
+	_, err := q.execute(cmd, 10*time.Second)
+	return err
+}
+
 // Close closes the QMP connection.
 func (q *QMPClient) Close() error {
 	if q == nil || q.conn == nil {

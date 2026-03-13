@@ -150,7 +150,10 @@ func main() {
 
 		qmMgr.CleanupOrphanedProcesses()
 
-		// No golden snapshot for QEMU (cold boot ~2-4s is acceptable)
+		// Prepare golden snapshot for fast VM creation
+		if err := qmMgr.PrepareGoldenSnapshot(); err != nil {
+			log.Printf("opensandbox-worker: WARNING: golden snapshot failed, using cold boot: %v", err)
+		}
 
 		mgr = qmMgr
 		autosaverSyncer = qmMgr
