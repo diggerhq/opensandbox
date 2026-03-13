@@ -70,9 +70,13 @@ class Pty:
         ws_url = self._api_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url}/sandboxes/{self._sandbox_id}/pty/{session_id}"
 
+        # Pass credentials as both header and query param for compatibility.
+        # Python websockets supports custom headers, but query params work
+        # consistently across all WebSocket implementations.
         headers = {}
         if self._api_key:
             headers["X-API-Key"] = self._api_key
+            ws_url += f"?api_key={self._api_key}"
 
         ws = await websockets.connect(ws_url, additional_headers=headers)
 

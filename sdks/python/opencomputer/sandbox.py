@@ -215,7 +215,7 @@ class Sandbox:
     @property
     def agent(self) -> Agent:
         """Access Claude Agent SDK sessions."""
-        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token)
+        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token, self._api_key)
 
     @property
     def files(self) -> Filesystem:

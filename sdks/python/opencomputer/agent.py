@@ -48,11 +48,13 @@ class Agent:
         sandbox_id: str,
         connect_url: str,
         token: str,
+        api_key: str = "",
     ):
         self._client = client
         self._sandbox_id = sandbox_id
         self._connect_url = connect_url
         self._token = token
+        self._api_key = api_key
 
     async def start(
         self,
@@ -138,8 +140,12 @@ class Agent:
             "https://", "wss://"
         )
         ws_endpoint = f"{ws_url}/sandboxes/{self._sandbox_id}/exec/{session_id}"
+        # WebSocket API cannot set custom headers, so pass credentials as query params.
+        # Prefer JWT token (direct worker access); fall back to API key (control plane).
         if self._token:
             ws_endpoint += f"?token={self._token}"
+        elif self._api_key:
+            ws_endpoint += f"?api_key={self._api_key}"
 
         ws = await websockets.connect(ws_endpoint)
 
