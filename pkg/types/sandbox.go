@@ -58,6 +58,9 @@ type SandboxConfig struct {
 	// SandboxID allows pre-determining the sandbox ID for async creation.
 	// If empty, a new ID is generated automatically.
 	SandboxID string `json:"-"`
+	// CheckpointID is the source checkpoint for template/snapshot creates.
+	// Used by the worker to key per-template golden snapshots.
+	CheckpointID string `json:"-"`
 }
 
 // SandboxListResponse is the response for listing sandboxes.

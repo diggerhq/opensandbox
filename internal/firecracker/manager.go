@@ -93,8 +93,9 @@ type Manager struct {
 	nextCID  uint32 // next guest CID to assign (starts at 3, 0-2 are reserved)
 	uploadWg sync.WaitGroup // tracks in-flight async S3 uploads
 
-	goldenMu sync.RWMutex
-	golden   *GoldenSnapshot // pre-booted default VM snapshot for fast creation
+	goldenMu        sync.RWMutex
+	golden          *GoldenSnapshot            // pre-booted default VM snapshot for fast creation
+	templateGoldens map[string]*GoldenSnapshot // per-checkpoint golden snapshots for templates/images
 }
 
 // NewManager creates a new Firecracker-backed sandbox manager.
@@ -140,10 +141,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		cfg:     cfg,
-		subnets: NewSubnetAllocator(),
-		vms:     make(map[string]*VMInstance),
-		nextCID: 3, // CIDs 0-2 are reserved (hypervisor=0, local=1, host=2)
+		cfg:             cfg,
+		subnets:         NewSubnetAllocator(),
+		vms:             make(map[string]*VMInstance),
+		nextCID:         3, // CIDs 0-2 are reserved (hypervisor=0, local=1, host=2)
+		templateGoldens: make(map[string]*GoldenSnapshot),
 	}, nil
 }
 
@@ -178,6 +180,15 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 			return sb, nil
 		} else if err != errNoGoldenSnapshot {
 			log.Printf("firecracker: golden snapshot create failed for %s: %v, falling back to cold boot", id, err)
+		}
+	}
+	// Per-template golden snapshot: if creating from a checkpoint (image/snapshot),
+	// try the golden snapshot path keyed by checkpoint ID.
+	if cfg.CheckpointID != "" && cfg.TemplateRootfsKey != "" {
+		if sb, err := m.createFromGoldenSnapshot(ctx, id, cfg); err == nil {
+			return sb, nil
+		} else if err != errNoGoldenSnapshot {
+			log.Printf("firecracker: template golden snapshot create failed for %s (cp=%s): %v, falling back to cold boot", id, cfg.CheckpointID, err)
 		}
 	}
 

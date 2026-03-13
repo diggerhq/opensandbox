@@ -273,6 +273,7 @@ message GetSandboxStatsResponse {
 message CreateCheckpointRequest {
   string sandbox_id = 1;
   string checkpoint_id = 2;  // UUID assigned by control plane
+  bool prepare_golden = 3;   // If true, also create a per-template golden snapshot for fast future creates
 }
 
 message CreateCheckpointResponse {

@@ -88,7 +88,8 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		NetworkEnabled: req.NetworkEnabled,
 		ImageRef:       req.ImageRef,
 		Port:           int(req.Port),
-		SandboxID:      req.SandboxId, // use server-assigned ID if provided
+		SandboxID:      req.SandboxId,      // use server-assigned ID if provided
+		CheckpointID:   req.CheckpointId,   // for per-template golden snapshots
 	}
 
 	// Warm fork: if checkpoint_id is set, try snapshot-based fork first.
@@ -514,7 +515,10 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
 	}
 
-	// The onReady callback marks the checkpoint as ready in the DB when the async S3 upload completes.
+	// The onReady callback fires after the async mem file move + S3 upload completes.
+	// If prepare_golden is set, it also creates a golden snapshot from the cache.
+	prepareGolden := req.PrepareGolden
+	mgr := s.manager
 	var onReady func()
 	if s.store != nil {
 		cpID, _ := uuid.Parse(checkpointID)
@@ -523,6 +527,24 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 				log.Printf("grpc: CreateCheckpoint: failed to mark checkpoint %s ready: %v", checkpointID, err)
 			} else {
 				log.Printf("grpc: CreateCheckpoint: checkpoint %s is now ready", checkpointID)
+			}
+			// Create golden snapshot after mem file is in place
+			if prepareGolden {
+				type goldenPreparer interface {
+					RegisterTemplateGoldenFromCache(checkpointID string)
+				}
+				if gp, ok := mgr.(goldenPreparer); ok {
+					gp.RegisterTemplateGoldenFromCache(checkpointID)
+				}
+			}
+		}
+	} else if prepareGolden {
+		onReady = func() {
+			type goldenPreparer interface {
+				RegisterTemplateGoldenFromCache(checkpointID string)
+			}
+			if gp, ok := mgr.(goldenPreparer); ok {
+				gp.RegisterTemplateGoldenFromCache(checkpointID)
 			}
 		}
 	}

@@ -460,8 +460,9 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		defer cancel()
 
 		resp, err := grpcClient.CreateCheckpoint(cpCtx, &pb.CreateCheckpointRequest{
-			SandboxId:    buildSandboxID,
-			CheckpointId: checkpointID.String(),
+			SandboxId:      buildSandboxID,
+			CheckpointId:   checkpointID.String(),
+			PrepareGolden:  true, // prepare golden snapshot for instant template creates
 		})
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to checkpoint build sandbox: %w", err)
@@ -489,6 +490,14 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 
 		if s.store != nil {
 			_ = s.store.SetCheckpointReady(ctx, checkpointID, rootfsKey, workspaceKey, 0)
+		}
+
+		// Prepare golden snapshot for combined mode
+		type goldenPreparer interface {
+			RegisterTemplateGoldenFromCache(checkpointID string)
+		}
+		if gp, ok := s.manager.(goldenPreparer); ok {
+			go gp.RegisterTemplateGoldenFromCache(checkpointID.String())
 		}
 	}
 
