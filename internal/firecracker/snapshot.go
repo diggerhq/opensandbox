@@ -2129,12 +2129,18 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	// Step 3: Flush filesystem, quiesce network, close agent, pause VM, snapshot
 	_ = agent.SyncFS(context.Background())
 
-	// Quiesce eth0 before snapshotting to ensure clean virtio-net virtqueues.
-	// Flush all addresses first so the host stops sending ARP/IPv6 ND traffic to
-	// this TAP, eliminating the race where a packet arrives in the RX used ring
-	// while NAPI is draining. Without this, snapshot restore triggers
-	// "input.0:id 0 is not a head!" (vq->broken=true) which permanently breaks
-	// virtio-net RX for every sandbox created from this golden snapshot.
+	// Quiesce networking before snapshotting to ensure clean virtio-net virtqueues.
+	//
+	// The host-side TAP must be brought down FIRST to stop all packet delivery
+	// into the guest's virtio-net RX ring. Only then is the guest side flushed
+	// and downed. Without this ordering, the host can push ARP/IPv6 ND packets
+	// into the RX used ring between the guest flush and the VM pause, corrupting
+	// the virtqueue state. On restore this manifests as:
+	//   "virtio_net virtio2: input.0:id 0 is not a head!"
+	// (vq->broken=true) which permanently breaks virtio-net RX for every
+	// sandbox created from this golden snapshot.
+	_ = run("ip", "link", "set", netCfg.TAPName, "down")
+
 	_, _ = agent.Exec(context.Background(), &pb.ExecRequest{
 		Command:        "/bin/sh",
 		Args:           []string{"-c", "ip addr flush dev eth0 && ip link set eth0 down"},
