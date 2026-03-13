@@ -70,10 +70,16 @@ type Config struct {
 	DefaultSandboxCPUs     int // default vCPUs per sandbox, default 1
 	DefaultSandboxDiskMB   int // default disk quota per sandbox (MB), 0 = no quota
 
+	// VM backend selection (worker mode)
+	VMBackend string // "firecracker" or "qemu" (default: "qemu")
+
 	// Firecracker microVM configuration (worker mode)
 	FirecrackerBin string // Path to firecracker binary (default: "firecracker")
 	KernelPath     string // Path to vmlinux kernel (default: $DataDir/firecracker/vmlinux-arm64)
 	ImagesDir      string // Path to base rootfs images (default: $DataDir/firecracker/images/)
+
+	// QEMU configuration (worker mode, when VMBackend="qemu")
+	QEMUBin string // Path to qemu-system-x86_64 binary (default: "qemu-system-x86_64")
 
 	// AWS EC2 compute pool (server mode only — for auto-scaling worker machines)
 	EC2AMI             string // Custom AMI with Firecracker pre-installed
@@ -150,9 +156,11 @@ func Load() (*Config, error) {
 		DefaultSandboxCPUs:     envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_CPUS", 1),
 		DefaultSandboxDiskMB:   envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB", 0),
 
+		VMBackend:      envOrDefault("OPENSANDBOX_VM_BACKEND", "qemu"),
 		FirecrackerBin: envOrDefault("OPENSANDBOX_FIRECRACKER_BIN", "firecracker"),
 		KernelPath:     os.Getenv("OPENSANDBOX_KERNEL_PATH"),     // default derived from DataDir
 		ImagesDir:      os.Getenv("OPENSANDBOX_IMAGES_DIR"),      // default derived from DataDir
+		QEMUBin:        envOrDefault("OPENSANDBOX_QEMU_BIN", "qemu-system-x86_64"),
 
 		EC2AMI:             os.Getenv("OPENSANDBOX_EC2_AMI"),
 		EC2InstanceType:    envOrDefault("OPENSANDBOX_EC2_INSTANCE_TYPE", "c7gd.metal"),
