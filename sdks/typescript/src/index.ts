@@ -3,5 +3,8 @@ export { Agent, type AgentEvent, type AgentConfig, type AgentStartOpts, type Age
 export { Filesystem, type EntryInfo } from "./filesystem.js";
 export { Exec, type ProcessResult, type RunOpts, type ExecSession, type ExecSessionInfo, type ExecStartOpts, type ExecAttachOpts } from "./exec.js";
 export { Pty, type PtySession, type PtyOpts } from "./pty.js";
-export { Image, type ImageManifest, type ImageStep } from "./image.js";
-export { Snapshots, type SnapshotInfo, type CreateSnapshotOpts } from "./snapshot.js";
+// Node.js-only modules (use crypto, fs, path) — import directly if needed:
+//   import { Image } from "@opencomputer/sdk/dist/image.js";
+//   import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+export type { ImageManifest, ImageStep } from "./image.js";
+export type { SnapshotInfo, CreateSnapshotOpts } from "./snapshot.js";

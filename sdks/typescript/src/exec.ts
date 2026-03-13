@@ -99,8 +99,14 @@ export class Exec {
     const wsUrl = this.apiUrl
       .replace("http://", "ws://")
       .replace("https://", "wss://");
-    const tokenParam = this.token ? `?token=${encodeURIComponent(this.token)}` : "";
-    const wsEndpoint = `${wsUrl}/sandboxes/${this.sandboxId}/exec/${sessionId}${tokenParam}`;
+    // WebSocket can't set custom headers, so pass credentials as query params.
+    // Prefer JWT token (direct worker access); fall back to API key (control plane).
+    const authParam = this.token
+      ? `?token=${encodeURIComponent(this.token)}`
+      : this.apiKey
+        ? `?api_key=${encodeURIComponent(this.apiKey)}`
+        : "";
+    const wsEndpoint = `${wsUrl}/sandboxes/${this.sandboxId}/exec/${sessionId}${authParam}`;
 
     const ws = new WebSocket(wsEndpoint);
     ws.binaryType = "arraybuffer";
