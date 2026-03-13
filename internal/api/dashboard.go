@@ -1061,6 +1061,11 @@ func (s *Server) proxyWorkerHTTP(c echo.Context, session *db.SandboxSession, met
 	// Forward the worker's response back to the dashboard
 	respBody, _ := io.ReadAll(resp.Body)
 	for k, vals := range resp.Header {
+		// Skip CORS headers — the API server's own CORS middleware adds these,
+		// so forwarding them from the worker causes duplicates (*, *).
+		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+			continue
+		}
 		for _, v := range vals {
 			c.Response().Header().Add(k, v)
 		}
