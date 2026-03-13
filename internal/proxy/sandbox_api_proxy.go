@@ -26,9 +26,10 @@ import (
 // control plane forwards exec/files/pty/agent requests to workers over the
 // internal VPC network.
 type SandboxAPIProxy struct {
-	store    *db.Store
-	registry *controlplane.RedisWorkerRegistry
-	jwtIssuer *auth.JWTIssuer
+	store        *db.Store
+	registry     *controlplane.RedisWorkerRegistry
+	jwtIssuer    *auth.JWTIssuer
+	waitForReady func(ctx context.Context, sandboxID string) error // blocks until async sandbox creation completes; nil = no-op
 }
 
 // NewSandboxAPIProxy creates a new sandbox API proxy.
@@ -38,6 +39,13 @@ func NewSandboxAPIProxy(store *db.Store, registry *controlplane.RedisWorkerRegis
 		registry: registry,
 		jwtIssuer: jwtIssuer,
 	}
+}
+
+// SetWaitForReady sets a callback that blocks until an async sandbox creation
+// completes. The proxy calls this before forwarding requests to avoid proxying
+// to a worker that hasn't finished booting the sandbox yet.
+func (p *SandboxAPIProxy) SetWaitForReady(fn func(ctx context.Context, sandboxID string) error) {
+	p.waitForReady = fn
 }
 
 // ProxyHandler forwards requests for a sandbox to the worker that owns it.
@@ -52,6 +60,15 @@ func (p *SandboxAPIProxy) ProxyHandler(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
+
+	// If this sandbox is still being created asynchronously, wait for it.
+	if p.waitForReady != nil {
+		if err := p.waitForReady(ctx, sandboxID); err != nil {
+			return c.JSON(http.StatusBadGateway, map[string]string{
+				"error": fmt.Sprintf("sandbox %s: creation failed: %v", sandboxID, err),
+			})
+		}
+	}
 
 	// Look up which worker owns this sandbox
 	session, err := p.store.GetSandboxSession(ctx, sandboxID)

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"io/fs"
 	"log"
 	"net/http"
@@ -105,6 +106,24 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.ecrConfig = opts.ECRConfig
 		s.cfClient = opts.CFClient
 		s.sandboxAPIProxy = opts.SandboxAPIProxy
+
+		// Wire up readiness waiting so the proxy blocks until async creates finish
+		if s.sandboxAPIProxy != nil {
+			s.sandboxAPIProxy.SetWaitForReady(func(ctx context.Context, sandboxID string) error {
+				val, ok := s.pendingCreates.Load(sandboxID)
+				if !ok {
+					return nil // not a pending create — proceed normally
+				}
+				pending := val.(*pendingCreate)
+				select {
+				case <-pending.ready:
+					s.pendingCreates.Delete(sandboxID)
+					return pending.err
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			})
+		}
 	}
 
 	// Global middleware
