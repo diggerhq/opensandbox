@@ -302,6 +302,11 @@ func (r *responseRecorder) WriteHeader(statusCode int) {
 
 func (r *responseRecorder) writeTo(w http.ResponseWriter) {
 	for k, vals := range r.header {
+		// Skip CORS headers — the outer server's CORS middleware adds these,
+		// so forwarding them from the proxied response causes duplicates (*, *).
+		if strings.HasPrefix(strings.ToLower(k), "access-control-") {
+			continue
+		}
 		for _, v := range vals {
 			w.Header().Add(k, v)
 		}
