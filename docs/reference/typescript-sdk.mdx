@@ -1,0 +1,525 @@
+---
+title: "TypeScript SDK"
+description: "Complete TypeScript SDK reference"
+---
+
+## Installation
+
+```bash
+npm install @opencomputer/sdk
+```
+
+```typescript
+import { Sandbox, Templates } from "@opencomputer/sdk";
+```
+
+---
+
+## Sandbox
+
+### Static Methods
+
+#### `Sandbox.create(opts?): Promise<Sandbox>`
+
+Create a new sandbox.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `template` | string | `"base"` | Template name |
+| `timeout` | number | `300` | Idle timeout in seconds |
+| `apiKey` | string | env var | API key |
+| `apiUrl` | string | env var | API URL |
+| `envs` | Record\<string, string\> | — | Environment variables |
+| `metadata` | Record\<string, string\> | — | Arbitrary metadata |
+| `cpuCount` | number | — | CPU cores (max 4) |
+| `memoryMB` | number | — | Memory in MB (max 2048) |
+
+```typescript
+const sandbox = await Sandbox.create({ template: "my-stack", timeout: 600 });
+```
+
+#### `Sandbox.connect(sandboxId, opts?): Promise<Sandbox>`
+
+Connect to an existing sandbox.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sandboxId` | string | Sandbox ID |
+| `apiKey` | string | API key (optional) |
+| `apiUrl` | string | API URL (optional) |
+
+```typescript
+const sandbox = await Sandbox.connect("sb-abc123");
+```
+
+#### `Sandbox.createFromCheckpoint(checkpointId, opts?): Promise<Sandbox>`
+
+Create a new sandbox from a checkpoint.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `checkpointId` | string | — | Checkpoint ID (**required**) |
+| `timeout` | number | `300` | Idle timeout |
+| `apiKey` | string | env var | API key |
+| `apiUrl` | string | env var | API URL |
+
+```typescript
+const forked = await Sandbox.createFromCheckpoint("cp-abc123");
+```
+
+#### `Sandbox.createCheckpointPatch(checkpointId, opts): Promise<PatchResult>`
+
+Create a patch for a checkpoint.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `checkpointId` | string | Yes | Target checkpoint |
+| `script` | string | Yes | Bash script |
+| `description` | string | No | Description |
+| `apiKey` | string | No | API key |
+| `apiUrl` | string | No | API URL |
+
+```typescript
+const result = await Sandbox.createCheckpointPatch("cp-abc", { script: "apt install -y curl" });
+```
+
+#### `Sandbox.listCheckpointPatches(checkpointId, opts?): Promise<PatchInfo[]>`
+
+```typescript
+const patches = await Sandbox.listCheckpointPatches("cp-abc");
+```
+
+#### `Sandbox.deleteCheckpointPatch(checkpointId, patchId, opts?): Promise<void>`
+
+```typescript
+await Sandbox.deleteCheckpointPatch("cp-abc", "pa-xyz");
+```
+
+### Instance Methods
+
+#### `sandbox.kill(): Promise<void>`
+
+Terminate the sandbox.
+
+#### `sandbox.isRunning(): Promise<boolean>`
+
+Check if the sandbox is running.
+
+#### `sandbox.hibernate(): Promise<void>`
+
+Snapshot VM state and stop. No compute cost while hibernated.
+
+#### `sandbox.wake(opts?): Promise<void>`
+
+Resume a hibernated sandbox.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `timeout` | number | `300` | Idle timeout after wake |
+
+#### `sandbox.setTimeout(timeout): Promise<void>`
+
+Update the idle timeout.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `timeout` | number | New timeout in seconds |
+
+#### `sandbox.createCheckpoint(name): Promise<CheckpointInfo>`
+
+Create a named checkpoint.
+
+#### `sandbox.listCheckpoints(): Promise<CheckpointInfo[]>`
+
+List all checkpoints for the sandbox.
+
+#### `sandbox.restoreCheckpoint(checkpointId): Promise<void>`
+
+Revert in-place to a checkpoint.
+
+#### `sandbox.deleteCheckpoint(checkpointId): Promise<void>`
+
+Delete a checkpoint.
+
+#### `sandbox.createPreviewURL(opts): Promise<PreviewURLResult>`
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `port` | number | Yes | Container port (1–65535) |
+| `domain` | string | No | Custom domain |
+| `authConfig` | Record\<string, unknown\> | No | Auth configuration |
+
+#### `sandbox.listPreviewURLs(): Promise<PreviewURLResult[]>`
+
+#### `sandbox.deletePreviewURL(port): Promise<void>`
+
+### Properties
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `sandboxId` | string | Sandbox ID (readonly) |
+| `status` | string | Current status (readonly) |
+| `agent` | Agent | [Agent sessions](#agent) |
+| `exec` | Exec | [Command execution](#exec) |
+| `files` | Filesystem | [File operations](#filesystem) |
+| `pty` | Pty | [Terminal sessions](#pty) |
+| `commands` | Exec | **Deprecated** — alias for `exec` |
+
+### Types
+
+#### SandboxOpts
+
+```typescript
+interface SandboxOpts {
+  template?: string;
+  timeout?: number;
+  apiKey?: string;
+  apiUrl?: string;
+  envs?: Record<string, string>;
+  metadata?: Record<string, string>;
+  cpuCount?: number;
+  memoryMB?: number;
+}
+```
+
+#### CheckpointInfo
+
+```typescript
+interface CheckpointInfo {
+  id: string;
+  sandboxId: string;
+  orgId: string;
+  name: string;
+  sandboxConfig: object;
+  status: string;       // "processing" | "ready" | "failed"
+  sizeBytes: number;
+  createdAt: string;
+}
+```
+
+#### PatchInfo
+
+```typescript
+interface PatchInfo {
+  id: string;
+  checkpointId: string;
+  sequence: number;
+  script: string;
+  description: string;
+  strategy: string;     // "on_wake"
+  createdAt: string;
+}
+```
+
+#### PatchResult
+
+```typescript
+interface PatchResult {
+  patch: PatchInfo;
+}
+```
+
+#### PreviewURLResult
+
+```typescript
+interface PreviewURLResult {
+  id: string;
+  sandboxId: string;
+  orgId: string;
+  hostname: string;
+  customHostname?: string;
+  port: number;
+  cfHostnameId?: string;
+  sslStatus: string;
+  authConfig?: object;
+  createdAt: string;
+}
+```
+
+---
+
+## Agent
+
+Accessed via `sandbox.agent`.
+
+### `sandbox.agent.start(opts?): Promise<AgentSession>`
+
+Start an agent session.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `prompt` | string | Initial prompt |
+| `model` | string | Claude model |
+| `systemPrompt` | string | System prompt |
+| `allowedTools` | string[] | Restrict tools |
+| `permissionMode` | string | Permission mode |
+| `maxTurns` | number | Max turns (default: 50) |
+| `cwd` | string | Working directory |
+| `mcpServers` | Record\<string, McpServerConfig\> | MCP servers |
+| `resume` | string | Resume session ID |
+| `onEvent` | (event: AgentEvent) => void | Event callback |
+| `onError` | (data: string) => void | Stderr callback |
+| `onExit` | (exitCode: number) => void | Exit callback |
+| `onScrollbackEnd` | () => void | Scrollback done callback |
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "Build a todo app",
+  onEvent: (e) => console.log(e.type),
+});
+```
+
+### `sandbox.agent.attach(sessionId, opts?): Promise<AgentSession>`
+
+Reconnect to a running agent session. Accepts `onEvent`, `onError`, `onExit`, `onScrollbackEnd`.
+
+### `sandbox.agent.list(): Promise<AgentSessionInfo[]>`
+
+List all agent sessions.
+
+### AgentSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | string | Session ID |
+| `done` | Promise\<number\> | Resolves with exit code |
+| `sendPrompt(text)` | method | Send follow-up prompt |
+| `interrupt()` | method | Interrupt current turn |
+| `configure(config)` | method | Update agent configuration |
+| `kill(signal?)` | Promise\<void\> | Kill agent process |
+| `close()` | method | Close WebSocket |
+
+### Types
+
+#### AgentEvent
+
+```typescript
+interface AgentEvent {
+  type: string;
+  [key: string]: unknown;
+}
+```
+
+#### McpServerConfig
+
+```typescript
+interface McpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+```
+
+---
+
+## Exec
+
+Accessed via `sandbox.exec`.
+
+### `sandbox.exec.run(command, opts?): Promise<ProcessResult>`
+
+Run a command synchronously.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `command` | string | — | Shell command (**required**) |
+| `timeout` | number | `60` | Timeout in seconds |
+| `env` | Record\<string, string\> | — | Environment variables |
+| `cwd` | string | — | Working directory |
+
+```typescript
+const result = await sandbox.exec.run("npm test", { cwd: "/app" });
+```
+
+### `sandbox.exec.start(command, opts?): Promise<ExecSession>`
+
+Start a long-running command with streaming.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `command` | string | Command (**required**) |
+| `args` | string[] | Arguments |
+| `env` | Record\<string, string\> | Environment variables |
+| `cwd` | string | Working directory |
+| `timeout` | number | Timeout in seconds |
+| `maxRunAfterDisconnect` | number | Seconds to keep running after disconnect |
+| `onStdout` | (data: Uint8Array) => void | Stdout callback |
+| `onStderr` | (data: Uint8Array) => void | Stderr callback |
+| `onExit` | (exitCode: number) => void | Exit callback |
+
+```typescript
+const session = await sandbox.exec.start("node server.js", {
+  onStdout: (data) => process.stdout.write(data),
+});
+```
+
+### `sandbox.exec.attach(sessionId, opts?): Promise<ExecSession>`
+
+Reconnect to a running exec session.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `sessionId` | string | Session ID (**required**) |
+| `onStdout` | (data: Uint8Array) => void | Stdout callback |
+| `onStderr` | (data: Uint8Array) => void | Stderr callback |
+| `onExit` | (exitCode: number) => void | Exit callback |
+| `onScrollbackEnd` | () => void | Scrollback replay done |
+
+### `sandbox.exec.list(): Promise<ExecSessionInfo[]>`
+
+List all exec sessions.
+
+### `sandbox.exec.kill(sessionId, signal?): Promise<void>`
+
+Kill an exec session. Default signal: `9` (SIGKILL).
+
+### ExecSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | string | Session ID |
+| `done` | Promise\<number\> | Resolves with exit code |
+| `sendStdin(data)` | method | Send input (string or Uint8Array) |
+| `kill(signal?)` | Promise\<void\> | Kill process |
+| `close()` | method | Close WebSocket |
+
+### Types
+
+#### ProcessResult
+
+```typescript
+interface ProcessResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+```
+
+#### ExecSessionInfo
+
+```typescript
+interface ExecSessionInfo {
+  sessionID: string;
+  sandboxID: string;
+  command: string;
+  args: string[];
+  running: boolean;
+  exitCode?: number;
+  startedAt: string;
+  attachedClients: number;
+}
+```
+
+---
+
+## Filesystem
+
+Accessed via `sandbox.files`.
+
+### `sandbox.files.read(path): Promise<string>`
+
+Read a file as a UTF-8 string.
+
+### `sandbox.files.readBytes(path): Promise<Uint8Array>`
+
+Read a file as raw bytes.
+
+### `sandbox.files.write(path, content): Promise<void>`
+
+Write content to a file. Accepts `string` or `Uint8Array`.
+
+### `sandbox.files.list(path?): Promise<EntryInfo[]>`
+
+List directory contents. Default path: `"/"`.
+
+### `sandbox.files.makeDir(path): Promise<void>`
+
+Create a directory (recursive).
+
+### `sandbox.files.remove(path): Promise<void>`
+
+Delete a file or directory.
+
+### `sandbox.files.exists(path): Promise<boolean>`
+
+Check if a path exists. Client-side wrapper — attempts a read and returns `false` on error.
+
+### Types
+
+#### EntryInfo
+
+```typescript
+interface EntryInfo {
+  name: string;
+  isDir: boolean;
+  path: string;
+  size: number;
+}
+```
+
+---
+
+## Pty
+
+Accessed via `sandbox.pty`.
+
+### `sandbox.pty.create(opts?): Promise<PtySession>`
+
+Create an interactive terminal session.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `cols` | number | `80` | Terminal columns |
+| `rows` | number | `24` | Terminal rows |
+| `onOutput` | (data: Uint8Array) => void | — | Output callback |
+
+### PtySession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | string | Session ID |
+| `send(data)` | method | Send input (string or Uint8Array) |
+| `close()` | method | Close the PTY |
+
+---
+
+## Templates
+
+Standalone class — not a property on Sandbox.
+
+### `new Templates(apiUrl, apiKey)`
+
+```typescript
+import { Templates } from "@opencomputer/sdk";
+
+const templates = new Templates("https://app.opencomputer.dev", apiKey);
+```
+
+### `templates.build(name, dockerfile): Promise<TemplateInfo>`
+
+Build a template from a Dockerfile string.
+
+### `templates.list(): Promise<TemplateInfo[]>`
+
+List all templates.
+
+### `templates.get(name): Promise<TemplateInfo>`
+
+Get a template by name.
+
+### `templates.delete(name): Promise<void>`
+
+Delete a template.
+
+### Types
+
+#### TemplateInfo
+
+```typescript
+interface TemplateInfo {
+  templateID: string;
+  name: string;
+  tag: string;
+  status: string;  // "ready" | "building" | "error"
+}
+```

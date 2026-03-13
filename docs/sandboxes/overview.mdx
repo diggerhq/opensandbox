@@ -1,0 +1,220 @@
+---
+title: "Sandboxes"
+description: "The compute primitive — full Linux VMs in the cloud"
+---
+
+A sandbox is a full Linux virtual machine in the cloud. Each one has its own filesystem, network stack, and process space — completely isolated from other sandboxes via hardware-level virtualization. Think of it as a disposable laptop that starts in milliseconds and sleeps when idle.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+const result = await sandbox.exec.run("echo Hello from $(uname -a)");
+console.log(result.stdout);
+await sandbox.kill();
+```
+
+```python Python
+from opencomputer import Sandbox
+
+async with await Sandbox.create() as sandbox:
+    result = await sandbox.exec.run("echo Hello from $(uname -a)")
+    print(result.stdout)
+# sandbox is killed automatically on exit
+```
+
+</CodeGroup>
+
+## Creating a Sandbox
+
+<CodeGroup>
+
+```typescript TypeScript
+const sandbox = await Sandbox.create({
+  template: "my-custom-template",
+  timeout: 600,
+  cpuCount: 2,
+  memoryMB: 1024,
+  envs: { NODE_ENV: "production" },
+  metadata: { project: "my-app" },
+});
+```
+
+```python Python
+sandbox = await Sandbox.create(
+    template="my-custom-template",
+    timeout=600,
+    envs={"NODE_ENV": "production"},
+    metadata={"project": "my-app"},
+)
+```
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "templateID": "my-custom-template",
+    "timeout": 600,
+    "cpuCount": 2,
+    "memoryMB": 1024,
+    "envs": {"NODE_ENV": "production"},
+    "metadata": {"project": "my-app"}
+  }'
+```
+
+</CodeGroup>
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `template` | string | `"base"` | Template for the VM root filesystem |
+| `timeout` | number | `300` | Idle timeout in seconds (resets on every operation) |
+| `envs` | object | — | Environment variables set inside the VM |
+| `metadata` | object | — | Arbitrary key-value pairs stored with the sandbox |
+| `cpuCount` | number | — | CPU cores (max 4). TypeScript and HTTP API only |
+| `memoryMB` | number | — | Memory in MB (max 2048). TypeScript and HTTP API only |
+| `apiKey` | string | — | Defaults to `OPENCOMPUTER_API_KEY` env var |
+| `apiUrl` | string | — | Defaults to `OPENCOMPUTER_API_URL` env var |
+
+<Note>
+  `cpuCount` and `memoryMB` are not available in the Python SDK. Use the [HTTP API](/reference/api#sandbox-lifecycle) directly for custom resources from Python.
+</Note>
+
+## Connecting to an Existing Sandbox
+
+<CodeGroup>
+
+```typescript TypeScript
+const sandbox = await Sandbox.connect("sb-abc123");
+```
+
+```python Python
+sandbox = await Sandbox.connect("sb-abc123")
+```
+
+</CodeGroup>
+
+## Lifecycle
+
+Sandboxes have four states:
+
+| Status | Description |
+| --- | --- |
+| `running` | Active, accepting operations |
+| `hibernated` | State saved, no compute cost |
+| `stopped` | Terminated |
+| `error` | Failed |
+
+A rolling idle timeout (default 300s) resets on every operation — exec, file access, agent activity. When the timeout expires, the sandbox auto-hibernates if possible, otherwise stops.
+
+## Hibernation & Wake
+
+Hibernation snapshots the VM state and stops it — no cost while hibernated. Wake restores the sandbox, typically fast, with a cold-boot fallback if snapshot restore is unavailable.
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.hibernate();
+// ... later ...
+await sandbox.wake({ timeout: 600 });
+```
+
+```http HTTP
+POST /api/sandboxes/sb-abc123/hibernate
+
+POST /api/sandboxes/sb-abc123/wake
+Content-Type: application/json
+
+{"timeout": 600}
+```
+
+</CodeGroup>
+
+<Note>
+  `hibernate()` and `wake()` are available in the TypeScript SDK and [CLI](/cli/sandbox). Python SDK support is planned — use the [HTTP API](/reference/api#sandbox-lifecycle) directly.
+</Note>
+
+## Methods
+
+| Method | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Kill | `await sandbox.kill()` | `await sandbox.kill()` | Terminate the sandbox |
+| Check status | `await sandbox.isRunning()` | `await sandbox.is_running()` | Returns boolean |
+| Set timeout | `await sandbox.setTimeout(600)` | `await sandbox.set_timeout(600)` | Update idle timeout (seconds) |
+| Hibernate | `await sandbox.hibernate()` | — | Snapshot and stop |
+| Wake | `await sandbox.wake()` | — | Resume from hibernation |
+
+## Properties
+
+| Property | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Sandbox ID | `sandbox.sandboxId` | `sandbox.sandbox_id` | Unique identifier |
+| Status | `sandbox.status` | `sandbox.status` | Current lifecycle state |
+| Agent | `sandbox.agent` | `sandbox.agent` | [Agent sessions](/agents/overview) |
+| Exec | `sandbox.exec` | `sandbox.exec` | [Command execution](/sandboxes/running-commands) |
+| Files | `sandbox.files` | `sandbox.files` | [Filesystem](/sandboxes/working-with-files) |
+| PTY | `sandbox.pty` | `sandbox.pty` | [Interactive terminals](/sandboxes/interactive-terminals) |
+
+<Warning>
+  `sandbox.commands` is a deprecated alias for `sandbox.exec`. Use `sandbox.exec` in all new code.
+</Warning>
+
+### Python Context Manager
+
+The Python SDK supports `async with` for automatic cleanup:
+
+```python
+async with await Sandbox.create() as sandbox:
+    result = await sandbox.exec.run("echo hello")
+    print(result.stdout)
+# sandbox.kill() called automatically on exit
+```
+
+## Forking from Checkpoints
+
+Create a sandbox from a saved checkpoint — useful for parallel testing from a known-good state:
+
+<CodeGroup>
+
+```typescript TypeScript
+const forked = await Sandbox.createFromCheckpoint("cp-abc123", { timeout: 600 });
+```
+
+```python Python
+forked = await Sandbox.create_from_checkpoint("cp-abc123", timeout=600)
+```
+
+</CodeGroup>
+
+See [Checkpoints](/sandboxes/checkpoints) for the full workflow.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Running Commands" href="/sandboxes/running-commands">
+    Execute shell commands
+  </Card>
+  <Card title="Working with Files" href="/sandboxes/working-with-files">
+    Read, write, and manage files
+  </Card>
+  <Card title="Interactive Terminals" href="/sandboxes/interactive-terminals">
+    PTY sessions for interactive work
+  </Card>
+  <Card title="Checkpoints" href="/sandboxes/checkpoints">
+    Snapshot, fork, and restore
+  </Card>
+  <Card title="Templates" href="/sandboxes/templates">
+    Custom VM images
+  </Card>
+  <Card title="Preview URLs" href="/sandboxes/preview-urls">
+    Expose ports to the internet
+  </Card>
+</CardGroup>
+
+<Tip>
+  CLI: [`oc sandbox`](/cli/sandbox) for lifecycle management. Full reference: [TypeScript SDK](/reference/typescript-sdk#sandbox) · [Python SDK](/reference/python-sdk#sandbox) · [HTTP API](/reference/api#sandbox-lifecycle).
+</Tip>

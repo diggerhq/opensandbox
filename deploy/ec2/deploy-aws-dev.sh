@@ -377,6 +377,11 @@ cmd_deploy() {
     log "Step 4: Installing env files..."
     ssh -o StrictHostKeyChecking=no -i "$key_file" ubuntu@"$public_ip" \
         "sudo bash ~/opensandbox/deploy/ec2/setup-dev-env.sh $API_KEY"
+    # Add sandbox domain for preview URLs (nip.io resolves to the public IP)
+    ssh -o StrictHostKeyChecking=no -i "$key_file" ubuntu@"$public_ip" "
+        echo 'OPENSANDBOX_SANDBOX_DOMAIN=${public_ip}.nip.io' | sudo tee -a /etc/opensandbox/server.env
+        echo 'OPENSANDBOX_SANDBOX_DOMAIN=${public_ip}.nip.io' | sudo tee -a /etc/opensandbox/worker.env
+    "
 
     log "Step 5: Starting/restarting services..."
     ssh -o StrictHostKeyChecking=no -i "$key_file" ubuntu@"$public_ip" "

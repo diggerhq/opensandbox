@@ -1,0 +1,69 @@
+---
+title: "Checkpoints"
+description: "Snapshot, fork, and restore from the CLI"
+---
+
+## Creating a Checkpoint
+
+Capture the current state of a running sandbox:
+
+```bash
+oc checkpoint create sb-abc123 --name before-migration
+# or using the shortcut:
+oc cp create sb-abc123 --name before-migration
+```
+
+The checkpoint saves the filesystem and installed state. Status starts as `processing` and transitions to `ready`.
+
+```bash
+oc cp list sb-abc123
+# ID          NAME               STATUS  SIZE     CREATED
+# cp-7f3a1b2c before-migration   ready   128 MB   2025-01-15T10:30:00Z
+```
+
+## Forking from a Checkpoint
+
+Create new sandboxes from a saved checkpoint. Each fork is independent:
+
+```bash
+# Spawn two independent sandboxes from the same checkpoint
+ID1=$(oc cp spawn cp-7f3a1b2c --json | jq -r '.sandboxID')
+ID2=$(oc cp spawn cp-7f3a1b2c --json | jq -r '.sandboxID')
+
+# Run different experiments
+oc exec $ID1 --wait -- ./experiment-a.sh
+oc exec $ID2 --wait -- ./experiment-b.sh
+```
+
+Forked sandboxes start with a fresh boot from the saved disk state — don't assume running processes carry over.
+
+## Restoring
+
+Revert a sandbox in-place to a checkpoint. All changes since the checkpoint are lost:
+
+```bash
+oc cp restore sb-abc123 cp-7f3a1b2c
+```
+
+## Listing and Deleting
+
+```bash
+oc cp list sb-abc123
+oc cp delete sb-abc123 cp-7f3a1b2c
+```
+
+Maximum 10 checkpoints per sandbox.
+
+## Checkpoint vs Hibernate
+
+| | Checkpoint | Hibernate |
+| --- | --- | --- |
+| Original sandbox | Keeps running | Stopped |
+| Can fork | Yes — unlimited new sandboxes | No |
+| Use case | Branching, parallel testing | Pause and resume, cost savings |
+
+Use checkpoints when you need to explore multiple paths from the same state. Use hibernation when you just want to pause and resume later.
+
+<Tip>
+  SDK usage: [Checkpoints](/sandboxes/checkpoints). Full flags: [CLI Reference](/reference/cli#oc-checkpoint).
+</Tip>

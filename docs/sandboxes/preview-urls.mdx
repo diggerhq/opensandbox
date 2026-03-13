@@ -1,0 +1,118 @@
+---
+title: "Preview URLs"
+description: "Expose sandbox ports to the internet"
+---
+
+A preview URL is a public HTTPS endpoint that routes traffic to a port inside your sandbox. Start a web server, create a preview URL, and share the link.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+await sandbox.exec.run("npx create-next-app@latest /app --yes", { timeout: 120 });
+sandbox.exec.start("npm run dev -- --port 3000", { cwd: "/app" });
+
+const preview = await sandbox.createPreviewURL({ port: 3000 });
+console.log(preview.hostname); // sb-abc123-p3000.preview.opencomputer.dev
+```
+
+```python Python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+await sandbox.exec.run("npx create-next-app@latest /app --yes", timeout=120)
+await sandbox.exec.start("npm run dev -- --port 3000", cwd="/app")
+
+preview = await sandbox.create_preview_url(port=3000)
+print(preview["hostname"])
+```
+
+</CodeGroup>
+
+## API Reference
+
+### Create Preview URL
+
+<CodeGroup>
+
+```typescript TypeScript
+const preview = await sandbox.createPreviewURL({
+  port: 3000,
+  domain: "preview.myapp.com", // optional custom domain
+});
+```
+
+```python Python
+preview = await sandbox.create_preview_url(
+    port=3000,
+    domain="preview.myapp.com",
+)
+```
+
+</CodeGroup>
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `port` | number | Yes | Container port to expose (1–65535) |
+| `domain` | string | No | Custom domain |
+| `authConfig` | object | No | Authentication configuration |
+
+### List Preview URLs
+
+<CodeGroup>
+
+```typescript TypeScript
+const previews = await sandbox.listPreviewURLs();
+for (const p of previews) {
+  console.log(`Port ${p.port}: https://${p.hostname}`);
+}
+```
+
+```python Python
+previews = await sandbox.list_preview_urls()
+for p in previews:
+    print(f"Port {p['port']}: https://{p['hostname']}")
+```
+
+</CodeGroup>
+
+### Delete Preview URL
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.deletePreviewURL(3000);
+```
+
+```python Python
+await sandbox.delete_preview_url(3000)
+```
+
+</CodeGroup>
+
+## Custom Domains
+
+Pass a `domain` when creating a preview URL. SSL is provisioned automatically via Cloudflare. Custom domain verification is configured at the organization level through the dashboard — not through the SDK.
+
+## Persistence
+
+Preview URLs persist across hibernation and wake cycles. If you hibernate a sandbox and wake it later, the preview URLs are still active.
+
+## Multiple Ports
+
+Expose multiple services from the same sandbox:
+
+```typescript
+// Frontend
+await sandbox.createPreviewURL({ port: 3000 });
+// API server
+await sandbox.createPreviewURL({ port: 8080 });
+// Database admin
+await sandbox.createPreviewURL({ port: 5432 });
+```
+
+<Tip>
+  CLI equivalent: [`oc preview`](/cli/preview). Full reference: [TypeScript SDK](/reference/typescript-sdk#sandbox) · [Python SDK](/reference/python-sdk#sandbox) · [HTTP API](/reference/api#preview-urls).
+</Tip>

@@ -1,0 +1,62 @@
+---
+title: "Preview URLs"
+description: "Expose sandbox ports from the CLI"
+---
+
+## Exposing a Port
+
+Create a public HTTPS URL that proxies traffic to a port inside your sandbox:
+
+```bash
+oc preview create sb-abc123 --port 3000
+# → hostname: sb-abc123-p3000.preview.opencomputer.dev
+```
+
+## Sharing a Dev Server
+
+Start a server inside the sandbox, expose it, and share the URL:
+
+```bash
+# Start a dev server in the background
+oc exec sb-abc123 -- bash -c 'cd /app && npm run dev &'
+
+# Expose port 3000
+oc preview create sb-abc123 --port 3000
+
+# Get the URL
+oc preview list sb-abc123
+```
+
+## Multiple Ports
+
+Expose multiple services from the same sandbox:
+
+```bash
+oc preview create sb-abc123 --port 3000  # Frontend
+oc preview create sb-abc123 --port 8080  # API server
+
+oc preview list sb-abc123
+# PORT  HOSTNAME                                      SSL     CREATED
+# 3000  sb-abc123-p3000.preview.opencomputer.dev      active  ...
+# 8080  sb-abc123-p8080.preview.opencomputer.dev      active  ...
+```
+
+## Custom Domains
+
+Pass `--domain` to use your own domain. DNS must point to OpenComputer's ingress, and the domain must be verified in the dashboard. SSL is provisioned automatically.
+
+```bash
+oc preview create sb-abc123 --port 3000 --domain preview.myapp.com
+```
+
+## Cleanup
+
+```bash
+oc preview delete sb-abc123 3000
+```
+
+Preview URLs persist across hibernation/wake cycles — no need to re-create them.
+
+<Tip>
+  SDK usage: [Preview URLs](/sandboxes/preview-urls). Full flags: [CLI Reference](/reference/cli#oc-preview).
+</Tip>

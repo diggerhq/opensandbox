@@ -1,26 +1,22 @@
 ---
 title: "Introduction"
-description: "Cloud sandboxes dedicated to running AI agents"
+description: "Cloud sandboxes for AI agents"
 ---
 
-# OpenComputer
-
-OpenComputer is a cloud sandbox platform dedicated to running the **Claude Agent SDK** inside isolated virtual machines. Each sandbox is a full Linux environment where agents can execute commands, read and write files, and run for as long as they need.
-
-## Built for AI agents
+OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated Firecracker microVM with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
 
 <CardGroup cols={2}>
-  <Card title="Claude Agent SDK inside the sandbox" icon="robot">
-    Start a Claude agent session with `sandbox.agent.start()`. The agent runs directly inside the VM with full access to the filesystem and shell.
+  <Card title="Claude Agent SDK built in" icon="robot">
+    Claude runs inside the VM with full filesystem and shell access. Think → act → observe loop, streaming events back to your code.
   </Card>
-  <Card title="Optimised for long-running agents" icon="clock">
-    Sandboxes stay alive for hours or days. Agents can install packages, build projects, run tests, and iterate — without time pressure.
+  <Card title="Long-running" icon="clock">
+    Hours or days, not minutes. Install packages, build projects, run test suites, iterate — no cold starts between steps.
   </Card>
-  <Card title="Run agent tasks easily" icon="play">
-    Pass a prompt to `sandbox.agent.start()` and get back a stream of events — assistant messages, tool calls, and results — as the agent works.
+  <Card title="Checkpoint & fork" icon="code-branch">
+    Named snapshots you can fork from. Try five approaches in parallel from the same starting point — like git branches for VMs.
   </Card>
-  <Card title="Snapshot, restore, fork any VM" icon="code-branch">
-    Create checkpoints of a running sandbox, restore to any previous state, or fork new sandboxes from a checkpoint. Branch your agent's work like git branches.
+  <Card title="Full Linux VM" icon="server">
+    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via Firecracker — the same technology behind AWS Lambda.
   </Card>
 </CardGroup>
 
@@ -36,43 +32,65 @@ npm install @opencomputer/sdk
 pip install opencomputer-sdk
 ```
 
+```bash CLI
+# See cli/overview for platform-specific install
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+```
+
 </CodeGroup>
 
-## Quick example
+```bash
+export OPENCOMPUTER_API_KEY=your-api-key
+```
 
-```typescript
+## Quick Example
+
+<CodeGroup>
+
+```typescript TypeScript
 import { Sandbox } from "@opencomputer/sdk";
 
-const sandbox = await Sandbox.create({ template: "default" });
-
+const sandbox = await Sandbox.create();
 const session = await sandbox.agent.start({
-  prompt: "Create a hello world Express server and test it",
+  prompt: "Create a hello world Express app and test it",
   onEvent: (event) => {
-    if (event.type === "assistant") {
-      console.log(event.content);
-    }
+    if (event.type === "assistant") console.log(event.message);
   },
 });
 
-const exitCode = await session.done;
-console.log(`Agent finished with exit code: ${exitCode}`);
-
+await session.done;
 await sandbox.kill();
 ```
 
-## Next steps
+```python Python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+session = await sandbox.agent.start(
+    prompt="Create a hello world Express app and test it",
+    on_event=lambda event: print(event.data.get("message", ""))
+    if event.type == "assistant" else None,
+)
+
+await session.wait()
+await sandbox.kill()
+```
+
+</CodeGroup>
+
+## Next Steps
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Run your first agent in 5 minutes.
+    Working agent in 2 minutes
   </Card>
-  <Card title="Agents" icon="robot" href="/agents">
-    Full reference for sandbox.agent.
+  <Card title="How It Works" icon="microchip" href="/how-it-works">
+    Architecture: Firecracker VMs, hibernation, checkpoints
   </Card>
-  <Card title="Running Commands" icon="terminal" href="/running-commands">
-    Execute shell commands directly.
+  <Card title="Agents" icon="robot" href="/agents/overview">
+    Run Claude inside sandboxes
   </Card>
-  <Card title="Working with Files" icon="file" href="/working-with-files">
-    Read, write, and manage files in the sandbox.
+  <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
+    The compute primitive
   </Card>
 </CardGroup>

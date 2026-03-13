@@ -1,0 +1,168 @@
+---
+title: "Templates"
+description: "Pre-built base images for sandboxes"
+---
+
+A template is a pre-built filesystem image that sandboxes start from. Build custom templates from Dockerfiles to skip repeated setup — install your dependencies once, then create sandboxes instantly from that template.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox, Templates } from "@opencomputer/sdk";
+
+const templates = new Templates(apiUrl, apiKey);
+await templates.build("my-stack", `
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y nodejs npm
+RUN npm install -g pnpm
+WORKDIR /app
+`);
+
+// Create a sandbox with the custom template
+const sandbox = await Sandbox.create({ template: "my-stack" });
+await sandbox.exec.run("pnpm --version"); // already installed
+```
+
+```bash curl
+# Build template
+curl -X POST https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-stack",
+    "dockerfile": "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y nodejs npm\nRUN npm install -g pnpm\nWORKDIR /app"
+  }'
+
+# Create sandbox from template
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"templateID": "my-stack"}'
+```
+
+</CodeGroup>
+
+<Note>
+  `Templates` is a standalone class, not a property on Sandbox. TypeScript exports `Templates` (plural), Python exports `Template` (singular).
+</Note>
+
+<Note>
+  The Python `Template` class does not have a public constructor. Use the HTTP API for template management from Python, or use `Sandbox.create(template="my-stack")` after building the template via HTTP.
+</Note>
+
+## Default Template
+
+Sandboxes use the default template when no template is specified. It includes:
+
+- **Ubuntu 22.04**
+- **Python 3** with pip, venv, setuptools
+- **Node.js 20 LTS** with npm
+- **Build tools:** build-essential, cmake, pkg-config
+- **CLI tools:** git, git-lfs, curl, wget, jq, rsync, htop, tree
+- **Editors:** nano, vim-tiny
+- **Database:** sqlite3
+- **Networking:** openssh-client, iproute2, net-tools, dnsutils
+- **Claude Agent SDK** and claude-code (pre-installed for agent sessions)
+
+## API Reference
+
+### Build Template
+
+Templates are built from Dockerfiles. The Docker build produces a filesystem image that Firecracker boots as the VM's root disk.
+
+<CodeGroup>
+
+```typescript TypeScript
+const templates = new Templates(apiUrl, apiKey);
+const info = await templates.build("node20-pnpm", `
+FROM ubuntu:22.04
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+RUN apt-get install -y nodejs && npm install -g pnpm
+`);
+console.log(info.status); // "ready"
+```
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "node20-pnpm", "dockerfile": "FROM ubuntu:22.04\n..."}'
+```
+
+</CodeGroup>
+
+Dockerfile templates return `status: "ready"` immediately. Sandbox-snapshot templates transition `processing` → `ready`.
+
+### List Templates
+
+<CodeGroup>
+
+```typescript TypeScript
+const all = await templates.list();
+```
+
+```bash curl
+curl https://app.opencomputer.dev/api/templates \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
+
+### Get Template
+
+<CodeGroup>
+
+```typescript TypeScript
+const info = await templates.get("my-stack");
+```
+
+```bash curl
+curl https://app.opencomputer.dev/api/templates/my-stack \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
+
+### Delete Template
+
+<CodeGroup>
+
+```typescript TypeScript
+await templates.delete("my-stack");
+```
+
+```bash curl
+curl -X DELETE https://app.opencomputer.dev/api/templates/my-stack \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
+
+### Using with Sandbox.create
+
+Pass the template name when creating a sandbox:
+
+<CodeGroup>
+
+```typescript TypeScript
+const sandbox = await Sandbox.create({ template: "my-stack" });
+```
+
+```python Python
+sandbox = await Sandbox.create(template="my-stack")
+```
+
+</CodeGroup>
+
+## TemplateInfo
+
+| Field | TypeScript | Python | Description |
+| --- | --- | --- | --- |
+| Template ID | `templateID` | `template_id` | Unique identifier |
+| Name | `name` | `name` | Template name |
+| Tag | `tag` | `tag` | Image tag (default: `"latest"`) |
+| Status | `status` | `status` | `ready`, `building`, or `error` |
+
+<Tip>
+  Full reference: [TypeScript SDK](/reference/typescript-sdk#templates) · [Python SDK](/reference/python-sdk#template) · [HTTP API](/reference/api#templates).
+</Tip>

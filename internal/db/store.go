@@ -880,8 +880,23 @@ func (s *Store) CountCheckpoints(ctx context.Context, sandboxID string) (int, er
 }
 
 // DeleteCheckpoint deletes a checkpoint (only if owned by org).
+// Clears any sandbox_sessions FK references first to avoid constraint violations.
 func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpointID uuid.UUID) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Clear FK references from sandboxes forked from this checkpoint
+	_, err = tx.Exec(ctx,
+		`UPDATE sandbox_sessions SET based_on_checkpoint_id = NULL WHERE based_on_checkpoint_id = $1`,
+		checkpointID)
+	if err != nil {
+		return fmt.Errorf("clear checkpoint references: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM sandbox_checkpoints WHERE id = $1 AND org_id = $2`,
 		checkpointID, orgID)
 	if err != nil {
@@ -890,7 +905,8 @@ func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoin
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("checkpoint not found or not owned by org")
 	}
-	return nil
+
+	return tx.Commit(ctx)
 }
 
 // --- Checkpoint Patch operations ---
