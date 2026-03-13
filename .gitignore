@@ -57,3 +57,4 @@ deploy/ec2/*.pem
 *.tmp
 *.log
 delme
+deploy/azure/.dev-env-state-*

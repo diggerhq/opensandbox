@@ -15,6 +15,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
 	fc "github.com/opensandbox/opensandbox/internal/firecracker"
+	qm "github.com/opensandbox/opensandbox/internal/qemu"
 	agentpb "github.com/opensandbox/opensandbox/proto/agent"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -30,196 +31,205 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	log.Printf("opensandbox-worker: starting (id=%s, region=%s)...", cfg.WorkerID, cfg.Region)
+	log.Printf("opensandbox-worker: starting (id=%s, region=%s, backend=%s)...", cfg.WorkerID, cfg.Region, cfg.VMBackend)
 
 	ctx := context.Background()
 
-	// Initialize Firecracker-based sandbox manager
-	fcCfg := fc.Config{
-		DataDir:         cfg.DataDir,
-		KernelPath:      cfg.KernelPath,
-		ImagesDir:       cfg.ImagesDir,
-		FirecrackerBin:  cfg.FirecrackerBin,
-		DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
-		DefaultCPUs:     cfg.DefaultSandboxCPUs,
-		DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
-	}
+	var mgr sandbox.Manager
 
-	fcMgr, err := fc.NewManager(fcCfg)
-	if err != nil {
-		log.Fatalf("failed to initialize Firecracker manager: %v", err)
-	}
-	defer fcMgr.Close()
-	log.Println("opensandbox-worker: Firecracker VM manager initialized")
+	// Backend-specific exec session factory
+	var execSessionFactory func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error)
+	// Backend-specific PTY session factory
+	var ptySessionFactory func(sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error)
+	// Backend-specific autosaver syncer
+	var autosaverSyncer worker.SyncFSer
+	// Backend-specific graceful shutdown
+	var doGracefulShutdown func(checkpointStore *storage.CheckpointStore, store *db.Store)
 
-	// Clean up orphaned Firecracker processes + TAP devices BEFORE starting golden snapshot.
-	// Must run first to avoid killing the golden snapshot VM (race condition).
-	fcMgr.CleanupOrphanedProcesses()
-
-	// Prepare golden snapshot for fast default VM creation (~500ms vs ~2s cold boot)
-	go func() {
-		if err := fcMgr.PrepareGoldenSnapshot(); err != nil {
-			log.Printf("opensandbox-worker: golden snapshot preparation failed: %v (cold boot fallback active)", err)
+	switch cfg.VMBackend {
+	case "firecracker":
+		fcCfg := fc.Config{
+			DataDir:         cfg.DataDir,
+			KernelPath:      cfg.KernelPath,
+			ImagesDir:       cfg.ImagesDir,
+			FirecrackerBin:  cfg.FirecrackerBin,
+			DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
+			DefaultCPUs:     cfg.DefaultSandboxCPUs,
+			DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
 		}
-	}()
 
-	// The Firecracker manager implements sandbox.Manager
-	var mgr sandbox.Manager = fcMgr
-
-	// Initialize PTY manager using Firecracker agent gRPC
-	// Initialize exec session manager using Firecracker agent gRPC
-	execMgr := sandbox.NewAgentExecSessionManager(func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
-		agent, err := fcMgr.GetAgent(sandboxID)
+		fcMgr, err := fc.NewManager(fcCfg)
 		if err != nil {
-			return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+			log.Fatalf("failed to initialize Firecracker manager: %v", err)
 		}
+		defer fcMgr.Close()
+		log.Println("opensandbox-worker: Firecracker VM manager initialized")
 
-		agentPB := &agentpb.ExecSessionCreateRequest{
-			Command:               req.Command,
-			Args:                  req.Args,
-			Envs:                  req.Env,
-			Cwd:                   req.Cwd,
-			TimeoutSeconds:        int32(req.Timeout),
-			MaxRunAfterDisconnect: int32(req.MaxRunAfterDisconnect),
-		}
+		fcMgr.CleanupOrphanedProcesses()
 
-		sessionID, err := agent.ExecSessionCreate(context.Background(), agentPB)
-		if err != nil {
-			return nil, fmt.Errorf("create exec session in VM: %w", err)
-		}
-
-		scrollback := sandbox.NewScrollbackBuffer(0)
-		done := make(chan struct{})
-
-		// Create a pipe for stdin: writes to stdinW are forwarded to the gRPC stream
-		stdinR, stdinW := io.Pipe()
-
-		handle := &sandbox.ExecSessionHandle{
-			ID:          sessionID,
-			SandboxID:   sandboxID,
-			Command:     req.Command,
-			Args:        req.Args,
-			Running:     true,
-			StartedAt:   time.Now(),
-			Done:        done,
-			Scrollback:  scrollback,
-			StdinWriter: stdinW,
-			OnKill: func(signal int) error {
-				stdinW.Close()
-				return agent.ExecSessionKill(context.Background(), sessionID, int32(signal))
-			},
-		}
-
-		// Attach to the session to pipe output into the host-side scrollback
 		go func() {
-			defer close(done)
-			defer stdinR.Close()
-			stream, err := agent.ExecSessionAttach(context.Background())
-			if err != nil {
-				return
-			}
-			// Send first message with session_id
-			if err := stream.Send(&agentpb.ExecSessionInput{SessionId: sessionID}); err != nil {
-				return
-			}
-
-			// Forward stdin pipe to gRPC stream in a separate goroutine
-			go func() {
-				buf := make([]byte, 4096)
-				for {
-					n, err := stdinR.Read(buf)
-					if err != nil {
-						return
-					}
-					if n > 0 {
-						data := make([]byte, n)
-						copy(data, buf[:n])
-						if err := stream.Send(&agentpb.ExecSessionInput{Stdin: data}); err != nil {
-							return
-						}
-					}
-				}
-			}()
-
-			for {
-				msg, err := stream.Recv()
-				if err != nil {
-					return
-				}
-				switch msg.Type {
-				case agentpb.ExecSessionOutput_STDOUT:
-					scrollback.Write(1, msg.Data)
-				case agentpb.ExecSessionOutput_STDERR:
-					scrollback.Write(2, msg.Data)
-				case agentpb.ExecSessionOutput_EXIT:
-					exitCode := int(msg.ExitCode)
-					handle.ExitCode = &exitCode
-					handle.Running = false
-					return
-				case agentpb.ExecSessionOutput_SCROLLBACK_END:
-					// Transition from scrollback replay to live
-				}
+			if err := fcMgr.PrepareGoldenSnapshot(); err != nil {
+				log.Printf("opensandbox-worker: golden snapshot preparation failed: %v (cold boot fallback active)", err)
 			}
 		}()
 
-		return handle, nil
-	})
+		mgr = fcMgr
+		autosaverSyncer = fcMgr
+
+		execSessionFactory = func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
+			agent, err := fcMgr.GetAgent(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+			}
+			return createExecSession(agent, sandboxID, req)
+		}
+
+		ptySessionFactory = func(sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
+			agent, err := fcMgr.GetAgent(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+			}
+			vsockPath, err := fcMgr.GetVsockPath(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get vsock path for %s: %w", sandboxID, err)
+			}
+			return createPTYSessionFC(agent, vsockPath, sandboxID, req)
+		}
+
+		doGracefulShutdown = func(checkpointStore *storage.CheckpointStore, store *db.Store) {
+			if checkpointStore == nil {
+				return
+			}
+			vms, _ := mgr.List(context.Background())
+			if len(vms) == 0 {
+				return
+			}
+			log.Printf("opensandbox-worker: hibernating %d sandboxes...", len(vms))
+			shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			results := fcMgr.HibernateAll(shutCtx, checkpointStore)
+			cancel()
+			processHibernateResults(results, store, func(r interface{}) (string, string, error) {
+				hr := r.(fc.HibernateAllResult)
+				return hr.SandboxID, hr.HibernationKey, hr.Err
+			})
+			log.Println("opensandbox-worker: waiting for S3 uploads...")
+			fcMgr.WaitUploads(3 * time.Minute)
+			log.Println("opensandbox-worker: graceful shutdown complete")
+		}
+
+		// Local recovery for Firecracker
+		defer func() {
+			// Recovery is done below after DB connection
+		}()
+
+		// Wire up local recovery
+		if dbURL := getDBURL(cfg); dbURL != "" {
+			if store, err := db.NewStore(ctx, dbURL); err == nil {
+				defer store.Close()
+				recoverLocalFC(ctx, fcMgr, store, cfg)
+			}
+		}
+
+	case "qemu":
+		qmCfg := qm.Config{
+			DataDir:         cfg.DataDir,
+			KernelPath:      cfg.KernelPath,
+			ImagesDir:       cfg.ImagesDir,
+			QEMUBin:         cfg.QEMUBin,
+			DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
+			DefaultCPUs:     cfg.DefaultSandboxCPUs,
+			DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
+		}
+
+		qmMgr, err := qm.NewManager(qmCfg)
+		if err != nil {
+			log.Fatalf("failed to initialize QEMU manager: %v", err)
+		}
+		defer qmMgr.Close()
+		log.Println("opensandbox-worker: QEMU VM manager initialized")
+
+		qmMgr.CleanupOrphanedProcesses()
+
+		// Prepare golden snapshot for fast VM creation
+		if err := qmMgr.PrepareGoldenSnapshot(); err != nil {
+			log.Printf("opensandbox-worker: WARNING: golden snapshot failed, using cold boot: %v", err)
+		}
+
+		mgr = qmMgr
+		autosaverSyncer = qmMgr
+
+		execSessionFactory = func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
+			agent, err := qmMgr.GetAgent(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+			}
+			return createExecSessionQEMU(agent, sandboxID, req)
+		}
+
+		ptySessionFactory = func(sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
+			agent, err := qmMgr.GetAgent(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
+			}
+			guestCID, err := qmMgr.GetGuestCID(sandboxID)
+			if err != nil {
+				return nil, fmt.Errorf("get guest CID for %s: %w", sandboxID, err)
+			}
+			return createPTYSessionQEMU(agent, guestCID, sandboxID, req)
+		}
+
+		doGracefulShutdown = func(checkpointStore *storage.CheckpointStore, store *db.Store) {
+			if checkpointStore == nil {
+				return
+			}
+			vms, _ := mgr.List(context.Background())
+			if len(vms) == 0 {
+				return
+			}
+			log.Printf("opensandbox-worker: hibernating %d sandboxes...", len(vms))
+			shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			results := qmMgr.HibernateAll(shutCtx, checkpointStore)
+			cancel()
+			processHibernateResults(results, store, func(r interface{}) (string, string, error) {
+				hr := r.(qm.HibernateAllResult)
+				return hr.SandboxID, hr.HibernationKey, hr.Err
+			})
+			log.Println("opensandbox-worker: waiting for S3 uploads...")
+			qmMgr.WaitUploads(3 * time.Minute)
+			log.Println("opensandbox-worker: graceful shutdown complete")
+		}
+
+		// Wire up local recovery
+		if dbURL := getDBURL(cfg); dbURL != "" {
+			if store, err := db.NewStore(ctx, dbURL); err == nil {
+				defer store.Close()
+				recoverLocalQEMU(ctx, qmMgr, store, cfg)
+			}
+		}
+
+	default:
+		log.Fatalf("unknown VM backend %q (expected 'firecracker' or 'qemu')", cfg.VMBackend)
+	}
+
+	// Initialize exec session manager
+	execMgr := sandbox.NewAgentExecSessionManager(execSessionFactory)
 	defer execMgr.CloseAll()
 
-	// Initialize PTY manager using Firecracker agent gRPC
-	ptyMgr := sandbox.NewAgentPTYManager(func(sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
-		agent, err := fcMgr.GetAgent(sandboxID)
-		if err != nil {
-			return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
-		}
-		vsockPath, err := fcMgr.GetVsockPath(sandboxID)
-		if err != nil {
-			return nil, fmt.Errorf("get vsock path for %s: %w", sandboxID, err)
-		}
-
-		cols := int32(req.Cols)
-		if cols <= 0 {
-			cols = 80
-		}
-		rows := int32(req.Rows)
-		if rows <= 0 {
-			rows = 24
-		}
-
-		sessionID, dataPort, err := agent.PTYCreate(context.Background(), cols, rows, req.Shell)
-		if err != nil {
-			return nil, fmt.Errorf("create PTY in VM: %w", err)
-		}
-
-		// Connect to the PTY data stream via vsock
-		conn, err := agent.ConnectPTYData(vsockPath, dataPort)
-		if err != nil {
-			_ = agent.PTYKill(context.Background(), sessionID)
-			return nil, fmt.Errorf("connect PTY data: %w", err)
-		}
-
-		done := make(chan struct{})
-
-		return &sandbox.PTYSessionHandle{
-			ID:        sessionID,
-			SandboxID: sandboxID,
-			PTY:       conn,
-			Done:      done,
-		}, nil
-	})
+	// Initialize PTY manager
+	ptyMgr := sandbox.NewAgentPTYManager(ptySessionFactory)
 	defer ptyMgr.CloseAll()
 
 	// Initialize per-sandbox SQLite manager
 	sandboxDBMgr := sandbox.NewSandboxDBManager(cfg.DataDir)
 	defer sandboxDBMgr.Close()
 
-	// JWT issuer for validating sandbox tokens
+	// JWT issuer
 	if cfg.JWTSecret == "" {
 		log.Fatalf("OPENSANDBOX_JWT_SECRET is required for worker mode")
 	}
 	jwtIssuer := auth.NewJWTIssuer(cfg.JWTSecret)
 
-	// Initialize S3 checkpoint store for hibernation (if configured)
+	// S3 checkpoint store
 	var checkpointStore *storage.CheckpointStore
 	if cfg.S3Bucket != "" {
 		var err error
@@ -236,7 +246,6 @@ func main() {
 		}
 		log.Printf("opensandbox-worker: S3 checkpoint store configured (bucket=%s, region=%s)", cfg.S3Bucket, cfg.S3Region)
 
-		// Enable local NVMe checkpoint cache if data dir is configured
 		if cfg.DataDir != "" {
 			cacheDir := filepath.Join(cfg.DataDir, "checkpoints")
 			if err := checkpointStore.SetCacheDir(cacheDir); err != nil {
@@ -245,12 +254,9 @@ func main() {
 		}
 	}
 
-	// Initialize PostgreSQL store for checkpoint lookups (auto-wake)
+	// PostgreSQL store
 	var store *db.Store
-	dbURL := cfg.DatabaseURL
-	if dbURL == "" {
-		dbURL = os.Getenv("DATABASE_URL")
-	}
+	dbURL := getDBURL(cfg)
 	if dbURL != "" {
 		var err error
 		store, err = db.NewStore(ctx, dbURL)
@@ -260,36 +266,6 @@ func main() {
 			defer store.Close()
 			log.Println("opensandbox-worker: PostgreSQL store connected (auto-wake enabled)")
 
-			// Local NVMe recovery: scan for sandbox data left from a previous run
-			recoveries := fcMgr.RecoverLocalSandboxes()
-			if len(recoveries) > 0 {
-				snapshotCount, workspaceCount := 0, 0
-				for _, r := range recoveries {
-					session, err := store.GetSandboxSession(ctx, r.SandboxID)
-					if err != nil {
-						log.Printf("opensandbox-worker: no DB session for %s, skipping recovery", r.SandboxID)
-						continue
-					}
-					if r.HasSnapshot {
-						// Full snapshot on NVMe — create hibernation record so doWake finds local files
-						_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
-							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
-						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
-						snapshotCount++
-					} else {
-						// Workspace only — create local sentinel hibernation for cold boot
-						_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
-							"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
-						_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
-						workspaceCount++
-					}
-				}
-				if snapshotCount+workspaceCount > 0 {
-					log.Printf("opensandbox-worker: local recovery: %d with snapshot, %d workspace-only", snapshotCount, workspaceCount)
-				}
-			}
-
-			// Mark any remaining stale "running" sessions (no local data) as stopped
 			_, stopped, err := store.ReconcileWorkerSessions(ctx, cfg.WorkerID)
 			if err != nil {
 				log.Printf("opensandbox-worker: warning: session reconciliation failed: %v", err)
@@ -299,7 +275,7 @@ func main() {
 		}
 	}
 
-	// Initialize SandboxRouter for rolling timeouts, auto-wake, and command routing
+	// Sandbox router
 	sbRouter := sandbox.NewSandboxRouter(sandbox.RouterConfig{
 		Manager:         mgr,
 		CheckpointStore: checkpointStore,
@@ -310,7 +286,6 @@ func main() {
 				sandboxID, result.HibernationKey, result.SizeBytes)
 			execMgr.RemoveSessions(sandboxID)
 			if store != nil {
-				// Create hibernation record so wake-on-request can find it
 				session, err := store.GetSandboxSession(context.Background(), sandboxID)
 				if err == nil {
 					_, _ = store.CreateHibernation(context.Background(), sandboxID, session.OrgID,
@@ -330,12 +305,12 @@ func main() {
 	defer sbRouter.Close()
 	log.Println("opensandbox-worker: sandbox router initialized (rolling timeouts, auto-wake)")
 
-	// Start Prometheus metrics server on :9091
+	// Metrics
 	metricsSrv := metrics.StartMetricsServer(":9091")
 	defer metricsSrv.Close()
 	log.Println("opensandbox-worker: metrics server started on :9091")
 
-	// Start gRPC server for control plane communication
+	// gRPC server
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, store)
 	grpcAddr := ":9090"
 	log.Printf("opensandbox-worker: starting gRPC server on %s", grpcAddr)
@@ -345,14 +320,14 @@ func main() {
 		}
 	}()
 
-	// Initialize subdomain reverse proxy
+	// Subdomain proxy
 	var sbProxy *proxy.SandboxProxy
 	if cfg.SandboxDomain != "" {
 		sbProxy = proxy.New(cfg.SandboxDomain, mgr, sbRouter)
 		log.Printf("opensandbox-worker: subdomain proxy configured (*.%s)", cfg.SandboxDomain)
 	}
 
-	// Start HTTP server for direct SDK access
+	// HTTP server
 	httpServer := worker.NewHTTPServer(mgr, ptyMgr, execMgr, jwtIssuer, sandboxDBMgr, sbProxy, sbRouter, cfg.SandboxDomain)
 	httpAddr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("opensandbox-worker: starting HTTP server on %s", httpAddr)
@@ -362,7 +337,7 @@ func main() {
 		}
 	}()
 
-	// Start Redis heartbeat for control plane discovery
+	// Redis heartbeat
 	if cfg.RedisURL != "" {
 		grpcAdvertise := grpcAddr
 		if addr := os.Getenv("OPENSANDBOX_GRPC_ADVERTISE"); addr != "" {
@@ -375,7 +350,7 @@ func main() {
 		} else {
 			if machineID := worker.GetEC2InstanceID(); machineID != "" {
 				hb.SetMachineID(machineID)
-				log.Printf("opensandbox-worker: EC2 instance ID: %s", machineID)
+				log.Printf("opensandbox-worker: instance ID: %s", machineID)
 			}
 			hb.Start(func() (int, int, float64, float64) {
 				count, _ := mgr.Count(context.Background())
@@ -387,7 +362,7 @@ func main() {
 		}
 	}
 
-	// Start NATS event publisher if configured
+	// NATS
 	if cfg.NATSURL != "" {
 		pub, err := worker.NewEventPublisher(cfg.NATSURL, cfg.Region, cfg.WorkerID, sandboxDBMgr)
 		if err != nil {
@@ -404,8 +379,8 @@ func main() {
 		}
 	}
 
-	// Start periodic SyncFS to keep workspace.ext4 crash-consistent on NVMe
-	autosaver := worker.NewWorkspaceAutosaver(mgr, fcMgr, 5*time.Minute)
+	// Periodic SyncFS
+	autosaver := worker.NewWorkspaceAutosaver(mgr, autosaverSyncer, 5*time.Minute)
 	autosaver.Start()
 
 	quit := make(chan os.Signal, 1)
@@ -414,48 +389,337 @@ func main() {
 
 	log.Println("opensandbox-worker: graceful shutdown starting...")
 
-	// 1. Stop accepting new work
 	grpcServer.Stop()
 	if err := httpServer.Close(); err != nil {
 		log.Printf("error closing HTTP server: %v", err)
 	}
 
-	// Stop autosaver before hibernating
 	autosaver.Stop()
 
-	// 2. Hibernate all running sandboxes for seamless resume
-	if checkpointStore != nil {
-		vms, _ := mgr.List(context.Background())
-		if len(vms) > 0 {
-			log.Printf("opensandbox-worker: hibernating %d sandboxes...", len(vms))
-			shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			results := fcMgr.HibernateAll(shutCtx, checkpointStore)
-			cancel()
+	doGracefulShutdown(checkpointStore, store)
+}
 
-			for _, r := range results {
-				if r.Err != nil {
-					log.Printf("opensandbox-worker: hibernate failed for %s: %v", r.SandboxID, r.Err)
-					if store != nil {
-						errMsg := "hibernate failed on shutdown: " + r.Err.Error()
-						_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "stopped", &errMsg)
-					}
-					continue
-				}
-				log.Printf("opensandbox-worker: hibernated %s (key=%s)", r.SandboxID, r.HibernationKey)
-				if store != nil {
-					session, err := store.GetSandboxSession(context.Background(), r.SandboxID)
-					if err == nil {
-						_, _ = store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
-							r.HibernationKey, 0, session.Region, session.Template, session.Config)
-						_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
-					}
-				}
+// getDBURL returns the database URL from config or environment.
+func getDBURL(cfg *config.Config) string {
+	if cfg.DatabaseURL != "" {
+		return cfg.DatabaseURL
+	}
+	return os.Getenv("DATABASE_URL")
+}
+
+// createExecSession creates an exec session using a Firecracker agent client.
+func createExecSession(agent *fc.AgentClient, sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
+	agentPB := &agentpb.ExecSessionCreateRequest{
+		Command:               req.Command,
+		Args:                  req.Args,
+		Envs:                  req.Env,
+		Cwd:                   req.Cwd,
+		TimeoutSeconds:        int32(req.Timeout),
+		MaxRunAfterDisconnect: int32(req.MaxRunAfterDisconnect),
+	}
+
+	sessionID, err := agent.ExecSessionCreate(context.Background(), agentPB)
+	if err != nil {
+		return nil, fmt.Errorf("create exec session in VM: %w", err)
+	}
+
+	scrollback := sandbox.NewScrollbackBuffer(0)
+	done := make(chan struct{})
+	stdinR, stdinW := io.Pipe()
+
+	handle := &sandbox.ExecSessionHandle{
+		ID:          sessionID,
+		SandboxID:   sandboxID,
+		Command:     req.Command,
+		Args:        req.Args,
+		Running:     true,
+		StartedAt:   time.Now(),
+		Done:        done,
+		Scrollback:  scrollback,
+		StdinWriter: stdinW,
+		OnKill: func(signal int) error {
+			stdinW.Close()
+			return agent.ExecSessionKill(context.Background(), sessionID, int32(signal))
+		},
+	}
+
+	go runExecStream(agent, sessionID, stdinR, done, scrollback, handle)
+
+	return handle, nil
+}
+
+// createExecSessionQEMU creates an exec session using a QEMU agent client.
+func createExecSessionQEMU(agent *qm.AgentClient, sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
+	agentPB := &agentpb.ExecSessionCreateRequest{
+		Command:               req.Command,
+		Args:                  req.Args,
+		Envs:                  req.Env,
+		Cwd:                   req.Cwd,
+		TimeoutSeconds:        int32(req.Timeout),
+		MaxRunAfterDisconnect: int32(req.MaxRunAfterDisconnect),
+	}
+
+	sessionID, err := agent.ExecSessionCreate(context.Background(), agentPB)
+	if err != nil {
+		return nil, fmt.Errorf("create exec session in VM: %w", err)
+	}
+
+	scrollback := sandbox.NewScrollbackBuffer(0)
+	done := make(chan struct{})
+	stdinR, stdinW := io.Pipe()
+
+	handle := &sandbox.ExecSessionHandle{
+		ID:          sessionID,
+		SandboxID:   sandboxID,
+		Command:     req.Command,
+		Args:        req.Args,
+		Running:     true,
+		StartedAt:   time.Now(),
+		Done:        done,
+		Scrollback:  scrollback,
+		StdinWriter: stdinW,
+		OnKill: func(signal int) error {
+			stdinW.Close()
+			return agent.ExecSessionKill(context.Background(), sessionID, int32(signal))
+		},
+	}
+
+	go runExecStreamQEMU(agent, sessionID, stdinR, done, scrollback, handle)
+
+	return handle, nil
+}
+
+// runExecStream attaches to an exec session stream (Firecracker backend).
+func runExecStream(agent *fc.AgentClient, sessionID string, stdinR *io.PipeReader, done chan struct{}, scrollback *sandbox.ScrollbackBuffer, handle *sandbox.ExecSessionHandle) {
+	defer close(done)
+	defer stdinR.Close()
+	stream, err := agent.ExecSessionAttach(context.Background())
+	if err != nil {
+		return
+	}
+	if err := stream.Send(&agentpb.ExecSessionInput{SessionId: sessionID}); err != nil {
+		return
+	}
+	go forwardStdin(stdinR, stream)
+	consumeExecOutput(stream, scrollback, handle)
+}
+
+// runExecStreamQEMU attaches to an exec session stream (QEMU backend).
+func runExecStreamQEMU(agent *qm.AgentClient, sessionID string, stdinR *io.PipeReader, done chan struct{}, scrollback *sandbox.ScrollbackBuffer, handle *sandbox.ExecSessionHandle) {
+	defer close(done)
+	defer stdinR.Close()
+	stream, err := agent.ExecSessionAttach(context.Background())
+	if err != nil {
+		return
+	}
+	if err := stream.Send(&agentpb.ExecSessionInput{SessionId: sessionID}); err != nil {
+		return
+	}
+	go forwardStdin(stdinR, stream)
+	consumeExecOutput(stream, scrollback, handle)
+}
+
+// forwardStdin pipes stdin data to a gRPC stream.
+func forwardStdin(stdinR *io.PipeReader, stream agentpb.SandboxAgent_ExecSessionAttachClient) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := stdinR.Read(buf)
+		if err != nil {
+			return
+		}
+		if n > 0 {
+			data := make([]byte, n)
+			copy(data, buf[:n])
+			if err := stream.Send(&agentpb.ExecSessionInput{Stdin: data}); err != nil {
+				return
 			}
-
-			// 3. Wait for async S3 uploads to complete
-			log.Println("opensandbox-worker: waiting for S3 uploads...")
-			fcMgr.WaitUploads(3 * time.Minute)
-			log.Println("opensandbox-worker: graceful shutdown complete")
 		}
 	}
 }
+
+// consumeExecOutput reads output from a gRPC exec stream into a scrollback buffer.
+func consumeExecOutput(stream agentpb.SandboxAgent_ExecSessionAttachClient, scrollback *sandbox.ScrollbackBuffer, handle *sandbox.ExecSessionHandle) {
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return
+		}
+		switch msg.Type {
+		case agentpb.ExecSessionOutput_STDOUT:
+			scrollback.Write(1, msg.Data)
+		case agentpb.ExecSessionOutput_STDERR:
+			scrollback.Write(2, msg.Data)
+		case agentpb.ExecSessionOutput_EXIT:
+			exitCode := int(msg.ExitCode)
+			handle.ExitCode = &exitCode
+			handle.Running = false
+			return
+		case agentpb.ExecSessionOutput_SCROLLBACK_END:
+			// Transition from scrollback replay to live
+		}
+	}
+}
+
+// createPTYSessionFC creates a PTY session using Firecracker's vsock UDS protocol.
+func createPTYSessionFC(agent *fc.AgentClient, vsockPath, sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
+	cols := int32(req.Cols)
+	if cols <= 0 {
+		cols = 80
+	}
+	rows := int32(req.Rows)
+	if rows <= 0 {
+		rows = 24
+	}
+
+	sessionID, dataPort, err := agent.PTYCreate(context.Background(), cols, rows, req.Shell)
+	if err != nil {
+		return nil, fmt.Errorf("create PTY in VM: %w", err)
+	}
+
+	conn, err := agent.ConnectPTYData(vsockPath, dataPort)
+	if err != nil {
+		_ = agent.PTYKill(context.Background(), sessionID)
+		return nil, fmt.Errorf("connect PTY data: %w", err)
+	}
+
+	done := make(chan struct{})
+	return &sandbox.PTYSessionHandle{
+		ID:        sessionID,
+		SandboxID: sandboxID,
+		PTY:       conn,
+		Done:      done,
+	}, nil
+}
+
+// createPTYSessionQEMU creates a PTY session using AF_VSOCK (QEMU backend).
+func createPTYSessionQEMU(agent *qm.AgentClient, guestCID uint32, sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
+	cols := int32(req.Cols)
+	if cols <= 0 {
+		cols = 80
+	}
+	rows := int32(req.Rows)
+	if rows <= 0 {
+		rows = 24
+	}
+
+	sessionID, dataPort, err := agent.PTYCreate(context.Background(), cols, rows, req.Shell)
+	if err != nil {
+		return nil, fmt.Errorf("create PTY in VM: %w", err)
+	}
+
+	conn, err := agent.ConnectPTYData(guestCID, dataPort)
+	if err != nil {
+		_ = agent.PTYKill(context.Background(), sessionID)
+		return nil, fmt.Errorf("connect PTY data: %w", err)
+	}
+
+	done := make(chan struct{})
+	return &sandbox.PTYSessionHandle{
+		ID:        sessionID,
+		SandboxID: sandboxID,
+		PTY:       conn,
+		Done:      done,
+	}, nil
+}
+
+// processHibernateResults handles results from HibernateAll for both backends.
+func processHibernateResults(results interface{}, store *db.Store, extract func(interface{}) (string, string, error)) {
+	// This is intentionally generic — each backend calls it with its own result type
+	switch rs := results.(type) {
+	case []fc.HibernateAllResult:
+		for _, r := range rs {
+			if r.Err != nil {
+				log.Printf("opensandbox-worker: hibernate failed for %s: %v", r.SandboxID, r.Err)
+				if store != nil {
+					errMsg := "hibernate failed on shutdown: " + r.Err.Error()
+					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "stopped", &errMsg)
+				}
+				continue
+			}
+			log.Printf("opensandbox-worker: hibernated %s (key=%s)", r.SandboxID, r.HibernationKey)
+			if store != nil {
+				session, err := store.GetSandboxSession(context.Background(), r.SandboxID)
+				if err == nil {
+					_, _ = store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
+						r.HibernationKey, 0, session.Region, session.Template, session.Config)
+					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
+				}
+			}
+		}
+	case []qm.HibernateAllResult:
+		for _, r := range rs {
+			if r.Err != nil {
+				log.Printf("opensandbox-worker: hibernate failed for %s: %v", r.SandboxID, r.Err)
+				if store != nil {
+					errMsg := "hibernate failed on shutdown: " + r.Err.Error()
+					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "stopped", &errMsg)
+				}
+				continue
+			}
+			log.Printf("opensandbox-worker: hibernated %s (key=%s)", r.SandboxID, r.HibernationKey)
+			if store != nil {
+				session, err := store.GetSandboxSession(context.Background(), r.SandboxID)
+				if err == nil {
+					_, _ = store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
+						r.HibernationKey, 0, session.Region, session.Template, session.Config)
+					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
+				}
+			}
+		}
+	}
+}
+
+// recoverLocalFC handles local NVMe recovery for Firecracker backend.
+func recoverLocalFC(ctx context.Context, fcMgr *fc.Manager, store *db.Store, cfg *config.Config) {
+	recoveries := fcMgr.RecoverLocalSandboxes()
+	if len(recoveries) == 0 {
+		return
+	}
+	snapshotCount, workspaceCount := 0, 0
+	for _, r := range recoveries {
+		session, err := store.GetSandboxSession(ctx, r.SandboxID)
+		if err != nil {
+			log.Printf("opensandbox-worker: no DB session for %s, skipping recovery", r.SandboxID)
+			continue
+		}
+		_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
+			"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
+		_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
+		if r.HasSnapshot {
+			snapshotCount++
+		} else {
+			workspaceCount++
+		}
+	}
+	if snapshotCount+workspaceCount > 0 {
+		log.Printf("opensandbox-worker: local recovery: %d with snapshot, %d workspace-only", snapshotCount, workspaceCount)
+	}
+}
+
+// recoverLocalQEMU handles local disk recovery for QEMU backend.
+func recoverLocalQEMU(ctx context.Context, qmMgr *qm.Manager, store *db.Store, cfg *config.Config) {
+	recoveries := qmMgr.RecoverLocalSandboxes()
+	if len(recoveries) == 0 {
+		return
+	}
+	snapshotCount, workspaceCount := 0, 0
+	for _, r := range recoveries {
+		session, err := store.GetSandboxSession(ctx, r.SandboxID)
+		if err != nil {
+			log.Printf("opensandbox-worker: no DB session for %s, skipping recovery", r.SandboxID)
+			continue
+		}
+		_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
+			"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
+		_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
+		if r.HasSnapshot {
+			snapshotCount++
+		} else {
+			workspaceCount++
+		}
+	}
+	if snapshotCount+workspaceCount > 0 {
+		log.Printf("opensandbox-worker: local recovery: %d with snapshot, %d workspace-only", snapshotCount, workspaceCount)
+	}
+}
+
