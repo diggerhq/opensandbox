@@ -23,7 +23,7 @@
   "topbarCtaButton": {
     "type": "link",
     "name": "Get Started",
-    "url": "/quickstart"
+    "url": "https://app.opencomputer.dev"
   },
   "tabs": [],
   "navigation": [
