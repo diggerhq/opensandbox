@@ -1,0 +1,372 @@
+---
+title: "Templates"
+description: "Define sandbox environments programmatically with the Image builder and Snapshots"
+---
+
+Templates provide a code-first approach to defining sandbox environments. Instead of configuring images manually, you define them programmatically using the SDK.
+
+The system supports two workflows:
+
+1. **Declarative images** — build images with varying dependencies _on demand_ when creating sandboxes
+2. **Pre-built snapshots** — create and register _ready-to-use_ snapshots that can be shared across multiple sandboxes
+
+## Declarative image building
+
+Build images on-the-fly when creating sandboxes. Ideal for iterating quickly without creating separate snapshots.
+
+Declarative images are **cached by content hash** — identical manifests produce the same image. Subsequent runs reuse the cached image instantly.
+
+```typescript
+import { Sandbox, Image } from '@opencomputer/sdk';
+
+// Define an image with packages, env vars, and files
+const image = Image.base()
+  .aptInstall(['curl', 'jq'])
+  .pipInstall(['requests', 'pandas'])
+  .env({ PROJECT_ROOT: '/workspace' })
+  .workdir('/workspace');
+
+// Create a sandbox — the image is built on first run, cached after
+const sandbox = await Sandbox.create({
+  image,
+  timeout: 300,
+  onBuildLog: (log) => console.log(`build: ${log}`),
+});
+
+const result = await sandbox.commands.run('which curl');
+console.log(result.exitCode); // 0
+```
+
+### `Sandbox.create({ image, onBuildLog? })`
+
+When you pass an `image` to `Sandbox.create()`, the server:
+
+1. Hashes the image manifest to compute a **cache key**
+2. If cached, creates the sandbox from the existing checkpoint instantly
+3. If not cached, boots a build sandbox, executes each step, checkpoints the result, then creates your sandbox from it
+
+<ParamField body="image" type="Image" optional>
+  A declarative image definition built with the `Image` builder.
+</ParamField>
+<ParamField body="onBuildLog" type="(log: string) => void" optional>
+  Callback for streaming build log messages via SSE. Receives step-by-step progress updates during image building.
+</ParamField>
+
+## Creating pre-built snapshots
+
+Create named snapshots that persist permanently and can be shared across sandboxes. Snapshots are visible in the dashboard and don't need to be rebuilt.
+
+```typescript
+import { Image, Snapshots } from '@opencomputer/sdk';
+
+const snapshots = new Snapshots();
+
+// Define the image
+const image = Image.base()
+  .aptInstall(['python3-pip'])
+  .pipInstall(['pandas', 'numpy', 'scikit-learn'])
+  .workdir('/workspace');
+
+// Create a named snapshot with build log streaming
+await snapshots.create({
+  name: 'data-science',
+  image,
+  onBuildLogs: (log) => console.log(`build: ${log}`),
+});
+
+// Now create sandboxes from the snapshot — instant, no build step
+const sandbox = await Sandbox.create({ snapshot: 'data-science' });
+```
+
+### `new Snapshots(opts?)`
+
+<ParamField body="opts" type="SnapshotOpts" optional>
+  <Expandable title="properties">
+    <ParamField body="apiKey" type="string" optional>
+      API key. Falls back to `OPENCOMPUTER_API_KEY` env var.
+    </ParamField>
+    <ParamField body="apiUrl" type="string" optional>
+      API base URL. Falls back to `OPENCOMPUTER_API_URL` env var.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### `snapshots.create(opts)`
+
+Creates a pre-built snapshot from a declarative image.
+
+<ParamField body="opts" type="CreateSnapshotOpts" required>
+  <Expandable title="properties">
+    <ParamField body="name" type="string" required>
+      Unique name for this snapshot.
+    </ParamField>
+    <ParamField body="image" type="Image" required>
+      Declarative image definition.
+    </ParamField>
+    <ParamField body="onBuildLogs" type="(log: string) => void" optional>
+      Callback for streaming build log messages.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<SnapshotInfo>`
+
+### `snapshots.list()`
+
+Returns all named snapshots for the current organization.
+
+```typescript
+const list = await snapshots.list();
+for (const s of list) {
+  console.log(`${s.name} — ${s.status}`);
+}
+```
+
+**Returns:** `Promise<SnapshotInfo[]>`
+
+### `snapshots.get(name)`
+
+Gets a snapshot by name.
+
+```typescript
+const snapshot = await snapshots.get('data-science');
+console.log(snapshot.status); // "ready"
+```
+
+<ParamField body="name" type="string" required>
+  Snapshot name.
+</ParamField>
+
+**Returns:** `Promise<SnapshotInfo>`
+
+### `snapshots.delete(name)`
+
+Deletes a named snapshot. Existing sandboxes created from it are not affected.
+
+```typescript
+await snapshots.delete('data-science');
+```
+
+<ParamField body="name" type="string" required>
+  Snapshot name to delete.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+### `Sandbox.create({ snapshot })`
+
+Create a sandbox from a pre-built snapshot by name.
+
+```typescript
+const sandbox = await Sandbox.create({ snapshot: 'data-science' });
+```
+
+<ParamField body="snapshot" type="string" optional>
+  Name of a pre-built snapshot to create the sandbox from.
+</ParamField>
+
+**Returns:** `Promise<Sandbox>`
+
+---
+
+## Image configuration
+
+The `Image` class provides a fluent, immutable API for defining sandbox environments. Each method returns a **new** `Image` instance — the original is never modified.
+
+### `Image.base()`
+
+Creates a new image starting from the default OpenSandbox environment (Ubuntu 22.04 with Python, Node.js, build tools, and common utilities).
+
+```typescript
+const image = Image.base();
+```
+
+### `image.aptInstall(packages)`
+
+Install system packages via `apt-get`.
+
+```typescript
+const image = Image.base().aptInstall(['curl', 'git', 'jq']);
+```
+
+<ParamField body="packages" type="string[]" required>
+  List of apt package names to install.
+</ParamField>
+
+### `image.pipInstall(packages)`
+
+Install Python packages via `pip`.
+
+```typescript
+const image = Image.base().pipInstall(['requests', 'pandas', 'numpy']);
+```
+
+<ParamField body="packages" type="string[]" required>
+  List of pip package names to install.
+</ParamField>
+
+### `image.runCommands(...commands)`
+
+Run one or more shell commands during image build.
+
+```typescript
+const image = Image.base().runCommands(
+  'mkdir -p /workspace/project',
+  'echo "Hello" > /workspace/welcome.txt',
+);
+```
+
+<ParamField body="commands" type="string[]" required>
+  Shell commands to execute sequentially.
+</ParamField>
+
+### `image.env(vars)`
+
+Set environment variables. Written to `/etc/environment` so they're available in all sessions.
+
+```typescript
+const image = Image.base().env({
+  PROJECT_ROOT: '/workspace',
+  NODE_ENV: 'production',
+});
+```
+
+<ParamField body="vars" type="Record<string, string>" required>
+  Key-value pairs of environment variables.
+</ParamField>
+
+### `image.workdir(path)`
+
+Set the default working directory.
+
+```typescript
+const image = Image.base().workdir('/workspace/project');
+```
+
+<ParamField body="path" type="string" required>
+  Absolute path for the working directory.
+</ParamField>
+
+### `image.addFile(remotePath, content)`
+
+Embed a file with inline content into the image.
+
+```typescript
+const image = Image.base()
+  .addFile('/workspace/config.json', '{"env": "production"}')
+  .addFile('/workspace/setup.sh', '#!/bin/bash\necho "Ready!"');
+```
+
+<ParamField body="remotePath" type="string" required>
+  Absolute path inside the sandbox.
+</ParamField>
+<ParamField body="content" type="string" required>
+  String content of the file.
+</ParamField>
+
+### `image.addLocalFile(localPath, remotePath)`
+
+Read a file from the local machine and embed it into the image.
+
+```typescript
+const image = Image.base()
+  .addLocalFile('package.json', '/workspace/package.json');
+```
+
+<ParamField body="localPath" type="string" required>
+  Path to the file on the local machine.
+</ParamField>
+<ParamField body="remotePath" type="string" required>
+  Absolute path inside the sandbox.
+</ParamField>
+
+### `image.addLocalDir(localPath, remotePath)`
+
+Recursively read a local directory and embed all files into the image.
+
+```typescript
+const image = Image.base()
+  .addLocalDir('src', '/workspace/src');
+```
+
+<ParamField body="localPath" type="string" required>
+  Path to the directory on the local machine.
+</ParamField>
+<ParamField body="remotePath" type="string" required>
+  Absolute path inside the sandbox where the directory will be created.
+</ParamField>
+
+### `image.toJSON()`
+
+Returns the image manifest as a plain object.
+
+**Returns:** `ImageManifest`
+
+### `image.cacheKey()`
+
+Computes a deterministic SHA-256 hash of the manifest for cache lookups.
+
+**Returns:** `string`
+
+---
+
+## SnapshotInfo
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | Unique snapshot identifier |
+| `name` | `string` | Snapshot name |
+| `status` | `string` | `"building"`, `"ready"`, or `"failed"` |
+| `contentHash` | `string` | SHA-256 hash of the image manifest |
+| `checkpointId` | `string` | Linked checkpoint ID |
+| `manifest` | `object` | The declarative image manifest |
+| `createdAt` | `string` | ISO 8601 creation timestamp |
+| `lastUsedAt` | `string` | ISO 8601 last usage timestamp |
+
+---
+
+## Complete example
+
+```typescript
+import { Sandbox, Image, Snapshots } from '@opencomputer/sdk';
+
+// ── Pattern 1: On-demand image ──
+const devImage = Image.base()
+  .aptInstall(['curl', 'jq'])
+  .pipInstall(['requests'])
+  .addFile('/workspace/config.json', '{"debug": true}')
+  .env({ APP_ENV: 'development' })
+  .workdir('/workspace');
+
+const sandbox = await Sandbox.create({
+  image: devImage,
+  onBuildLog: console.log,
+});
+
+await sandbox.commands.run('curl --version');
+await sandbox.kill();
+
+// ── Pattern 2: Pre-built snapshot ──
+const snapshots = new Snapshots();
+
+const prodImage = Image.base()
+  .aptInstall(['python3-pip', 'git'])
+  .pipInstall(['pandas', 'numpy', 'scikit-learn'])
+  .runCommands('mkdir -p /workspace/data')
+  .env({ APP_ENV: 'production' })
+  .workdir('/workspace');
+
+await snapshots.create({
+  name: 'ml-env',
+  image: prodImage,
+  onBuildLogs: console.log,
+});
+
+// Instant — no build, just boot from snapshot
+const mlSandbox = await Sandbox.create({ snapshot: 'ml-env' });
+await mlSandbox.commands.run('python3 -c "import pandas; print(pandas.__version__)"');
+await mlSandbox.kill();
+
+// Cleanup
+await snapshots.delete('ml-env');
+```

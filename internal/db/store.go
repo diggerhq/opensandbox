@@ -85,7 +85,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{11, "migrations/011_rename_hibernation.up.sql"},
 		{12, "migrations/012_checkpoints.up.sql"},
 		{13, "migrations/013_checkpoint_patches.up.sql"},
-		{14, "migrations/014_projects.up.sql"},
+		{14, "migrations/014_image_cache.up.sql"},
+		{15, "migrations/015_projects.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -1168,6 +1169,133 @@ func (s *Store) DeleteTemplateForOrg(ctx context.Context, id uuid.UUID, orgID uu
 	}
 	if result.RowsAffected() == 0 {
 		return fmt.Errorf("template not found or not owned by this org")
+	}
+	return nil
+}
+
+// --- Image Cache operations ---
+
+// ImageCache represents a cached image build (content-hashed manifest → checkpoint).
+type ImageCache struct {
+	ID           uuid.UUID       `json:"id"`
+	OrgID        uuid.UUID       `json:"orgId"`
+	ContentHash  string          `json:"contentHash"`
+	CheckpointID *uuid.UUID      `json:"checkpointId,omitempty"`
+	Name         *string         `json:"name,omitempty"` // nil for auto-cached, set for named snapshots
+	Manifest     json.RawMessage `json:"manifest"`
+	Status       string          `json:"status"` // building | ready | failed
+	CreatedAt    time.Time       `json:"createdAt"`
+	LastUsedAt   time.Time       `json:"lastUsedAt"`
+}
+
+// GetImageCacheByHash looks up a cached image by org + content hash.
+func (s *Store) GetImageCacheByHash(ctx context.Context, orgID uuid.UUID, contentHash string) (*ImageCache, error) {
+	ic := &ImageCache{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, content_hash, checkpoint_id, name, manifest, status, created_at, last_used_at
+		 FROM image_cache WHERE org_id = $1 AND content_hash = $2`,
+		orgID, contentHash,
+	).Scan(&ic.ID, &ic.OrgID, &ic.ContentHash, &ic.CheckpointID, &ic.Name, &ic.Manifest, &ic.Status, &ic.CreatedAt, &ic.LastUsedAt)
+	if err != nil {
+		return nil, fmt.Errorf("image cache not found: %w", err)
+	}
+	return ic, nil
+}
+
+// GetImageCacheByName looks up a named snapshot by org + name.
+func (s *Store) GetImageCacheByName(ctx context.Context, orgID uuid.UUID, name string) (*ImageCache, error) {
+	ic := &ImageCache{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, content_hash, checkpoint_id, name, manifest, status, created_at, last_used_at
+		 FROM image_cache WHERE org_id = $1 AND name = $2`,
+		orgID, name,
+	).Scan(&ic.ID, &ic.OrgID, &ic.ContentHash, &ic.CheckpointID, &ic.Name, &ic.Manifest, &ic.Status, &ic.CreatedAt, &ic.LastUsedAt)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot %q not found: %w", name, err)
+	}
+	return ic, nil
+}
+
+// CreateImageCache inserts a new image cache record.
+func (s *Store) CreateImageCache(ctx context.Context, ic *ImageCache) error {
+	return s.pool.QueryRow(ctx,
+		`INSERT INTO image_cache (id, org_id, content_hash, checkpoint_id, name, manifest, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 RETURNING created_at, last_used_at`,
+		ic.ID, ic.OrgID, ic.ContentHash, ic.CheckpointID, ic.Name, ic.Manifest, ic.Status,
+	).Scan(&ic.CreatedAt, &ic.LastUsedAt)
+}
+
+// SetImageCacheReady marks an image cache entry as ready with its checkpoint ID.
+func (s *Store) SetImageCacheReady(ctx context.Context, id uuid.UUID, checkpointID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE image_cache SET status = 'ready', checkpoint_id = $2, last_used_at = now() WHERE id = $1`,
+		id, checkpointID)
+	return err
+}
+
+// SetImageCacheFailed marks an image cache entry as failed.
+func (s *Store) SetImageCacheFailed(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE image_cache SET status = 'failed' WHERE id = $1`, id)
+	return err
+}
+
+// TouchImageCacheUsage updates the last_used_at timestamp.
+func (s *Store) TouchImageCacheUsage(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE image_cache SET last_used_at = now() WHERE id = $1`, id)
+	return err
+}
+
+// ListImageCacheByOrg returns all image cache entries for an org, newest first.
+func (s *Store) ListImageCacheByOrg(ctx context.Context, orgID uuid.UUID, namedOnly bool) ([]ImageCache, error) {
+	query := `SELECT id, org_id, content_hash, checkpoint_id, name, manifest, status, created_at, last_used_at
+		 FROM image_cache WHERE org_id = $1`
+	if namedOnly {
+		query += ` AND name IS NOT NULL`
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := s.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []ImageCache
+	for rows.Next() {
+		var ic ImageCache
+		if err := rows.Scan(&ic.ID, &ic.OrgID, &ic.ContentHash, &ic.CheckpointID, &ic.Name, &ic.Manifest, &ic.Status, &ic.CreatedAt, &ic.LastUsedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, ic)
+	}
+	return results, rows.Err()
+}
+
+// DeleteImageCache deletes an image cache entry by ID (org-scoped).
+func (s *Store) DeleteImageCache(ctx context.Context, orgID uuid.UUID, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM image_cache WHERE id = $1 AND org_id = $2`, id, orgID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("image cache entry not found or not owned by org")
+	}
+	return nil
+}
+
+// DeleteImageCacheByName deletes a named snapshot by org + name.
+func (s *Store) DeleteImageCacheByName(ctx context.Context, orgID uuid.UUID, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM image_cache WHERE org_id = $1 AND name = $2`, orgID, name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("snapshot %q not found", name)
 	}
 	return nil
 }

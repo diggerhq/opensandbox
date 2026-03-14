@@ -10,7 +10,7 @@ pip install opencomputer-sdk
 ```
 
 ```python
-from opencomputer import Sandbox, Template
+from opencomputer import Sandbox, Image, Snapshots
 ```
 
 ---
@@ -31,6 +31,9 @@ Create a new sandbox.
 | `api_url` | str | env var | API URL |
 | `envs` | dict[str, str] | None | Environment variables |
 | `metadata` | dict[str, str] | None | Arbitrary metadata |
+| `image` | Image | None | Declarative image definition (see [Image](#image)) |
+| `snapshot` | str | None | Name of a pre-built snapshot |
+| `on_build_log` | `Callable[[str], None]` | None | Build log callback (when using `image`) |
 
 ```python
 sandbox = await Sandbox.create(template="my-stack", timeout=600)
@@ -428,41 +431,103 @@ Create an interactive terminal session.
 
 ---
 
-## Template
+## Image
 
-`Template` is a standalone class (singular, not `Templates`).
+Fluent, immutable builder for declarative sandbox images. Each method returns a new `Image` instance.
 
-<Warning>
-  The Python SDK's `Template` class does not expose a public constructor. Template management is available via the instance methods below (accessed internally), but for direct template operations from Python, use the [HTTP API](/reference/api#templates) instead.
-</Warning>
+### `Image.base(): Image`
 
-### Instance Methods
-
-If you have a `Template` instance (e.g., obtained internally by the SDK):
-
-#### `await template.build(name, dockerfile): TemplateInfo`
-
-Build a template from a Dockerfile string.
-
-#### `await template.list(): list[TemplateInfo]`
-
-List all templates.
-
-#### `await template.get(name): TemplateInfo`
-
-Get a template by name.
-
-#### `await template.delete(name): None`
-
-Delete a template.
-
-### TemplateInfo
+Start from the default OpenSandbox environment (Ubuntu 22.04, Python, Node.js, build tools).
 
 ```python
-@dataclass
-class TemplateInfo:
-    template_id: str
-    name: str
-    tag: str
-    status: str  # "ready" | "building" | "error"
+from opencomputer import Image
+
+image = (
+    Image.base()
+    .apt_install(["curl", "jq"])
+    .pip_install(["requests", "pandas"])
+    .env({"PROJECT_ROOT": "/workspace"})
+    .workdir("/workspace")
+)
+```
+
+### Builder Methods
+
+| Method | Parameters | Description |
+| --- | --- | --- |
+| `apt_install(packages)` | `list[str]` | Install system packages via apt-get |
+| `pip_install(packages)` | `list[str]` | Install Python packages via pip |
+| `run_commands(*cmds)` | `str (variadic)` | Run shell commands during build |
+| `env(vars)` | `dict[str, str]` | Set environment variables |
+| `workdir(path)` | `str` | Set default working directory |
+| `add_file(remote_path, content)` | `str, str` | Embed a file with inline content |
+| `add_local_file(local_path, remote_path)` | `str, str` | Read a local file into the image |
+| `add_local_dir(local_path, remote_path)` | `str, str` | Read a local directory into the image |
+
+### `image.to_dict(): dict`
+
+Returns the image manifest as a plain dict.
+
+### `image.cache_key(): str`
+
+Computes a deterministic SHA-256 hash of the manifest for cache lookups.
+
+---
+
+## Snapshots
+
+Standalone class — not a property on Sandbox.
+
+### `Snapshots(api_key=..., api_url=...)`
+
+```python
+from opencomputer import Snapshots
+
+snapshots = Snapshots()
+# or with explicit config:
+snapshots = Snapshots(api_key="...", api_url="...")
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `api_key` | str | API key (falls back to `OPENCOMPUTER_API_KEY` env var) |
+| `api_url` | str | API URL (falls back to `OPENCOMPUTER_API_URL` env var) |
+
+### `await snapshots.create(name, image, on_build_logs=None): dict`
+
+Create a pre-built snapshot from a declarative image.
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | str | Yes | Unique snapshot name |
+| `image` | Image | Yes | Declarative image definition |
+| `on_build_logs` | `Callable[[str], None]` | No | Build log streaming callback |
+
+### `await snapshots.list(): list[dict]`
+
+List all snapshots for the current organization.
+
+### `await snapshots.get(name): dict`
+
+Get a snapshot by name.
+
+### `await snapshots.delete(name): None`
+
+Delete a snapshot. Existing sandboxes created from it are not affected.
+
+### SnapshotInfo
+
+Snapshot methods return dicts with these fields:
+
+```python
+{
+    "id": str,           # Unique snapshot identifier
+    "name": str,         # Snapshot name
+    "status": str,       # "building" | "ready" | "failed"
+    "contentHash": str,  # SHA-256 hash of the image manifest
+    "checkpointId": str, # Linked checkpoint ID
+    "manifest": dict,    # The declarative image manifest
+    "createdAt": str,    # ISO 8601 creation timestamp
+    "lastUsedAt": str,   # ISO 8601 last usage timestamp
+}
 ```

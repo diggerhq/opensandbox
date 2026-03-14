@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getSessionDetail, getSessionStats, saveAsTemplate } from '../api/client'
+import { useQuery } from '@tanstack/react-query'
+import { getSessionDetail, getSessionStats } from '../api/client'
 import Terminal from '../components/Terminal'
 
 function StatusBadge({ status }: { status: string }) {
@@ -63,23 +63,10 @@ export default function SessionDetail() {
   const [showTerminal, setShowTerminal] = useState(false)
   const [showInternal, setShowInternal] = useState(false)
 
-  const queryClient = useQueryClient()
-  const [showSaveTemplate, setShowSaveTemplate] = useState(false)
-  const [templateName, setTemplateName] = useState('')
-
   const { data: session, isLoading } = useQuery({
     queryKey: ['session-detail', sandboxId],
     queryFn: () => getSessionDetail(sandboxId!),
     enabled: !!sandboxId,
-  })
-
-  const saveTemplateMutation = useMutation({
-    mutationFn: () => saveAsTemplate(sandboxId!, templateName),
-    onSuccess: () => {
-      setShowSaveTemplate(false)
-      setTemplateName('')
-      queryClient.invalidateQueries({ queryKey: ['templates'] })
-    },
   })
 
   const { data: stats } = useQuery({
@@ -158,17 +145,6 @@ export default function SessionDetail() {
                   </svg>
                   Terminal
                 </button>
-                <button
-                  className="btn-ghost"
-                  onClick={() => setShowSaveTemplate(true)}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                    <polyline points="17 21 17 13 7 13 7 21" />
-                    <polyline points="7 3 7 8 15 8" />
-                  </svg>
-                  Save as Template
-                </button>
               </>
             )}
           </div>
@@ -179,58 +155,6 @@ export default function SessionDetail() {
       {showTerminal && session.status === 'running' && (
         <div className="glass-card animate-in" style={{ padding: 20, marginBottom: 16 }}>
           <Terminal sandboxId={sandboxId!} onClose={() => setShowTerminal(false)} />
-        </div>
-      )}
-
-      {/* Save as Template modal */}
-      {showSaveTemplate && (
-        <div className="glass-card animate-in" style={{ padding: 22, marginBottom: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 14 }}>
-            Save as Template
-          </div>
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
-              Template Name
-            </label>
-            <input
-              type="text"
-              value={templateName}
-              onChange={e => setTemplateName(e.target.value)}
-              placeholder="e.g. my-dev-environment"
-              className="input"
-              autoFocus
-            />
-          </div>
-          {saveTemplateMutation.isError && (
-            <div style={{
-              color: 'var(--accent-rose)',
-              fontSize: 12,
-              marginBottom: 12,
-              padding: '8px 12px',
-              background: 'rgba(244, 63, 94, 0.06)',
-              borderRadius: 'var(--radius-sm)',
-              border: '1px solid rgba(244, 63, 94, 0.15)',
-            }}>
-              {saveTemplateMutation.error?.message || 'Failed to save template'}
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              className="btn-primary"
-              onClick={() => saveTemplateMutation.mutate()}
-              disabled={saveTemplateMutation.isPending || !templateName.trim()}
-            >
-              {saveTemplateMutation.isPending ? 'Saving...' : 'Save Template'}
-            </button>
-            <button className="btn-ghost" onClick={() => { setShowSaveTemplate(false); setTemplateName('') }}>
-              Cancel
-            </button>
-          </div>
-          {saveTemplateMutation.isPending && (
-            <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-tertiary)' }}>
-              Snapshotting sandbox filesystem. This may take a moment...
-            </div>
-          )}
         </div>
       )}
 

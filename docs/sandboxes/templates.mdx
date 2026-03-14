@@ -1,58 +1,227 @@
 ---
 title: "Templates"
-description: "Pre-built base images for sandboxes"
+description: "Define sandbox environments programmatically with the Image builder and Snapshots"
 ---
 
-A template is a pre-built filesystem image that sandboxes start from. Build custom templates from Dockerfiles to skip repeated setup — install your dependencies once, then create sandboxes instantly from that template.
+Templates provide a code-first approach to defining sandbox environments. Instead of configuring images manually, you define them programmatically using the SDK.
+
+The system supports two workflows:
+
+1. **Declarative images** — build images with varying dependencies _on demand_ when creating sandboxes
+2. **Pre-built snapshots** — create and register _ready-to-use_ snapshots that can be shared across multiple sandboxes
+
+## Declarative image building
+
+Build images on-the-fly when creating sandboxes. Ideal for iterating quickly without creating separate snapshots.
+
+Declarative images are **cached by content hash** — identical manifests produce the same image. Subsequent runs reuse the cached image instantly.
 
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox, Templates } from "@opencomputer/sdk";
+import { Sandbox, Image } from '@opencomputer/sdk';
 
-const templates = new Templates(apiUrl, apiKey);
-await templates.build("my-stack", `
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y nodejs npm
-RUN npm install -g pnpm
-WORKDIR /app
-`);
+// Define an image with packages, env vars, and files
+const image = Image.base()
+  .aptInstall(['curl', 'jq'])
+  .pipInstall(['requests', 'pandas'])
+  .env({ PROJECT_ROOT: '/workspace' })
+  .workdir('/workspace');
 
-// Create a sandbox with the custom template
-const sandbox = await Sandbox.create({ template: "my-stack" });
-await sandbox.exec.run("pnpm --version"); // already installed
+// Create a sandbox — the image is built on first run, cached after
+const sandbox = await Sandbox.create({
+  image,
+  timeout: 300,
+  onBuildLog: (log) => console.log(`build: ${log}`),
+});
+
+const result = await sandbox.exec.run('which curl');
+console.log(result.exitCode); // 0
+```
+
+```python Python
+from opencomputer import Sandbox, Image
+
+# Define an image with packages, env vars, and files
+image = (
+    Image.base()
+    .apt_install(["curl", "jq"])
+    .pip_install(["requests", "pandas"])
+    .env({"PROJECT_ROOT": "/workspace"})
+    .workdir("/workspace")
+)
+
+# Create a sandbox — the image is built on first run, cached after
+sandbox = await Sandbox.create(
+    image=image,
+    timeout=300,
+    on_build_log=lambda log: print(f"build: {log}"),
+)
+
+result = await sandbox.exec.run("which curl")
+print(result.exit_code)  # 0
 ```
 
 ```bash curl
-# Build template
-curl -X POST https://app.opencomputer.dev/api/templates \
-  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "my-stack",
-    "dockerfile": "FROM ubuntu:22.04\nRUN apt-get update && apt-get install -y nodejs npm\nRUN npm install -g pnpm\nWORKDIR /app"
-  }'
-
-# Create sandbox from template
 curl -X POST https://app.opencomputer.dev/api/sandboxes \
   -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"templateID": "my-stack"}'
+  -d '{
+    "image": {
+      "steps": [
+        {"type": "apt_install", "packages": ["curl", "jq"]},
+        {"type": "pip_install", "packages": ["requests", "pandas"]},
+        {"type": "env", "vars": {"PROJECT_ROOT": "/workspace"}},
+        {"type": "workdir", "path": "/workspace"}
+      ]
+    },
+    "timeout": 300
+  }'
 ```
 
 </CodeGroup>
 
-<Note>
-  `Templates` is a standalone class, not a property on Sandbox. TypeScript exports `Templates` (plural), Python exports `Template` (singular).
-</Note>
+When you pass an `image` to `Sandbox.create()`, the server:
 
-<Note>
-  The Python `Template` class does not have a public constructor. Use the HTTP API for template management from Python, or use `Sandbox.create(template="my-stack")` after building the template via HTTP.
-</Note>
+1. Hashes the image manifest to compute a **cache key**
+2. If cached, creates the sandbox from the existing checkpoint instantly
+3. If not cached, boots a build sandbox, executes each step, checkpoints the result, then creates your sandbox from it
 
-## Default Template
+## Creating pre-built snapshots
 
-Sandboxes use the default template when no template is specified. It includes:
+Create named snapshots that persist permanently and can be shared across sandboxes. Snapshots are visible in the dashboard and don't need to be rebuilt.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Image, Snapshots } from '@opencomputer/sdk';
+
+const snapshots = new Snapshots();
+
+// Define the image
+const image = Image.base()
+  .aptInstall(['python3-pip'])
+  .pipInstall(['pandas', 'numpy', 'scikit-learn'])
+  .workdir('/workspace');
+
+// Create a named snapshot with build log streaming
+await snapshots.create({
+  name: 'data-science',
+  image,
+  onBuildLogs: (log) => console.log(`build: ${log}`),
+});
+
+// Now create sandboxes from the snapshot — instant, no build step
+const sandbox = await Sandbox.create({ snapshot: 'data-science' });
+```
+
+```python Python
+from opencomputer import Image, Snapshots
+
+snapshots = Snapshots()
+
+# Define the image
+image = (
+    Image.base()
+    .apt_install(["python3-pip"])
+    .pip_install(["pandas", "numpy", "scikit-learn"])
+    .workdir("/workspace")
+)
+
+# Create a named snapshot with build log streaming
+await snapshots.create(
+    name="data-science",
+    image=image,
+    on_build_logs=lambda log: print(f"build: {log}"),
+)
+
+# Now create sandboxes from the snapshot — instant, no build step
+sandbox = await Sandbox.create(snapshot="data-science")
+```
+
+```bash curl
+# Create a named snapshot
+curl -X POST https://app.opencomputer.dev/api/snapshots \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "data-science",
+    "image": {
+      "steps": [
+        {"type": "apt_install", "packages": ["python3-pip"]},
+        {"type": "pip_install", "packages": ["pandas", "numpy", "scikit-learn"]},
+        {"type": "workdir", "path": "/workspace"}
+      ]
+    }
+  }'
+
+# Create sandbox from the snapshot — instant
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"snapshot": "data-science"}'
+```
+
+</CodeGroup>
+
+### Managing snapshots
+
+<CodeGroup>
+
+```typescript TypeScript
+const snapshots = new Snapshots();
+
+// List all snapshots
+const list = await snapshots.list();
+for (const s of list) {
+  console.log(`${s.name} — ${s.status}`);
+}
+
+// Get a specific snapshot
+const snapshot = await snapshots.get('data-science');
+console.log(snapshot.status); // "ready"
+
+// Delete a snapshot
+await snapshots.delete('data-science');
+```
+
+```python Python
+snapshots = Snapshots()
+
+# List all snapshots
+snapshot_list = await snapshots.list()
+for s in snapshot_list:
+    print(f"{s['name']} — {s['status']}")
+
+# Get a specific snapshot
+snapshot = await snapshots.get("data-science")
+print(snapshot["status"])  # "ready"
+
+# Delete a snapshot
+await snapshots.delete("data-science")
+```
+
+```bash curl
+# List all snapshots
+curl https://app.opencomputer.dev/api/snapshots \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+
+# Get a specific snapshot
+curl https://app.opencomputer.dev/api/snapshots/data-science \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+
+# Delete a snapshot
+curl -X DELETE https://app.opencomputer.dev/api/snapshots/data-science \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+</CodeGroup>
+
+---
+
+## Default template
+
+Sandboxes use the default template when no image or snapshot is specified. It includes:
 
 - **Ubuntu 22.04**
 - **Python 3** with pip, venv, setuptools
@@ -64,105 +233,39 @@ Sandboxes use the default template when no template is specified. It includes:
 - **Networking:** openssh-client, iproute2, net-tools, dnsutils
 - **Claude Agent SDK** and claude-code (pre-installed for agent sessions)
 
-## API Reference
+---
 
-### Build Template
+## Image configuration
 
-Templates are built from Dockerfiles. The Docker build produces a filesystem image that Firecracker boots as the VM's root disk.
+The `Image` class provides a fluent, immutable API for defining sandbox environments. Each method returns a **new** `Image` instance — the original is never modified.
 
-<CodeGroup>
+| Method | Description |
+| --- | --- |
+| `Image.base()` | Start from the default OpenSandbox environment |
+| `.aptInstall(packages)` / `.apt_install(packages)` | Install system packages via apt-get |
+| `.pipInstall(packages)` / `.pip_install(packages)` | Install Python packages via pip |
+| `.runCommands(...cmds)` / `.run_commands(*cmds)` | Run shell commands during build |
+| `.env(vars)` | Set environment variables (written to `/etc/environment`) |
+| `.workdir(path)` | Set default working directory |
+| `.addFile(path, content)` / `.add_file(path, content)` | Embed a file with inline content |
+| `.addLocalFile(local, remote)` / `.add_local_file(local, remote)` | Read a local file into the image |
+| `.addLocalDir(local, remote)` / `.add_local_dir(local, remote)` | Read a local directory into the image |
+| `.toJSON()` / `.to_dict()` | Return the image manifest |
+| `.cacheKey()` / `.cache_key()` | Compute SHA-256 content hash |
 
-```typescript TypeScript
-const templates = new Templates(apiUrl, apiKey);
-const info = await templates.build("node20-pnpm", `
-FROM ubuntu:22.04
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-RUN apt-get install -y nodejs && npm install -g pnpm
-`);
-console.log(info.status); // "ready"
-```
+## SnapshotInfo
 
-```bash curl
-curl -X POST https://app.opencomputer.dev/api/templates \
-  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "node20-pnpm", "dockerfile": "FROM ubuntu:22.04\n..."}'
-```
-
-</CodeGroup>
-
-Dockerfile templates return `status: "ready"` immediately. Sandbox-snapshot templates transition `processing` → `ready`.
-
-### List Templates
-
-<CodeGroup>
-
-```typescript TypeScript
-const all = await templates.list();
-```
-
-```bash curl
-curl https://app.opencomputer.dev/api/templates \
-  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
-```
-
-</CodeGroup>
-
-### Get Template
-
-<CodeGroup>
-
-```typescript TypeScript
-const info = await templates.get("my-stack");
-```
-
-```bash curl
-curl https://app.opencomputer.dev/api/templates/my-stack \
-  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
-```
-
-</CodeGroup>
-
-### Delete Template
-
-<CodeGroup>
-
-```typescript TypeScript
-await templates.delete("my-stack");
-```
-
-```bash curl
-curl -X DELETE https://app.opencomputer.dev/api/templates/my-stack \
-  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
-```
-
-</CodeGroup>
-
-### Using with Sandbox.create
-
-Pass the template name when creating a sandbox:
-
-<CodeGroup>
-
-```typescript TypeScript
-const sandbox = await Sandbox.create({ template: "my-stack" });
-```
-
-```python Python
-sandbox = await Sandbox.create(template="my-stack")
-```
-
-</CodeGroup>
-
-## TemplateInfo
-
-| Field | TypeScript | Python | Description |
-| --- | --- | --- | --- |
-| Template ID | `templateID` | `template_id` | Unique identifier |
-| Name | `name` | `name` | Template name |
-| Tag | `tag` | `tag` | Image tag (default: `"latest"`) |
-| Status | `status` | `status` | `ready`, `building`, or `error` |
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique snapshot identifier |
+| `name` | string | Snapshot name |
+| `status` | string | `"building"`, `"ready"`, or `"failed"` |
+| `contentHash` | string | SHA-256 hash of the image manifest |
+| `checkpointId` | string | Linked checkpoint ID |
+| `manifest` | object | The declarative image manifest |
+| `createdAt` | string | ISO 8601 creation timestamp |
+| `lastUsedAt` | string | ISO 8601 last usage timestamp |
 
 <Tip>
-  Full reference: [TypeScript SDK](/reference/typescript-sdk#templates) · [Python SDK](/reference/python-sdk#template) · [HTTP API](/reference/api#templates).
+  Full SDK reference: [TypeScript SDK](/sdks/typescript/templates) · [Python SDK](/sdks/python/templates) · [HTTP API](/reference/api#snapshots).
 </Tip>

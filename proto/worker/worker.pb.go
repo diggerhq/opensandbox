@@ -2397,7 +2397,8 @@ func (x *GetSandboxStatsResponse) GetPids() int32 {
 type CreateCheckpointRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	CheckpointId  string                 `protobuf:"bytes,2,opt,name=checkpoint_id,json=checkpointId,proto3" json:"checkpoint_id,omitempty"` // UUID assigned by control plane
+	CheckpointId  string                 `protobuf:"bytes,2,opt,name=checkpoint_id,json=checkpointId,proto3" json:"checkpoint_id,omitempty"`     // UUID assigned by control plane
+	PrepareGolden bool                   `protobuf:"varint,3,opt,name=prepare_golden,json=prepareGolden,proto3" json:"prepare_golden,omitempty"` // If true, also create a per-template golden snapshot for fast future creates
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2444,6 +2445,13 @@ func (x *CreateCheckpointRequest) GetCheckpointId() string {
 		return x.CheckpointId
 	}
 	return ""
+}
+
+func (x *CreateCheckpointRequest) GetPrepareGolden() bool {
+	if x != nil {
+		return x.PrepareGolden
+	}
+	return false
 }
 
 type CreateCheckpointResponse struct {
@@ -2796,11 +2804,12 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\tnet_input\x18\x04 \x01(\x04R\bnetInput\x12\x1d\n" +
 	"\n" +
 	"net_output\x18\x05 \x01(\x04R\tnetOutput\x12\x12\n" +
-	"\x04pids\x18\x06 \x01(\x05R\x04pids\"]\n" +
+	"\x04pids\x18\x06 \x01(\x05R\x04pids\"\x84\x01\n" +
 	"\x17CreateCheckpointRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12#\n" +
-	"\rcheckpoint_id\x18\x02 \x01(\tR\fcheckpointId\"h\n" +
+	"\rcheckpoint_id\x18\x02 \x01(\tR\fcheckpointId\x12%\n" +
+	"\x0eprepare_golden\x18\x03 \x01(\bR\rprepareGolden\"h\n" +
 	"\x18CreateCheckpointResponse\x12\"\n" +
 	"\rrootfs_s3_key\x18\x01 \x01(\tR\vrootfsS3Key\x12(\n" +
 	"\x10workspace_s3_key\x18\x02 \x01(\tR\x0eworkspaceS3Key\"^\n" +

@@ -2166,12 +2166,18 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	// Step 3: Flush filesystem, quiesce network, close agent, pause VM, snapshot
 	_ = agent.SyncFS(context.Background())
 
-	// Quiesce eth0 before snapshotting to ensure clean virtio-net virtqueues.
-	// Flush all addresses first so the host stops sending ARP/IPv6 ND traffic to
-	// this TAP, eliminating the race where a packet arrives in the RX used ring
-	// while NAPI is draining. Without this, snapshot restore triggers
-	// "input.0:id 0 is not a head!" (vq->broken=true) which permanently breaks
-	// virtio-net RX for every sandbox created from this golden snapshot.
+	// Quiesce networking before snapshotting to ensure clean virtio-net virtqueues.
+	//
+	// The host-side TAP must be brought down FIRST to stop all packet delivery
+	// into the guest's virtio-net RX ring. Only then is the guest side flushed
+	// and downed. Without this ordering, the host can push ARP/IPv6 ND packets
+	// into the RX used ring between the guest flush and the VM pause, corrupting
+	// the virtqueue state. On restore this manifests as:
+	//   "virtio_net virtio2: input.0:id 0 is not a head!"
+	// (vq->broken=true) which permanently breaks virtio-net RX for every
+	// sandbox created from this golden snapshot.
+	_ = run("ip", "link", "set", netCfg.TAPName, "down")
+
 	_, _ = agent.Exec(context.Background(), &pb.ExecRequest{
 		Command:        "/bin/sh",
 		Args:           []string{"-c", "ip addr flush dev eth0 && ip link set eth0 down"},
@@ -2261,11 +2267,97 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	return nil
 }
 
+// registerTemplateGoldenFromCache creates a per-checkpoint golden snapshot by reflink-copying
+// files from the checkpoint cache. Called after CreateCheckpoint when the checkpoint is for
+// an image/snapshot build. All copies are reflink (instant CoW) — no extra VM boot needed.
+func (m *Manager) RegisterTemplateGoldenFromCache(checkpointID string) {
+	m.goldenMu.RLock()
+	existing := m.templateGoldens[checkpointID]
+	m.goldenMu.RUnlock()
+	if existing != nil {
+		return
+	}
+
+	t0 := time.Now()
+	cacheDir := m.checkpointCacheDir(checkpointID)
+	goldenDir := filepath.Join(m.cfg.DataDir, "golden-snapshot", "template-"+checkpointID)
+
+	// Verify checkpoint cache has all required files
+	requiredFiles := []string{
+		filepath.Join(cacheDir, "rootfs.ext4"),
+		filepath.Join(cacheDir, "workspace.ext4"),
+		filepath.Join(cacheDir, "snapshot", "mem"),
+		filepath.Join(cacheDir, "snapshot", "vmstate"),
+		filepath.Join(cacheDir, "snapshot", "snapshot-meta.json"),
+	}
+	for _, f := range requiredFiles {
+		if !fileExists(f) {
+			log.Printf("firecracker: template golden %s: missing %s, skipping", checkpointID, f)
+			return
+		}
+	}
+
+	os.RemoveAll(goldenDir)
+	if err := os.MkdirAll(filepath.Join(goldenDir, "snapshot"), 0755); err != nil {
+		log.Printf("firecracker: template golden %s: mkdir failed: %v", checkpointID, err)
+		return
+	}
+
+	// Reflink-copy drives and snapshot files (~1ms total with CoW)
+	copies := [][2]string{
+		{filepath.Join(cacheDir, "rootfs.ext4"), filepath.Join(goldenDir, "rootfs.ext4")},
+		{filepath.Join(cacheDir, "workspace.ext4"), filepath.Join(goldenDir, "workspace.ext4")},
+		{filepath.Join(cacheDir, "snapshot", "mem"), filepath.Join(goldenDir, "snapshot", "mem")},
+		{filepath.Join(cacheDir, "snapshot", "vmstate"), filepath.Join(goldenDir, "snapshot", "vmstate")},
+	}
+	for _, cp := range copies {
+		if err := copyFileReflink(cp[0], cp[1]); err != nil {
+			log.Printf("firecracker: template golden %s: copy %s failed: %v", checkpointID, cp[0], err)
+			os.RemoveAll(goldenDir)
+			return
+		}
+	}
+
+	// Read the checkpoint's snapshot metadata and use it for the golden snapshot
+	metaBytes, err := os.ReadFile(filepath.Join(cacheDir, "snapshot", "snapshot-meta.json"))
+	if err != nil {
+		log.Printf("firecracker: template golden %s: read meta failed: %v", checkpointID, err)
+		os.RemoveAll(goldenDir)
+		return
+	}
+	var meta SnapshotMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		log.Printf("firecracker: template golden %s: parse meta failed: %v", checkpointID, err)
+		os.RemoveAll(goldenDir)
+		return
+	}
+
+	// Write golden snapshot metadata (copy to golden dir)
+	_ = os.WriteFile(filepath.Join(goldenDir, "snapshot", "snapshot-meta.json"), metaBytes, 0644)
+
+	gs := &GoldenSnapshot{
+		Dir:   goldenDir,
+		Meta:  meta,
+		Ready: true,
+	}
+	m.goldenMu.Lock()
+	m.templateGoldens[checkpointID] = gs
+	m.goldenMu.Unlock()
+
+	log.Printf("firecracker: template golden snapshot ready for %s at %s (%dms)", checkpointID, goldenDir, time.Since(t0).Milliseconds())
+}
+
 // createFromGoldenSnapshot creates a new sandbox using the pre-booted golden snapshot.
 // Returns errNoGoldenSnapshot if no golden snapshot is available.
 func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg types.SandboxConfig) (*types.Sandbox, error) {
+	// Pick the right golden snapshot: per-template if CheckpointID is set, otherwise the default.
 	m.goldenMu.RLock()
-	gs := m.golden
+	var gs *GoldenSnapshot
+	if cfg.CheckpointID != "" {
+		gs = m.templateGoldens[cfg.CheckpointID]
+	} else {
+		gs = m.golden
+	}
 	m.goldenMu.RUnlock()
 
 	if gs == nil || !gs.Ready {

@@ -1,6 +1,9 @@
 package types
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SandboxStatus represents the current state of a sandbox.
 type SandboxStatus string
@@ -56,9 +59,18 @@ type SandboxConfig struct {
 	// Secrets are only substituted in requests to matching hosts.
 	// Missing key or empty slice = substitute on all allowed hosts.
 	SecretAllowedHosts map[string][]string `json:"secretAllowedHosts,omitempty"`
+	// Declarative image manifest: when set, the server builds and caches
+	// the image as a checkpoint before creating the sandbox.
+	ImageManifest json.RawMessage `json:"image,omitempty"`
+	// Snapshot name: when set, the server resolves a named snapshot (image cache)
+	// and creates the sandbox from its cached checkpoint.
+	Snapshot string `json:"snapshot,omitempty"`
 	// SandboxID allows pre-determining the sandbox ID for async creation.
 	// If empty, a new ID is generated automatically.
 	SandboxID string `json:"-"`
+	// CheckpointID is the source checkpoint for template/snapshot creates.
+	// Used by the worker to key per-template golden snapshots.
+	CheckpointID string `json:"-"`
 }
 
 // SandboxListResponse is the response for listing sandboxes.

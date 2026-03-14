@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
 from opencomputer.agent import Agent
 from opencomputer.exec import Exec
 from opencomputer.filesystem import Filesystem
+from opencomputer.image import Image
 from opencomputer.pty import Pty
+from opencomputer.sse import parse_sse_stream
 
 
 @dataclass
@@ -38,6 +40,9 @@ class Sandbox:
         envs: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         secret_store: str | None = None,
+        image: Image | None = None,
+        snapshot: str | None = None,
+        on_build_log: Callable[[str], None] | None = None,
     ) -> Sandbox:
         """Create a new sandbox instance.
 
@@ -50,6 +55,9 @@ class Sandbox:
             metadata: Custom metadata key-value pairs.
             secret_store: Secret store name — resolves encrypted secrets
                 and egress allowlist.
+            image: Declarative Image definition. The server builds and caches it as a checkpoint.
+            snapshot: Name of a pre-built snapshot to create the sandbox from.
+            on_build_log: Callback for build log streaming when using image/snapshot.
         """
         url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
@@ -58,11 +66,17 @@ class Sandbox:
         # Control plane client always uses /api prefix
         api_base = url if url.endswith("/api") else f"{url}/api"
 
-        headers = {}
+        headers: dict[str, str] = {}
         if key:
             headers["X-API-Key"] = key
 
-        client = httpx.AsyncClient(base_url=api_base, headers=headers, timeout=30.0)
+        use_sse = on_build_log is not None and (image is not None or snapshot is not None)
+        if use_sse:
+            headers["Accept"] = "text/event-stream"
+
+        # Image builds may take longer
+        client_timeout = 300.0 if image else 30.0
+        client = httpx.AsyncClient(base_url=api_base, headers=headers, timeout=client_timeout)
 
         body: dict[str, Any] = {
             "templateID": template,
@@ -74,10 +88,17 @@ class Sandbox:
             body["metadata"] = metadata
         if secret_store:
             body["secretStore"] = secret_store
+        if image is not None:
+            body["image"] = image.to_dict()
+        if snapshot is not None:
+            body["snapshot"] = snapshot
 
-        resp = await client.post("/sandboxes", json=body)
-        resp.raise_for_status()
-        data = resp.json()
+        if use_sse:
+            data = await cls._create_with_sse(client, body, on_build_log)
+        else:
+            resp = await client.post("/sandboxes", json=body)
+            resp.raise_for_status()
+            data = resp.json()
 
         connect_url = data.get("connectURL", "")
         token = data.get("token", "")
@@ -102,6 +123,18 @@ class Sandbox:
             _client=client,
             _data_client=data_client,
         )
+
+    @classmethod
+    async def _create_with_sse(
+        cls,
+        client: httpx.AsyncClient,
+        body: dict[str, Any],
+        on_build_log: Callable[[str], None] | None,
+    ) -> dict[str, Any]:
+        """Create sandbox with SSE build log streaming."""
+        async with client.stream("POST", "/sandboxes", json=body) as resp:
+            resp.raise_for_status()
+            return await parse_sse_stream(resp, on_build_log or (lambda _: None))
 
     @classmethod
     async def connect(
@@ -187,7 +220,7 @@ class Sandbox:
     @property
     def agent(self) -> Agent:
         """Access Claude Agent SDK sessions."""
-        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token)
+        return Agent(self._ops_client, self.sandbox_id, self._connect_url, self._token, self._api_key)
 
     @property
     def files(self) -> Filesystem:

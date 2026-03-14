@@ -116,8 +116,9 @@ type Manager struct {
 	nextCID  uint32 // next guest CID to assign (starts at 3, 0-2 are reserved)
 	uploadWg sync.WaitGroup // tracks in-flight async S3 uploads
 
-	goldenMu sync.RWMutex
-	golden   *GoldenSnapshot // pre-booted default VM snapshot for fast creation
+	goldenMu        sync.RWMutex
+	golden          *GoldenSnapshot            // pre-booted default VM snapshot for fast creation
+	templateGoldens map[string]*GoldenSnapshot // per-checkpoint golden snapshots for templates/images
 
 	secretsProxy SecretsProxyIntegration // nil if secrets proxy is not configured
 }
@@ -165,10 +166,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		cfg:     cfg,
-		subnets: NewSubnetAllocator(),
-		vms:     make(map[string]*VMInstance),
-		nextCID: 3, // CIDs 0-2 are reserved (hypervisor=0, local=1, host=2)
+		cfg:             cfg,
+		subnets:         NewSubnetAllocator(),
+		vms:             make(map[string]*VMInstance),
+		nextCID:         3, // CIDs 0-2 are reserved (hypervisor=0, local=1, host=2)
+		templateGoldens: make(map[string]*GoldenSnapshot),
 	}, nil
 }
 
@@ -209,6 +211,15 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 			return sb, nil
 		} else if err != errNoGoldenSnapshot {
 			log.Printf("firecracker: golden snapshot create failed for %s: %v, falling back to cold boot", id, err)
+		}
+	}
+	// Per-template golden snapshot: if creating from a checkpoint (image/snapshot),
+	// try the golden snapshot path keyed by checkpoint ID.
+	if cfg.CheckpointID != "" && cfg.TemplateRootfsKey != "" {
+		if sb, err := m.createFromGoldenSnapshot(ctx, id, cfg); err == nil {
+			return sb, nil
+		} else if err != errNoGoldenSnapshot {
+			log.Printf("firecracker: template golden snapshot create failed for %s (cp=%s): %v, falling back to cold boot", id, cfg.CheckpointID, err)
 		}
 	}
 
@@ -964,13 +975,9 @@ func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey stri
 	return m.doWake(ctx, sandboxID, checkpointKey, checkpointStore, timeout)
 }
 
-// SaveAsTemplate snapshots a running sandbox's drives for use as a template.
+// SaveAsTemplate is deprecated. Use the declarative image builder instead.
 func (m *Manager) SaveAsTemplate(ctx context.Context, sandboxID, templateID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
-	vm, err := m.getVM(sandboxID)
-	if err != nil {
-		return "", "", err
-	}
-	return m.doSaveAsTemplate(ctx, vm, templateID, checkpointStore, onReady)
+	return "", "", fmt.Errorf("deprecated: use declarative image builder")
 }
 
 // getVM retrieves a VM by ID (read-locked).

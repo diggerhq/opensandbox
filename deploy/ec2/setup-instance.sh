@@ -11,7 +11,7 @@ set -euo pipefail
 # Prerequisites:
 #   - Ubuntu 24.04 LTS AMI
 #   - r7gd.metal (ARM64) or c7i.metal (x86_64) for production
-#   - Security group: 443 (HTTPS), 8080 (HTTP), 9090 (gRPC), 9091 (metrics) open inbound
+#   - Security group: 8080 (HTTP), 9090 (gRPC), 9091 (metrics) open from VPC only (workers are internal)
 #   - SSH access
 
 # Detect architecture
@@ -72,32 +72,6 @@ sudo apt-get install -y e2fsprogs
 # -------------------------------------------------------------------
 echo "==> Installing Redis..."
 sudo apt-get install -y redis-server
-
-# -------------------------------------------------------------------
-# Caddy (custom build with Route53 DNS module for wildcard certs)
-# -------------------------------------------------------------------
-echo "==> Installing Go (needed for xcaddy)..."
-GO_VERSION="1.23.6"
-curl -sL "https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
-export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-
-echo "==> Building Caddy with Route53 DNS module..."
-go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-xcaddy build --with github.com/caddy-dns/route53 --output /tmp/caddy-custom
-sudo mv /tmp/caddy-custom /usr/local/bin/caddy
-sudo chmod +x /usr/local/bin/caddy
-
-echo "==> Verifying Caddy has Route53 module..."
-caddy list-modules | grep route53 || { echo "ERROR: Caddy missing route53 module"; exit 1; }
-
-echo "==> Installing Caddy config..."
-sudo mkdir -p /etc/caddy
-sudo cp /tmp/deploy-ec2/Caddyfile /etc/caddy/Caddyfile 2>/dev/null || \
-  echo "    NOTE: Copy deploy/ec2/Caddyfile to /etc/caddy/Caddyfile manually"
-
-echo "==> Installing Caddy systemd unit..."
-sudo cp /tmp/deploy-ec2/caddy.service /etc/systemd/system/caddy.service 2>/dev/null || \
-  echo "    NOTE: Copy deploy/ec2/caddy.service to /etc/systemd/system/ manually"
 
 # -------------------------------------------------------------------
 # NVMe instance storage (XFS with reflink for instant rootfs copies)
@@ -233,7 +207,7 @@ WORKER_ID="w-use2-${SHORT_ID}"
 mkdir -p /etc/opensandbox
 cat > /etc/opensandbox/worker-identity.env << EOF
 OPENSANDBOX_WORKER_ID=${WORKER_ID}
-OPENSANDBOX_HTTP_ADDR=http://${PUBLIC_IP:-$PRIVATE_IP}:8080
+OPENSANDBOX_HTTP_ADDR=http://${PRIVATE_IP}:8080
 OPENSANDBOX_GRPC_ADVERTISE=${PRIVATE_IP}:9090
 EOF
 echo "opensandbox-identity: ${WORKER_ID} private=${PRIVATE_IP} public=${PUBLIC_IP:-none}"
@@ -305,14 +279,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable opensandbox-nvme
 sudo systemctl enable opensandbox-identity
 sudo systemctl enable opensandbox-worker
-sudo systemctl enable caddy 2>/dev/null || true
 
 # -------------------------------------------------------------------
 # Cleanup
 # -------------------------------------------------------------------
-echo "==> Cleaning up build tools..."
+echo "==> Cleaning up..."
 sudo apt-get clean
-sudo rm -rf /usr/local/go $HOME/go
 
 echo ""
 echo "============================================"

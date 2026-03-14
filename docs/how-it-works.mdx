@@ -51,15 +51,20 @@ Maximum 10 checkpoints per sandbox.
 
 ## Templates
 
-Templates are built from Dockerfiles, but sandboxes are not containers. The Docker build produces a filesystem image that becomes the VM's root disk. The default template includes Ubuntu, Python 3, Node.js, and common CLI tools.
+Templates define the sandbox environment. The default template includes Ubuntu, Python 3, Node.js, and common CLI tools.
 
-Custom templates skip repeated setup:
+For custom environments, use the **Image builder** to define dependencies programmatically, or create **pre-built snapshots** for instant reuse:
 
 ```typescript
-const sandbox = await Sandbox.create({ template: "my-custom-stack" });
+// On-demand image (built + cached by content hash)
+const image = Image.base().aptInstall(['curl']).pipInstall(['pandas']);
+const sandbox = await Sandbox.create({ image });
+
+// Pre-built snapshot (instant boot)
+const sandbox = await Sandbox.create({ snapshot: 'my-custom-stack' });
 ```
 
-See [Templates](/sandboxes/templates) for building your own.
+See [Templates](/sandboxes/templates) for the full guide.
 
 ## Networking
 

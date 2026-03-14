@@ -10,7 +10,9 @@ npm install @opencomputer/sdk
 ```
 
 ```typescript
-import { Sandbox, Templates } from "@opencomputer/sdk";
+import { Sandbox } from "@opencomputer/sdk";
+import { Image } from "@opencomputer/sdk/dist/image.js";
+import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
 ```
 
 ---
@@ -33,6 +35,9 @@ Create a new sandbox.
 | `metadata` | Record\<string, string\> | — | Arbitrary metadata |
 | `cpuCount` | number | — | CPU cores (max 4) |
 | `memoryMB` | number | — | Memory in MB (max 2048) |
+| `image` | Image | — | Declarative image definition (see [Image](#image)) |
+| `snapshot` | string | — | Name of a pre-built snapshot |
+| `onBuildLog` | `(log: string) => void` | — | Build log callback (when using `image`) |
 
 ```typescript
 const sandbox = await Sandbox.create({ template: "my-stack", timeout: 600 });
@@ -179,6 +184,9 @@ interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  image?: Image;
+  snapshot?: string;
+  onBuildLog?: (log: string) => void;
 }
 ```
 
@@ -483,43 +491,101 @@ Create an interactive terminal session.
 
 ---
 
-## Templates
+## Image
+
+Fluent, immutable builder for declarative sandbox images. Each method returns a new `Image` instance.
+
+### `Image.base(): Image`
+
+Start from the default OpenSandbox environment (Ubuntu 22.04, Python, Node.js, build tools).
+
+```typescript
+import { Image } from "@opencomputer/sdk";
+
+const image = Image.base()
+  .aptInstall(['curl', 'jq'])
+  .pipInstall(['requests', 'pandas'])
+  .env({ PROJECT_ROOT: '/workspace' })
+  .workdir('/workspace');
+```
+
+### Builder Methods
+
+| Method | Parameters | Description |
+| --- | --- | --- |
+| `aptInstall(packages)` | `string[]` | Install system packages via apt-get |
+| `pipInstall(packages)` | `string[]` | Install Python packages via pip |
+| `runCommands(...cmds)` | `string[]` | Run shell commands during build |
+| `env(vars)` | `Record<string, string>` | Set environment variables |
+| `workdir(path)` | `string` | Set default working directory |
+| `addFile(remotePath, content)` | `string, string` | Embed a file with inline content |
+| `addLocalFile(localPath, remotePath)` | `string, string` | Read a local file into the image |
+| `addLocalDir(localPath, remotePath)` | `string, string` | Read a local directory into the image |
+
+### `image.toJSON(): ImageManifest`
+
+Returns the image manifest as a plain object.
+
+### `image.cacheKey(): string`
+
+Computes a deterministic SHA-256 hash of the manifest for cache lookups.
+
+---
+
+## Snapshots
 
 Standalone class — not a property on Sandbox.
 
-### `new Templates(apiUrl, apiKey)`
+### `new Snapshots(opts?)`
 
 ```typescript
-import { Templates } from "@opencomputer/sdk";
+import { Snapshots } from "@opencomputer/sdk";
 
-const templates = new Templates("https://app.opencomputer.dev", apiKey);
+const snapshots = new Snapshots();
+// or with explicit config:
+const snapshots = new Snapshots({ apiKey: "...", apiUrl: "..." });
 ```
 
-### `templates.build(name, dockerfile): Promise<TemplateInfo>`
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `apiKey` | string | API key (falls back to `OPENCOMPUTER_API_KEY` env var) |
+| `apiUrl` | string | API URL (falls back to `OPENCOMPUTER_API_URL` env var) |
 
-Build a template from a Dockerfile string.
+### `snapshots.create(opts): Promise<SnapshotInfo>`
 
-### `templates.list(): Promise<TemplateInfo[]>`
+Create a pre-built snapshot from a declarative image.
 
-List all templates.
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Unique snapshot name |
+| `image` | Image | Yes | Declarative image definition |
+| `onBuildLogs` | `(log: string) => void` | No | Build log streaming callback |
 
-### `templates.get(name): Promise<TemplateInfo>`
+### `snapshots.list(): Promise<SnapshotInfo[]>`
 
-Get a template by name.
+List all snapshots for the current organization.
 
-### `templates.delete(name): Promise<void>`
+### `snapshots.get(name): Promise<SnapshotInfo>`
 
-Delete a template.
+Get a snapshot by name.
+
+### `snapshots.delete(name): Promise<void>`
+
+Delete a snapshot. Existing sandboxes created from it are not affected.
 
 ### Types
 
-#### TemplateInfo
+#### SnapshotInfo
 
 ```typescript
-interface TemplateInfo {
-  templateID: string;
+interface SnapshotInfo {
+  id: string;
   name: string;
-  tag: string;
-  status: string;  // "ready" | "building" | "error"
+  status: string;       // "building" | "ready" | "failed"
+  contentHash: string;
+  checkpointId: string;
+  manifest: object;
+  createdAt: string;
+  lastUsedAt: string;
 }
 ```

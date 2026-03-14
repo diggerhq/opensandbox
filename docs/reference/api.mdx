@@ -28,7 +28,7 @@ Most operational routes are available on **both** surfaces. Exceptions:
 | `POST .../hibernate`, `.../wake` | Yes | — |
 | Checkpoint routes | Yes | — |
 | Preview URL routes | Yes | — |
-| Template routes | Yes | — |
+| Snapshot routes | Yes | — |
 | `POST .../token/refresh` | — | Yes |
 | `POST .../timeout` | — | Yes |
 | Exec, filesystem, agent, PTY routes | Yes | Yes |
@@ -62,6 +62,8 @@ Create a new sandbox.
 | `memoryMB` | int | No | Memory in MB, up to 2048 (default: `512`) |
 | `envs` | object | No | Environment variables |
 | `metadata` | object | No | Arbitrary key-value pairs |
+| `image` | object | No | Declarative image manifest (see [Image builder](/sandboxes/templates#image-configuration)) |
+| `snapshot` | string | No | Name of a pre-built snapshot (see [Snapshots](#snapshots)) |
 
 **Response** `201`:
 
@@ -491,45 +493,70 @@ Patches are scripts that run when a sandbox is spawned from a checkpoint. They a
 
 ---
 
-## Templates
+## Snapshots
 
-Templates are built from Dockerfiles. The Docker build produces a filesystem image that Firecracker boots from directly.
+Snapshots are pre-built sandbox environments created from declarative image manifests. Once built, sandboxes can be created from them instantly.
 
-### `POST /api/templates` — Build
+### `POST /api/snapshots` — Create
 
 **Request body:**
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | string | Yes | Template name |
-| `dockerfile` | string | Yes | Dockerfile content |
-| `tag` | string | No | Image tag (default: `"latest"`) |
+| `name` | string | Yes | Unique snapshot name |
+| `image` | object | Yes | Declarative image manifest (see [Image builder](/sandboxes/templates#image-configuration)) |
 
 **Response** `201`:
 
 ```json
 {
-  "id": "tpl-abc123",
-  "name": "my-template",
-  "tag": "latest",
-  "status": "ready",
-  "createdAt": "2025-01-15T10:30:00Z"
+  "id": "snap-abc123",
+  "name": "data-science",
+  "status": "building",
+  "contentHash": "sha256:...",
+  "checkpointId": "",
+  "manifest": { "steps": [...] },
+  "createdAt": "2025-01-15T10:30:00Z",
+  "lastUsedAt": ""
 }
 ```
 
-Dockerfile templates return `status: "ready"` immediately. Sandbox-snapshot templates transition `processing` → `ready`.
+Status transitions: `building` → `ready` or `failed`.
 
-### `GET /api/templates` — List
+### `GET /api/snapshots` — List
 
-**Response** `200`: Array of template objects.
+**Response** `200`: Array of snapshot objects.
 
-### `GET /api/templates/:name` — Get
+### `GET /api/snapshots/:name` — Get
 
-**Response** `200`: Template object.
+**Response** `200`: Snapshot object.
 
-### `DELETE /api/templates/:name` — Delete
+### `DELETE /api/snapshots/:name` — Delete
 
 **Response** `204`: No content.
+
+### Using snapshots and images with `POST /api/sandboxes`
+
+The create sandbox endpoint accepts `snapshot` or `image` fields in addition to `templateID`:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `snapshot` | string | Name of a pre-built snapshot — instant boot, no build step |
+| `image` | object | Declarative image manifest — built on first use, cached by content hash |
+
+```bash
+# From a snapshot (instant)
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"snapshot": "data-science", "timeout": 600}'
+
+# From a declarative image (built + cached)
+curl -X POST https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"image": {"steps": [{"type": "apt_install", "packages": ["curl"]}]}, "timeout": 600}'
+```
 
 ---
 

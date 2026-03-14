@@ -15,6 +15,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -34,7 +37,6 @@ type GRPCServer struct {
 	execSessionManager *sandbox.ExecSessionManager
 	sandboxDBs         *sandbox.SandboxDBManager
 	checkpointStore    *storage.CheckpointStore
-	builder            *template.Builder
 	store              *db.Store // nil if no DB configured
 	server             *grpc.Server
 }
@@ -70,7 +72,6 @@ func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 		execSessionManager: execMgr,
 		sandboxDBs:         sandboxDBs,
 		checkpointStore:    checkpointStore,
-		builder:            builder,
 		store:              store,
 		server:             grpc.NewServer(serverOpts...),
 	}
@@ -112,15 +113,16 @@ func parseSecretAllowedHosts(m map[string]string) map[string][]string {
 
 func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxRequest) (*pb.CreateSandboxResponse, error) {
 	cfg := types.SandboxConfig{
-		Template:        req.Template,
-		Timeout:         int(req.Timeout),
-		Envs:            req.Envs,
-		MemoryMB:        int(req.MemoryMb),
-		CpuCount:        int(req.CpuCount),
-		NetworkEnabled:  req.NetworkEnabled,
-		ImageRef:        req.ImageRef,
-		Port:            int(req.Port),
-		SandboxID:       req.SandboxId, // use server-assigned ID if provided
+		Template:           req.Template,
+		Timeout:            int(req.Timeout),
+		Envs:               req.Envs,
+		MemoryMB:           int(req.MemoryMb),
+		CpuCount:           int(req.CpuCount),
+		NetworkEnabled:     req.NetworkEnabled,
+		ImageRef:           req.ImageRef,
+		Port:               int(req.Port),
+		SandboxID:          req.SandboxId,    // use server-assigned ID if provided
+		CheckpointID:       req.CheckpointId, // for per-template golden snapshots
 		EgressAllowlist:    req.EgressAllowlist,
 		SecretAllowedHosts: parseSecretAllowedHosts(req.SecretAllowedHosts),
 	}
@@ -531,53 +533,11 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 }
 
 func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateRequest) (*pb.BuildTemplateResponse, error) {
-	if s.builder == nil {
-		return nil, fmt.Errorf("template builder not configured on this worker")
-	}
-
-	imageRef, buildLog, err := s.builder.Build(ctx, req.Dockerfile, req.Name, req.Tag, req.EcrImageRef)
-	if err != nil {
-		return nil, fmt.Errorf("template build failed: %w", err)
-	}
-
-	return &pb.BuildTemplateResponse{
-		ImageRef: imageRef,
-		BuildLog: buildLog,
-	}, nil
+	return nil, status.Errorf(codes.Unimplemented, "deprecated")
 }
 
 func (s *GRPCServer) SaveAsTemplate(ctx context.Context, req *pb.SaveAsTemplateRequest) (*pb.SaveAsTemplateResponse, error) {
-	if s.checkpointStore == nil {
-		return nil, fmt.Errorf("checkpoint store not configured on this worker")
-	}
-
-	templateID := req.TemplateId
-	if _, err := uuid.Parse(templateID); err != nil {
-		return nil, fmt.Errorf("invalid template ID: %w", err)
-	}
-
-	// The onReady callback marks the template as ready in the DB when the async S3 upload completes.
-	var onReady func()
-	if s.store != nil {
-		tid, _ := uuid.Parse(templateID)
-		onReady = func() {
-			if err := s.store.SetTemplateReady(context.Background(), tid); err != nil {
-				log.Printf("grpc: SaveAsTemplate: failed to mark template %s ready: %v", templateID, err)
-			} else {
-				log.Printf("grpc: SaveAsTemplate: template %s is now ready", templateID)
-			}
-		}
-	}
-
-	rootfsKey, workspaceKey, err := s.manager.SaveAsTemplate(ctx, req.SandboxId, templateID, s.checkpointStore, onReady)
-	if err != nil {
-		return nil, fmt.Errorf("save-as-template failed: %w", err)
-	}
-
-	return &pb.SaveAsTemplateResponse{
-		RootfsS3Key:    rootfsKey,
-		WorkspaceS3Key: workspaceKey,
-	}, nil
+	return nil, status.Errorf(codes.Unimplemented, "deprecated")
 }
 
 func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpointRequest) (*pb.CreateCheckpointResponse, error) {
@@ -590,7 +550,10 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
 	}
 
-	// The onReady callback marks the checkpoint as ready in the DB when the async S3 upload completes.
+	// The onReady callback fires after the async mem file move + S3 upload completes.
+	// If prepare_golden is set, it also creates a golden snapshot from the cache.
+	prepareGolden := req.PrepareGolden
+	mgr := s.manager
 	var onReady func()
 	if s.store != nil {
 		cpID, _ := uuid.Parse(checkpointID)
@@ -599,6 +562,24 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 				log.Printf("grpc: CreateCheckpoint: failed to mark checkpoint %s ready: %v", checkpointID, err)
 			} else {
 				log.Printf("grpc: CreateCheckpoint: checkpoint %s is now ready", checkpointID)
+			}
+			// Create golden snapshot after mem file is in place
+			if prepareGolden {
+				type goldenPreparer interface {
+					RegisterTemplateGoldenFromCache(checkpointID string)
+				}
+				if gp, ok := mgr.(goldenPreparer); ok {
+					gp.RegisterTemplateGoldenFromCache(checkpointID)
+				}
+			}
+		}
+	} else if prepareGolden {
+		onReady = func() {
+			type goldenPreparer interface {
+				RegisterTemplateGoldenFromCache(checkpointID string)
+			}
+			if gp, ok := mgr.(goldenPreparer); ok {
+				gp.RegisterTemplateGoldenFromCache(checkpointID)
 			}
 		}
 	}
