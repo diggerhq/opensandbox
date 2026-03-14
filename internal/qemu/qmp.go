@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -221,6 +223,54 @@ func (q *QMPClient) Execute(command string, args map[string]interface{}) error {
 	}
 	_, err := q.execute(cmd, 10*time.Second)
 	return err
+}
+
+// SendFd passes an open file descriptor to QEMU via the QMP getfd command.
+// QEMU receives the fd via SCM_RIGHTS and registers it under the given name.
+func (q *QMPClient) SendFd(name string, f *os.File) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	unixConn, ok := q.conn.(*net.UnixConn)
+	if !ok {
+		return fmt.Errorf("QMP connection is not a Unix socket")
+	}
+
+	// Build the getfd command
+	cmd := qmpCommand{
+		Execute:   "getfd",
+		Arguments: map[string]string{"fdname": name},
+	}
+	data, _ := json.Marshal(cmd)
+	data = append(data, '\n')
+
+	// Send the command with the fd attached via SCM_RIGHTS
+	rights := syscall.UnixRights(int(f.Fd()))
+	_, _, err := unixConn.WriteMsgUnix(data, rights, nil)
+	if err != nil {
+		return fmt.Errorf("send fd via SCM_RIGHTS: %w", err)
+	}
+
+	// Read response
+	_ = q.conn.SetDeadline(time.Now().Add(10 * time.Second))
+	defer q.conn.SetDeadline(time.Time{})
+	for {
+		line, err := q.r.ReadBytes('\n')
+		if err != nil {
+			return fmt.Errorf("read getfd response: %w", err)
+		}
+		var resp qmpResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return fmt.Errorf("parse getfd response: %w", err)
+		}
+		if resp.Event != "" {
+			continue
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("getfd error: %s: %s", resp.Error.Class, resp.Error.Desc)
+		}
+		return nil
+	}
 }
 
 // Close closes the QMP connection.

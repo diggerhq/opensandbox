@@ -243,17 +243,29 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	}
 	log.Printf("qemu: golden VM booted, agent ready (%dms)", time.Since(t0).Milliseconds())
 
-	// Close agent connection before migration
-	agentClient.Close()
+	// Close agent connection before migration. Use a timeout because gRPC's
+	// graceful close over vsock can hang if vhost-vsock doesn't drain cleanly.
+	closeDone := make(chan struct{})
+	go func() {
+		agentClient.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		log.Printf("qemu: golden: agent close timed out, proceeding anyway")
+	}
 	time.Sleep(500 * time.Millisecond)
 
 	// QMP stop + migrate
+	log.Printf("qemu: golden: sending QMP stop...")
 	if err := qmpClient.Stop(); err != nil {
 		qmpClient.Close()
 		cmd.Process.Kill()
 		cmd.Wait()
 		return fmt.Errorf("golden QMP stop: %w", err)
 	}
+	log.Printf("qemu: golden: VM stopped, starting migration...")
 
 	migrateURI := fmt.Sprintf("exec:cat > %s", memFile)
 	if err := qmpClient.Migrate(migrateURI); err != nil {
@@ -284,7 +296,8 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	os.Remove(workspaceFile)
 	os.Remove(qmpSockPath)
 
-	// Compress golden mem with zstd for faster restore
+	// Compress golden mem with zstd — on EBS volumes, reading less data from disk
+	// is faster than raw I/O despite the CPU cost of decompression.
 	zstCmd := exec.Command("zstd", "-3", "--rm", memFile, "-o", memFile+".zst")
 	if out, err := zstCmd.CombinedOutput(); err != nil {
 		log.Printf("qemu: golden zstd compress failed (will use raw): %v (%s)", err, string(out))
@@ -399,7 +412,7 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	}
 
 	// Build QEMU args with -incoming to restore from golden snapshot.
-	// Use zstd-compressed mem file if available (typically ~40% of raw size).
+	// Use zstd-compressed mem file if available (less EBS I/O despite CPU cost).
 	goldenMemZst := filepath.Join(m.goldenDir, "mem.zst")
 	goldenMemRaw := filepath.Join(m.goldenDir, "mem")
 	var incomingURI string
