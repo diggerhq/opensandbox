@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/opensandbox/opensandbox/internal/crypto"
 )
 
 //go:embed migrations/*.sql
@@ -19,7 +21,13 @@ var migrationsFS embed.FS
 
 // Store provides data access to the global PostgreSQL database.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	encryptor *crypto.Encryptor // nil if no encryption key configured
+}
+
+// SetEncryptor configures the encryption key for project secrets.
+func (s *Store) SetEncryptor(enc *crypto.Encryptor) {
+	s.encryptor = enc
 }
 
 // NewStore creates a new Store with a connection pool.
@@ -78,6 +86,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{12, "migrations/012_checkpoints.up.sql"},
 		{13, "migrations/013_checkpoint_patches.up.sql"},
 		{14, "migrations/014_image_cache.up.sql"},
+		{15, "migrations/015_projects.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -1382,4 +1391,234 @@ func (s *Store) DeletePreviewURLsBySandbox(ctx context.Context, sandboxID string
 		urls = append(urls, p)
 	}
 	return urls, nil
+}
+
+// ── Secret Stores ─────────────────────────────────────────────────────────────
+
+// SecretStore represents a named collection of secrets scoped to an org.
+type SecretStore struct {
+	ID              uuid.UUID `json:"id"`
+	OrgID           uuid.UUID `json:"orgId"`
+	Name            string    `json:"name"`
+	EgressAllowlist []string  `json:"egressAllowlist"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+// SecretEntry represents an encrypted secret in a store (values are never returned to clients).
+type SecretEntry struct {
+	ID           uuid.UUID `json:"id"`
+	StoreID      uuid.UUID `json:"storeId"`
+	Name         string    `json:"name"`
+	AllowedHosts []string  `json:"allowedHosts"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+// DecryptedSecret holds a plaintext secret value and its host restrictions.
+type DecryptedSecret struct {
+	Name         string
+	Value        string
+	AllowedHosts []string
+}
+
+// CreateSecretStore creates a new secret store for an org.
+func (s *Store) CreateSecretStore(ctx context.Context, orgID uuid.UUID, name string, egressAllowlist []string) (*SecretStore, error) {
+	if egressAllowlist == nil {
+		egressAllowlist = []string{}
+	}
+
+	var ss SecretStore
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO secret_stores (org_id, name, egress_allowlist)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, org_id, name, egress_allowlist, created_at, updated_at`,
+		orgID, name, egressAllowlist,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create secret store: %w", err)
+	}
+	return &ss, nil
+}
+
+// GetSecretStore returns a secret store by ID, scoped to an org.
+func (s *Store) GetSecretStore(ctx context.Context, orgID, storeID uuid.UUID) (*SecretStore, error) {
+	var ss SecretStore
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE id = $1 AND org_id = $2`,
+		storeID, orgID,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get secret store: %w", err)
+	}
+	return &ss, nil
+}
+
+// GetSecretStoreByName returns a secret store by name, scoped to an org.
+func (s *Store) GetSecretStoreByName(ctx context.Context, orgID uuid.UUID, name string) (*SecretStore, error) {
+	var ss SecretStore
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE org_id = $1 AND name = $2`,
+		orgID, name,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get secret store by name: %w", err)
+	}
+	return &ss, nil
+}
+
+// ListSecretStores returns all secret stores for an org.
+func (s *Store) ListSecretStores(ctx context.Context, orgID uuid.UUID) ([]SecretStore, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, org_id, name, egress_allowlist, created_at, updated_at
+		 FROM secret_stores WHERE org_id = $1 ORDER BY name`,
+		orgID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list secret stores: %w", err)
+	}
+	defer rows.Close()
+
+	var stores []SecretStore
+	for rows.Next() {
+		var ss SecretStore
+		if err := rows.Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt); err != nil {
+			return nil, err
+		}
+		stores = append(stores, ss)
+	}
+	return stores, nil
+}
+
+// UpdateSecretStore updates a secret store's configuration.
+func (s *Store) UpdateSecretStore(ctx context.Context, orgID, storeID uuid.UUID, name string, egressAllowlist []string) (*SecretStore, error) {
+	if egressAllowlist == nil {
+		egressAllowlist = []string{}
+	}
+	var ss SecretStore
+	err := s.pool.QueryRow(ctx,
+		`UPDATE secret_stores SET name = $3, egress_allowlist = $4, updated_at = now()
+		 WHERE id = $1 AND org_id = $2
+		 RETURNING id, org_id, name, egress_allowlist, created_at, updated_at`,
+		storeID, orgID, name, egressAllowlist,
+	).Scan(&ss.ID, &ss.OrgID, &ss.Name, &ss.EgressAllowlist, &ss.CreatedAt, &ss.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("update secret store: %w", err)
+	}
+	return &ss, nil
+}
+
+// DeleteSecretStore deletes a secret store and all its entries (cascading).
+func (s *Store) DeleteSecretStore(ctx context.Context, orgID, storeID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM secret_stores WHERE id = $1 AND org_id = $2`, storeID, orgID)
+	if err != nil {
+		return fmt.Errorf("delete secret store: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("secret store not found")
+	}
+	return nil
+}
+
+// ── Secret Store Entries ──────────────────────────────────────────────────────
+
+// SetSecretEntry creates or updates a secret in a store. The value is encrypted at rest.
+func (s *Store) SetSecretEntry(ctx context.Context, storeID uuid.UUID, name string, value []byte, allowedHosts []string) error {
+	if s.encryptor == nil {
+		return fmt.Errorf("encryption not configured (set OPENSANDBOX_SECRET_ENCRYPTION_KEY)")
+	}
+	if allowedHosts == nil {
+		allowedHosts = []string{}
+	}
+	encrypted, err := s.encryptor.Encrypt(value)
+	if err != nil {
+		return fmt.Errorf("encrypt secret: %w", err)
+	}
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO secret_store_entries (store_id, name, encrypted_value, allowed_hosts)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (store_id, name) DO UPDATE SET encrypted_value = $3, allowed_hosts = $4, updated_at = now()`,
+		storeID, name, encrypted, allowedHosts,
+	)
+	if err != nil {
+		return fmt.Errorf("set secret entry: %w", err)
+	}
+	return nil
+}
+
+// DeleteSecretEntry removes a secret from a store.
+func (s *Store) DeleteSecretEntry(ctx context.Context, storeID uuid.UUID, name string) error {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM secret_store_entries WHERE store_id = $1 AND name = $2`,
+		storeID, name,
+	)
+	if err != nil {
+		return fmt.Errorf("delete secret entry: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("secret not found")
+	}
+	return nil
+}
+
+// ListSecretEntries returns all entries in a store (names and allowed hosts, no values).
+func (s *Store) ListSecretEntries(ctx context.Context, storeID uuid.UUID) ([]SecretEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, store_id, name, allowed_hosts, created_at, updated_at
+		 FROM secret_store_entries WHERE store_id = $1 ORDER BY name`,
+		storeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list secret entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []SecretEntry
+	for rows.Next() {
+		var se SecretEntry
+		if err := rows.Scan(&se.ID, &se.StoreID, &se.Name, &se.AllowedHosts, &se.CreatedAt, &se.UpdatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, se)
+	}
+	return entries, nil
+}
+
+// DecryptSecretEntries returns all secrets in a store as plaintext with host restrictions.
+// Used server-side when creating a sandbox to pass decrypted values to the worker.
+func (s *Store) DecryptSecretEntries(ctx context.Context, storeID uuid.UUID) ([]DecryptedSecret, error) {
+	if s.encryptor == nil {
+		return nil, fmt.Errorf("encryption not configured")
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT name, encrypted_value, allowed_hosts FROM secret_store_entries WHERE store_id = $1`,
+		storeID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query secret entries: %w", err)
+	}
+	defer rows.Close()
+
+	var secrets []DecryptedSecret
+	for rows.Next() {
+		var name string
+		var encrypted []byte
+		var allowedHosts []string
+		if err := rows.Scan(&name, &encrypted, &allowedHosts); err != nil {
+			return nil, err
+		}
+		plaintext, err := s.encryptor.Decrypt(encrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt secret %q: %w", name, err)
+		}
+		secrets = append(secrets, DecryptedSecret{
+			Name:         name,
+			Value:        string(plaintext),
+			AllowedHosts: allowedHosts,
+		})
+	}
+	return secrets, nil
 }

@@ -39,6 +39,12 @@ type SnapshotMeta struct {
 	Template      string            `json:"template"`
 	GuestPort     int               `json:"guestPort"`
 	SnapshotedAt  time.Time         `json:"snapshotedAt,omitempty"`
+	// SealedTokens maps sealed token → real value for re-registering the proxy session on wake.
+	SealedTokens  map[string]string `json:"sealedTokens,omitempty"`
+	// ProxyAllowlist and ProxyTokenHosts are persisted so the proxy session
+	// can be fully restored with the same restrictions after hibernate → wake.
+	ProxyAllowlist  []string            `json:"proxyAllowlist,omitempty"`
+	ProxyTokenHosts map[string][]string `json:"proxyTokenHosts,omitempty"`
 }
 
 // doHibernate pauses a running VM, creates a full memory snapshot, and kicks off
@@ -131,6 +137,12 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		GuestPort:     vm.GuestPort,
 		SnapshotedAt:  time.Now(),
 	}
+	// Persist sealed token map + proxy config so wake can fully restore the proxy session
+	if m.secretsProxy != nil && vm.network != nil {
+		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.ProxyAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
+		meta.ProxyTokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
+	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
 		return nil, fmt.Errorf("marshal snapshot meta: %w", err)
@@ -140,8 +152,12 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		return nil, fmt.Errorf("write snapshot meta: %w", err)
 	}
 
-	// Step 7: Clean up network (keep snapshot files on disk for local wake)
+	// Step 7: Clean up network and proxy session (keep snapshot files on disk for local wake)
+	if m.secretsProxy != nil && vm.network != nil {
+		m.secretsProxy.UnregisterSession(vm.network.GuestIP)
+	}
 	if vm.network != nil {
+		RemoveProxyRedirect(vm.network)
 		RemoveDNAT(vm.network)
 		DeleteTAP(vm.network.TAPName)
 		m.subnets.Release(vm.network.TAPName)
@@ -517,6 +533,14 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	// Sync guest clock — frozen at snapshot time
 	if err := syncGuestClock(context.Background(), agentClient); err != nil {
 		log.Printf("firecracker: wake %s: clock sync failed: %v", sandboxID, err)
+	}
+
+	// Re-register secrets proxy session if token map was persisted
+	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.ProxyAllowlist, meta.ProxyTokenHosts)
+		if err := AddProxyRedirect(netCfg); err != nil {
+			log.Printf("firecracker: warning: proxy redirect failed for %s on wake: %v", sandboxID, err)
+		}
 	}
 
 	// Register VM
@@ -1912,10 +1936,23 @@ func (m *Manager) warmForkFromCheckpoint(ctx context.Context, checkpointID strin
 		log.Printf("firecracker: warmFork %s: clock sync failed: %v", newID, err)
 	}
 
+	// Secrets proxy integration: seal env vars and set up proxy redirect
+	envsToInject := cfg.Envs
+	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(newID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
+		if sealedEnvs != nil {
+			envsToInject = sealedEnvs
+			if err := AddProxyRedirect(netCfg); err != nil {
+				log.Printf("firecracker: warning: proxy redirect failed for %s: %v", newID, err)
+			}
+			m.injectCACert(ctx, agentClient, newID)
+		}
+	}
+
 	// Send sandbox-level env vars into the forked VM agent
-	if len(cfg.Envs) > 0 {
+	if len(envsToInject) > 0 {
 		envCtx, envCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := agentClient.SetEnvs(envCtx, cfg.Envs); err != nil {
+		if err := agentClient.SetEnvs(envCtx, envsToInject); err != nil {
 			envCancel()
 			log.Printf("firecracker: warning: SetEnvs failed for %s: %v", newID, err)
 		}
@@ -2479,10 +2516,23 @@ func (m *Manager) createFromGoldenSnapshot(ctx context.Context, id string, cfg t
 		log.Printf("firecracker: goldenCreate %s: clock sync failed: %v", id, err)
 	}
 
+	// Secrets proxy integration: seal env vars and set up proxy redirect
+	envsToInject := cfg.Envs
+	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
+		if sealedEnvs != nil {
+			envsToInject = sealedEnvs
+			if err := AddProxyRedirect(netCfg); err != nil {
+				log.Printf("firecracker: warning: proxy redirect failed for %s: %v", id, err)
+			}
+			m.injectCACert(ctx, agentClient, id)
+		}
+	}
+
 	// Send sandbox-level env vars into the VM agent
-	if len(cfg.Envs) > 0 {
+	if len(envsToInject) > 0 {
 		envCtx, envCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := agentClient.SetEnvs(envCtx, cfg.Envs); err != nil {
+		if err := agentClient.SetEnvs(envCtx, envsToInject); err != nil {
 			envCancel()
 			log.Printf("firecracker: warning: SetEnvs failed for %s: %v", id, err)
 		}

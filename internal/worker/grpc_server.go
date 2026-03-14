@@ -19,9 +19,11 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/grpctls"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
 	"github.com/opensandbox/opensandbox/internal/storage"
+	"github.com/opensandbox/opensandbox/internal/template"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -40,7 +42,29 @@ type GRPCServer struct {
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
-func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, store *db.Store) *GRPCServer {
+// If OPENSANDBOX_GRPC_TLS_* env vars are set, the server uses mTLS.
+func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder, store *db.Store) *GRPCServer {
+	serverOpts := []grpc.ServerOption{
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+	}
+
+	// Enable mTLS if configured
+	if grpctls.Enabled() {
+		creds, err := grpctls.ServerCredentials()
+		if err != nil {
+			log.Fatalf("grpc: failed to load TLS credentials: %v", err)
+		}
+		serverOpts = append(serverOpts, grpc.Creds(creds))
+		log.Println("grpc: mTLS enabled for worker gRPC server")
+	}
+
 	s := &GRPCServer{
 		manager:            mgr,
 		router:             router,
@@ -49,16 +73,7 @@ func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 		sandboxDBs:         sandboxDBs,
 		checkpointStore:    checkpointStore,
 		store:              store,
-		server: grpc.NewServer(
-			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-				MinTime:             5 * time.Second,
-				PermitWithoutStream: true,
-			}),
-			grpc.KeepaliveParams(keepalive.ServerParameters{
-				Time:    30 * time.Second,
-				Timeout: 10 * time.Second,
-			}),
-		),
+		server:             grpc.NewServer(serverOpts...),
 	}
 	pb.RegisterSandboxWorkerServer(s.server, s)
 	return s
@@ -78,18 +93,38 @@ func (s *GRPCServer) Stop() {
 	s.server.GracefulStop()
 }
 
+// parseSecretAllowedHosts converts the proto map (env var → comma-separated hosts)
+// to the internal map (env var → host slice). Returns nil if input is empty.
+func parseSecretAllowedHosts(m map[string]string) map[string][]string {
+	if len(m) == 0 {
+		return nil
+	}
+	result := make(map[string][]string, len(m))
+	for name, hosts := range m {
+		if hosts != "" {
+			result[name] = strings.Split(hosts, ",")
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxRequest) (*pb.CreateSandboxResponse, error) {
 	cfg := types.SandboxConfig{
-		Template:       req.Template,
-		Timeout:        int(req.Timeout),
-		Envs:           req.Envs,
-		MemoryMB:       int(req.MemoryMb),
-		CpuCount:       int(req.CpuCount),
-		NetworkEnabled: req.NetworkEnabled,
-		ImageRef:       req.ImageRef,
-		Port:           int(req.Port),
-		SandboxID:      req.SandboxId,      // use server-assigned ID if provided
-		CheckpointID:   req.CheckpointId,   // for per-template golden snapshots
+		Template:           req.Template,
+		Timeout:            int(req.Timeout),
+		Envs:               req.Envs,
+		MemoryMB:           int(req.MemoryMb),
+		CpuCount:           int(req.CpuCount),
+		NetworkEnabled:     req.NetworkEnabled,
+		ImageRef:           req.ImageRef,
+		Port:               int(req.Port),
+		SandboxID:          req.SandboxId,    // use server-assigned ID if provided
+		CheckpointID:       req.CheckpointId, // for per-template golden snapshots
+		EgressAllowlist:    req.EgressAllowlist,
+		SecretAllowedHosts: parseSecretAllowedHosts(req.SecretAllowedHosts),
 	}
 
 	// Warm fork: if checkpoint_id is set, try snapshot-based fork first.

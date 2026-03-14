@@ -20,6 +20,8 @@ export interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  /** Secret store name — resolves encrypted secrets and egress allowlist. */
+  secretStore?: string;
   /** Declarative image definition. The server builds and caches it as a checkpoint. */
   image?: Image;
   /** Name of a pre-built snapshot to create the sandbox from. */
@@ -127,6 +129,7 @@ export class Sandbox {
     if (opts.metadata) body.metadata = opts.metadata;
     if (opts.cpuCount != null) body.cpuCount = opts.cpuCount;
     if (opts.memoryMB != null) body.memoryMB = opts.memoryMB;
+    if (opts.secretStore) body.secretStore = opts.secretStore;
     if (opts.image) body.image = opts.image.toJSON();
     if (opts.snapshot) body.snapshot = opts.snapshot;
 

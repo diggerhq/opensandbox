@@ -49,6 +49,16 @@ type SandboxConfig struct {
 	// When set, the sandbox boots from these drives instead of the standard base image.
 	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
+	// SecretStore name — resolves secrets from the named secret store.
+	SecretStore string `json:"secretStore,omitempty"`
+	// EgressAllowlist restricts outbound HTTPS from the sandbox to these hosts.
+	// Supports exact matches ("api.anthropic.com") and wildcards ("*.openai.com").
+	// Empty = all hosts allowed (no restriction).
+	EgressAllowlist []string `json:"egressAllowlist,omitempty"`
+	// SecretAllowedHosts maps env var name → allowed hosts for that secret.
+	// Secrets are only substituted in requests to matching hosts.
+	// Missing key or empty slice = substitute on all allowed hosts.
+	SecretAllowedHosts map[string][]string `json:"secretAllowedHosts,omitempty"`
 	// Declarative image manifest: when set, the server builds and caches
 	// the image as a checkpoint before creating the sandbox.
 	ImageManifest json.RawMessage `json:"image,omitempty"`

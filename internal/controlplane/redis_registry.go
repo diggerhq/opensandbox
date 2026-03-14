@@ -11,8 +11,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+
+	"github.com/opensandbox/opensandbox/internal/grpctls"
 
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -241,8 +242,13 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 
 // dialWorkerLocked dials a gRPC connection to a worker. Must be called with r.mu held.
 func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
+	creds, err := grpctls.ClientCredentials()
+	if err != nil {
+		log.Printf("redis_registry: failed to load TLS credentials for worker %s: %v", workerID, err)
+		return
+	}
 	conn, err := grpc.NewClient(grpcAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(creds),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                30 * time.Second,
 			Timeout:             10 * time.Second,

@@ -5,15 +5,16 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/grpctls"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
@@ -64,6 +65,18 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 	// Workers
 	api.GET("/workers", s.listWorkers)
 
+	// Secret stores
+	api.POST("/secret-stores", s.createSecretStore)
+	api.GET("/secret-stores", s.listSecretStores)
+	api.GET("/secret-stores/:id", s.getSecretStore)
+	api.PUT("/secret-stores/:id", s.updateSecretStore)
+	api.DELETE("/secret-stores/:id", s.deleteSecretStore)
+
+	// Secret store entries
+	api.PUT("/secret-stores/:id/secrets/:name", s.setSecretEntry)
+	api.DELETE("/secret-stores/:id/secrets/:name", s.deleteSecretEntry)
+	api.GET("/secret-stores/:id/secrets", s.listSecretEntries)
+
 	return s
 }
 
@@ -87,6 +100,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		CpuCount   int               `json:"cpuCount"`
 		Metadata   map[string]string `json:"metadata"`
 		NetworkEnabled bool          `json:"networkEnabled"`
+		SecretStore    string        `json:"secretStore"` // secret store name — resolves secrets + egress config
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
@@ -105,6 +119,42 @@ func (s *Server) createSandbox(c echo.Context) error {
 	count, err := s.store.CountActiveSandboxes(c.Request().Context(), orgID)
 	if err == nil && count >= org.MaxConcurrentSandboxes {
 		return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "concurrent sandbox limit reached"})
+	}
+
+	// Resolve secret store: decrypt secrets + inherit egress allowlist
+	var egressAllowlist []string
+	var secretAllowedHosts map[string]string // env var name → comma-separated hosts (for proto)
+	if req.SecretStore != "" {
+		store, err := s.store.GetSecretStoreByName(c.Request().Context(), orgID, req.SecretStore)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret store not found: " + req.SecretStore})
+		}
+
+		egressAllowlist = store.EgressAllowlist
+
+		// Decrypt secrets and merge into envs (request envs override store secrets)
+		secrets, err := s.store.DecryptSecretEntries(c.Request().Context(), store.ID)
+		if err != nil {
+			log.Printf("controlplane: decrypt secrets failed for store %s: %v", req.SecretStore, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to decrypt secrets"})
+		}
+		if len(secrets) > 0 {
+			if req.Envs == nil {
+				req.Envs = make(map[string]string)
+			}
+			for _, secret := range secrets {
+				if _, exists := req.Envs[secret.Name]; !exists {
+					req.Envs[secret.Name] = secret.Value
+				}
+				// Build per-secret host restrictions for proto
+				if len(secret.AllowedHosts) > 0 {
+					if secretAllowedHosts == nil {
+						secretAllowedHosts = make(map[string]string)
+					}
+					secretAllowedHosts[secret.Name] = strings.Join(secret.AllowedHosts, ",")
+				}
+			}
+		}
 	}
 
 	// Select region (explicit, or from Fly-Region header, or default)
@@ -127,7 +177,11 @@ func (s *Server) createSandbox(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 60*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds, err := grpctls.ClientCredentials()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load TLS credentials"})
+	}
+	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to connect to worker"})
 	}
@@ -135,12 +189,14 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	client := pb.NewSandboxWorkerClient(conn)
 	grpcResp, err := client.CreateSandbox(ctx, &pb.CreateSandboxRequest{
-		Template:       req.TemplateID,
-		Timeout:        int32(req.Timeout),
-		Envs:           req.Envs,
-		MemoryMb:       int32(req.MemoryMB),
-		CpuCount:       int32(req.CpuCount),
-		NetworkEnabled: req.NetworkEnabled,
+		Template:           req.TemplateID,
+		Timeout:            int32(req.Timeout),
+		Envs:               req.Envs,
+		MemoryMb:           int32(req.MemoryMB),
+		CpuCount:           int32(req.CpuCount),
+		NetworkEnabled:     req.NetworkEnabled,
+		EgressAllowlist:    egressAllowlist,
+		SecretAllowedHosts: secretAllowedHosts,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "worker create failed: " + err.Error()})
@@ -229,7 +285,11 @@ func (s *Server) destroySandbox(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 10*time.Second)
 	defer cancel()
 
-	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds2, err := grpctls.ClientCredentials()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to load TLS credentials"})
+	}
+	conn, err := grpc.NewClient(worker.GRPCAddr, grpc.WithTransportCredentials(creds2))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to connect to worker"})
 	}

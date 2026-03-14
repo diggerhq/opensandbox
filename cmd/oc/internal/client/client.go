@@ -158,6 +158,34 @@ func (c *Client) Put(ctx context.Context, path string, body io.Reader) error {
 	return nil
 }
 
+// PutJSON performs a PUT request with a JSON body and decodes the response.
+func (c *Client) PutJSON(ctx context.Context, path string, body, result interface{}) error {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, "PUT", c.baseURL+path, bodyReader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if result != nil {
+		return json.NewDecoder(resp.Body).Decode(result)
+	}
+	return nil
+}
+
 // Delete performs a DELETE request.
 func (c *Client) Delete(ctx context.Context, path string) error {
 	req, err := http.NewRequestWithContext(ctx, "DELETE", c.baseURL+path, nil)

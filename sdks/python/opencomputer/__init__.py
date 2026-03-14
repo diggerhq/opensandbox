@@ -6,6 +6,8 @@ from opencomputer.filesystem import Filesystem
 from opencomputer.exec import Exec, ProcessResult, ExecSessionInfo
 from opencomputer.image import Image
 from opencomputer.pty import Pty, PtySession
+from opencomputer.template import Template
+from opencomputer.project import SecretStore
 from opencomputer.snapshot import Snapshots
 
 __all__ = [
@@ -21,6 +23,8 @@ __all__ = [
     "Image",
     "Pty",
     "PtySession",
+    "Template",
+    "SecretStore",
     "Snapshots",
 ]
 

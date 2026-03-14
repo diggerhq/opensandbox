@@ -60,6 +60,42 @@ func (s *Server) createSandbox(c echo.Context) error {
 		}
 	}
 
+	// Resolve secret store: decrypt secrets + inherit egress config
+	if cfg.SecretStore != "" && s.store != nil && hasOrg {
+		store, err := s.store.GetSecretStoreByName(ctx, orgID, cfg.SecretStore)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "secret store not found: " + cfg.SecretStore,
+			})
+		}
+
+		cfg.EgressAllowlist = store.EgressAllowlist
+
+		secrets, err := s.store.DecryptSecretEntries(ctx, store.ID)
+		if err != nil {
+			log.Printf("api: decrypt secrets failed for store %s: %v", cfg.SecretStore, err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "failed to decrypt secrets",
+			})
+		}
+		if len(secrets) > 0 {
+			if cfg.Envs == nil {
+				cfg.Envs = make(map[string]string)
+			}
+			for _, secret := range secrets {
+				if _, exists := cfg.Envs[secret.Name]; !exists {
+					cfg.Envs[secret.Name] = secret.Value
+				}
+				if len(secret.AllowedHosts) > 0 {
+					if cfg.SecretAllowedHosts == nil {
+						cfg.SecretAllowedHosts = make(map[string][]string)
+					}
+					cfg.SecretAllowedHosts[secret.Name] = secret.AllowedHosts
+				}
+			}
+		}
+	}
+
 	// Declarative image or named snapshot → resolve to checkpoint and use createFromCheckpoint flow
 	if len(cfg.ImageManifest) > 0 || cfg.Snapshot != "" {
 		if !hasOrg {

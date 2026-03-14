@@ -39,6 +39,7 @@ class Sandbox:
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
+        secret_store: str | None = None,
         image: Image | None = None,
         snapshot: str | None = None,
         on_build_log: Callable[[str], None] | None = None,
@@ -46,12 +47,14 @@ class Sandbox:
         """Create a new sandbox instance.
 
         Args:
-            template: Base template name (default "base").
+            template: Template to use (default "base").
             timeout: Sandbox timeout in seconds (default 300).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
-            envs: Environment variables to inject.
-            metadata: Arbitrary metadata tags.
+            envs: Environment variables to inject. Overrides store secrets.
+            metadata: Custom metadata key-value pairs.
+            secret_store: Secret store name — resolves encrypted secrets
+                and egress allowlist.
             image: Declarative Image definition. The server builds and caches it as a checkpoint.
             snapshot: Name of a pre-built snapshot to create the sandbox from.
             on_build_log: Callback for build log streaming when using image/snapshot.
@@ -83,6 +86,8 @@ class Sandbox:
             body["envs"] = envs
         if metadata:
             body["metadata"] = metadata
+        if secret_store:
+            body["secretStore"] = secret_store
         if image is not None:
             body["image"] = image.to_dict()
         if snapshot is not None:

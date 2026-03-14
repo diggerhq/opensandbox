@@ -247,6 +247,18 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/snapshots/:name", s.getSnapshot)
 	api.DELETE("/snapshots/:name", s.deleteSnapshot)
 
+	// Secret stores
+	api.POST("/secret-stores", s.createSecretStore)
+	api.GET("/secret-stores", s.listSecretStores)
+	api.GET("/secret-stores/:id", s.getSecretStore)
+	api.PUT("/secret-stores/:id", s.updateSecretStore)
+	api.DELETE("/secret-stores/:id", s.deleteSecretStore)
+
+	// Secret store entries
+	api.PUT("/secret-stores/:id/secrets/:name", s.setSecretEntry)
+	api.DELETE("/secret-stores/:id/secrets/:name", s.deleteSecretEntry)
+	api.GET("/secret-stores/:id/secrets", s.listSecretEntries)
+
 	// Workers (server mode only — queries worker registry)
 	api.GET("/workers", s.listWorkers)
 

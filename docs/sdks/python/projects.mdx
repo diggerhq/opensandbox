@@ -1,0 +1,184 @@
+---
+title: "Secret Stores & Secrets"
+description: "Manage secret stores and encrypted secrets that are securely injected into sandboxes"
+---
+
+Secret stores hold encrypted secrets that are injected into sandboxes as sealed tokens. When you create a sandbox with a secret store, secrets are sealed inside the sandbox so they never exist as plaintext in VM memory.
+
+## How Secrets Work
+
+When a sandbox is created with a secret store:
+
+1. The server decrypts the store's secrets
+2. Secrets are sent to the worker and **sealed** into opaque tokens (`osb_sealed_...`)
+3. Inside the sandbox, env vars contain sealed tokens — never real values
+4. When the sandbox makes an outbound HTTPS request, the MITM proxy intercepts it and replaces sealed tokens with real values in headers and request body
+5. The real secret only exists in the proxy's memory on the host, never inside the VM
+
+## Creating a Secret Store
+
+```python
+from opencomputer import SecretStore
+
+store = await SecretStore.create(
+    name='my-agent-secrets',
+    egress_allowlist=['api.anthropic.com'],
+)
+```
+
+### `SecretStore.create(**kwargs)`
+
+<ParamField body="name" type="str" required>
+  Store name (unique per organization).
+</ParamField>
+<ParamField body="egress_allowlist" type="list[str] | None" default="None">
+  Allowed egress hosts (e.g. `["api.anthropic.com"]`).
+</ParamField>
+
+**Returns:** `dict` — Secret store info with `id`, `name`, `egressAllowlist`, etc.
+
+## Listing Secret Stores
+
+```python
+stores = await SecretStore.list()
+```
+
+### `SecretStore.list(**kwargs)`
+
+**Returns:** `list[dict]`
+
+## Getting a Secret Store
+
+```python
+store = await SecretStore.get('store-uuid')
+```
+
+### `SecretStore.get(store_id, **kwargs)`
+
+<ParamField body="store_id" type="str" required>
+  UUID of the secret store.
+</ParamField>
+
+**Returns:** `dict`
+
+## Updating a Secret Store
+
+Partial updates — only the fields you pass are changed.
+
+```python
+updated = await SecretStore.update(
+    'store-uuid',
+    name='new-name',
+    egress_allowlist=['api.anthropic.com', '*.openai.com'],
+)
+```
+
+### `SecretStore.update(store_id, **kwargs)`
+
+<ParamField body="store_id" type="str" required>
+  UUID of the store to update.
+</ParamField>
+<ParamField body="name" type="str" default="">
+  New store name (empty = no change).
+</ParamField>
+<ParamField body="egress_allowlist" type="list[str] | None" default="None">
+  New allowed egress hosts (None = no change).
+</ParamField>
+
+**Returns:** `dict`
+
+## Deleting a Secret Store
+
+```python
+await SecretStore.delete('store-uuid')
+```
+
+Deletes the store and all its secrets. Running sandboxes are not affected.
+
+### `SecretStore.delete(store_id, **kwargs)`
+
+**Returns:** `None`
+
+## Setting a Secret
+
+```python
+await SecretStore.set_secret('store-uuid', 'ANTHROPIC_API_KEY', 'sk-ant-...')
+```
+
+Secrets are encrypted at rest. The value is never returned by the API.
+
+Optionally restrict which hosts can receive this secret:
+
+```python
+await SecretStore.set_secret(
+    'store-uuid',
+    'ANTHROPIC_API_KEY',
+    'sk-ant-...',
+    allowed_hosts=['api.anthropic.com'],
+)
+```
+
+### `SecretStore.set_secret(store_id, name, value, **kwargs)`
+
+<ParamField body="store_id" type="str" required>
+  UUID of the secret store.
+</ParamField>
+<ParamField body="name" type="str" required>
+  Secret name (used as the env var name in sandboxes).
+</ParamField>
+<ParamField body="value" type="str" required>
+  Secret value (encrypted at rest, never returned by API).
+</ParamField>
+<ParamField body="allowed_hosts" type="list[str] | None" default="None">
+  Restrict this secret to specific hosts only.
+</ParamField>
+
+**Returns:** `None`
+
+## Listing Secrets
+
+```python
+entries = await SecretStore.list_secrets('store-uuid')
+# [{'name': 'ANTHROPIC_API_KEY', 'allowedHosts': ['api.anthropic.com'], ...}, ...]
+```
+
+Returns secret metadata only. Values are never exposed.
+
+### `SecretStore.list_secrets(store_id, **kwargs)`
+
+**Returns:** `list[dict]`
+
+## Deleting a Secret
+
+```python
+await SecretStore.delete_secret('store-uuid', 'DATABASE_URL')
+```
+
+### `SecretStore.delete_secret(store_id, name, **kwargs)`
+
+**Returns:** `None`
+
+## Creating a Sandbox with a Secret Store
+
+Pass the `secret_store` parameter to `Sandbox.create()` to inject the store's secrets:
+
+```python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create(
+    secret_store='my-agent-secrets',
+    timeout=600,
+)
+
+# Secrets are available as sealed env vars
+result = await sandbox.commands.run('echo $ANTHROPIC_API_KEY')
+# stdout: "osb_sealed_abc123..." (sealed, not the real key)
+
+# But outbound HTTPS requests get the real value substituted by the proxy
+api_result = await sandbox.commands.run(
+    'curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY" ...'
+)
+# The proxy replaces the sealed token with the real key before it hits Anthropic
+```
+
+Request-level options (`timeout`, `envs`, `cpu_count`, etc.) work as normal alongside `secret_store`.
