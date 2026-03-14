@@ -589,3 +589,188 @@ interface SnapshotInfo {
   lastUsedAt: string;
 }
 ```
+
+---
+
+## Secret Stores
+
+### `SecretStore.create(opts)`
+
+Create a new secret store.
+
+```typescript
+import { SecretStore } from '@opencomputer/sdk';
+
+const store = await SecretStore.create({
+  name: 'my-agent-secrets',
+  egressAllowlist: ['api.anthropic.com'],
+});
+```
+
+<ParamField body="opts" type="CreateSecretStoreOpts" required>
+  <Expandable title="properties">
+    <ParamField body="name" type="string" required>
+      Store name (unique per organization).
+    </ParamField>
+    <ParamField body="egressAllowlist" type="string[]" optional>
+      Allowed egress hosts (e.g. `["api.anthropic.com"]`).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<SecretStoreInfo>`
+
+### `SecretStore.list(opts?)`
+
+List all secret stores.
+
+```typescript
+const stores = await SecretStore.list();
+```
+
+**Returns:** `Promise<SecretStoreInfo[]>`
+
+### `SecretStore.get(storeId, opts?)`
+
+Get a secret store by ID.
+
+```typescript
+const store = await SecretStore.get('store-uuid');
+```
+
+<ParamField body="storeId" type="string" required>
+  UUID of the secret store.
+</ParamField>
+
+**Returns:** `Promise<SecretStoreInfo>`
+
+### `SecretStore.update(storeId, opts)`
+
+Partial updates — only the fields you pass are changed.
+
+```typescript
+const updated = await SecretStore.update('store-uuid', {
+  name: 'new-name',
+  egressAllowlist: ['api.anthropic.com', '*.openai.com'],
+});
+```
+
+<ParamField body="storeId" type="string" required>
+  UUID of the store to update.
+</ParamField>
+<ParamField body="opts" type="UpdateSecretStoreOpts" required>
+  <Expandable title="properties">
+    <ParamField body="name" type="string" optional>
+      New store name.
+    </ParamField>
+    <ParamField body="egressAllowlist" type="string[]" optional>
+      New allowed egress hosts.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Returns:** `Promise<SecretStoreInfo>`
+
+### `SecretStore.delete(storeId, opts?)`
+
+Deletes the store and all its secrets. Running sandboxes are not affected.
+
+```typescript
+await SecretStore.delete('store-uuid');
+```
+
+**Returns:** `Promise<void>`
+
+### `SecretStore.setSecret(storeId, name, value, opts?)`
+
+Set a secret in a store. Secrets are encrypted at rest. The value is never returned by the API.
+
+```typescript
+await SecretStore.setSecret('store-uuid', 'ANTHROPIC_API_KEY', 'sk-ant-...');
+```
+
+Optionally restrict which hosts can receive this secret:
+
+```typescript
+await SecretStore.setSecret('store-uuid', 'ANTHROPIC_API_KEY', 'sk-ant-...', {
+  allowedHosts: ['api.anthropic.com'],
+});
+```
+
+<ParamField body="storeId" type="string" required>
+  UUID of the secret store.
+</ParamField>
+<ParamField body="name" type="string" required>
+  Secret name (used as the env var name in sandboxes).
+</ParamField>
+<ParamField body="value" type="string" required>
+  Secret value (encrypted at rest, never returned by API).
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+### `SecretStore.listSecrets(storeId, opts?)`
+
+Returns secret metadata only. Values are never exposed.
+
+```typescript
+const entries = await SecretStore.listSecrets('store-uuid');
+// [{ name: 'ANTHROPIC_API_KEY', allowedHosts: ['api.anthropic.com'], ... }, ...]
+```
+
+**Returns:** `Promise<SecretEntryInfo[]>`
+
+### `SecretStore.deleteSecret(storeId, name, opts?)`
+
+```typescript
+await SecretStore.deleteSecret('store-uuid', 'DATABASE_URL');
+```
+
+**Returns:** `Promise<void>`
+
+### Creating a Sandbox with a Secret Store
+
+Pass the `secretStore` option to `Sandbox.create()` to inject the store's secrets:
+
+```typescript
+import { Sandbox } from '@opencomputer/sdk';
+
+const sandbox = await Sandbox.create({
+  secretStore: 'my-agent-secrets',
+  timeout: 600,
+});
+
+// Secrets are available as sealed env vars
+const result = await sandbox.commands.run('echo $ANTHROPIC_API_KEY');
+// stdout: "osb_sealed_abc123..." (sealed, not the real key)
+
+// But outbound HTTPS requests get the real value substituted by the proxy
+const apiResult = await sandbox.commands.run(
+  'curl -s https://api.anthropic.com/v1/messages -H "x-api-key: $ANTHROPIC_API_KEY" ...'
+);
+// The proxy replaces the sealed token with the real key before it hits Anthropic
+```
+
+### Types
+
+#### SecretStoreInfo
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | Store UUID |
+| `orgId` | `string` | Organization UUID |
+| `name` | `string` | Store name |
+| `egressAllowlist` | `string[]` | Allowed egress hosts |
+| `createdAt` | `string` | ISO 8601 timestamp |
+| `updatedAt` | `string` | ISO 8601 timestamp |
+
+#### SecretEntryInfo
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `id` | `string` | Entry UUID |
+| `storeId` | `string` | Parent store UUID |
+| `name` | `string` | Secret name (env var name) |
+| `allowedHosts` | `string[]` | Host restrictions for this secret |
+| `createdAt` | `string` | ISO 8601 timestamp |
+| `updatedAt` | `string` | ISO 8601 timestamp |

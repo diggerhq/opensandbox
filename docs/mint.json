@@ -53,6 +53,7 @@
         "sandboxes/interactive-terminals",
         "sandboxes/checkpoints",
         "sandboxes/templates",
+        "sandboxes/secrets",
         "sandboxes/patches",
         "sandboxes/preview-urls"
       ]
@@ -66,7 +67,8 @@
         "cli/shell",
         "cli/checkpoint",
         "cli/patch",
-        "cli/preview"
+        "cli/preview",
+        "cli/secrets"
       ]
     },
     {
