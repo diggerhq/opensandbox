@@ -4,15 +4,34 @@
   "name": "OpenComputer",
   "description": "Cloud sandboxes for running AI agents",
   "colors": {
-    "primary": "#6366F1",
-    "light": "#818CF8",
-    "dark": "#4F46E5"
+    "primary": "#131311",
+    "light": "#dfdfdf",
+    "dark": "#131311"
+  },
+  "background": {
+    "color": {
+      "light": "#f8f6f1",
+      "dark": "#0f0f0f"
+    }
+  },
+  "fonts": {
+    "heading": {
+      "family": "Newsreader",
+      "weight": 400
+    },
+    "body": {
+      "family": "Inter",
+      "weight": 400
+    }
   },
   "favicon": "/images/favicon.svg",
   "logo": {
     "light": "/images/logo-light.svg",
     "dark": "/images/logo-dark.svg",
     "href": "https://opencomputer.dev"
+  },
+  "modeToggle": {
+    "default": "light"
   },
   "topbarLinks": [
     {
@@ -29,11 +48,7 @@
   "navigation": [
     {
       "group": "Getting Started",
-      "pages": [
-        "introduction",
-        "quickstart",
-        "how-it-works"
-      ]
+      "pages": ["introduction", "quickstart", "how-it-works"]
     },
     {
       "group": "Agents",
@@ -73,10 +88,7 @@
     },
     {
       "group": "Guides",
-      "pages": [
-        "guides/build-a-lovable-clone",
-        "guides/agent-skill"
-      ]
+      "pages": ["guides/build-a-lovable-clone", "guides/agent-skill"]
     },
     {
       "group": "Reference",
@@ -89,9 +101,7 @@
     },
     {
       "group": "Resources",
-      "pages": [
-        "troubleshooting"
-      ]
+      "pages": ["troubleshooting"]
     }
   ],
   "footerSocials": {
