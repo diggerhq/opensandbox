@@ -17,7 +17,6 @@ import (
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
-	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -104,19 +103,6 @@ func main() {
 			opts.CheckpointStore = checkpointStore
 			log.Printf("opensandbox: S3 checkpoint store configured (bucket=%s, region=%s)", cfg.S3Bucket, cfg.S3Region)
 		}
-	}
-
-	// Initialize ECR config for template images (if configured)
-	if cfg.ECRRegistry != "" {
-		ecrCfg := &ecr.Config{
-			Registry:   cfg.ECRRegistry,
-			Repository: cfg.ECRRepository,
-			Region:     cfg.S3Region, // reuse S3 region (same AWS account)
-			AccessKey:  cfg.S3AccessKeyID,
-			SecretKey:  cfg.S3SecretAccessKey,
-		}
-		opts.ECRConfig = ecrCfg
-		log.Printf("opensandbox: ECR configured (registry=%s, repo=%s)", cfg.ECRRegistry, cfg.ECRRepository)
 	}
 
 	// Set sandbox domain for API responses

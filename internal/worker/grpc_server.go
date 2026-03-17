@@ -15,9 +15,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
@@ -86,7 +83,6 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		MemoryMB:       int(req.MemoryMb),
 		CpuCount:       int(req.CpuCount),
 		NetworkEnabled: req.NetworkEnabled,
-		ImageRef:       req.ImageRef,
 		Port:           int(req.Port),
 		SandboxID:      req.SandboxId, // use server-assigned ID if provided
 	}
@@ -494,14 +490,6 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
-}
-
-func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateRequest) (*pb.BuildTemplateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "deprecated")
-}
-
-func (s *GRPCServer) SaveAsTemplate(ctx context.Context, req *pb.SaveAsTemplateRequest) (*pb.SaveAsTemplateResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "deprecated")
 }
 
 func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpointRequest) (*pb.CreateCheckpointResponse, error) {

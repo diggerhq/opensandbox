@@ -237,14 +237,12 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		})
 	}
 
-	// Resolve template image from DB (org-scoped lookup with public fallback)
-	var imageRef string
+	// Resolve template from DB (org-scoped lookup with public fallback)
 	var templateRootfsKey, templateWorkspaceKey string
 	var templateID *uuid.UUID
 	if s.store != nil && hasOrg {
 		tmpl, err := s.store.GetTemplateByName(ctx, orgID, cfg.Template)
 		if err == nil {
-			imageRef = tmpl.ImageRef
 			templateID = &tmpl.ID
 			log.Printf("sandbox: resolved template %q (type=%s, id=%s)", cfg.Template, tmpl.TemplateType, tmpl.ID)
 			// Sandbox-type templates provide S3 drive keys instead of ECR image refs
@@ -274,7 +272,6 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		MemoryMb:             int32(cfg.MemoryMB),
 		CpuCount:             int32(cfg.CpuCount),
 		NetworkEnabled:       cfg.NetworkEnabled,
-		ImageRef:             imageRef,
 		Port:                 int32(cfg.Port),
 		TemplateRootfsKey:    templateRootfsKey,
 		TemplateWorkspaceKey: templateWorkspaceKey,

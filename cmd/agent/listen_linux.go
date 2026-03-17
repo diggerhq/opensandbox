@@ -87,8 +87,10 @@ func listenVirtioSerial(path string) (net.Listener, error) {
 }
 
 func (l *virtioSerialListener) Accept() (net.Conn, error) {
-	// Wait until no connection is active, then provide a new one.
-	// This handles: initial boot, reconnect after golden restore, etc.
+	// Wait until no connection is active and the port is readable.
+	// After loadvm/checkpoint restore, the virtio-serial port may be
+	// "disconnected" until the host connects to the chardev Unix socket.
+	// We poll for readability to avoid returning a conn that immediately errors.
 	for {
 		select {
 		case <-l.closed:
@@ -98,20 +100,43 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 
 		l.mu.Lock()
 		if !l.active {
-			l.active = true
+			// Wait for port to be readable (host connected to chardev socket)
 			l.mu.Unlock()
-			return &virtioSerialConn{
-				f: l.f,
-				onClose: func() {
-					l.mu.Lock()
-					l.active = false
+			if waitForReadable(l.f, 500*time.Millisecond) {
+				l.mu.Lock()
+				if !l.active {
+					l.active = true
 					l.mu.Unlock()
-				},
-			}, nil
+					log.Printf("agent: virtio-serial Accept: port readable, accepting connection")
+					return &virtioSerialConn{
+						f: l.f,
+						onClose: func() {
+							l.mu.Lock()
+							l.active = false
+							l.mu.Unlock()
+						},
+					}, nil
+				}
+				l.mu.Unlock()
+			}
+			continue
 		}
 		l.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// waitForReadable polls a file for readability using poll(2).
+// Returns true if the fd becomes readable within the timeout.
+func waitForReadable(f *os.File, timeout time.Duration) bool {
+	fd := int32(f.Fd())
+	timeoutMs := int(timeout.Milliseconds())
+	fds := []unix.PollFd{{Fd: fd, Events: unix.POLLIN}}
+	n, err := unix.Poll(fds, timeoutMs)
+	if err != nil || n <= 0 {
+		return false
+	}
+	return fds[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0
 }
 
 func (l *virtioSerialListener) Close() error {

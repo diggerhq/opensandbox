@@ -549,6 +549,11 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		log.Printf("qemu: golden-create %s: network patch failed: %v", id, err)
 	}
 
+	// Sync guest clock — golden snapshot has stale time
+	if err := syncGuestClock(context.Background(), agentClient); err != nil {
+		log.Printf("qemu: golden-create %s: clock sync failed: %v", id, err)
+	}
+
 	// Mount /workspace — the golden snapshot was taken with /workspace unmounted
 	// to keep the vdb device state clean for fresh workspace qcow2 files.
 	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1413,11 +1418,6 @@ func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey stri
 	return m.doWake(ctx, sandboxID, checkpointKey, checkpointStore, timeout)
 }
 
-// SaveAsTemplate is not implemented in the QEMU backend.
-func (m *Manager) SaveAsTemplate(ctx context.Context, sandboxID, templateID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
-	return "", "", ErrNotImplemented
-}
-
 // TemplateCachePath returns "" — not implemented.
 func (m *Manager) TemplateCachePath(templateID, filename string) string {
 	return ""
@@ -1452,14 +1452,22 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("no QMP client for VM %s", sandboxID)
 	}
 
-	// Sync filesystem before snapshot
+	// Sync filesystem and close agent before snapshot. Closing the agent
+	// puts it in Accept() mode — when ForkFromCheckpoint restores from this
+	// checkpoint, the agent immediately accepts the new connection (~1ms)
+	// instead of waiting for the stale gRPC stream to time out (~6s).
 	if vm.agent != nil {
 		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{Command: "sync"})
+		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
+			Command: "/bin/sh",
+			Args:    []string{"-c", "umount /workspace 2>/dev/null; sync"},
+		})
 		cancel()
 		if syncErr != nil {
 			log.Printf("qemu: CreateCheckpoint %s/%s: sync failed: %v", sandboxID, checkpointID, syncErr)
 		}
+		vm.agent.Close()
+		vm.agent = nil
 	}
 
 	// savevm creates an internal snapshot — memory + device state + disk deltas
@@ -1469,6 +1477,20 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("savevm failed: %w", err)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
+
+	// Reconnect agent + remount workspace (VM resumed after savevm)
+	agentClient, reconnErr := m.waitForAgentSocket(context.Background(), vm.agentSockPath, 10*time.Second)
+	if reconnErr != nil {
+		log.Printf("qemu: CreateCheckpoint %s/%s: agent reconnect failed: %v", sandboxID, checkpointID, reconnErr)
+	} else {
+		vm.agent = agentClient
+		mountCtx, mountCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = agentClient.Exec(mountCtx, &pb.ExecRequest{
+			Command: "/bin/sh",
+			Args:    []string{"-c", "echo 3 > /proc/sys/vm/drop_caches; mount /dev/vdb /workspace 2>/dev/null || true"},
+		})
+		mountCancel()
+	}
 
 	// Also cache the drive files for ForkFromCheckpoint (which needs a separate QEMU process)
 	cacheDir := m.checkpointCacheDir(checkpointID)
@@ -1566,6 +1588,18 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return fmt.Errorf("agent reconnect after loadvm: %w", err)
 	}
 	vm.agent = agent
+
+	// Remount workspace + drop caches (loadvm reverted to checkpoint state)
+	restoreCtx, restoreCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	_, _ = agent.Exec(restoreCtx, &pb.ExecRequest{
+		Command: "/bin/sh",
+		Args:    []string{"-c", "echo 3 > /proc/sys/vm/drop_caches; mount /dev/vdb /workspace 2>/dev/null || true"},
+	})
+	restoreCancel()
+
+	if err := syncGuestClock(context.Background(), agent); err != nil {
+		log.Printf("qemu: RestoreFromCheckpoint %s: clock sync failed: %v", sandboxID, err)
+	}
 
 	log.Printf("qemu: RestoreFromCheckpoint %s/%s: loadvm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 	return nil
@@ -1733,7 +1767,18 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 		return nil, fmt.Errorf("agent connect: %w", err)
 	}
 
-	// Patch network (snapshot had different IP)
+	// Drop caches (checkpoint had different rootfs state) + mount workspace + patch network
+	postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, _ = agent.Exec(postCtx, &pb.ExecRequest{
+		Command: "/bin/sh",
+		Args:    []string{"-c", "echo 3 > /proc/sys/vm/drop_caches; mount /dev/vdb /workspace 2>/dev/null || true"},
+	})
+	postCancel()
+
+	if err := syncGuestClock(context.Background(), agent); err != nil {
+		log.Printf("qemu: ForkFromCheckpoint %s: clock sync failed: %v", id, err)
+	}
+
 	if err := patchGuestNetwork(context.Background(), agent, netCfg); err != nil {
 		log.Printf("qemu: ForkFromCheckpoint %s: network patch failed: %v", id, err)
 	}

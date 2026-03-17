@@ -61,10 +61,6 @@ type Config struct {
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool // true for R2/MinIO
 
-	// ECR for template images
-	ECRRegistry   string // e.g. "086971355112.dkr.ecr.us-east-2.amazonaws.com"
-	ECRRepository string // e.g. "opensandbox-templates"
-
 	// Sandbox resource defaults (overridable per-sandbox via API)
 	DefaultSandboxMemoryMB int // default RAM per sandbox (MB), default 1024
 	DefaultSandboxCPUs     int // default vCPUs per sandbox, default 1
@@ -148,9 +144,6 @@ func Load() (*Config, error) {
 		S3AccessKeyID:     os.Getenv("OPENSANDBOX_S3_ACCESS_KEY_ID"),
 		S3SecretAccessKey: os.Getenv("OPENSANDBOX_S3_SECRET_ACCESS_KEY"),
 		S3ForcePathStyle:  os.Getenv("OPENSANDBOX_S3_FORCE_PATH_STYLE") == "true",
-
-		ECRRegistry:   os.Getenv("OPENSANDBOX_ECR_REGISTRY"),
-		ECRRepository: envOrDefault("OPENSANDBOX_ECR_REPOSITORY", "opensandbox-templates"),
 
 		DefaultSandboxMemoryMB: envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB", 1024),
 		DefaultSandboxCPUs:     envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_CPUS", 1),

@@ -387,9 +387,19 @@ sudo iptables -C FORWARD -d 172.16.0.0/16 -m conntrack --ctstate RELATED,ESTABLI
 sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
 sudo sysctl -w net.ipv4.conf.all.route_localnet=1 > /dev/null
 
-# Redirect port 80 -> 8080 so UI is accessible on standard HTTP port
-sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080 2>/dev/null || \
-    sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+# Redirect port 80 -> 8080 so UI is accessible on standard HTTP port.
+# Only match traffic destined for the host's own IPs — don't intercept
+# VM outbound HTTP traffic (e.g., apt-get to archive.ubuntu.com).
+PRIVATE_IP=\$(ip -4 addr show \$(ip route show default | awk '{print \$5}' | head -1) | awk '/inet / {print \$2}' | cut -d/ -f1)
+PUBLIC_IP=\$(curl -s -m 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
+if [ -n "\$PRIVATE_IP" ]; then
+    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "\$PRIVATE_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
+        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "\$PRIVATE_IP" -j REDIRECT --to-port 8080
+fi
+if [ -n "\$PUBLIC_IP" ]; then
+    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "\$PUBLIC_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
+        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "\$PUBLIC_IP" -j REDIRECT --to-port 8080
+fi
 
 sudo systemctl daemon-reload
 sudo systemctl restart opensandbox-server || true
