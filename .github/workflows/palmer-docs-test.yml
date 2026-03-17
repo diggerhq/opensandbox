@@ -19,7 +19,7 @@ jobs:
           prompt: |
             Explore the docs/ directory and read every documentation page (.mdx files). Identify every testable code example and verifiable claim — cover every code snippet, every CLI command, every SDK usage example. For each test, include the source file path and section heading in the name. Be thorough.
           branch: ${{ github.event.pull_request.head.ref }}
-          browser-enabled: false
+          browser_enabled: false
           timeout: 7200
         env:
           PALMER_API_URL: https://api.generalvolition.com
