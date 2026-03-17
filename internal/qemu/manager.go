@@ -51,8 +51,9 @@ type VMInstance struct {
 	qmp           *QMPClient
 	guestMAC      string
 	guestCID      uint32
-	bootArgs    string
-	restoring   chan struct{}
+	bootArgs      string
+	restoring     chan struct{}
+	dimmCount     int // number of hotplugged DIMMs (for unique IDs)
 }
 
 // SandboxMeta is persisted to sandbox-meta.json for recovery after hard kills.
@@ -91,6 +92,10 @@ type Manager struct {
 	goldenCID     uint32 // CID used when the golden snapshot was created
 	goldenGuestIP string // guest IP baked into the golden snapshot
 	goldenHostIP  string // host IP of the golden subnet (for temp addr on TAP)
+
+	// Metadata service callbacks (set via SetMetadataCallbacks)
+	onSandboxReady   func(sandboxID, guestIP, template string, startedAt time.Time)
+	onSandboxDestroy func(sandboxID string)
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -137,6 +142,17 @@ func NewManager(cfg Config) (*Manager, error) {
 		vms:     make(map[string]*VMInstance),
 		nextCID: 3,
 	}, nil
+}
+
+// SetMetadataCallbacks registers callbacks that are invoked when sandboxes
+// become ready or are destroyed. Used by the metadata server to track
+// guestIP → sandboxID mappings.
+func (m *Manager) SetMetadataCallbacks(
+	onReady func(sandboxID, guestIP, template string, startedAt time.Time),
+	onDestroy func(sandboxID string),
+) {
+	m.onSandboxReady = onReady
+	m.onSandboxDestroy = onDestroy
 }
 
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
@@ -411,6 +427,11 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		return nil, fmt.Errorf("add DNAT: %w", err)
 	}
 
+	// Add metadata service DNAT (169.254.169.254:80 → host:8888)
+	if err := AddMetadataDNAT(netCfg.TAPName, netCfg.HostIP); err != nil {
+		log.Printf("qemu: warning: metadata DNAT failed for %s: %v", netCfg.TAPName, err)
+	}
+
 	cpus := cfg.CpuCount
 	if cpus <= 0 {
 		cpus = m.cfg.DefaultCPUs
@@ -580,6 +601,11 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	m.vms[id] = vm
 	m.mu.Unlock()
 
+	// Notify metadata server
+	if m.onSandboxReady != nil {
+		m.onSandboxReady(id, netCfg.GuestIP, template, vm.StartedAt)
+	}
+
 	sbMeta := SandboxMeta{
 		SandboxID: id,
 		Template:  template,
@@ -713,7 +739,7 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 	return []string{
 		"-machine", "q35,accel=kvm",
 		"-cpu", "host",
-		"-m", fmt.Sprintf("%dM", memMB),
+		"-m", fmt.Sprintf("%dM,maxmem=16G,slots=8", memMB),
 		"-smp", fmt.Sprintf("%d", cpus),
 		"-kernel", m.cfg.KernelPath,
 		"-append", bootArgs,
@@ -826,6 +852,11 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 		return nil, fmt.Errorf("add DNAT: %w", err)
 	}
 
+	// Add metadata service DNAT (169.254.169.254:80 → host:8888)
+	if err := AddMetadataDNAT(netCfg.TAPName, netCfg.HostIP); err != nil {
+		log.Printf("qemu: warning: metadata DNAT failed for %s: %v", netCfg.TAPName, err)
+	}
+
 	cpus := cfg.CpuCount
 	if cpus <= 0 {
 		cpus = m.cfg.DefaultCPUs
@@ -935,6 +966,11 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	m.mu.Lock()
 	m.vms[id] = vm
 	m.mu.Unlock()
+
+	// Notify metadata server
+	if m.onSandboxReady != nil {
+		m.onSandboxReady(id, netCfg.GuestIP, template, vm.StartedAt)
+	}
 
 	sbMeta := SandboxMeta{
 		SandboxID: id,
@@ -1092,9 +1128,15 @@ func (m *Manager) destroyVM(vm *VMInstance) error {
 	}
 
 	if vm.network != nil {
+		RemoveMetadataDNAT(vm.network.TAPName, vm.network.HostIP)
 		RemoveDNAT(vm.network)
 		DeleteTAP(vm.network.TAPName)
 		m.subnets.Release(vm.network.TAPName)
+	}
+
+	// Notify metadata server
+	if m.onSandboxDestroy != nil {
+		m.onSandboxDestroy(vm.ID)
 	}
 
 	if vm.qmpSockPath != "" {
@@ -1112,6 +1154,7 @@ func (m *Manager) destroyVM(vm *VMInstance) error {
 // cleanupVM cleans up resources on failed creation.
 func (m *Manager) cleanupVM(netCfg *NetworkConfig, sandboxDir string) {
 	if netCfg != nil {
+		RemoveMetadataDNAT(netCfg.TAPName, netCfg.HostIP)
 		RemoveDNAT(netCfg)
 		DeleteTAP(netCfg.TAPName)
 		m.subnets.Release(netCfg.TAPName)
@@ -1342,6 +1385,35 @@ func (m *Manager) Stat(ctx context.Context, sandboxID, path string) (*types.File
 		ModTime: resp.ModTime,
 		Path:    resp.Path,
 	}, nil
+}
+
+// SetResourceLimits adjusts sandbox cgroup limits at runtime via the agent.
+// If the requested memory exceeds the VM's physical RAM, hotplug a DIMM first.
+func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	vm, err := m.getReadyVM(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+
+	// Memory hotplug: if requested memory > current VM physical RAM, add a DIMM
+	if maxMemoryBytes > 0 {
+		currentBytes := int64(vm.MemoryMB) * 1024 * 1024
+		if maxMemoryBytes > currentBytes && vm.qmp != nil {
+			addMB := int(maxMemoryBytes-currentBytes) / (1024 * 1024)
+			if addMB > 0 {
+				if err := vm.qmp.HotplugMemory(vm.dimmCount, addMB); err != nil {
+					log.Printf("qemu: memory hotplug %s: add %dMB failed: %v", sandboxID, addMB, err)
+					// Non-fatal — cgroup limit will still be set (capped at physical RAM)
+				} else {
+					vm.dimmCount++
+					vm.MemoryMB += addMB
+					log.Printf("qemu: memory hotplug %s: added %dMB (total %dMB)", sandboxID, addMB, vm.MemoryMB)
+				}
+			}
+		}
+	}
+
+	return vm.agent.SetResourceLimits(ctx, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
 }
 
 // Stats returns live resource usage from the VM.
@@ -1683,6 +1755,11 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 		return nil, fmt.Errorf("add DNAT: %w", err)
 	}
 
+	// Add metadata service DNAT (169.254.169.254:80 → host:8888)
+	if err := AddMetadataDNAT(netCfg.TAPName, netCfg.HostIP); err != nil {
+		log.Printf("qemu: warning: metadata DNAT failed for %s: %v", netCfg.TAPName, err)
+	}
+
 	cpus := cfg.CpuCount
 	if cpus <= 0 {
 		cpus = m.cfg.DefaultCPUs
@@ -1822,6 +1899,11 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	m.mu.Lock()
 	m.vms[id] = vm
 	m.mu.Unlock()
+
+	// Notify metadata server
+	if m.onSandboxReady != nil {
+		m.onSandboxReady(id, netCfg.GuestIP, meta.Template, now)
+	}
 
 	log.Printf("qemu: ForkFromCheckpoint %s → %s: complete (%dms, port=%d, tap=%s)",
 		checkpointID, id, time.Since(t0).Milliseconds(), hostPort, netCfg.TAPName)

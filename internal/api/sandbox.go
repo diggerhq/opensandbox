@@ -571,6 +571,95 @@ func (s *Server) setTimeout(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+func (s *Server) setLimits(c echo.Context) error {
+	id := c.Param("id")
+	ctx := c.Request().Context()
+
+	var req struct {
+		MaxPids     int `json:"maxPids"`
+		MaxMemoryMB int `json:"maxMemoryMB"`
+		CPUPercent  int `json:"cpuPercent"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid request body: " + err.Error(),
+		})
+	}
+
+	// Convert to cgroup values
+	maxMemoryBytes := int64(req.MaxMemoryMB) * 1024 * 1024
+	cpuMaxUsec := int64(req.CPUPercent) * 1000
+	cpuPeriodUsec := int64(100000)
+
+	// Server mode: dispatch to worker via gRPC
+	if s.workerRegistry != nil {
+		return s.setLimitsRemote(c, id, int32(req.MaxPids), maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+	}
+
+	// Combined mode: apply locally
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if err := s.manager.SetResourceLimits(ctx, id, int32(req.MaxPids), maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID":      id,
+		"maxPids":        req.MaxPids,
+		"maxMemoryMB":    req.MaxMemoryMB,
+		"cpuPercent":     req.CPUPercent,
+	})
+}
+
+func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+	}
+
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	if session.Status != "running" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox is not running"})
+	}
+
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable"})
+	}
+
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
+	defer cancel()
+
+	_, err = client.SetSandboxLimits(grpcCtx, &pb.SetSandboxLimitsRequest{
+		SandboxId:      sandboxID,
+		MaxPids:        maxPids,
+		MaxMemoryBytes: maxMemoryBytes,
+		CpuMaxUsec:     cpuMaxUsec,
+		CpuPeriodUsec:  cpuPeriodUsec,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "set limits failed: " + err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID":      sandboxID,
+		"maxPids":        maxPids,
+		"maxMemoryBytes": maxMemoryBytes,
+		"cpuMaxUsec":     cpuMaxUsec,
+		"cpuPeriodUsec":  cpuPeriodUsec,
+	})
+}
+
 func (s *Server) hibernateSandbox(c echo.Context) error {
 	id := c.Param("id")
 	ctx := c.Request().Context()

@@ -136,6 +136,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
 
+	// Resource limits
+	api.PUT("/sandboxes/:id/limits", s.setLimits)
+
 	// Checkpoints
 	api.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)
 	api.GET("/sandboxes/:id/checkpoints", s.listCheckpoints)

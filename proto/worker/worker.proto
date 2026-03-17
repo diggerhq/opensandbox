@@ -35,6 +35,8 @@ service SandboxWorker {
   rpc BuildTemplate(BuildTemplateRequest) returns (BuildTemplateResponse);
 
   rpc GetSandboxStats(GetSandboxStatsRequest) returns (GetSandboxStatsResponse);
+
+  rpc SetSandboxLimits(SetSandboxLimitsRequest) returns (SetSandboxLimitsResponse);
 }
 
 message CreateSandboxRequest {
@@ -288,3 +290,13 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;
 }
+
+message SetSandboxLimitsRequest {
+  string sandbox_id = 1;
+  int32 max_pids = 2;
+  int64 max_memory_bytes = 3;
+  int64 cpu_max_usec = 4;
+  int64 cpu_period_usec = 5;
+}
+
+message SetSandboxLimitsResponse {}

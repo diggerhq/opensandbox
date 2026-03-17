@@ -242,6 +242,17 @@ func (c *AgentClient) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// SetResourceLimits adjusts sandbox cgroup limits at runtime.
+func (c *AgentClient) SetResourceLimits(ctx context.Context, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	_, err := c.client.SetResourceLimits(ctx, &pb.SetResourceLimitsRequest{
+		MaxPids:        maxPids,
+		MaxMemoryBytes: maxMemoryBytes,
+		CpuMaxUsec:     cpuMaxUsec,
+		CpuPeriodUsec:  cpuPeriodUsec,
+	})
+	return err
+}
+
 // SyncFS flushes all filesystem buffers inside the VM.
 func (c *AgentClient) SyncFS(ctx context.Context) error {
 	_, err := c.client.SyncFS(ctx, &pb.SyncFSRequest{})

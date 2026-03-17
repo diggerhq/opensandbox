@@ -50,6 +50,10 @@ service SandboxAgent {
   // SyncFS flushes all filesystem buffers without exiting.
   // Used before snapshot to ensure disk state is consistent.
   rpc SyncFS(SyncFSRequest) returns (SyncFSResponse);
+
+  // SetResourceLimits adjusts sandbox cgroup limits at runtime.
+  // Used for elastic scaling — raise/lower memory, CPU, pids without restart.
+  rpc SetResourceLimits(SetResourceLimitsRequest) returns (SetResourceLimitsResponse);
 }
 
 // --- Exec ---
@@ -265,3 +269,14 @@ message ShutdownResponse {}
 message SyncFSRequest {}
 
 message SyncFSResponse {}
+
+// --- Resource Limits ---
+
+message SetResourceLimitsRequest {
+  int32 max_pids = 1;          // pids.max (0 = don't change)
+  int64 max_memory_bytes = 2;  // memory.max (0 = don't change)
+  int64 cpu_max_usec = 3;      // cpu.max quota (0 = don't change)
+  int64 cpu_period_usec = 4;   // cpu.max period (0 = default 100000)
+}
+
+message SetResourceLimitsResponse {}

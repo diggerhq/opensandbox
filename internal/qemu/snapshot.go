@@ -327,6 +327,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("add DNAT: %w", err)
 	}
 
+	// Add metadata service DNAT (169.254.169.254:80 → host:8888)
+	if err := AddMetadataDNAT(netCfg.TAPName, netCfg.HostIP); err != nil {
+		log.Printf("qemu: warning: metadata DNAT failed for %s: %v", netCfg.TAPName, err)
+	}
+
 	// Use the user's rootfs if it exists (preserves apt/pip installs).
 	// Fall back to fresh golden rootfs copy if missing (e.g., S3 restore
 	// of an old checkpoint that didn't include rootfs).
@@ -480,6 +485,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
 
+	// Notify metadata server
+	if m.onSandboxReady != nil {
+		m.onSandboxReady(sandboxID, netCfg.GuestIP, vm.Template, vm.StartedAt)
+	}
+
 	log.Printf("qemu: woke VM %s (cold boot, port=%d, tap=%s)",
 		sandboxID, hostPort, netCfg.TAPName)
 	return vmToSandbox(vm), nil
@@ -542,6 +552,11 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 		DeleteTAP(netCfg.TAPName)
 		m.subnets.Release(netCfg.TAPName)
 		return nil, fmt.Errorf("add DNAT: %w", err)
+	}
+
+	// Add metadata service DNAT (169.254.169.254:80 → host:8888)
+	if err := AddMetadataDNAT(netCfg.TAPName, netCfg.HostIP); err != nil {
+		log.Printf("qemu: warning: metadata DNAT failed for %s: %v", netCfg.TAPName, err)
 	}
 
 	cpus := meta.CpuCount
@@ -641,6 +656,11 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
+
+	// Notify metadata server
+	if m.onSandboxReady != nil {
+		m.onSandboxReady(sandboxID, netCfg.GuestIP, meta.Template, vm.StartedAt)
+	}
 
 	log.Printf("qemu: cold-boot-local %s (template=%s, port=%d, tap=%s)", sandboxID, meta.Template, hostPort, netCfg.TAPName)
 	return vmToSandbox(vm), nil

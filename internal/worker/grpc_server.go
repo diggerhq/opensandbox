@@ -698,6 +698,13 @@ func downloadAndExtract(ctx context.Context, store *storage.CheckpointStore, s3K
 	return extract(tmpPath, dest)
 }
 
+func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLimitsRequest) (*pb.SetSandboxLimitsResponse, error) {
+	if err := s.manager.SetResourceLimits(ctx, req.SandboxId, req.MaxPids, req.MaxMemoryBytes, req.CpuMaxUsec, req.CpuPeriodUsec); err != nil {
+		return nil, fmt.Errorf("set sandbox limits failed: %w", err)
+	}
+	return &pb.SetSandboxLimitsResponse{}, nil
+}
+
 func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {
 	stats, err := s.manager.Stats(ctx, req.SandboxId)
 	if err != nil {

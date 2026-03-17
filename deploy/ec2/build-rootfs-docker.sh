@@ -137,6 +137,41 @@ hostname sandbox
 # Debug: check for virtio-serial device
 ls -la /dev/vport* /dev/virtio-ports/ 2>/dev/null || echo "init: no virtio-serial devices found"
 
+# ── Cgroup v2: sandbox resource limits ──
+# Agent (PID 1) stays in root cgroup (protected from user resource exhaustion).
+# User processes are placed in /sys/fs/cgroup/sandbox/ by the agent's exec handler.
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    # Enable controllers in root
+    echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+    # Create sandbox cgroup
+    mkdir -p /sys/fs/cgroup/sandbox
+    # Defaults: 256 pids, 90% of total memory, 90% of CPUs
+    # CPU limit reserves 10% for the agent (PID 1) so it stays responsive
+    # even under fork bomb / CPU exhaustion attacks.
+    echo 128 > /sys/fs/cgroup/sandbox/pids.max
+    TOTAL_MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+    SANDBOX_MEM=$(( (TOTAL_MEM_KB * 1024 * 9) / 10 ))
+    echo "$SANDBOX_MEM" > /sys/fs/cgroup/sandbox/memory.max 2>/dev/null
+    # cpu.max: limit user processes to 80% of available CPUs.
+    # This reserves 20% for the agent (PID 1) so it stays responsive
+    # even under fork bomb / CPU saturation.
+    NUM_CPUS=$(nproc)
+    CPU_MAX=$(( 80000 * NUM_CPUS ))
+    echo "$CPU_MAX 100000" > /sys/fs/cgroup/sandbox/cpu.max 2>/dev/null
+    # cpu.weight: lower priority than agent
+    echo 50 > /sys/fs/cgroup/sandbox/cpu.weight 2>/dev/null
+    echo "init: cgroup sandbox ready (pids=128, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
+else
+    echo "init: warning: cgroup v2 not available"
+fi
+
+# Note: user commands run as root inside the VM. This is safe because:
+# - Each VM is fully isolated (separate QEMU process, separate kernel)
+# - cgroup v2 prevents processes inside a cgroup from modifying their own limits
+# - The agent (PID 1) is in the root cgroup, user processes in /sandbox cgroup
+
 exec /usr/local/bin/osb-agent
 INIT_EOF
 chmod +x "$TMPDIR/init"

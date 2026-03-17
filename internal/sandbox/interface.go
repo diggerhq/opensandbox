@@ -49,6 +49,9 @@ type Manager interface {
 	Exists(ctx context.Context, sandboxID, path string) (bool, error)
 	Stat(ctx context.Context, sandboxID, path string) (*types.FileInfo, error)
 
+	// Resource limits
+	SetResourceLimits(ctx context.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error
+
 	// Monitoring
 	Stats(ctx context.Context, sandboxID string) (*SandboxStats, error)
 	HostPort(ctx context.Context, sandboxID string) (int, error)

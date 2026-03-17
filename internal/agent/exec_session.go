@@ -54,8 +54,14 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	env = append(env, mapToEnv(req.Envs)...)
 	cmd.Env = env
 
-	// Set process group so we can kill the whole group
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Run as sandbox user in its own process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
+		Credential: &syscall.Credential{
+			Uid: sandboxUID,
+			Gid: sandboxGID,
+		},
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -98,6 +104,7 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 		cancel()
 		return nil, fmt.Errorf("start command: %w", err)
 	}
+	moveToCgroup(cmd.Process.Pid)
 
 	s.execMu.Lock()
 	s.execSessions[sessionID] = sess

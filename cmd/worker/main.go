@@ -158,6 +158,13 @@ func main() {
 		mgr = qmMgr
 		autosaverSyncer = qmMgr
 
+		// Start metadata server (169.254.169.254 equivalent, served on :8888)
+		metadataSrv := worker.NewMetadataServer(qmMgr, cfg.Region)
+		metadataSrv.Start(":8888")
+		defer metadataSrv.Close()
+		qmMgr.SetMetadataCallbacks(metadataSrv.RegisterSandbox, metadataSrv.UnregisterSandbox)
+		log.Println("opensandbox-worker: metadata server started on :8888")
+
 		execSessionFactory = func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error) {
 			agent, err := qmMgr.GetAgent(sandboxID)
 			if err != nil {

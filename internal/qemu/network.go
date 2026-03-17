@@ -173,6 +173,29 @@ func RemoveDNAT(cfg *NetworkConfig) {
 		fmt.Sprintf("%s:%d", cfg.GuestIP, cfg.GuestPort))
 }
 
+// AddMetadataDNAT adds an iptables rule to redirect 169.254.169.254:80 from a VM's TAP
+// to the host metadata server on port 8888.
+func AddMetadataDNAT(tapName, hostIP string) error {
+	err := run("iptables", "-t", "nat", "-A", "PREROUTING",
+		"-i", tapName,
+		"-d", "169.254.169.254",
+		"-p", "tcp", "--dport", "80",
+		"-j", "DNAT", "--to-destination", hostIP+":8888")
+	if err != nil {
+		return fmt.Errorf("add metadata DNAT for %s: %w", tapName, err)
+	}
+	return nil
+}
+
+// RemoveMetadataDNAT removes the metadata DNAT rule for a TAP device.
+func RemoveMetadataDNAT(tapName, hostIP string) {
+	_ = run("iptables", "-t", "nat", "-D", "PREROUTING",
+		"-i", tapName,
+		"-d", "169.254.169.254",
+		"-p", "tcp", "--dport", "80",
+		"-j", "DNAT", "--to-destination", hostIP+":8888")
+}
+
 // EnableForwarding enables IPv4 forwarding and masquerading for the VM subnet.
 func EnableForwarding() error {
 	if err := run("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {

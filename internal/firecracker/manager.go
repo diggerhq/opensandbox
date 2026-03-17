@@ -795,6 +795,12 @@ func (m *Manager) Stat(ctx context.Context, sandboxID, path string) (*types.File
 	}, nil
 }
 
+// SetResourceLimits adjusts sandbox cgroup limits at runtime.
+// Not yet implemented for the Firecracker backend.
+func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	return fmt.Errorf("SetResourceLimits not implemented for Firecracker backend")
+}
+
 // Stats returns live resource usage from the VM.
 func (m *Manager) Stats(ctx context.Context, sandboxID string) (*sandbox.SandboxStats, error) {
 	vm, err := m.getReadyVM(ctx, sandboxID)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/creack/pty"
 	"github.com/google/uuid"
@@ -55,6 +56,7 @@ func (s *Server) PTYCreate(ctx context.Context, req *pb.PTYCreateRequest) (*pb.P
 		fmt.Sprintf("COLUMNS=%d", req.Cols),
 		fmt.Sprintf("LINES=%d", req.Rows),
 	)
+	_ = syscall.Getuid() // keep syscall import for future use
 
 	cols := uint16(req.Cols)
 	rows := uint16(req.Rows)
@@ -72,6 +74,9 @@ func (s *Server) PTYCreate(ctx context.Context, req *pb.PTYCreateRequest) (*pb.P
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("start pty: %w", err)
+	}
+	if cmd.Process != nil {
+		moveToCgroup(cmd.Process.Pid)
 	}
 
 	sess := &ptySession{
