@@ -185,8 +185,8 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=1000000
 LimitNPROC=infinity
-KillMode=mixed
-TimeoutStopSec=180
+KillMode=process
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target

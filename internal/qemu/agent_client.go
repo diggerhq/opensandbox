@@ -122,9 +122,35 @@ func (c *rawVsockConn) Close() error {
 
 func (c *rawVsockConn) LocalAddr() net.Addr                { return vsockAddr{} }
 func (c *rawVsockConn) RemoteAddr() net.Addr               { return vsockAddr{} }
-func (c *rawVsockConn) SetDeadline(t time.Time) error      { return nil }
-func (c *rawVsockConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *rawVsockConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *rawVsockConn) SetDeadline(t time.Time) error {
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
+	}
+	return c.SetWriteDeadline(t)
+}
+
+func (c *rawVsockConn) SetReadDeadline(t time.Time) error {
+	return setSockTimeout(c.fd, unix.SO_RCVTIMEO, t)
+}
+
+func (c *rawVsockConn) SetWriteDeadline(t time.Time) error {
+	return setSockTimeout(c.fd, unix.SO_SNDTIMEO, t)
+}
+
+// setSockTimeout sets SO_RCVTIMEO or SO_SNDTIMEO on a raw fd.
+// A zero time clears the timeout (blocks indefinitely).
+func setSockTimeout(fd int, opt int, t time.Time) error {
+	var tv unix.Timeval
+	if !t.IsZero() {
+		d := time.Until(t)
+		if d <= 0 {
+			d = 1 * time.Microsecond // already expired — set minimal timeout
+		}
+		tv = unix.NsecToTimeval(int64(d))
+	}
+	// Zero tv clears the timeout
+	return unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, opt, &tv)
+}
 
 type vsockAddr struct{}
 
@@ -291,6 +317,50 @@ func (c *AgentClient) ConnectPTYData(guestCID uint32, dataPort uint32) (net.Conn
 	conn, err := dialVsock(ctx, guestCID, dataPort)
 	if err != nil {
 		return nil, fmt.Errorf("connect to PTY data port %d: %w", dataPort, err)
+	}
+	return conn, nil
+}
+
+// NewAgentClientTCP connects to the agent via TCP using the guest IP.
+// Used by QEMU backend — TCP over virtio-net survives QEMU migration.
+func NewAgentClientTCP(guestIP string) (*AgentClient, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	addr := fmt.Sprintf("%s:%d", guestIP, 1024)
+	conn, err := grpc.DialContext(ctx,
+		addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  10 * time.Millisecond,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   1 * time.Second,
+			},
+		}),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(64*1024*1024),
+			grpc.MaxCallSendMsgSize(64*1024*1024),
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to agent at %s: %w", addr, err)
+	}
+
+	return &AgentClient{
+		conn:   conn,
+		client: pb.NewSandboxAgentClient(conn),
+	}, nil
+}
+
+// ConnectPTYDataTCP connects to a PTY data port via TCP.
+func ConnectPTYDataTCP(guestIP string, dataPort uint32) (net.Conn, error) {
+	addr := fmt.Sprintf("%s:%d", guestIP, dataPort)
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("connect to PTY data %s: %w", addr, err)
 	}
 	return conn, nil
 }

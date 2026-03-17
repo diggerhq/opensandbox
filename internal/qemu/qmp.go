@@ -215,6 +215,35 @@ func (q *QMPClient) WaitMigration(timeout time.Duration) error {
 	return fmt.Errorf("migration timed out after %v", timeout)
 }
 
+// SaveVM creates an internal VM snapshot (memory + device state + disk deltas).
+// Requires all drives to be qcow2 format. The snapshot is stored inside the qcow2 files.
+func (q *QMPClient) SaveVM(name string) error {
+	_, err := q.execute(qmpCommand{
+		Execute:   "human-monitor-command",
+		Arguments: map[string]string{"command-line": "savevm " + name},
+	}, 5*time.Minute)
+	return err
+}
+
+// LoadVM restores an internal VM snapshot. The VM reverts to the exact state
+// when SaveVM was called — memory, devices, and disk contents all revert.
+func (q *QMPClient) LoadVM(name string) error {
+	_, err := q.execute(qmpCommand{
+		Execute:   "human-monitor-command",
+		Arguments: map[string]string{"command-line": "loadvm " + name},
+	}, 5*time.Minute)
+	return err
+}
+
+// DeleteVM deletes an internal VM snapshot.
+func (q *QMPClient) DeleteVM(name string) error {
+	_, err := q.execute(qmpCommand{
+		Execute:   "human-monitor-command",
+		Arguments: map[string]string{"command-line": "delvm " + name},
+	}, 30*time.Second)
+	return err
+}
+
 // Execute sends an arbitrary QMP command with the given arguments.
 func (q *QMPClient) Execute(command string, args map[string]interface{}) error {
 	cmd := qmpCommand{Execute: command}

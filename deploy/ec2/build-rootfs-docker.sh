@@ -71,31 +71,20 @@ cat > "$TMPDIR/init" << 'INIT_EOF'
 mount -t proc proc /proc
 mount -t devtmpfs devtmpfs /dev
 
-# ── Overlay root: data disk as writable upper layer over the rootfs ──
-mkdir -p /mnt/data
-if mount /dev/vdb /mnt/data 2>/dev/null || mount /dev/vdb1 /mnt/data 2>/dev/null; then
-    mkdir -p /mnt/data/upper /mnt/data/work /mnt/overlay
+# Load kernel modules (needed for QEMU with modular kernel)
+if [ -d /lib/modules/vsock ]; then
+    for mod in /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do
+        [ -f "$mod" ] && insmod "$mod" 2>/dev/null || true
+    done
+    echo "init: kernel modules loaded"
+fi
 
-    umount /dev
-    umount /proc
-
-    mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/data/upper,workdir=/mnt/data/work /mnt/overlay
-
-    mkdir -p /mnt/overlay/mnt/data
-    mount --move /mnt/data /mnt/overlay/mnt/data
-
-    cd /mnt/overlay
-    mkdir -p mnt/old_root
-    pivot_root . mnt/old_root
-
-    umount -l /mnt/old_root 2>/dev/null
-    rmdir /mnt/old_root 2>/dev/null
-
-    echo "init: overlay root active (data disk backing all writes)"
+# ── Mount workspace: data disk at /workspace (persistent user data) ──
+mkdir -p /workspace
+if mount /dev/vdb /workspace 2>/dev/null || mount /dev/vdb1 /workspace 2>/dev/null; then
+    echo "init: workspace mounted (/dev/vdb -> /workspace)"
 else
-    umount /dev
-    umount /proc
-    echo "init: warning: no data disk found, running on rootfs only"
+    echo "init: warning: no data disk found, /workspace is ephemeral"
 fi
 
 # ── Mount virtual filesystems (in the final root) ──
