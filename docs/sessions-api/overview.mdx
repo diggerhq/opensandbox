@@ -1,0 +1,75 @@
+---
+title: "Sessions API Overview"
+description: "Interactive AI agent sessions on OpenComputer — create a session, send messages, stream real-time events, and get a live preview URL"
+---
+
+The Sessions API lets you create cloud sandboxes with AI agents that build and modify apps in real time. Each session gives you a live preview URL, an SSE event stream, and multi-turn conversation support — all through a simple REST + SSE API.
+
+## Base URL
+
+```
+https://api.opencomputer.dev
+```
+
+## Authentication
+
+All requests require an OpenComputer API key via the `X-API-Key` header:
+
+```
+X-API-Key: osb_your_api_key
+```
+
+Get your API key from the [OpenComputer dashboard](https://app.opencomputer.dev).
+
+## Session object
+
+All endpoints that return sessions use this shape:
+
+```typescript
+{
+  id: string;                  // "session_abc123"
+  status: "ready" | "running" | "error";
+  sandboxId: string | null;    // "sb-31317626"
+  previewUrl: string;          // "https://sb-xxx-p3000.preview.opencomputer.dev"
+  userId: string;
+  project: {
+    title: string;
+    framework: string;
+    artifacts: { path: string; summary: string }[];
+  };
+  messages: {
+    id: string;
+    role: "user" | "assistant" | "system";
+    content: string;
+    createdAt: string;         // ISO 8601
+  }[];
+  events: {
+    id: string;
+    type: string;
+    level: "info" | "warning" | "error";
+    message: string;
+    createdAt: string;
+  }[];
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+## Preview URL
+
+The `previewUrl` field points to a live dev server running inside the sandbox. Embed it in an iframe or open it directly — it updates in real-time as the agent edits files via HMR.
+
+The URL is available once the agent starts a dev server on port 3000. If the agent hasn't started one yet, `previewUrl` will be empty.
+
+## Errors
+
+All errors return:
+
+```json
+{
+  "error": {
+    "type": "invalid_request | not_found | internal_error",
+    "message": "Human-readable description"
+  }
+}
+```
