@@ -1,0 +1,20 @@
+---
+title: 'Kill Agent Session'
+api: 'POST /api/sandboxes/{id}/agent/{sid}/kill'
+---
+
+Terminate the agent session.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sid" type="string" required>
+  Agent session ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

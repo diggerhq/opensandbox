@@ -1,0 +1,24 @@
+---
+title: 'List Agent Sessions'
+api: 'GET /api/sandboxes/{id}/agent'
+---
+
+List all agent sessions for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  {
+    "sessionID": "as-abc123",
+    "sandboxID": "sb-abc123",
+    "running": true,
+    "startedAt": "2025-01-15T10:30:00Z",
+    "claudeSessionID": ""
+  }
+]
+```
+</ResponseExample>

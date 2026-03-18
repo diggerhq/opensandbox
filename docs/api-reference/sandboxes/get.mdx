@@ -1,0 +1,21 @@
+---
+title: 'Get Sandbox'
+api: 'GET /api/sandboxes/{id}'
+---
+
+Get sandbox details by ID. Available on both control plane and worker.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "sandboxID": "sb-abc123",
+  "status": "running",
+  "region": "use2",
+  "workerID": "w-use2-abc123"
+}
+```
+</ResponseExample>

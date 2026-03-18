@@ -1,0 +1,20 @@
+---
+title: 'Delete Checkpoint'
+api: 'DELETE /api/sandboxes/{id}/checkpoints/{checkpointId}'
+---
+
+Delete a checkpoint.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

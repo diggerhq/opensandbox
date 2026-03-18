@@ -1,0 +1,25 @@
+---
+title: 'List Preview URLs'
+api: 'GET /api/sandboxes/{id}/preview'
+---
+
+List all preview URLs for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  {
+    "id": "pv-abc123",
+    "sandboxId": "sb-abc123",
+    "hostname": "sb-abc123-p3000.preview.opencomputer.dev",
+    "port": 3000,
+    "sslStatus": "active",
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+]
+```
+</ResponseExample>

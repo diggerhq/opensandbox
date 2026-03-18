@@ -1,0 +1,20 @@
+---
+title: 'Set Timeout'
+api: 'POST /api/sandboxes/{id}/timeout'
+---
+
+Update the idle timeout for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="timeout" type="integer" required>
+  New timeout in seconds (must be > 0)
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

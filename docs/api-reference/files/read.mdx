@@ -1,0 +1,20 @@
+---
+title: 'Read File'
+api: 'GET /api/sandboxes/{id}/files'
+---
+
+Returns file content as plain text (not JSON).
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+<ResponseExample>
+```text 200
+Hello, World!
+```
+</ResponseExample>

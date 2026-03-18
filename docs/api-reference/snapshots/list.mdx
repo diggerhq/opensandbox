@@ -1,0 +1,23 @@
+---
+title: 'List Snapshots'
+api: 'GET /api/snapshots'
+---
+
+List all snapshots.
+
+<ResponseExample>
+```json 200
+[
+  {
+    "id": "snap-abc123",
+    "name": "data-science",
+    "status": "ready",
+    "contentHash": "sha256:...",
+    "checkpointId": "cp-abc123",
+    "manifest": { "steps": [] },
+    "createdAt": "2025-01-15T10:30:00Z",
+    "lastUsedAt": "2025-01-16T08:00:00Z"
+  }
+]
+```
+</ResponseExample>

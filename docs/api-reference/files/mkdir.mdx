@@ -1,0 +1,20 @@
+---
+title: 'Create Directory'
+api: 'POST /api/sandboxes/{id}/files/mkdir'
+---
+
+Create a new directory.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Path for the new directory
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

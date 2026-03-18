@@ -1,0 +1,20 @@
+---
+title: 'Kill PTY Session'
+api: 'DELETE /api/sandboxes/{id}/pty/{sessionID}'
+---
+
+Terminate a PTY session.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sessionID" type="string" required>
+  PTY session ID
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

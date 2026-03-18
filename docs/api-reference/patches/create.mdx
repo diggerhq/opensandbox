@@ -1,0 +1,34 @@
+---
+title: 'Create Patch'
+api: 'POST /api/sandboxes/checkpoints/{checkpointId}/patches'
+---
+
+Create a patch script that runs when a sandbox is spawned from a checkpoint. Patches apply in sequence order.
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ParamField body="script" type="string" required>
+  Bash script to execute on spawn
+</ParamField>
+
+<ParamField body="description" type="string">
+  Human-readable description
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "patch": {
+    "id": "pa-abc123",
+    "checkpointId": "cp-abc123",
+    "script": "apt install -y curl",
+    "description": "Install curl",
+    "strategy": "on_wake",
+    "sequence": 1,
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+}
+```
+</ResponseExample>

@@ -1,0 +1,25 @@
+---
+title: 'List Checkpoints'
+api: 'GET /api/sandboxes/{id}/checkpoints'
+---
+
+List all checkpoints for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  {
+    "id": "cp-abc123",
+    "sandboxID": "sb-abc123",
+    "name": "before-migration",
+    "status": "ready",
+    "sizeBytes": 134217728,
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+]
+```
+</ResponseExample>

@@ -33,6 +33,13 @@
   "modeToggle": {
     "default": "light"
   },
+  "api": {
+    "baseUrl": "https://app.opencomputer.dev",
+    "auth": {
+      "method": "key",
+      "name": "X-API-Key"
+    }
+  },
   "topbarLinks": [
     {
       "name": "GitHub",
@@ -93,7 +100,6 @@
     {
       "group": "Reference",
       "pages": [
-        "reference/api",
         "reference/typescript-sdk",
         "reference/python-sdk",
         "reference/cli"
@@ -102,6 +108,96 @@
     {
       "group": "Resources",
       "pages": ["troubleshooting"]
+    },
+    {
+      "group": "API Reference",
+      "pages": [
+        "api-reference/overview",
+        {
+          "group": "Sandboxes",
+          "pages": [
+            "api-reference/sandboxes/create",
+            "api-reference/sandboxes/list",
+            "api-reference/sandboxes/get",
+            "api-reference/sandboxes/delete",
+            "api-reference/sandboxes/set-timeout",
+            "api-reference/sandboxes/hibernate",
+            "api-reference/sandboxes/wake"
+          ]
+        },
+        {
+          "group": "Commands",
+          "pages": [
+            "api-reference/exec/run",
+            "api-reference/exec/create-session",
+            "api-reference/exec/list-sessions",
+            "api-reference/exec/kill-session"
+          ]
+        },
+        {
+          "group": "Agent Sessions",
+          "pages": [
+            "api-reference/agent/create",
+            "api-reference/agent/list",
+            "api-reference/agent/prompt",
+            "api-reference/agent/interrupt",
+            "api-reference/agent/kill"
+          ]
+        },
+        {
+          "group": "Filesystem",
+          "pages": [
+            "api-reference/files/read",
+            "api-reference/files/write",
+            "api-reference/files/list-directory",
+            "api-reference/files/mkdir",
+            "api-reference/files/delete"
+          ]
+        },
+        {
+          "group": "Checkpoints",
+          "pages": [
+            "api-reference/checkpoints/create",
+            "api-reference/checkpoints/list",
+            "api-reference/checkpoints/restore",
+            "api-reference/checkpoints/fork",
+            "api-reference/checkpoints/delete"
+          ]
+        },
+        {
+          "group": "Patches",
+          "pages": [
+            "api-reference/patches/create",
+            "api-reference/patches/list",
+            "api-reference/patches/delete"
+          ]
+        },
+        {
+          "group": "Preview URLs",
+          "pages": [
+            "api-reference/preview/create",
+            "api-reference/preview/list",
+            "api-reference/preview/delete"
+          ]
+        },
+        {
+          "group": "Snapshots",
+          "pages": [
+            "api-reference/snapshots/create",
+            "api-reference/snapshots/list",
+            "api-reference/snapshots/get",
+            "api-reference/snapshots/delete"
+          ]
+        },
+        {
+          "group": "PTY",
+          "pages": [
+            "api-reference/pty/create",
+            "api-reference/pty/resize",
+            "api-reference/pty/kill"
+          ]
+        }
+      ]
     }
   ],
   "footerSocials": {

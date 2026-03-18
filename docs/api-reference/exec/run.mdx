@@ -1,0 +1,40 @@
+---
+title: 'Run Command'
+api: 'POST /api/sandboxes/{id}/exec/run'
+---
+
+Execute a command synchronously and return the result.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="cmd" type="string" required>
+  Command to execute
+</ParamField>
+
+<ParamField body="args" type="string[]">
+  Command arguments
+</ParamField>
+
+<ParamField body="envs" type="object">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField body="timeout" type="integer">
+  Timeout in seconds (default: `60`)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "exitCode": 0,
+  "stdout": "Hello, World!\n",
+  "stderr": ""
+}
+```
+</ResponseExample>

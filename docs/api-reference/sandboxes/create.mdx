@@ -1,0 +1,49 @@
+---
+title: 'Create Sandbox'
+api: 'POST /api/sandboxes'
+---
+
+Create a new sandbox.
+
+<ParamField body="templateID" type="string">
+  Template name (default: `"base"`)
+</ParamField>
+
+<ParamField body="timeout" type="integer">
+  Idle timeout in seconds (default: `300`)
+</ParamField>
+
+<ParamField body="cpuCount" type="integer">
+  CPU cores, 1–4 (default: `1`)
+</ParamField>
+
+<ParamField body="memoryMB" type="integer">
+  Memory in MB, up to 2048 (default: `512`)
+</ParamField>
+
+<ParamField body="envs" type="object">
+  Environment variables as key-value pairs
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Arbitrary key-value pairs
+</ParamField>
+
+<ParamField body="image" type="object">
+  Declarative image manifest (see [Image builder](/sandboxes/templates#image-configuration))
+</ParamField>
+
+<ParamField body="snapshot" type="string">
+  Name of a pre-built snapshot for instant boot
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "sandboxID": "sb-abc123",
+  "status": "running",
+  "region": "use2",
+  "workerID": "w-use2-abc123"
+}
+```
+</ResponseExample>

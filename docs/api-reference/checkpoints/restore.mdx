@@ -1,0 +1,20 @@
+---
+title: 'Restore Checkpoint'
+api: 'POST /api/sandboxes/{id}/checkpoints/{checkpointId}/restore'
+---
+
+Revert the sandbox in-place to a checkpoint. All changes since the checkpoint are lost.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

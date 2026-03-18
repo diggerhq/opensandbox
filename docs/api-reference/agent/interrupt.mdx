@@ -1,0 +1,20 @@
+---
+title: 'Interrupt Agent'
+api: 'POST /api/sandboxes/{id}/agent/{sid}/interrupt'
+---
+
+Stop the agent's current turn.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sid" type="string" required>
+  Agent session ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

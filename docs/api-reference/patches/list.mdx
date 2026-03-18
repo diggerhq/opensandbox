@@ -1,0 +1,26 @@
+---
+title: 'List Patches'
+api: 'GET /api/sandboxes/checkpoints/{checkpointId}/patches'
+---
+
+List all patches for a checkpoint.
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  {
+    "id": "pa-abc123",
+    "checkpointId": "cp-abc123",
+    "script": "apt install -y curl",
+    "description": "Install curl",
+    "strategy": "on_wake",
+    "sequence": 1,
+    "createdAt": "2025-01-15T10:30:00Z"
+  }
+]
+```
+</ResponseExample>

@@ -1,0 +1,58 @@
+---
+title: 'Create Agent Session'
+api: 'POST /api/sandboxes/{id}/agent'
+---
+
+Create a new agent session running the Claude Agent SDK inside the sandbox. Events stream over the exec session WebSocket transport.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="prompt" type="string">
+  Initial prompt
+</ParamField>
+
+<ParamField body="model" type="string">
+  Claude model name
+</ParamField>
+
+<ParamField body="systemPrompt" type="string">
+  System prompt
+</ParamField>
+
+<ParamField body="allowedTools" type="string[]">
+  Restrict available tools
+</ParamField>
+
+<ParamField body="permissionMode" type="string">
+  Permission mode
+</ParamField>
+
+<ParamField body="maxTurns" type="integer">
+  Maximum turns
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField body="mcpServers" type="object">
+  MCP server configuration
+</ParamField>
+
+<ParamField body="resume" type="string">
+  Session ID to resume
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "sessionID": "as-abc123",
+  "sandboxID": "sb-abc123",
+  "running": true,
+  "startedAt": "2025-01-15T10:30:00Z",
+  "claudeSessionID": ""
+}
+```
+</ResponseExample>

@@ -1,0 +1,49 @@
+---
+title: 'Create Exec Session'
+api: 'POST /api/sandboxes/{id}/exec'
+---
+
+Start a long-running command as a session. Attach via WebSocket to stream I/O.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="cmd" type="string" required>
+  Command to execute
+</ParamField>
+
+<ParamField body="args" type="string[]">
+  Command arguments
+</ParamField>
+
+<ParamField body="envs" type="object">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField body="timeout" type="integer">
+  Timeout in seconds
+</ParamField>
+
+<ParamField body="maxRunAfterDisconnect" type="integer">
+  Seconds to keep running after all clients disconnect
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "sessionID": "es-abc123",
+  "sandboxID": "sb-abc123",
+  "command": "node",
+  "args": ["server.js"],
+  "running": true,
+  "exitCode": null,
+  "startedAt": "2025-01-15T10:30:00Z",
+  "attachedClients": 0
+}
+```
+</ResponseExample>

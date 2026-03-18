@@ -1,0 +1,48 @@
+---
+title: "API Reference"
+description: "Complete REST API reference for OpenComputer"
+---
+
+## Base URL
+
+```
+https://app.opencomputer.dev/api
+```
+
+## Authentication
+
+All requests require an API key passed via the `X-API-Key` header.
+
+```bash
+curl https://app.opencomputer.dev/api/sandboxes \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+## WebSocket Authentication
+
+WebSocket endpoints accept auth via query parameter:
+
+```
+wss://app.opencomputer.dev/api/sandboxes/{id}/exec/{sessionID}?api_key=<key>
+```
+
+## Error Format
+
+All errors use a consistent JSON envelope:
+
+```json
+{
+  "error": "descriptive error message"
+}
+```
+
+| Status Code | Meaning |
+| --- | --- |
+| `400` | Invalid request (missing fields, bad values) |
+| `401` | Missing or invalid authentication |
+| `403` | Insufficient permissions |
+| `404` | Resource not found |
+| `409` | Conflict (duplicate resource) |
+| `429` | Quota exceeded |
+| `500` | Internal server error |
+| `503` | Feature unavailable in current deployment mode |

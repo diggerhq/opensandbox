@@ -1,0 +1,20 @@
+---
+title: 'Write File'
+api: 'PUT /api/sandboxes/{id}/files'
+---
+
+Write content to a file. The request body is written as raw file content (not JSON).
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

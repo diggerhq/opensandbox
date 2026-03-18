@@ -1,0 +1,32 @@
+---
+title: 'Resize PTY'
+api: 'POST /api/sandboxes/{id}/pty/{sessionID}/resize'
+---
+
+Resize a PTY session.
+
+<Note>
+  PTY resize is HTTP-only — not exposed in the TypeScript or Python SDKs. The SDKs handle resize automatically for interactive sessions.
+</Note>
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sessionID" type="string" required>
+  PTY session ID
+</ParamField>
+
+<ParamField body="cols" type="integer" required>
+  New column count
+</ParamField>
+
+<ParamField body="rows" type="integer" required>
+  New row count
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

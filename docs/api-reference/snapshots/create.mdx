@@ -1,0 +1,29 @@
+---
+title: 'Create Snapshot'
+api: 'POST /api/snapshots'
+---
+
+Create a pre-built sandbox environment from a declarative image manifest.
+
+<ParamField body="name" type="string" required>
+  Unique snapshot name
+</ParamField>
+
+<ParamField body="image" type="object" required>
+  Declarative image manifest (see [Image builder](/sandboxes/templates#image-configuration))
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "id": "snap-abc123",
+  "name": "data-science",
+  "status": "building",
+  "contentHash": "sha256:...",
+  "checkpointId": "",
+  "manifest": { "steps": [] },
+  "createdAt": "2025-01-15T10:30:00Z",
+  "lastUsedAt": ""
+}
+```
+</ResponseExample>

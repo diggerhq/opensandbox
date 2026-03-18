@@ -1,0 +1,23 @@
+---
+title: 'List Directory'
+api: 'GET /api/sandboxes/{id}/files/list'
+---
+
+List contents of a directory.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string">
+  Directory path (default: `/`)
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  { "name": "app", "isDir": true, "size": 4096, "path": "/app" },
+  { "name": "README.md", "isDir": false, "size": 1234, "path": "/README.md" }
+]
+```
+</ResponseExample>

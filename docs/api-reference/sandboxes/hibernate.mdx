@@ -1,0 +1,21 @@
+---
+title: 'Hibernate Sandbox'
+api: 'POST /api/sandboxes/{id}/hibernate'
+---
+
+Snapshot VM state and stop the sandbox. Control plane only.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "sandboxID": "sb-abc123",
+  "hibernationKey": "checkpoints/sb-abc123/1234567890.tar.zst",
+  "sizeBytes": 134217728,
+  "status": "hibernated"
+}
+```
+</ResponseExample>

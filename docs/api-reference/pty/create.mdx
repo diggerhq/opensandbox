@@ -1,0 +1,31 @@
+---
+title: 'Create PTY Session'
+api: 'POST /api/sandboxes/{id}/pty'
+---
+
+Create an interactive terminal session.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="cols" type="integer">
+  Terminal columns (default: `80`)
+</ParamField>
+
+<ParamField body="rows" type="integer">
+  Terminal rows (default: `24`)
+</ParamField>
+
+<ParamField body="shell" type="string">
+  Shell path (default: `/bin/bash`)
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "sessionID": "ps-abc123",
+  "sandboxID": "sb-abc123"
+}
+```
+</ResponseExample>

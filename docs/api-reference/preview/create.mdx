@@ -1,0 +1,35 @@
+---
+title: 'Create Preview URL'
+api: 'POST /api/sandboxes/{id}/preview'
+---
+
+Create a preview URL to expose a port from the sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="port" type="integer" required>
+  Container port (1–65535)
+</ParamField>
+
+<ParamField body="domain" type="string">
+  Custom domain
+</ParamField>
+
+<ParamField body="authConfig" type="object">
+  Authentication configuration
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "id": "pv-abc123",
+  "sandboxId": "sb-abc123",
+  "hostname": "sb-abc123-p3000.preview.opencomputer.dev",
+  "port": 3000,
+  "sslStatus": "active",
+  "createdAt": "2025-01-15T10:30:00Z"
+}
+```
+</ResponseExample>

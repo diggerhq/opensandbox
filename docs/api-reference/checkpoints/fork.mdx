@@ -1,0 +1,25 @@
+---
+title: 'Fork from Checkpoint'
+api: 'POST /api/sandboxes/from-checkpoint/{checkpointId}'
+---
+
+Create a new sandbox from a checkpoint.
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ParamField body="timeout" type="integer">
+  Idle timeout for the new sandbox (default: `300`)
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "sandboxID": "sb-def456",
+  "status": "running",
+  "region": "use2",
+  "workerID": "w-use2-abc123"
+}
+```
+</ResponseExample>

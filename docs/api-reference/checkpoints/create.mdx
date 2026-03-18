@@ -1,0 +1,27 @@
+---
+title: 'Create Checkpoint'
+api: 'POST /api/sandboxes/{id}/checkpoints'
+---
+
+Create a checkpoint of the sandbox state. Maximum 10 checkpoints per sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Checkpoint name (unique per sandbox)
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "id": "cp-abc123",
+  "sandboxID": "sb-abc123",
+  "name": "before-migration",
+  "status": "processing",
+  "sizeBytes": 0,
+  "createdAt": "2025-01-15T10:30:00Z"
+}
+```
+</ResponseExample>

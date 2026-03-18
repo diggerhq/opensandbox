@@ -1,0 +1,24 @@
+---
+title: 'Kill Exec Session'
+api: 'POST /api/sandboxes/{id}/exec/{sessionID}/kill'
+---
+
+Kill an exec session.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sessionID" type="string" required>
+  Exec session ID
+</ParamField>
+
+<ParamField body="signal" type="integer">
+  Signal number (default: `9` / SIGKILL)
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

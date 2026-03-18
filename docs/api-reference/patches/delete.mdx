@@ -1,0 +1,20 @@
+---
+title: 'Delete Patch'
+api: 'DELETE /api/sandboxes/checkpoints/{checkpointId}/patches/{patchId}'
+---
+
+Delete a patch.
+
+<ParamField path="checkpointId" type="string" required>
+  Checkpoint ID
+</ParamField>
+
+<ParamField path="patchId" type="string" required>
+  Patch ID
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

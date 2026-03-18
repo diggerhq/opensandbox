@@ -1,0 +1,27 @@
+---
+title: 'List Exec Sessions'
+api: 'GET /api/sandboxes/{id}/exec'
+---
+
+List all exec sessions for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+[
+  {
+    "sessionID": "es-abc123",
+    "sandboxID": "sb-abc123",
+    "command": "node",
+    "args": ["server.js"],
+    "running": true,
+    "exitCode": null,
+    "startedAt": "2025-01-15T10:30:00Z",
+    "attachedClients": 0
+  }
+]
+```
+</ResponseExample>

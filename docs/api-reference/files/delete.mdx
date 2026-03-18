@@ -1,0 +1,20 @@
+---
+title: 'Delete File or Directory'
+api: 'DELETE /api/sandboxes/{id}/files'
+---
+
+Delete a file or directory.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Path to the file or directory to delete
+</ParamField>
+
+<ResponseExample>
+```json 204
+{}
+```
+</ResponseExample>

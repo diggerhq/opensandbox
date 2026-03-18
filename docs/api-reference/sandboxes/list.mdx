@@ -1,0 +1,19 @@
+---
+title: 'List Sandboxes'
+api: 'GET /api/sandboxes'
+---
+
+List all running sandboxes.
+
+<ResponseExample>
+```json 200
+[
+  {
+    "sandboxID": "sb-abc123",
+    "status": "running",
+    "region": "use2",
+    "workerID": "w-use2-abc123"
+  }
+]
+```
+</ResponseExample>

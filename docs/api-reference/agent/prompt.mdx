@@ -1,0 +1,24 @@
+---
+title: 'Send Follow-up Prompt'
+api: 'POST /api/sandboxes/{id}/agent/{sid}/prompt'
+---
+
+Send a follow-up prompt to a running agent session.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField path="sid" type="string" required>
+  Agent session ID
+</ParamField>
+
+<ParamField body="text" type="string" required>
+  Follow-up prompt text
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>
