@@ -11,10 +11,9 @@ import (
 )
 
 const (
-	scaleUpThreshold    = 0.70 // Scale up when utilization > 70%
-	scaleDownThreshold  = 0.30 // Scale down when utilization < 30%
-	minWorkersPerRegion = 1
-	maxWorkersPerRegion = 10   // Hard cap to prevent runaway launches
+	scaleUpThreshold   = 0.70 // Scale up when utilization > 70%
+	scaleDownThreshold = 0.30 // Scale down when utilization < 30%
+	maxWorkersPerRegion = 10  // Hard cap to prevent runaway launches
 	pendingWorkerTTL    = 10 * time.Minute // How long to wait for a launched worker to register
 
 	// Resource-based scaling thresholds (applied per-worker, trigger on ANY worker exceeding)
@@ -38,6 +37,7 @@ type ScalerConfig struct {
 	WorkerImage string
 	Cooldown    time.Duration // minimum time between scale-up actions per region
 	Interval    time.Duration // how often to evaluate scaling (0 = default 30s)
+	MinWorkers  int           // minimum workers per region (0 = default 1). Set higher to pre-provision capacity.
 }
 
 // pendingLaunch tracks an EC2 instance that was launched but hasn't registered yet.
@@ -53,6 +53,7 @@ type Scaler struct {
 	image       string
 	cooldown    time.Duration
 	interval    time.Duration
+	minWorkers  int
 	lastScaleUp map[string]time.Time      // region -> last scale-up time
 	pending     map[string][]pendingLaunch // region -> pending (unregistered) launches
 	stop        chan struct{}
@@ -69,12 +70,17 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 	if cooldown <= 0 {
 		cooldown = 5 * time.Minute
 	}
+	minWorkers := cfg.MinWorkers
+	if minWorkers <= 0 {
+		minWorkers = 1
+	}
 	return &Scaler{
 		pool:        cfg.Pool,
 		registry:    cfg.Registry,
 		image:       cfg.WorkerImage,
 		cooldown:    cooldown,
 		interval:    interval,
+		minWorkers:  minWorkers,
 		lastScaleUp: make(map[string]time.Time),
 		pending:     make(map[string][]pendingLaunch),
 		stop:        make(chan struct{}),
@@ -142,6 +148,19 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		reason = fmt.Sprintf("memory pressure %.1f%% > %.0f%%", maxMem, resourceMemThreshold)
 	}
 
+	// Ensure minimum workers are running (pre-provisioned capacity).
+	// Ignores cooldowns — if we're below minimum, launch immediately.
+	totalWorkers := len(workers) + len(s.pending[region])
+	if totalWorkers < s.minWorkers {
+		deficit := s.minWorkers - totalWorkers
+		log.Printf("scaler: region %s below minimum workers (%d/%d), launching %d",
+			region, totalWorkers, s.minWorkers, deficit)
+		for i := 0; i < deficit; i++ {
+			s.scaleUp(ctx, region)
+		}
+		return
+	}
+
 	if needsScaleUp {
 		// Check cooldown before scaling up
 		if last, ok := s.lastScaleUp[region]; ok && time.Since(last) < s.cooldown {
@@ -159,7 +178,6 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		}
 
 		// Don't exceed max workers per region
-		totalWorkers := len(workers) + len(pending)
 		if totalWorkers >= maxWorkersPerRegion {
 			log.Printf("scaler: region %s at max workers (%d), skipping scale-up", region, totalWorkers)
 			return
@@ -168,7 +186,7 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% util=%.1f%%)",
 			region, reason, maxCPU, maxMem, utilization*100)
 		s.scaleUp(ctx, region)
-	} else if utilization < scaleDownThreshold && len(workers) > minWorkersPerRegion {
+	} else if utilization < scaleDownThreshold && len(workers) > s.minWorkers {
 		log.Printf("scaler: region %s utilization %.1f%% < %.0f%%, scaling down", region, utilization*100, scaleDownThreshold*100)
 		s.scaleDown(ctx, region, workers)
 	}

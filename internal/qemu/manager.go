@@ -66,6 +66,26 @@ type SandboxMeta struct {
 	GuestPort int    `json:"guestPort"`
 }
 
+// SecretsProxyIntegration provides the interface for the secrets proxy to integrate
+// with VM lifecycle. Defined here (not imported from firecracker) to avoid circular deps.
+type SecretsProxyIntegration interface {
+	// CreateSealedEnvs generates sealed tokens for env vars, registers a proxy session,
+	// and returns the full env map (sealed tokens + proxy config vars) to inject into the VM.
+	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
+	// UnregisterSession removes the proxy session for the given guest IP.
+	UnregisterSession(guestIP string)
+	// GetSessionTokens returns the sealed token → real value map for persisting during hibernate.
+	GetSessionTokens(guestIP string) map[string]string
+	// GetSessionAllowlist returns the egress allowlist for persisting during hibernate.
+	GetSessionAllowlist(guestIP string) []string
+	// GetSessionTokenHosts returns the per-token host restrictions for persisting during hibernate.
+	GetSessionTokenHosts(guestIP string) map[string][]string
+	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
+	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string)
+	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
+	CACertPEM() []byte
+}
+
 // Config holds configuration for the QEMU Manager.
 type Config struct {
 	DataDir         string // base data directory (e.g., /data)
@@ -97,6 +117,8 @@ type Manager struct {
 	// Metadata service callbacks (set via SetMetadataCallbacks)
 	onSandboxReady   func(sandboxID, guestIP, template string, startedAt time.Time)
 	onSandboxDestroy func(sandboxID string)
+
+	secretsProxy SecretsProxyIntegration // nil if secrets proxy is not configured
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -154,6 +176,12 @@ func (m *Manager) SetMetadataCallbacks(
 ) {
 	m.onSandboxReady = onReady
 	m.onSandboxDestroy = onDestroy
+}
+
+// SetSecretsProxy configures the secrets proxy integration for token substitution.
+// Must be called before any sandboxes are created.
+func (m *Manager) SetSecretsProxy(sp SecretsProxyIntegration) {
+	m.secretsProxy = sp
 }
 
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then

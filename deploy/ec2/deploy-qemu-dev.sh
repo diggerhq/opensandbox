@@ -286,33 +286,37 @@ else
     echo "Rootfs image already exists (delete /data/firecracker/images/default.ext4 to rebuild)."
 fi
 
-# Patch rootfs with guest kernel modules (vsock, overlay) and insmod symlink
-GUEST_MODDIR="/opt/opensandbox/guest-modules"
-if [ -d "$GUEST_MODDIR" ] && [ -f /data/firecracker/images/default.ext4 ]; then
+# Patch rootfs with guest kernel modules (vsock, virtio_mem) and insmod symlink
+if [ -f /data/firecracker/images/default.ext4 ]; then
     echo "Patching rootfs with guest kernel modules..."
     MNTDIR=$(mktemp -d)
     sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
 
-    # Copy modules
+    # Detect guest kernel version from the vmlinux binary
+    GUEST_KVER=$(grep -aoP '\d+\.\d+\.\d+-\d+-generic' /opt/opensandbox/vmlinux | head -1)
+    echo "Guest kernel version: $GUEST_KVER"
+
+    # Copy vsock modules from host
+    GUEST_MODDIR="/opt/opensandbox/guest-modules"
     sudo mkdir -p "$MNTDIR/lib/modules/vsock"
-    sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
+    if [ -d "$GUEST_MODDIR" ]; then
+        sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
+    fi
+
+    # Copy virtio_mem module from host kernel modules, decompress for busybox insmod
+    HOST_VIRTIO_MEM="/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko.zst"
+    if [ -f "$HOST_VIRTIO_MEM" ]; then
+        sudo zstd -d "$HOST_VIRTIO_MEM" -o "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" --force
+        sudo mkdir -p "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio"
+        sudo mv "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" 2>/dev/null || true
+        echo "Copied virtio_mem.ko for guest kernel $GUEST_KVER"
+    else
+        echo "Warning: virtio_mem.ko.zst not found at $HOST_VIRTIO_MEM"
+    fi
 
     # Create insmod symlink (busybox applet)
     if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
         sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
-    fi
-
-    # Update init script: load modules early (before overlay mount)
-    if ! grep -q 'lib/modules/vsock' "$MNTDIR/sbin/init" 2>/dev/null; then
-        sudo sed -i '/^mount -t devtmpfs devtmpfs \/dev$/a\
-\
-# Load kernel modules (needed for QEMU with modular kernel)\
-if [ -d /lib/modules/vsock ]; then\
-    for mod in /lib/modules/vsock/overlay.ko /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do\
-        [ -f "$mod" ] \&\& insmod "$mod" 2>/dev/null || true\
-    done\
-    echo "init: kernel modules loaded"\
-fi' "$MNTDIR/sbin/init"
     fi
 
     sudo umount "$MNTDIR"
@@ -329,10 +333,15 @@ ROOTFS
         --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
     local sandbox_domain="${public_ip}.nip.io"
 
-    ssh_cmd << ENVSETUP
-set -euo pipefail
-# Worker env
-sudo tee /etc/opensandbox/worker.env > /dev/null << EOF
+    # Compute API key hash locally
+    local api_key_hash
+    api_key_hash=$(echo -n "${API_KEY}" | shasum -a 256 | cut -d' ' -f1)
+
+    # Write env files locally, then scp to instance
+    local env_tmpdir
+    env_tmpdir=$(mktemp -d)
+
+    cat > "$env_tmpdir/worker.env" << EOF
 OPENSANDBOX_MODE=worker
 OPENSANDBOX_VM_BACKEND=qemu
 OPENSANDBOX_QEMU_BIN=qemu-system-x86_64
@@ -344,7 +353,7 @@ OPENSANDBOX_HTTP_ADDR=http://${private_ip}:8081
 OPENSANDBOX_JWT_SECRET=dev-jwt-secret
 OPENSANDBOX_WORKER_ID=w-qemu-dev-1
 OPENSANDBOX_REGION=use2
-OPENSANDBOX_MAX_CAPACITY=10
+OPENSANDBOX_MAX_CAPACITY=100
 OPENSANDBOX_DATABASE_URL=postgres://opensandbox:opensandbox@localhost:5432/opensandbox?sslmode=disable
 OPENSANDBOX_REDIS_URL=redis://localhost:6379
 OPENSANDBOX_SANDBOX_DOMAIN=${sandbox_domain}
@@ -358,10 +367,9 @@ OPENSANDBOX_S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
 OPENSANDBOX_S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
 EOF
 
-# Server env
-sudo tee /etc/opensandbox/server.env > /dev/null << EOF
+    cat > "$env_tmpdir/server.env" << EOF
 OPENSANDBOX_MODE=server
-OPENSANDBOX_API_KEY=\$(echo -n "${API_KEY}" | sha256sum | cut -d' ' -f1)
+OPENSANDBOX_API_KEY=${api_key_hash}
 OPENSANDBOX_JWT_SECRET=dev-jwt-secret
 OPENSANDBOX_HTTP_ADDR=http://0.0.0.0:8080
 OPENSANDBOX_DATABASE_URL=postgres://opensandbox:opensandbox@localhost:5432/opensandbox?sslmode=disable
@@ -369,8 +377,20 @@ OPENSANDBOX_REDIS_URL=redis://localhost:6379
 OPENSANDBOX_SANDBOX_DOMAIN=${sandbox_domain}
 OPENSANDBOX_PORT=8080
 OPENSANDBOX_REGION=use2
+OPENSANDBOX_S3_BUCKET=opensandbox-checkpoints
+OPENSANDBOX_S3_REGION=us-east-2
+OPENSANDBOX_S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+OPENSANDBOX_S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+OPENSANDBOX_MIN_WORKERS=1
 EOF
-ENVSETUP
+
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -i "$SSH_KEY" "$env_tmpdir/worker.env" "$env_tmpdir/server.env" \
+        "ubuntu@${public_ip}:/tmp/"
+
+    ssh_cmd "sudo mkdir -p /etc/opensandbox && sudo mv /tmp/worker.env /tmp/server.env /etc/opensandbox/"
+
+    rm -rf "$env_tmpdir"
 
     # Start services + iptables
     log "Starting services..."
@@ -390,15 +410,15 @@ sudo sysctl -w net.ipv4.conf.all.route_localnet=1 > /dev/null
 # Redirect port 80 -> 8080 so UI is accessible on standard HTTP port.
 # Only match traffic destined for the host's own IPs — don't intercept
 # VM outbound HTTP traffic (e.g., apt-get to archive.ubuntu.com).
-PRIVATE_IP=\$(ip -4 addr show \$(ip route show default | awk '{print \$5}' | head -1) | awk '/inet / {print \$2}' | cut -d/ -f1)
-PUBLIC_IP=\$(curl -s -m 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
-if [ -n "\$PRIVATE_IP" ]; then
-    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "\$PRIVATE_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
-        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "\$PRIVATE_IP" -j REDIRECT --to-port 8080
+PRIVATE_IP=$(ip -4 addr show $(ip route show default | awk '{print $5}' | head -1) | awk '/inet / {print $2}' | cut -d/ -f1)
+PUBLIC_IP=$(curl -s -m 2 http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || echo "")
+if [ -n "$PRIVATE_IP" ]; then
+    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "$PRIVATE_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
+        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "$PRIVATE_IP" -j REDIRECT --to-port 8080
 fi
-if [ -n "\$PUBLIC_IP" ]; then
-    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "\$PUBLIC_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
-        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "\$PUBLIC_IP" -j REDIRECT --to-port 8080
+if [ -n "$PUBLIC_IP" ]; then
+    sudo iptables -t nat -C PREROUTING -p tcp --dport 80 -d "$PUBLIC_IP" -j REDIRECT --to-port 8080 2>/dev/null || \
+        sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -d "$PUBLIC_IP" -j REDIRECT --to-port 8080
 fi
 
 sudo systemctl daemon-reload
@@ -567,6 +587,72 @@ cmd_destroy() {
     log "Instance terminated. State file cleaned up."
 }
 
+# --- Bake AMI ---
+cmd_bake_ami() {
+    local instance_id public_ip
+    instance_id=$(load_state INSTANCE_ID)
+    public_ip=$(load_state PUBLIC_IP)
+    [ -n "$instance_id" ] || err "No instance found. Run 'create' first."
+
+    log "Preparing instance for AMI bake..."
+
+    # Sync filesystem
+    ssh_cmd "sudo sync"
+
+    # Stop services and remove golden snapshot dir (will be recreated on boot)
+    ssh_cmd << 'PREBAKE'
+set -euo pipefail
+sudo systemctl stop opensandbox-worker 2>/dev/null || true
+sudo systemctl stop opensandbox-server 2>/dev/null || true
+sudo rm -rf /data/sandboxes/golden 2>/dev/null || true
+sudo sync
+echo "Services stopped, golden dir removed, filesystem synced."
+PREBAKE
+
+    log "Creating AMI from instance $instance_id..."
+    local ami_name="opensandbox-qemu-worker-$(date +%Y%m%d-%H%M%S)"
+    local ami_id
+    ami_id=$(aws_cmd ec2 create-image \
+        --instance-id "$instance_id" \
+        --name "$ami_name" \
+        --description "OpenSandbox QEMU worker AMI" \
+        --no-reboot \
+        --query 'ImageId' --output text)
+
+    log "AMI: $ami_id ($ami_name)"
+
+    # Tag the AMI
+    aws_cmd ec2 create-tags --resources "$ami_id" \
+        --tags Key=Name,Value="$ami_name" Key=opensandbox:role,Value=worker-ami Key=Project,Value=opensandbox
+
+    log "Waiting for AMI to become available (this may take several minutes)..."
+    aws_cmd ec2 wait image-available --image-ids "$ami_id"
+    log "AMI $ami_id is now available."
+
+    # Restart services
+    log "Restarting services..."
+    ssh_cmd << 'POSTBAKE'
+set -euo pipefail
+sudo systemctl start opensandbox-server || true
+sleep 2
+sudo systemctl start opensandbox-worker || true
+echo "Services restarted."
+POSTBAKE
+
+    log ""
+    log "=== AMI Bake Complete ==="
+    log "  AMI ID:   $ami_id"
+    log "  AMI Name: $ami_name"
+    log ""
+    log "  For autoscaler config:"
+    log "    OPENSANDBOX_WORKER_AMI=$ami_id"
+    log "    OPENSANDBOX_WORKER_INSTANCE_TYPE=$INSTANCE_TYPE"
+    log "    OPENSANDBOX_WORKER_SECURITY_GROUP=$SECURITY_GROUP"
+    log "    OPENSANDBOX_WORKER_SUBNET=$SUBNET_ID"
+    log "    OPENSANDBOX_WORKER_KEY_NAME=$KEY_NAME"
+    log ""
+}
+
 # --- Stop old a1.metal ---
 cmd_stop_old() {
     local old_instance_id="${1:-}"
@@ -591,9 +677,10 @@ case "$CMD" in
     stop)      cmd_stop ;;
     start)     cmd_start ;;
     destroy)   cmd_destroy ;;
+    bake-ami)  cmd_bake_ami ;;
     stop-old)  shift; cmd_stop_old "$@" ;;
     *)
-        echo "Usage: $0 {create|deploy|ssh|status|stop|start|destroy|stop-old}"
+        echo "Usage: $0 {create|deploy|ssh|status|stop|start|destroy|bake-ami|stop-old}"
         echo ""
         echo "Commands:"
         echo "  create     Launch c5d.metal spot instance with QEMU setup"
@@ -603,6 +690,7 @@ case "$CMD" in
         echo "  stop       Stop instance (on-demand only; spot cannot be stopped)"
         echo "  start      Start a stopped instance"
         echo "  destroy    Terminate instance (NVMe data lost)"
+        echo "  bake-ami   Create AMI from current instance for autoscaler"
         echo "  stop-old   Stop the old a1.metal ARM instance (preserves EBS)"
         echo ""
         echo "Environment:"

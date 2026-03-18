@@ -170,6 +170,7 @@ func main() {
 			Registry:    redisRegistry,
 			WorkerImage: cfg.EC2WorkerImage,
 			Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
+			MinWorkers:  cfg.MinWorkersPerRegion,
 		})
 		scaler.Start()
 		defer scaler.Stop()
