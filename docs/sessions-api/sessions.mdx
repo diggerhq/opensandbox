@@ -1,0 +1,157 @@
+---
+title: "Sessions"
+description: "Create, retrieve, and delete agent sessions"
+---
+
+## Create a session
+
+```
+POST /v1/sessions
+```
+
+Creates a cloud sandbox, starts an AI agent with your prompt, and returns a session with a live preview URL. The agent begins working immediately — stream events to follow its progress.
+
+### Request body
+
+<ParamField body="prompt" type="string" required>
+  What the agent should build or do
+</ParamField>
+
+<ParamField body="user_id" type="string" required>
+  Your user's ID (for session ownership)
+</ParamField>
+
+<ParamField body="user_email" type="string">
+  User email (stored for reference)
+</ParamField>
+
+<ParamField body="user_name" type="string">
+  User name (stored for reference)
+</ParamField>
+
+<ParamField body="agent_config" type="object">
+  Agent configuration
+
+  <Expandable title="agent_config fields">
+    <ParamField body="agent_config.system_prompt" type="string">
+      System prompt for the AI agent
+    </ParamField>
+
+    <ParamField body="agent_config.skills" type="object">
+      Map of `path → content` — files synced into the sandbox at `/workspace/agent/`
+    </ParamField>
+
+    <ParamField body="agent_config.allowed_tools" type="string[]">
+      Tools the agent can use. Default: `["bash", "read", "write", "edit", "glob", "grep"]`
+    </ParamField>
+
+    <ParamField body="agent_config.cwd" type="string">
+      Agent working directory. Default: `/workspace/app`
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```bash
+curl -X POST https://api.opencomputer.dev/v1/sessions \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: osb_your_api_key" \
+  -d '{
+    "prompt": "Build a todo app with Next.js and Tailwind",
+    "user_id": "user_123",
+    "agent_config": {
+      "system_prompt": "You are a web app builder. Work in /workspace/app.",
+      "skills": {
+        ".claude/skills/build-app/SKILL.md": "# Build App\n\nScaffold, install, edit, verify."
+      }
+    }
+  }'
+```
+
+### Response `201`
+
+```json
+{
+  "id": "session_abc123",
+  "status": "running",
+  "sandboxId": "sb-31317626",
+  "previewUrl": "https://sb-31317626-p3000.preview.opencomputer.dev",
+  "project": {
+    "title": "Build a todo app",
+    "framework": "nextjs",
+    "artifacts": []
+  },
+  "messages": [
+    {
+      "id": "msg_xxx",
+      "role": "user",
+      "content": "Build a todo app with Next.js and Tailwind",
+      "createdAt": "2026-03-18T17:00:00.000Z"
+    }
+  ],
+  "events": [
+    {
+      "id": "evt_xxx",
+      "type": "session_started",
+      "level": "info",
+      "message": "Bootstrapping sandbox...",
+      "createdAt": "2026-03-18T17:00:00.000Z"
+    }
+  ],
+  "userId": "user_123",
+  "createdAt": "2026-03-18T17:00:00.000Z",
+  "updatedAt": "2026-03-18T17:00:02.000Z"
+}
+```
+
+---
+
+## Get a session
+
+```
+GET /v1/sessions/{sessionId}
+```
+
+Returns the full session state including messages, events, and preview URL.
+
+<ParamField query="user_id" type="string">
+  Filter by user ownership
+</ParamField>
+
+### Example
+
+```bash
+curl https://api.opencomputer.dev/v1/sessions/session_abc123?user_id=user_123 \
+  -H "X-API-Key: osb_your_api_key"
+```
+
+---
+
+## Delete a session
+
+```
+DELETE /v1/sessions/{sessionId}
+```
+
+Kills the sandbox and ends the session.
+
+<ParamField query="user_id" type="string">
+  Filter by user ownership
+</ParamField>
+
+### Example
+
+```bash
+curl -X DELETE https://api.opencomputer.dev/v1/sessions/session_abc123?user_id=user_123 \
+  -H "X-API-Key: osb_your_api_key"
+```
+
+### Response `200`
+
+```json
+{
+  "id": "session_abc123",
+  "status": "ended"
+}
+```

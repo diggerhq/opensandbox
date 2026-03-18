@@ -1,0 +1,68 @@
+---
+title: "Messages"
+description: "Send follow-up messages to an agent session"
+---
+
+## Send a message
+
+```
+POST /v1/sessions/{sessionId}/messages
+```
+
+Send a follow-up message to the agent. The agent receives the message in the same sandbox with full conversation context. Returns immediately — the agent works asynchronously and emits events via the [SSE stream](/sessions-api/events).
+
+<ParamField body="message" type="string" required>
+  The user's message
+</ParamField>
+
+<ParamField body="user_id" type="string" required>
+  Must match the session owner
+</ParamField>
+
+### Example
+
+```bash
+curl -X POST https://api.opencomputer.dev/v1/sessions/session_abc123/messages \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: osb_your_api_key" \
+  -d '{
+    "message": "Add a dark mode toggle to the header",
+    "user_id": "user_123"
+  }'
+```
+
+### Response `200`
+
+Returns the full session object (same shape as [create](/sessions-api/sessions#create-a-session)).
+
+```json
+{
+  "id": "session_abc123",
+  "status": "running",
+  "sandboxId": "sb-31317626",
+  "previewUrl": "https://sb-31317626-p3000.preview.opencomputer.dev",
+  "project": {
+    "title": "Build a todo app",
+    "framework": "nextjs",
+    "artifacts": []
+  },
+  "messages": [
+    {
+      "id": "msg_xxx",
+      "role": "user",
+      "content": "Build a todo app with Next.js and Tailwind",
+      "createdAt": "2026-03-18T17:00:00.000Z"
+    },
+    {
+      "id": "msg_yyy",
+      "role": "user",
+      "content": "Add a dark mode toggle to the header",
+      "createdAt": "2026-03-18T17:05:00.000Z"
+    }
+  ],
+  "events": [],
+  "userId": "user_123",
+  "createdAt": "2026-03-18T17:00:00.000Z",
+  "updatedAt": "2026-03-18T17:05:00.000Z"
+}
+```

@@ -67,6 +67,15 @@
       ]
     },
     {
+      "group": "Sessions API",
+      "pages": [
+        "sessions-api/overview",
+        "sessions-api/sessions",
+        "sessions-api/messages",
+        "sessions-api/events"
+      ]
+    },
+    {
       "group": "Sandboxes",
       "pages": [
         "sandboxes/overview",

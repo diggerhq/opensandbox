@@ -1,0 +1,60 @@
+---
+title: "Events"
+description: "Stream real-time agent activity via Server-Sent Events"
+---
+
+## Stream events
+
+```
+GET /v1/sessions/{sessionId}/events
+```
+
+Server-Sent Events (SSE) stream of real-time agent activity. On connect, replays all past events from the session, then streams live events as the agent works.
+
+<ParamField query="api_key" type="string" required>
+  OpenComputer API key (since `EventSource` can't set headers)
+</ParamField>
+
+<ParamField query="user_id" type="string">
+  Filter by user ownership
+</ParamField>
+
+### Example
+
+```javascript
+const es = new EventSource(
+  "https://api.opencomputer.dev/v1/sessions/session_abc123/events?api_key=osb_your_api_key"
+);
+
+es.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log(data.type, data);
+};
+```
+
+## Event types
+
+| Type | Description |
+|------|-------------|
+| `assistant` | Agent response with `message.content` blocks (text, tool_use) |
+| `tool_use_summary` | Summary of a tool call (`tool` field) |
+| `turn_complete` | Agent finished processing the current message |
+| `result` | Final result of a turn |
+| `error` | Something went wrong |
+| `ready` | Agent process initialized |
+| `configured` | Agent configured with tools/prompt |
+
+## Example `assistant` event
+
+```json
+{
+  "type": "assistant",
+  "message": {
+    "content": [
+      { "type": "text", "text": "I'll create a Next.js app with a todo list..." },
+      { "type": "tool_use", "name": "bash", "input": { "command": "npx create-next-app@latest . --ts --tailwind --yes" } }
+    ]
+  },
+  "session_id": "claude_session_xxx"
+}
+```
