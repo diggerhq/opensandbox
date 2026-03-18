@@ -79,6 +79,13 @@ if [ -d /lib/modules/vsock ]; then
     echo "init: kernel modules loaded"
 fi
 
+# Load virtio-mem module (for dynamic memory scaling)
+KVER=$(uname -r)
+if [ -f "/lib/modules/$KVER/kernel/drivers/virtio/virtio_mem.ko" ]; then
+    insmod "/lib/modules/$KVER/kernel/drivers/virtio/virtio_mem.ko" 2>/dev/null || true
+    echo "init: virtio_mem module loaded"
+fi
+
 # ── Mount workspace: data disk at /workspace (persistent user data) ──
 mkdir -p /workspace
 if mount /dev/vdb /workspace 2>/dev/null || mount /dev/vdb1 /workspace 2>/dev/null; then
@@ -151,8 +158,7 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     # CPU limit reserves 10% for the agent (PID 1) so it stays responsive
     # even under fork bomb / CPU exhaustion attacks.
     echo 128 > /sys/fs/cgroup/sandbox/pids.max
-    TOTAL_MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-    SANDBOX_MEM=$(( (TOTAL_MEM_KB * 1024 * 9) / 10 ))
+    SANDBOX_MEM=$(awk '/MemTotal/{printf "%.0f", $2 * 1024 * 0.9}' /proc/meminfo)
     echo "$SANDBOX_MEM" > /sys/fs/cgroup/sandbox/memory.max 2>/dev/null
     # cpu.max: limit user processes to 80% of available CPUs.
     # This reserves 20% for the agent (PID 1) so it stays responsive

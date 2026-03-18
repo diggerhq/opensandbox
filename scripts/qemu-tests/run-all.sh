@@ -25,6 +25,7 @@ ALL_TESTS=(
     "08-fork-bomb"
     "09-concurrent"
     "10-edge-cases"
+    "11-secrets"
 )
 
 # Filter tests if args provided

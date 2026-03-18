@@ -91,7 +91,8 @@ type Config struct {
 	CFZoneID   string // Cloudflare zone ID for the shared zone (e.g. opencomputer.dev)
 
 	// Autoscaler
-	ScaleCooldownSec int // Cooldown between scale-up actions (seconds), default 300
+	ScaleCooldownSec    int // Cooldown between scale-up actions (seconds), default 300
+	MinWorkersPerRegion int // Minimum workers per region (for pre-provisioned capacity), default 1
 
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
@@ -170,7 +171,8 @@ func Load() (*Config, error) {
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
 
-		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
+		ScaleCooldownSec:    envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
+		MinWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MIN_WORKERS", 1),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 

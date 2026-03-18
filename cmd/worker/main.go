@@ -63,8 +63,6 @@ func main() {
 			log.Println("opensandbox-worker: secrets proxy started on :3128")
 		}
 	}
-	_ = secretsProxy // TODO: wire into QEMU manager lifecycle
-
 	// QEMU backend
 	{
 		qmCfg := qm.Config{
@@ -83,6 +81,10 @@ func main() {
 		}
 		defer qmMgr.Close()
 		log.Println("opensandbox-worker: QEMU VM manager initialized")
+
+		if secretsProxy != nil {
+			qmMgr.SetSecretsProxy(secretsProxy)
+		}
 
 		qmMgr.CleanupOrphanedProcesses()
 
