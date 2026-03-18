@@ -1,0 +1,120 @@
+---
+title: "Image"
+description: "Declarative sandbox image builder"
+---
+
+Fluent, immutable builder for declarative sandbox images. Each method returns a new `Image` instance.
+
+## `Image.base()`
+
+Start from the default OpenSandbox environment (Ubuntu 22.04, Python, Node.js, build tools).
+
+```python
+from opencomputer import Image
+
+image = (
+    Image.base()
+    .apt_install(["curl", "jq"])
+    .pip_install(["requests", "pandas"])
+    .env({"PROJECT_ROOT": "/workspace"})
+    .workdir("/workspace")
+)
+```
+
+**Returns:** `Image`
+
+---
+
+## Builder Methods
+
+### `image.apt_install(packages)`
+
+<ParamField body="packages" type="list[str]" required>
+  System packages to install via apt-get
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.pip_install(packages)`
+
+<ParamField body="packages" type="list[str]" required>
+  Python packages to install via pip
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.run_commands(*cmds)`
+
+<ParamField body="cmds" type="str (variadic)" required>
+  Shell commands to run during build
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.env(vars)`
+
+<ParamField body="vars" type="dict[str, str]" required>
+  Environment variables to set
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.workdir(path)`
+
+<ParamField body="path" type="str" required>
+  Default working directory
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.add_file(remote_path, content)`
+
+<ParamField body="remote_path" type="str" required>
+  Destination path in the image
+</ParamField>
+
+<ParamField body="content" type="str" required>
+  File content
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.add_local_file(local_path, remote_path)`
+
+<ParamField body="local_path" type="str" required>
+  Path to the local file
+</ParamField>
+
+<ParamField body="remote_path" type="str" required>
+  Destination path in the image
+</ParamField>
+
+**Returns:** `Image`
+
+### `image.add_local_dir(local_path, remote_path)`
+
+<ParamField body="local_path" type="str" required>
+  Path to the local directory
+</ParamField>
+
+<ParamField body="remote_path" type="str" required>
+  Destination path in the image
+</ParamField>
+
+**Returns:** `Image`
+
+---
+
+## Utility Methods
+
+### `image.to_dict()`
+
+Returns the image manifest as a plain dict.
+
+**Returns:** `dict`
+
+### `image.cache_key()`
+
+Computes a deterministic SHA-256 hash of the manifest for cache lookups.
+
+**Returns:** `str`

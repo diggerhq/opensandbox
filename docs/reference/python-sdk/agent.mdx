@@ -1,0 +1,142 @@
+---
+title: "Agent"
+description: "Start and manage Claude agent sessions"
+---
+
+Accessed via `sandbox.agent`.
+
+## `await sandbox.agent.start(...)`
+
+Start an agent session. [HTTP API →](/api-reference/agent/create)
+
+<ParamField body="prompt" type="str">
+  Initial prompt
+</ParamField>
+
+<ParamField body="model" type="str">
+  Claude model
+</ParamField>
+
+<ParamField body="system_prompt" type="str">
+  System prompt
+</ParamField>
+
+<ParamField body="allowed_tools" type="list[str]">
+  Restrict tools
+</ParamField>
+
+<ParamField body="permission_mode" type="str">
+  Permission mode
+</ParamField>
+
+<ParamField body="max_turns" type="int" default="50">
+  Max turns
+</ParamField>
+
+<ParamField body="cwd" type="str">
+  Working directory
+</ParamField>
+
+<ParamField body="mcp_servers" type="dict[str, Any]">
+  MCP server configuration
+</ParamField>
+
+<ParamField body="on_event" type="Callable[[AgentEvent], None]">
+  Event callback
+</ParamField>
+
+<ParamField body="on_error" type="Callable[[str], None]">
+  Stderr callback
+</ParamField>
+
+**Returns:** `AgentSession`
+
+```python
+session = await sandbox.agent.start(
+    prompt="Build a todo app",
+    on_event=lambda e: print(e.type),
+)
+```
+
+<Note>
+  `resume`, `on_exit`, and `on_scrollback_end` are not available in the Python SDK.
+</Note>
+
+---
+
+## `await sandbox.agent.attach(session_id, ...)`
+
+Reconnect to a running agent session. Accepts `on_event` and `on_error`.
+
+**Returns:** `AgentSession`
+
+---
+
+## `await sandbox.agent.list()`
+
+List all agent sessions. [HTTP API →](/api-reference/agent/list)
+
+**Returns:** `list[AgentSessionInfo]`
+
+---
+
+## AgentSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | `str` | Session ID |
+| `sandbox_id` | `str` | Sandbox ID |
+| `send_prompt(text)` | method | Send follow-up prompt |
+| `interrupt()` | method | Interrupt current turn |
+| `configure(...)` | method | Update model, tools, cwd |
+| `await kill(signal=9)` | method | Kill agent process |
+| `await close()` | method | Close WebSocket |
+
+### `await session.collect_events()`
+
+Collect all events until the agent process exits. Python-unique alternative to callbacks.
+
+**Returns:** `list[AgentEvent]`
+
+```python
+session = await sandbox.agent.start(prompt="Fix the tests")
+events = await session.collect_events()
+for event in events:
+    if event.type == "result":
+        print(event.data)
+```
+
+### `await session.wait()`
+
+Wait for the agent to finish.
+
+**Returns:** `int` (exit code)
+
+---
+
+## Types
+
+<Accordion title="AgentEvent">
+```python
+@dataclass
+class AgentEvent:
+    type: str
+    data: dict[str, Any]
+
+# Usage:
+event["message"]      # dict-like access
+event.get("message")  # safe access with default
+event.type            # attribute access
+```
+</Accordion>
+
+<Accordion title="AgentSessionInfo">
+```python
+@dataclass
+class AgentSessionInfo:
+    session_id: str
+    sandbox_id: str
+    running: bool
+    started_at: str
+```
+</Accordion>

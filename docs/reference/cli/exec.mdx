@@ -1,0 +1,61 @@
+---
+title: "oc exec"
+description: "Execute commands inside a sandbox"
+---
+
+## `oc exec <id> [flags] -- <command...>`
+
+By default, creates an **exec session** and prints the session ID with attach instructions. Use `--wait` to run synchronously.
+
+[HTTP API →](/api-reference/exec/run)
+
+<ParamField query="--wait" type="boolean" default="false">
+  Wait for completion, stream output, mirror exit code
+</ParamField>
+
+<ParamField query="--cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField query="--timeout" type="int" default="0">
+  Timeout in seconds (0 = none)
+</ParamField>
+
+<ParamField query="--env" type="string">
+  Environment variable `KEY=VALUE` (repeatable)
+</ParamField>
+
+```bash
+# Synchronous — streams output, exits with process exit code
+oc exec sb-abc --wait -- npm run build
+
+# Asynchronous — creates session, prints session ID
+oc exec sb-abc -- node server.js
+# → Session es-xyz created. Attach with: oc exec attach sb-abc es-xyz
+```
+
+---
+
+## `oc exec list <id>`
+
+List active exec sessions for a sandbox. [HTTP API →](/api-reference/exec/list-sessions)
+
+Output: session ID, status (`running` or `exited (code)`), command, client count.
+
+---
+
+## `oc exec attach <id> <session-id>`
+
+<Warning>
+  Not yet implemented. The command exists but prints guidance to use the SDK or a WebSocket client (`websocat`).
+</Warning>
+
+---
+
+## `oc exec kill <id> <session-id>`
+
+Kill an exec session. [HTTP API →](/api-reference/exec/kill-session)
+
+<ParamField query="--signal" type="int" default="9">
+  Signal number (default: SIGKILL)
+</ParamField>

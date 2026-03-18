@@ -1,0 +1,36 @@
+---
+title: "oc preview"
+description: "Manage preview URLs"
+---
+
+Expose sandbox ports to the internet.
+
+## `oc preview create <sandbox-id>`
+
+[HTTP API →](/api-reference/preview/create)
+
+<ParamField query="--port" type="int" required>
+  Container port to expose
+</ParamField>
+
+<ParamField query="--domain" type="string">
+  Custom domain
+</ParamField>
+
+```bash
+oc preview create sb-abc --port 3000
+```
+
+---
+
+## `oc preview list <sandbox-id>`
+
+[HTTP API →](/api-reference/preview/list)
+
+Output columns: `PORT`, `HOSTNAME`, `SSL`, `CREATED`
+
+---
+
+## `oc preview delete <sandbox-id> <port>`
+
+[HTTP API →](/api-reference/preview/delete)

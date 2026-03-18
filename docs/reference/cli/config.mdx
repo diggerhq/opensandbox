@@ -1,0 +1,21 @@
+---
+title: "oc config"
+description: "CLI configuration"
+---
+
+Manage CLI configuration. Settings are persisted to a local config file.
+
+## `oc config set <key> <value>`
+
+Supported keys: `api-key`, `api-url`.
+
+```bash
+oc config set api-key sk-1234...
+oc config set api-url https://app.opencomputer.dev
+```
+
+---
+
+## `oc config show`
+
+Display current configuration. The API key is masked (first 4 and last 4 characters shown).

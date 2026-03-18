@@ -1,0 +1,122 @@
+---
+title: "Exec"
+description: "Run commands and manage exec sessions"
+---
+
+Accessed via `sandbox.exec`.
+
+## `await sandbox.exec.run(command, ...)`
+
+Run a command synchronously via `sh -c`. [HTTP API →](/api-reference/exec/run)
+
+<ParamField body="command" type="str" required>
+  Shell command
+</ParamField>
+
+<ParamField body="timeout" type="int" default="60">
+  Timeout in seconds
+</ParamField>
+
+<ParamField body="env" type="dict[str, str]">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="str">
+  Working directory
+</ParamField>
+
+**Returns:** `ProcessResult`
+
+```python
+result = await sandbox.exec.run("npm test", cwd="/app")
+```
+
+---
+
+## `await sandbox.exec.start(command, ...)`
+
+Start a long-running command. Returns the **session ID** (not a session object). [HTTP API →](/api-reference/exec/create-session)
+
+<ParamField body="command" type="str" required>
+  Command
+</ParamField>
+
+<ParamField body="args" type="list[str]">
+  Arguments
+</ParamField>
+
+<ParamField body="env" type="dict[str, str]">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="str">
+  Working directory
+</ParamField>
+
+<ParamField body="timeout" type="int">
+  Timeout in seconds
+</ParamField>
+
+**Returns:** `str` (session ID)
+
+```python
+session_id = await sandbox.exec.start("node server.js", cwd="/app")
+```
+
+<Note>
+  Python `exec.start()` returns a session ID string. There are no streaming callbacks, `ExecSession` object, or `max_run_after_disconnect`. For streaming, use the [WebSocket binary protocol](/reference/api#websocket-binary-protocol).
+</Note>
+
+---
+
+## `await sandbox.exec.list()`
+
+List all exec sessions. [HTTP API →](/api-reference/exec/list-sessions)
+
+**Returns:** `list[ExecSessionInfo]`
+
+---
+
+## `await sandbox.exec.kill(session_id, signal=9)`
+
+Kill an exec session. [HTTP API →](/api-reference/exec/kill-session)
+
+**Returns:** `None`
+
+---
+
+## Not Available in Python
+
+- `exec.attach()` — reconnect to running session
+- Streaming callbacks (`on_stdout`, `on_stderr`, `on_exit`)
+- `ExecSession` object with `send_stdin()` and `done`
+- `max_run_after_disconnect`
+
+---
+
+## Types
+
+<Accordion title="ProcessResult">
+```python
+@dataclass
+class ProcessResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+```
+</Accordion>
+
+<Accordion title="ExecSessionInfo">
+```python
+@dataclass
+class ExecSessionInfo:
+    session_id: str
+    sandbox_id: str
+    command: str
+    args: list[str]
+    running: bool
+    exit_code: int | None
+    started_at: str
+    attached_clients: int
+```
+</Accordion>

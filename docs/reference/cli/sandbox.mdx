@@ -1,0 +1,89 @@
+---
+title: "oc sandbox"
+description: "Manage sandbox lifecycle"
+---
+
+## `oc sandbox create`
+
+Create a new sandbox. **Alias:** `oc create`
+
+[HTTP API →](/api-reference/sandboxes/create)
+
+<ParamField query="--timeout" type="int" default="300">
+  Idle timeout in seconds
+</ParamField>
+
+<ParamField query="--cpu" type="int" default="0">
+  CPU cores (0 = platform default)
+</ParamField>
+
+<ParamField query="--memory" type="int" default="0">
+  Memory in MB (0 = platform default)
+</ParamField>
+
+<ParamField query="--env" type="string">
+  Environment variable `KEY=VALUE` (repeatable)
+</ParamField>
+
+<ParamField query="--metadata" type="string">
+  Metadata `KEY=VALUE` (repeatable)
+</ParamField>
+
+```bash
+oc create --timeout 600 --cpu 2 --memory 1024 --env NODE_ENV=production
+```
+
+---
+
+## `oc sandbox list`
+
+List all running sandboxes. **Alias:** `oc ls`
+
+[HTTP API →](/api-reference/sandboxes/list)
+
+Output columns: `ID`, `TEMPLATE`, `STATUS`, `CPU`, `MEM`, `AGE`
+
+```bash
+oc ls
+oc ls --json
+```
+
+---
+
+## `oc sandbox get <id>`
+
+Show detailed information for a sandbox. [HTTP API →](/api-reference/sandboxes/get)
+
+Output: ID, Template, Status, CPU, Memory, Started, Ends.
+
+---
+
+## `oc sandbox kill <id>`
+
+Terminate and remove a sandbox. [HTTP API →](/api-reference/sandboxes/delete)
+
+---
+
+## `oc sandbox hibernate <id>`
+
+Snapshot VM state and stop the sandbox. Displays snapshot size on success. [HTTP API →](/api-reference/sandboxes/hibernate)
+
+---
+
+## `oc sandbox wake <id>`
+
+Resume a hibernated sandbox. [HTTP API →](/api-reference/sandboxes/wake)
+
+<ParamField query="--timeout" type="int" default="300">
+  Idle timeout in seconds after wake
+</ParamField>
+
+---
+
+## `oc sandbox set-timeout <id> <seconds>`
+
+Update the idle timeout for a running sandbox. [HTTP API →](/api-reference/sandboxes/set-timeout)
+
+```bash
+oc sandbox set-timeout sb-abc123 600
+```

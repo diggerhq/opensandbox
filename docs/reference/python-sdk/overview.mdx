@@ -1,0 +1,43 @@
+---
+title: "Python SDK"
+description: "Complete Python SDK reference"
+---
+
+## Installation
+
+```bash
+pip install opencomputer-sdk
+```
+
+```python
+from opencomputer import Sandbox, Image, Snapshots
+```
+
+## Modules
+
+<CardGroup cols={2}>
+  <Card title="Sandbox" icon="box" href="/reference/python-sdk/sandbox">
+    Create, connect, and manage sandbox lifecycle
+  </Card>
+  <Card title="Exec" icon="terminal" href="/reference/python-sdk/exec">
+    Run commands and manage exec sessions
+  </Card>
+  <Card title="Agent" icon="robot" href="/reference/python-sdk/agent">
+    Start and manage Claude agent sessions
+  </Card>
+  <Card title="Filesystem" icon="folder" href="/reference/python-sdk/filesystem">
+    Read, write, and manage files
+  </Card>
+  <Card title="PTY" icon="rectangle-terminal" href="/reference/python-sdk/pty">
+    Interactive terminal sessions
+  </Card>
+  <Card title="Image" icon="layer-group" href="/reference/python-sdk/image">
+    Declarative sandbox image builder
+  </Card>
+  <Card title="Snapshots" icon="camera" href="/reference/python-sdk/snapshots">
+    Pre-built sandbox environments
+  </Card>
+  <Card title="Secret Stores" icon="key" href="/reference/python-sdk/secrets">
+    Manage secrets and egress control
+  </Card>
+</CardGroup>

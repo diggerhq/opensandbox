@@ -1,0 +1,107 @@
+---
+title: "Filesystem"
+description: "Read, write, and manage files"
+---
+
+Accessed via `sandbox.files`.
+
+## `await sandbox.files.read(path)`
+
+Read a file as a UTF-8 string. [HTTP API →](/api-reference/files/read)
+
+<ParamField body="path" type="str" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `str`
+
+---
+
+## `await sandbox.files.read_bytes(path)`
+
+Read a file as raw bytes.
+
+<ParamField body="path" type="str" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `bytes`
+
+---
+
+## `await sandbox.files.write(path, content)`
+
+Write content to a file. [HTTP API →](/api-reference/files/write)
+
+<ParamField body="path" type="str" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="content" type="str | bytes" required>
+  File content
+</ParamField>
+
+**Returns:** `None`
+
+---
+
+## `await sandbox.files.list(path="/")`
+
+List directory contents. [HTTP API →](/api-reference/files/list-directory)
+
+<ParamField body="path" type="str" default="/">
+  Directory path
+</ParamField>
+
+**Returns:** `list[EntryInfo]`
+
+---
+
+## `await sandbox.files.make_dir(path)`
+
+Create a directory. [HTTP API →](/api-reference/files/mkdir)
+
+<ParamField body="path" type="str" required>
+  Directory path
+</ParamField>
+
+**Returns:** `None`
+
+---
+
+## `await sandbox.files.remove(path)`
+
+Delete a file or directory. [HTTP API →](/api-reference/files/delete)
+
+<ParamField body="path" type="str" required>
+  Path to remove
+</ParamField>
+
+**Returns:** `None`
+
+---
+
+## `await sandbox.files.exists(path)`
+
+Check if a path exists. Client-side wrapper — attempts a read and returns `False` on error.
+
+<ParamField body="path" type="str" required>
+  Path to check
+</ParamField>
+
+**Returns:** `bool`
+
+---
+
+## Types
+
+<Accordion title="EntryInfo">
+```python
+@dataclass
+class EntryInfo:
+    name: str
+    is_dir: bool
+    path: str
+    size: int = 0
+```
+</Accordion>

@@ -1,0 +1,167 @@
+---
+title: "Exec"
+description: "Run commands and manage exec sessions"
+---
+
+Accessed via `sandbox.exec`.
+
+## `sandbox.exec.run(command, opts?)`
+
+Run a command synchronously. [HTTP API →](/api-reference/exec/run)
+
+<ParamField body="command" type="string" required>
+  Shell command
+</ParamField>
+
+<ParamField body="timeout" type="number" default="60">
+  Timeout in seconds
+</ParamField>
+
+<ParamField body="env" type="Record<string, string>">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+**Returns:** `Promise<ProcessResult>`
+
+```typescript
+const result = await sandbox.exec.run("npm test", { cwd: "/app" });
+```
+
+---
+
+## `sandbox.exec.start(command, opts?)`
+
+Start a long-running command with streaming. [HTTP API →](/api-reference/exec/create-session)
+
+<ParamField body="command" type="string" required>
+  Command
+</ParamField>
+
+<ParamField body="args" type="string[]">
+  Arguments
+</ParamField>
+
+<ParamField body="env" type="Record<string, string>">
+  Environment variables
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField body="timeout" type="number">
+  Timeout in seconds
+</ParamField>
+
+<ParamField body="maxRunAfterDisconnect" type="number">
+  Seconds to keep running after disconnect
+</ParamField>
+
+<ParamField body="onStdout" type="(data: Uint8Array) => void">
+  Stdout callback
+</ParamField>
+
+<ParamField body="onStderr" type="(data: Uint8Array) => void">
+  Stderr callback
+</ParamField>
+
+<ParamField body="onExit" type="(exitCode: number) => void">
+  Exit callback
+</ParamField>
+
+**Returns:** `Promise<ExecSession>`
+
+```typescript
+const session = await sandbox.exec.start("node server.js", {
+  onStdout: (data) => process.stdout.write(data),
+});
+```
+
+---
+
+## `sandbox.exec.attach(sessionId, opts?)`
+
+Reconnect to a running exec session.
+
+<ParamField body="sessionId" type="string" required>
+  Session ID
+</ParamField>
+
+<ParamField body="onStdout" type="(data: Uint8Array) => void">
+  Stdout callback
+</ParamField>
+
+<ParamField body="onStderr" type="(data: Uint8Array) => void">
+  Stderr callback
+</ParamField>
+
+<ParamField body="onExit" type="(exitCode: number) => void">
+  Exit callback
+</ParamField>
+
+<ParamField body="onScrollbackEnd" type="() => void">
+  Scrollback replay done
+</ParamField>
+
+**Returns:** `Promise<ExecSession>`
+
+---
+
+## `sandbox.exec.list()`
+
+List all exec sessions. [HTTP API →](/api-reference/exec/list-sessions)
+
+**Returns:** `Promise<ExecSessionInfo[]>`
+
+---
+
+## `sandbox.exec.kill(sessionId, signal?)`
+
+Kill an exec session. Default signal: `9` (SIGKILL). [HTTP API →](/api-reference/exec/kill-session)
+
+**Returns:** `Promise<void>`
+
+---
+
+## ExecSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Session ID |
+| `done` | `Promise<number>` | Resolves with exit code |
+| `sendStdin(data)` | method | Send input (string or Uint8Array) |
+| `kill(signal?)` | `Promise<void>` | Kill process |
+| `close()` | method | Close WebSocket |
+
+---
+
+## Types
+
+<Accordion title="ProcessResult">
+```typescript
+interface ProcessResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+```
+</Accordion>
+
+<Accordion title="ExecSessionInfo">
+```typescript
+interface ExecSessionInfo {
+  sessionID: string;
+  sandboxID: string;
+  command: string;
+  args: string[];
+  running: boolean;
+  exitCode?: number;
+  startedAt: string;
+  attachedClients: number;
+}
+```
+</Accordion>

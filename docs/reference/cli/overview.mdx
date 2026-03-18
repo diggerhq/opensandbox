@@ -1,0 +1,46 @@
+---
+title: "CLI Reference"
+description: "Every command, subcommand, and flag"
+---
+
+## Global Flags
+
+These flags apply to all commands.
+
+<ParamField query="--api-key" type="string">
+  API key for authentication. Env: `OPENCOMPUTER_API_KEY`
+</ParamField>
+
+<ParamField query="--api-url" type="string">
+  Control plane URL. Env: `OPENCOMPUTER_API_URL`
+</ParamField>
+
+<ParamField query="--json" type="boolean">
+  Output as JSON
+</ParamField>
+
+## Commands
+
+<CardGroup cols={2}>
+  <Card title="oc sandbox" icon="box" href="/reference/cli/sandbox">
+    Manage sandbox lifecycle
+  </Card>
+  <Card title="oc exec" icon="terminal" href="/reference/cli/exec">
+    Execute commands inside a sandbox
+  </Card>
+  <Card title="oc shell" icon="rectangle-terminal" href="/reference/cli/shell">
+    Interactive terminal access
+  </Card>
+  <Card title="oc checkpoint" icon="camera" href="/reference/cli/checkpoint">
+    Manage sandbox checkpoints
+  </Card>
+  <Card title="oc patch" icon="file-code" href="/reference/cli/patch">
+    Manage checkpoint patches
+  </Card>
+  <Card title="oc preview" icon="globe" href="/reference/cli/preview">
+    Manage preview URLs
+  </Card>
+  <Card title="oc config" icon="gear" href="/reference/cli/config">
+    CLI configuration
+  </Card>
+</CardGroup>

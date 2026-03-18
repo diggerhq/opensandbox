@@ -1,0 +1,95 @@
+---
+title: "Snapshots"
+description: "Pre-built sandbox environments"
+---
+
+Standalone class — not a property on Sandbox.
+
+## Constructor
+
+```typescript
+import { Snapshots } from "@opencomputer/sdk";
+
+const snapshots = new Snapshots();
+// or with explicit config:
+const snapshots = new Snapshots({ apiKey: "...", apiUrl: "..." });
+```
+
+<ParamField body="apiKey" type="string">
+  API key (falls back to `OPENCOMPUTER_API_KEY` env var)
+</ParamField>
+
+<ParamField body="apiUrl" type="string">
+  API URL (falls back to `OPENCOMPUTER_API_URL` env var)
+</ParamField>
+
+---
+
+## `snapshots.create(opts)`
+
+Create a pre-built snapshot from a declarative image. [HTTP API →](/api-reference/snapshots/create)
+
+<ParamField body="name" type="string" required>
+  Unique snapshot name
+</ParamField>
+
+<ParamField body="image" type="Image" required>
+  Declarative image definition
+</ParamField>
+
+<ParamField body="onBuildLogs" type="(log: string) => void">
+  Build log streaming callback
+</ParamField>
+
+**Returns:** `Promise<SnapshotInfo>`
+
+---
+
+## `snapshots.list()`
+
+List all snapshots. [HTTP API →](/api-reference/snapshots/list)
+
+**Returns:** `Promise<SnapshotInfo[]>`
+
+---
+
+## `snapshots.get(name)`
+
+Get a snapshot by name. [HTTP API →](/api-reference/snapshots/get)
+
+<ParamField body="name" type="string" required>
+  Snapshot name
+</ParamField>
+
+**Returns:** `Promise<SnapshotInfo>`
+
+---
+
+## `snapshots.delete(name)`
+
+Delete a snapshot. Existing sandboxes created from it are not affected. [HTTP API →](/api-reference/snapshots/delete)
+
+<ParamField body="name" type="string" required>
+  Snapshot name
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
+## Types
+
+<Accordion title="SnapshotInfo">
+```typescript
+interface SnapshotInfo {
+  id: string;
+  name: string;
+  status: string;       // "building" | "ready" | "failed"
+  contentHash: string;
+  checkpointId: string;
+  manifest: object;
+  createdAt: string;
+  lastUsedAt: string;
+}
+```
+</Accordion>

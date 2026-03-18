@@ -1,0 +1,19 @@
+---
+title: "oc shell"
+description: "Interactive terminal access"
+---
+
+## `oc shell <id>`
+
+Open an interactive terminal (PTY) session via WebSocket. [HTTP API →](/api-reference/pty/create)
+
+<ParamField query="--shell" type="string" default="/bin/bash">
+  Shell to use
+</ParamField>
+
+Terminal size is auto-detected and resize events are forwarded. Press `Ctrl+D` or type `exit` to disconnect. The PTY session is cleaned up automatically on exit.
+
+```bash
+oc shell sb-abc123
+oc shell sb-abc123 --shell /bin/zsh
+```

@@ -1,0 +1,40 @@
+---
+title: "PTY"
+description: "Interactive terminal sessions"
+---
+
+Accessed via `sandbox.pty`.
+
+## `await sandbox.pty.create(cols=80, rows=24, on_output=None)`
+
+Create an interactive terminal session. [HTTP API →](/api-reference/pty/create)
+
+<ParamField body="cols" type="int" default="80">
+  Terminal columns
+</ParamField>
+
+<ParamField body="rows" type="int" default="24">
+  Terminal rows
+</ParamField>
+
+<ParamField body="on_output" type="Callable[[bytes], None]">
+  Output callback
+</ParamField>
+
+**Returns:** `PtySession`
+
+---
+
+## PtySession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | `str` | Session ID |
+| `sandbox_id` | `str` | Sandbox ID |
+| `send(data)` | method | Send input (str or bytes) |
+| `await recv()` | method | Receive output bytes (Python-unique) |
+| `await close()` | method | Close the PTY |
+
+<Note>
+  `recv()` is Python-unique — a pull-based alternative to the `on_output` callback. Returns raw `bytes`.
+</Note>

@@ -1,0 +1,34 @@
+---
+title: "PTY"
+description: "Interactive terminal sessions"
+---
+
+Accessed via `sandbox.pty`.
+
+## `sandbox.pty.create(opts?)`
+
+Create an interactive terminal session. [HTTP API →](/api-reference/pty/create)
+
+<ParamField body="cols" type="number" default="80">
+  Terminal columns
+</ParamField>
+
+<ParamField body="rows" type="number" default="24">
+  Terminal rows
+</ParamField>
+
+<ParamField body="onOutput" type="(data: Uint8Array) => void">
+  Output callback
+</ParamField>
+
+**Returns:** `Promise<PtySession>`
+
+---
+
+## PtySession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Session ID |
+| `send(data)` | method | Send input (string or Uint8Array) |
+| `close()` | method | Close the PTY |

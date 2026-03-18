@@ -1,0 +1,53 @@
+---
+title: "TypeScript SDK"
+description: "Complete TypeScript SDK reference"
+---
+
+## Installation
+
+<CodeGroup>
+```bash npm
+npm install @opencomputer/sdk
+```
+```bash yarn
+yarn add @opencomputer/sdk
+```
+```bash pnpm
+pnpm add @opencomputer/sdk
+```
+</CodeGroup>
+
+```typescript
+import { Sandbox } from "@opencomputer/sdk";
+import { Image } from "@opencomputer/sdk/dist/image.js";
+import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+```
+
+## Modules
+
+<CardGroup cols={2}>
+  <Card title="Sandbox" icon="box" href="/reference/typescript-sdk/sandbox">
+    Create, connect, and manage sandbox lifecycle
+  </Card>
+  <Card title="Exec" icon="terminal" href="/reference/typescript-sdk/exec">
+    Run commands and manage exec sessions
+  </Card>
+  <Card title="Agent" icon="robot" href="/reference/typescript-sdk/agent">
+    Start and manage Claude agent sessions
+  </Card>
+  <Card title="Filesystem" icon="folder" href="/reference/typescript-sdk/filesystem">
+    Read, write, and manage files
+  </Card>
+  <Card title="PTY" icon="rectangle-terminal" href="/reference/typescript-sdk/pty">
+    Interactive terminal sessions
+  </Card>
+  <Card title="Image" icon="layer-group" href="/reference/typescript-sdk/image">
+    Declarative sandbox image builder
+  </Card>
+  <Card title="Snapshots" icon="camera" href="/reference/typescript-sdk/snapshots">
+    Pre-built sandbox environments
+  </Card>
+  <Card title="Secret Stores" icon="key" href="/reference/typescript-sdk/secrets">
+    Manage secrets and egress control
+  </Card>
+</CardGroup>

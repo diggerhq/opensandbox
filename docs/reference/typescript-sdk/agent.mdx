@@ -1,0 +1,124 @@
+---
+title: "Agent"
+description: "Start and manage Claude agent sessions"
+---
+
+Accessed via `sandbox.agent`.
+
+## `sandbox.agent.start(opts?)`
+
+Start an agent session. [HTTP API →](/api-reference/agent/create)
+
+<ParamField body="prompt" type="string">
+  Initial prompt
+</ParamField>
+
+<ParamField body="model" type="string">
+  Claude model
+</ParamField>
+
+<ParamField body="systemPrompt" type="string">
+  System prompt
+</ParamField>
+
+<ParamField body="allowedTools" type="string[]">
+  Restrict tools
+</ParamField>
+
+<ParamField body="permissionMode" type="string">
+  Permission mode
+</ParamField>
+
+<ParamField body="maxTurns" type="number" default="50">
+  Max turns
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory
+</ParamField>
+
+<ParamField body="mcpServers" type="Record<string, McpServerConfig>">
+  MCP servers
+</ParamField>
+
+<ParamField body="resume" type="string">
+  Resume session ID
+</ParamField>
+
+<ParamField body="onEvent" type="(event: AgentEvent) => void">
+  Event callback
+</ParamField>
+
+<ParamField body="onError" type="(data: string) => void">
+  Stderr callback
+</ParamField>
+
+<ParamField body="onExit" type="(exitCode: number) => void">
+  Exit callback
+</ParamField>
+
+<ParamField body="onScrollbackEnd" type="() => void">
+  Scrollback done callback
+</ParamField>
+
+**Returns:** `Promise<AgentSession>`
+
+```typescript
+const session = await sandbox.agent.start({
+  prompt: "Build a todo app",
+  onEvent: (e) => console.log(e.type),
+});
+```
+
+---
+
+## `sandbox.agent.attach(sessionId, opts?)`
+
+Reconnect to a running agent session. Accepts `onEvent`, `onError`, `onExit`, `onScrollbackEnd`.
+
+**Returns:** `Promise<AgentSession>`
+
+---
+
+## `sandbox.agent.list()`
+
+List all agent sessions. [HTTP API →](/api-reference/agent/list)
+
+**Returns:** `Promise<AgentSessionInfo[]>`
+
+---
+
+## AgentSession
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Session ID |
+| `done` | `Promise<number>` | Resolves with exit code |
+| `sendPrompt(text)` | method | Send follow-up prompt |
+| `interrupt()` | method | Interrupt current turn |
+| `configure(config)` | method | Update agent configuration |
+| `kill(signal?)` | `Promise<void>` | Kill agent process |
+| `close()` | method | Close WebSocket |
+
+---
+
+## Types
+
+<Accordion title="AgentEvent">
+```typescript
+interface AgentEvent {
+  type: string;
+  [key: string]: unknown;
+}
+```
+</Accordion>
+
+<Accordion title="McpServerConfig">
+```typescript
+interface McpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+```
+</Accordion>

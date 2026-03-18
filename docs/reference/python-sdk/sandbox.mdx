@@ -1,0 +1,252 @@
+---
+title: "Sandbox"
+description: "Create, connect, and manage sandbox lifecycle"
+---
+
+## Class Methods
+
+### `await Sandbox.create(...)`
+
+Create a new sandbox. [HTTP API →](/api-reference/sandboxes/create)
+
+<ParamField body="template" type="str" default="base">
+  Template name
+</ParamField>
+
+<ParamField body="timeout" type="int" default="300">
+  Idle timeout in seconds
+</ParamField>
+
+<ParamField body="api_key" type="str">
+  API key (falls back to `OPENCOMPUTER_API_KEY` env var)
+</ParamField>
+
+<ParamField body="api_url" type="str">
+  API URL (falls back to `OPENCOMPUTER_API_URL` env var)
+</ParamField>
+
+<ParamField body="envs" type="dict[str, str]">
+  Environment variables
+</ParamField>
+
+<ParamField body="metadata" type="dict[str, str]">
+  Arbitrary metadata
+</ParamField>
+
+<ParamField body="image" type="Image">
+  Declarative image definition (see [Image](/reference/python-sdk/image))
+</ParamField>
+
+<ParamField body="snapshot" type="str">
+  Name of a pre-built snapshot
+</ParamField>
+
+<ParamField body="on_build_log" type="Callable[[str], None]">
+  Build log callback (when using `image`)
+</ParamField>
+
+**Returns:** `Sandbox`
+
+```python
+sandbox = await Sandbox.create(template="my-stack", timeout=600)
+```
+
+<Note>
+  `cpuCount` and `memoryMB` are not available in the Python SDK. Use the [HTTP API](/api-reference/sandboxes/create) for custom resources.
+</Note>
+
+---
+
+### `await Sandbox.connect(sandbox_id, ...)`
+
+Connect to an existing sandbox. [HTTP API →](/api-reference/sandboxes/get)
+
+<ParamField body="sandbox_id" type="str" required>
+  Sandbox ID
+</ParamField>
+
+**Returns:** `Sandbox`
+
+```python
+sandbox = await Sandbox.connect("sb-abc123")
+```
+
+---
+
+### `await Sandbox.create_from_checkpoint(checkpoint_id, ...)`
+
+Create a new sandbox from a checkpoint. [HTTP API →](/api-reference/checkpoints/fork)
+
+<ParamField body="checkpoint_id" type="str" required>
+  Checkpoint ID
+</ParamField>
+
+<ParamField body="timeout" type="int" default="300">
+  Idle timeout
+</ParamField>
+
+**Returns:** `Sandbox`
+
+```python
+forked = await Sandbox.create_from_checkpoint("cp-abc123")
+```
+
+---
+
+### `await Sandbox.create_checkpoint_patch(checkpoint_id, script, ...)`
+
+[HTTP API →](/api-reference/patches/create)
+
+<ParamField body="checkpoint_id" type="str" required>
+  Target checkpoint
+</ParamField>
+
+<ParamField body="script" type="str" required>
+  Bash script
+</ParamField>
+
+<ParamField body="description" type="str">
+  Description
+</ParamField>
+
+**Returns:** `dict`
+
+---
+
+### `await Sandbox.list_checkpoint_patches(checkpoint_id, ...)`
+
+[HTTP API →](/api-reference/patches/list) — **Returns:** `list[dict]`
+
+### `await Sandbox.delete_checkpoint_patch(checkpoint_id, patch_id, ...)`
+
+[HTTP API →](/api-reference/patches/delete) — **Returns:** `None`
+
+---
+
+## Context Manager
+
+Auto-kills the sandbox on exit:
+
+```python
+async with await Sandbox.create() as sandbox:
+    result = await sandbox.exec.run("echo hello")
+    print(result.stdout)
+# sandbox.kill() called automatically
+```
+
+---
+
+## Instance Methods
+
+### `await sandbox.kill()`
+
+Terminate the sandbox. [HTTP API →](/api-reference/sandboxes/delete)
+
+**Returns:** `None`
+
+### `await sandbox.is_running()`
+
+Check if the sandbox is running.
+
+**Returns:** `bool`
+
+### `await sandbox.set_timeout(timeout)`
+
+Update idle timeout. [HTTP API →](/api-reference/sandboxes/set-timeout)
+
+<ParamField body="timeout" type="int" required>
+  New timeout in seconds
+</ParamField>
+
+**Returns:** `None`
+
+### `await sandbox.create_checkpoint(name)`
+
+Create a named checkpoint. [HTTP API →](/api-reference/checkpoints/create)
+
+**Returns:** `dict`
+
+### `await sandbox.list_checkpoints()`
+
+[HTTP API →](/api-reference/checkpoints/list) — **Returns:** `list[dict]`
+
+### `await sandbox.restore_checkpoint(checkpoint_id)`
+
+Revert in-place to a checkpoint. [HTTP API →](/api-reference/checkpoints/restore)
+
+**Returns:** `None`
+
+### `await sandbox.delete_checkpoint(checkpoint_id)`
+
+[HTTP API →](/api-reference/checkpoints/delete) — **Returns:** `None`
+
+### `await sandbox.create_preview_url(port, domain?, auth_config?)`
+
+[HTTP API →](/api-reference/preview/create)
+
+<ParamField body="port" type="int" required>
+  Container port (1–65535)
+</ParamField>
+
+<ParamField body="domain" type="str">
+  Custom domain
+</ParamField>
+
+<ParamField body="auth_config" type="dict">
+  Auth configuration
+</ParamField>
+
+**Returns:** `dict`
+
+### `await sandbox.list_preview_urls()`
+
+[HTTP API →](/api-reference/preview/list) — **Returns:** `list[dict]`
+
+### `await sandbox.delete_preview_url(port)`
+
+[HTTP API →](/api-reference/preview/delete) — **Returns:** `None`
+
+### `await sandbox.close()`
+
+Close HTTP clients. Called automatically by the context manager.
+
+---
+
+## Not Available in Python
+
+These features are TypeScript-only. Use the [HTTP API](/api-reference/overview) directly:
+
+- `hibernate()` / `wake()`
+- `cpuCount` / `memoryMB` on create
+
+---
+
+## Properties
+
+<ParamField body="sandbox_id" type="str">
+  Sandbox ID
+</ParamField>
+
+<ParamField body="status" type="str">
+  Current status
+</ParamField>
+
+<ParamField body="agent" type="Agent">
+  [Agent sessions](/reference/python-sdk/agent)
+</ParamField>
+
+<ParamField body="exec" type="Exec">
+  [Command execution](/reference/python-sdk/exec)
+</ParamField>
+
+<ParamField body="files" type="Filesystem">
+  [File operations](/reference/python-sdk/filesystem)
+</ParamField>
+
+<ParamField body="pty" type="Pty">
+  [Terminal sessions](/reference/python-sdk/pty)
+</ParamField>
+
+<ParamField body="commands" type="Exec">
+  **Deprecated** — alias for `exec`
+</ParamField>

@@ -1,0 +1,53 @@
+---
+title: "oc checkpoint"
+description: "Manage sandbox checkpoints"
+---
+
+**Alias:** `oc cp`
+
+## `oc checkpoint create <sandbox-id>`
+
+Create a named checkpoint of a running sandbox. [HTTP API →](/api-reference/checkpoints/create)
+
+<ParamField query="--name" type="string" required>
+  Checkpoint name
+</ParamField>
+
+```bash
+oc cp create sb-abc --name before-migration
+```
+
+---
+
+## `oc checkpoint list <sandbox-id>`
+
+List checkpoints for a sandbox. [HTTP API →](/api-reference/checkpoints/list)
+
+Output columns: `ID`, `NAME`, `STATUS`, `SIZE`, `CREATED`
+
+---
+
+## `oc checkpoint restore <sandbox-id> <checkpoint-id>`
+
+Revert a sandbox in-place to a checkpoint. All changes since the checkpoint are lost. [HTTP API →](/api-reference/checkpoints/restore)
+
+---
+
+## `oc checkpoint spawn <checkpoint-id>`
+
+Create a new sandbox from a checkpoint (fork). [HTTP API →](/api-reference/checkpoints/fork)
+
+<ParamField query="--timeout" type="int" default="300">
+  Idle timeout for the new sandbox
+</ParamField>
+
+```bash
+ID=$(oc cp spawn cp-xyz --json | jq -r '.sandboxID')
+oc exec "$ID" --wait -- echo "forked sandbox ready"
+```
+
+---
+
+## `oc checkpoint delete <sandbox-id> <checkpoint-id>`
+
+Delete a checkpoint. [HTTP API →](/api-reference/checkpoints/delete)

@@ -1,0 +1,107 @@
+---
+title: "Filesystem"
+description: "Read, write, and manage files"
+---
+
+Accessed via `sandbox.files`.
+
+## `sandbox.files.read(path)`
+
+Read a file as a UTF-8 string. [HTTP API →](/api-reference/files/read)
+
+<ParamField body="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `Promise<string>`
+
+---
+
+## `sandbox.files.readBytes(path)`
+
+Read a file as raw bytes.
+
+<ParamField body="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `Promise<Uint8Array>`
+
+---
+
+## `sandbox.files.write(path, content)`
+
+Write content to a file. [HTTP API →](/api-reference/files/write)
+
+<ParamField body="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="content" type="string | Uint8Array" required>
+  File content
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
+## `sandbox.files.list(path?)`
+
+List directory contents. [HTTP API →](/api-reference/files/list-directory)
+
+<ParamField body="path" type="string" default="/">
+  Directory path
+</ParamField>
+
+**Returns:** `Promise<EntryInfo[]>`
+
+---
+
+## `sandbox.files.makeDir(path)`
+
+Create a directory (recursive). [HTTP API →](/api-reference/files/mkdir)
+
+<ParamField body="path" type="string" required>
+  Directory path
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
+## `sandbox.files.remove(path)`
+
+Delete a file or directory. [HTTP API →](/api-reference/files/delete)
+
+<ParamField body="path" type="string" required>
+  Path to remove
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
+## `sandbox.files.exists(path)`
+
+Check if a path exists. Client-side wrapper — attempts a read and returns `false` on error.
+
+<ParamField body="path" type="string" required>
+  Path to check
+</ParamField>
+
+**Returns:** `Promise<boolean>`
+
+---
+
+## Types
+
+<Accordion title="EntryInfo">
+```typescript
+interface EntryInfo {
+  name: string;
+  isDir: boolean;
+  path: string;
+  size: number;
+}
+```
+</Accordion>

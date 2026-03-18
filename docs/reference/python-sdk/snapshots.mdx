@@ -1,0 +1,87 @@
+---
+title: "Snapshots"
+description: "Pre-built sandbox environments"
+---
+
+Standalone class — not a property on Sandbox.
+
+## Constructor
+
+```python
+from opencomputer import Snapshots
+
+snapshots = Snapshots()
+# or with explicit config:
+snapshots = Snapshots(api_key="...", api_url="...")
+```
+
+<ParamField body="api_key" type="str">
+  API key (falls back to `OPENCOMPUTER_API_KEY` env var)
+</ParamField>
+
+<ParamField body="api_url" type="str">
+  API URL (falls back to `OPENCOMPUTER_API_URL` env var)
+</ParamField>
+
+---
+
+## `await snapshots.create(name, image, on_build_logs=None)`
+
+Create a pre-built snapshot. [HTTP API →](/api-reference/snapshots/create)
+
+<ParamField body="name" type="str" required>
+  Unique snapshot name
+</ParamField>
+
+<ParamField body="image" type="Image" required>
+  Declarative image definition
+</ParamField>
+
+<ParamField body="on_build_logs" type="Callable[[str], None]">
+  Build log streaming callback
+</ParamField>
+
+**Returns:** `dict`
+
+---
+
+## `await snapshots.list()`
+
+[HTTP API →](/api-reference/snapshots/list) — **Returns:** `list[dict]`
+
+## `await snapshots.get(name)`
+
+[HTTP API →](/api-reference/snapshots/get)
+
+<ParamField body="name" type="str" required>
+  Snapshot name
+</ParamField>
+
+**Returns:** `dict`
+
+## `await snapshots.delete(name)`
+
+Delete a snapshot. Existing sandboxes are not affected. [HTTP API →](/api-reference/snapshots/delete)
+
+**Returns:** `None`
+
+---
+
+## SnapshotInfo
+
+Snapshot methods return dicts with these fields:
+
+<Accordion title="SnapshotInfo fields">
+```python
+{
+    "id": str,           # Unique snapshot identifier
+    "name": str,         # Snapshot name
+    "status": str,       # "building" | "ready" | "failed"
+    "contentHash": str,  # SHA-256 hash of the image manifest
+    "checkpointId": str, # Linked checkpoint ID
+    "manifest": dict,    # The declarative image manifest
+    "createdAt": str,    # ISO 8601 creation timestamp
+    "lastUsedAt": str,   # ISO 8601 last usage timestamp
+}
+```
+</Accordion>

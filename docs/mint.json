@@ -98,16 +98,45 @@
       "pages": ["guides/build-a-lovable-clone", "guides/agent-skill"]
     },
     {
-      "group": "Reference",
+      "group": "TypeScript SDK",
       "pages": [
-        "reference/typescript-sdk",
-        "reference/python-sdk",
-        "reference/cli"
+        "reference/typescript-sdk/overview",
+        "reference/typescript-sdk/sandbox",
+        "reference/typescript-sdk/exec",
+        "reference/typescript-sdk/agent",
+        "reference/typescript-sdk/filesystem",
+        "reference/typescript-sdk/pty",
+        "reference/typescript-sdk/image",
+        "reference/typescript-sdk/snapshots",
+        "reference/typescript-sdk/secrets"
       ]
     },
     {
-      "group": "Resources",
-      "pages": ["troubleshooting"]
+      "group": "Python SDK",
+      "pages": [
+        "reference/python-sdk/overview",
+        "reference/python-sdk/sandbox",
+        "reference/python-sdk/exec",
+        "reference/python-sdk/agent",
+        "reference/python-sdk/filesystem",
+        "reference/python-sdk/pty",
+        "reference/python-sdk/image",
+        "reference/python-sdk/snapshots",
+        "reference/python-sdk/secrets"
+      ]
+    },
+    {
+      "group": "CLI Reference",
+      "pages": [
+        "reference/cli/overview",
+        "reference/cli/sandbox",
+        "reference/cli/exec",
+        "reference/cli/shell",
+        "reference/cli/checkpoint",
+        "reference/cli/patch",
+        "reference/cli/preview",
+        "reference/cli/config"
+      ]
     },
     {
       "group": "API Reference",
@@ -198,6 +227,10 @@
           ]
         }
       ]
+    },
+    {
+      "group": "Resources",
+      "pages": ["troubleshooting"]
     }
   ],
   "footerSocials": {
