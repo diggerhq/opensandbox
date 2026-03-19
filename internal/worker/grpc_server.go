@@ -594,48 +594,12 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 	}, nil
 }
 
+// RestoreCheckpoint reverts a running sandbox to a checkpoint using QEMU's loadvm.
+// The snapshot is already stored inside the qcow2 files — no S3 download needed.
 func (s *GRPCServer) RestoreCheckpoint(ctx context.Context, req *pb.RestoreCheckpointRequest) (*pb.RestoreCheckpointResponse, error) {
-	checkpointID := req.CheckpointId
-	if _, err := uuid.Parse(checkpointID); err != nil {
-		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
+	if err := s.manager.RestoreFromCheckpoint(ctx, req.SandboxId, req.CheckpointId); err != nil {
+		return nil, fmt.Errorf("restore checkpoint: %w", err)
 	}
-
-	// Check local cache first; if not available, download from S3
-	cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
-	cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
-	if cachedRootfs == "" || cachedWorkspace == "" {
-		// Need to download from S3
-		if s.checkpointStore == nil {
-			return nil, fmt.Errorf("checkpoint not cached locally and no S3 store configured")
-		}
-		log.Printf("grpc: RestoreCheckpoint %s: not cached locally, downloading from S3", checkpointID)
-		rootfsKey := fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", req.SandboxId, checkpointID)
-		workspaceKey := fmt.Sprintf("checkpoints/%s/%s/workspace.sparse.zst", req.SandboxId, checkpointID)
-
-		cacheDir := filepath.Join(s.manager.DataDir(), "checkpoints", checkpointID)
-		if err := os.MkdirAll(cacheDir, 0755); err != nil {
-			return nil, fmt.Errorf("create checkpoint cache dir: %w", err)
-		}
-
-		cachedRootfsPath := filepath.Join(cacheDir, "rootfs.ext4")
-		cachedWorkspacePath := filepath.Join(cacheDir, "workspace.ext4")
-
-		if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
-			os.RemoveAll(cacheDir)
-			return nil, fmt.Errorf("download checkpoint rootfs: %w", err)
-		}
-		if err := downloadAndExtract(ctx, s.checkpointStore, workspaceKey, cachedWorkspacePath, extractSparseCmd); err != nil {
-			os.RemoveAll(cacheDir)
-			return nil, fmt.Errorf("download checkpoint workspace: %w", err)
-		}
-		log.Printf("grpc: RestoreCheckpoint %s: cached locally at %s", checkpointID, cacheDir)
-		_ = cachedRootfsPath // used implicitly by manager.CheckpointCachePath after download
-	}
-
-	if err := s.manager.RestoreFromCheckpoint(ctx, req.SandboxId, checkpointID); err != nil {
-		return nil, fmt.Errorf("restore from checkpoint failed: %w", err)
-	}
-
 	return &pb.RestoreCheckpointResponse{Success: true}, nil
 }
 

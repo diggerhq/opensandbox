@@ -33,6 +33,7 @@ const (
 	SandboxAgent_PTYCreate_FullMethodName         = "/agent.SandboxAgent/PTYCreate"
 	SandboxAgent_PTYResize_FullMethodName         = "/agent.SandboxAgent/PTYResize"
 	SandboxAgent_PTYKill_FullMethodName           = "/agent.SandboxAgent/PTYKill"
+	SandboxAgent_PTYAttach_FullMethodName         = "/agent.SandboxAgent/PTYAttach"
 	SandboxAgent_ExecSessionCreate_FullMethodName = "/agent.SandboxAgent/ExecSessionCreate"
 	SandboxAgent_ExecSessionAttach_FullMethodName = "/agent.SandboxAgent/ExecSessionAttach"
 	SandboxAgent_ExecSessionList_FullMethodName   = "/agent.SandboxAgent/ExecSessionList"
@@ -70,6 +71,9 @@ type SandboxAgentClient interface {
 	PTYCreate(ctx context.Context, in *PTYCreateRequest, opts ...grpc.CallOption) (*PTYCreateResponse, error)
 	PTYResize(ctx context.Context, in *PTYResizeRequest, opts ...grpc.CallOption) (*PTYResizeResponse, error)
 	PTYKill(ctx context.Context, in *PTYKillRequest, opts ...grpc.CallOption) (*PTYKillResponse, error)
+	// PTYAttach opens a bidirectional stream for PTY I/O over gRPC.
+	// Used by QEMU backend (virtio-serial) where vsock data ports are unavailable.
+	PTYAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PTYInput, PTYOutput], error)
 	// Exec sessions — persistent command execution with scrollback and reconnect.
 	ExecSessionCreate(ctx context.Context, in *ExecSessionCreateRequest, opts ...grpc.CallOption) (*ExecSessionCreateResponse, error)
 	ExecSessionAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput], error)
@@ -246,6 +250,19 @@ func (c *sandboxAgentClient) PTYKill(ctx context.Context, in *PTYKillRequest, op
 	return out, nil
 }
 
+func (c *sandboxAgentClient) PTYAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PTYInput, PTYOutput], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[1], SandboxAgent_PTYAttach_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PTYInput, PTYOutput]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_PTYAttachClient = grpc.BidiStreamingClient[PTYInput, PTYOutput]
+
 func (c *sandboxAgentClient) ExecSessionCreate(ctx context.Context, in *ExecSessionCreateRequest, opts ...grpc.CallOption) (*ExecSessionCreateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExecSessionCreateResponse)
@@ -258,7 +275,7 @@ func (c *sandboxAgentClient) ExecSessionCreate(ctx context.Context, in *ExecSess
 
 func (c *sandboxAgentClient) ExecSessionAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[1], SandboxAgent_ExecSessionAttach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[2], SandboxAgent_ExecSessionAttach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -356,6 +373,9 @@ type SandboxAgentServer interface {
 	PTYCreate(context.Context, *PTYCreateRequest) (*PTYCreateResponse, error)
 	PTYResize(context.Context, *PTYResizeRequest) (*PTYResizeResponse, error)
 	PTYKill(context.Context, *PTYKillRequest) (*PTYKillResponse, error)
+	// PTYAttach opens a bidirectional stream for PTY I/O over gRPC.
+	// Used by QEMU backend (virtio-serial) where vsock data ports are unavailable.
+	PTYAttach(grpc.BidiStreamingServer[PTYInput, PTYOutput]) error
 	// Exec sessions — persistent command execution with scrollback and reconnect.
 	ExecSessionCreate(context.Context, *ExecSessionCreateRequest) (*ExecSessionCreateResponse, error)
 	ExecSessionAttach(grpc.BidiStreamingServer[ExecSessionInput, ExecSessionOutput]) error
@@ -424,6 +444,9 @@ func (UnimplementedSandboxAgentServer) PTYResize(context.Context, *PTYResizeRequ
 }
 func (UnimplementedSandboxAgentServer) PTYKill(context.Context, *PTYKillRequest) (*PTYKillResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PTYKill not implemented")
+}
+func (UnimplementedSandboxAgentServer) PTYAttach(grpc.BidiStreamingServer[PTYInput, PTYOutput]) error {
+	return status.Error(codes.Unimplemented, "method PTYAttach not implemented")
 }
 func (UnimplementedSandboxAgentServer) ExecSessionCreate(context.Context, *ExecSessionCreateRequest) (*ExecSessionCreateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExecSessionCreate not implemented")
@@ -715,6 +738,13 @@ func _SandboxAgent_PTYKill_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxAgent_PTYAttach_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxAgentServer).PTYAttach(&grpc.GenericServerStream[PTYInput, PTYOutput]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_PTYAttachServer = grpc.BidiStreamingServer[PTYInput, PTYOutput]
+
 func _SandboxAgent_ExecSessionCreate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExecSessionCreateRequest)
 	if err := dec(in); err != nil {
@@ -941,6 +971,12 @@ var SandboxAgent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "ExecStream",
 			Handler:       _SandboxAgent_ExecStream_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "PTYAttach",
+			Handler:       _SandboxAgent_PTYAttach_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "ExecSessionAttach",

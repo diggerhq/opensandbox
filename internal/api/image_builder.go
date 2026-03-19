@@ -376,19 +376,25 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		return uuid.Nil, fmt.Errorf("no execution backend available")
 	}
 
-	// Cleanup: always destroy the build sandbox and mark it stopped in PG
+	// Cleanup: destroy the build sandbox after a delay.
+	// The checkpoint cache (qcow2 files) must survive long enough for the first
+	// ForkFromCheckpoint to copy them. With reflink the fork is instant, but the
+	// server-side create flow is async — the fork gRPC call may arrive seconds later.
 	defer func() {
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if grpcClient != nil {
-			_, _ = grpcClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: buildSandboxID})
-		} else if s.manager != nil {
-			_ = s.manager.Kill(cleanCtx, buildSandboxID)
-		}
-		if s.store != nil {
-			_ = s.store.UpdateSandboxSessionStatus(cleanCtx, buildSandboxID, "stopped", nil)
-		}
-		log.Printf("image-builder: destroyed build sandbox %s", buildSandboxID)
+		go func() {
+			time.Sleep(30 * time.Second) // give forks time to copy from cache
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if grpcClient != nil {
+				_, _ = grpcClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: buildSandboxID})
+			} else if s.manager != nil {
+				_ = s.manager.Kill(cleanCtx, buildSandboxID)
+			}
+			if s.store != nil {
+				_ = s.store.UpdateSandboxSessionStatus(cleanCtx, buildSandboxID, "stopped", nil)
+			}
+			log.Printf("image-builder: destroyed build sandbox %s (delayed)", buildSandboxID)
+		}()
 	}()
 
 	// Record session in PG (so worker can find it)

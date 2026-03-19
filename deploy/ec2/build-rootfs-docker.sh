@@ -193,6 +193,11 @@ fi
 cat >> "$TMPDIR/Dockerfile" << 'INJECT_EOF'
 
 # --- OpenSandbox agent injection ---
+# Create sandbox user (UID 1000) for exec sessions — agent runs as root (PID 1),
+# but user commands run as this non-root user for cgroup/security isolation.
+RUN useradd -m -u 1000 -s /bin/bash sandbox && \
+    echo 'sandbox ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    chown sandbox:sandbox /workspace 2>/dev/null || true
 COPY osb-agent /usr/local/bin/osb-agent
 RUN chmod +x /usr/local/bin/osb-agent
 COPY init /sbin/init

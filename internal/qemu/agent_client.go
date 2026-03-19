@@ -320,6 +320,11 @@ func (c *AgentClient) ExecSessionKill(ctx context.Context, sessionID string, sig
 	return err
 }
 
+// PTYAttach opens a bidirectional gRPC stream for PTY I/O.
+func (c *AgentClient) PTYAttach(ctx context.Context) (pb.SandboxAgent_PTYAttachClient, error) {
+	return c.client.PTYAttach(ctx)
+}
+
 // ConnectPTYData connects to the PTY data stream on the given vsock port.
 // Uses AF_VSOCK directly instead of Firecracker's UDS protocol.
 func (c *AgentClient) ConnectPTYData(guestCID uint32, dataPort uint32) (net.Conn, error) {

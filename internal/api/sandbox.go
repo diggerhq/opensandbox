@@ -651,6 +651,43 @@ func (s *Server) setLimits(c echo.Context) error {
 	})
 }
 
+// scaleSandbox is a simplified scaling endpoint: POST /sandboxes/:id/scale
+// Accepts {"memory_mb": 2048} and auto-calculates CPU (1 vCPU per 1GB).
+func (s *Server) scaleSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	var req struct {
+		MemoryMB int `json:"memory_mb"`
+	}
+	if err := c.Bind(&req); err != nil || req.MemoryMB <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memory_mb is required and must be positive"})
+	}
+
+	// Auto-calculate: 1 vCPU per 1GB = 100% CPU per 1024MB
+	cpuPercent := (req.MemoryMB * 100) / 1024
+	if cpuPercent < 100 {
+		cpuPercent = 100
+	}
+	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
+	cpuMaxUsec := int64(cpuPercent) * 1000
+	cpuPeriodUsec := int64(100000)
+
+	if s.workerRegistry != nil {
+		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+	}
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+	if err := s.manager.SetResourceLimits(c.Request().Context(), id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID": id,
+		"memoryMB":  req.MemoryMB,
+		"cpuPercent": cpuPercent,
+	})
+}
+
 func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
 	if s.store == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{

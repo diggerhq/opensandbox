@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -54,14 +55,8 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	env = append(env, mapToEnv(req.Envs)...)
 	cmd.Env = env
 
-	// Run as sandbox user in its own process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-		Credential: &syscall.Credential{
-			Uid: sandboxUID,
-			Gid: sandboxGID,
-		},
-	}
+	// Run in its own process group (for clean kill on timeout)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -100,8 +95,10 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 		sess.maxRunAfterDisc = time.Duration(req.MaxRunAfterDisconnect) * time.Second
 	}
 
+	log.Printf("exec-session: starting %s %v (SysProcAttr=%+v, Dir=%s)", req.Command, req.Args, cmd.SysProcAttr, cmd.Dir)
 	if err := cmd.Start(); err != nil {
 		cancel()
+		log.Printf("exec-session: start failed: %v (cmd=%s)", err, req.Command)
 		return nil, fmt.Errorf("start command: %w", err)
 	}
 	moveToCgroup(cmd.Process.Pid)

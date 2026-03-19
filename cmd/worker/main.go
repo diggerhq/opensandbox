@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -116,11 +117,7 @@ func main() {
 			if err != nil {
 				return nil, fmt.Errorf("get agent for %s: %w", sandboxID, err)
 			}
-			guestCID, err := qmMgr.GetGuestCID(sandboxID)
-			if err != nil {
-				return nil, fmt.Errorf("get guest CID for %s: %w", sandboxID, err)
-			}
-			return createPTYSessionQEMU(agent, guestCID, sandboxID, req)
+			return createPTYSessionQEMU(agent, sandboxID, req)
 		}
 
 		doGracefulShutdown = func(checkpointStore *storage.CheckpointStore, store *db.Store) {
@@ -482,8 +479,59 @@ func consumeExecOutput(stream agentpb.SandboxAgent_ExecSessionAttachClient, scro
 	}
 }
 
-// createPTYSessionQEMU creates a PTY session using AF_VSOCK (QEMU backend).
-func createPTYSessionQEMU(agent *qm.AgentClient, guestCID uint32, sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
+// grpcPTYConn adapts a PTYAttach bidi gRPC stream into an io.ReadWriteCloser
+// with a Resize method, suitable for PTYSessionHandle.PTY.
+type grpcPTYConn struct {
+	stream    agentpb.SandboxAgent_PTYAttachClient
+	buf       []byte
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	exited    bool
+	exitCode  int
+}
+
+func (c *grpcPTYConn) Read(p []byte) (int, error) {
+	if len(c.buf) > 0 {
+		n := copy(p, c.buf)
+		c.buf = c.buf[n:]
+		return n, nil
+	}
+	msg, err := c.stream.Recv()
+	if err != nil {
+		return 0, err
+	}
+	if msg.Exited {
+		c.exited = true
+		c.exitCode = int(msg.ExitCode)
+		return 0, io.EOF
+	}
+	n := copy(p, msg.Data)
+	if n < len(msg.Data) {
+		c.buf = msg.Data[n:]
+	}
+	return n, nil
+}
+
+func (c *grpcPTYConn) Write(p []byte) (int, error) {
+	data := make([]byte, len(p))
+	copy(data, p)
+	if err := c.stream.Send(&agentpb.PTYInput{Stdin: data}); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (c *grpcPTYConn) Resize(cols, rows int) error {
+	return c.stream.Send(&agentpb.PTYInput{Cols: int32(cols), Rows: int32(rows)})
+}
+
+func (c *grpcPTYConn) Close() error {
+	c.closeOnce.Do(func() { c.cancel() })
+	return nil
+}
+
+// createPTYSessionQEMU creates a PTY session using gRPC PTYAttach (QEMU backend).
+func createPTYSessionQEMU(agent *qm.AgentClient, sandboxID string, req types.PTYCreateRequest) (*sandbox.PTYSessionHandle, error) {
 	cols := int32(req.Cols)
 	if cols <= 0 {
 		cols = 80
@@ -493,15 +541,32 @@ func createPTYSessionQEMU(agent *qm.AgentClient, guestCID uint32, sandboxID stri
 		rows = 24
 	}
 
-	sessionID, dataPort, err := agent.PTYCreate(context.Background(), cols, rows, req.Shell)
+	// 1. Create the PTY session (allocates shell + pty in the VM)
+	sessionID, _, err := agent.PTYCreate(context.Background(), cols, rows, req.Shell)
 	if err != nil {
 		return nil, fmt.Errorf("create PTY in VM: %w", err)
 	}
 
-	conn, err := agent.ConnectPTYData(guestCID, dataPort)
+	// 2. Open bidi gRPC stream for PTY I/O
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := agent.PTYAttach(ctx)
 	if err != nil {
+		cancel()
 		_ = agent.PTYKill(context.Background(), sessionID)
-		return nil, fmt.Errorf("connect PTY data: %w", err)
+		return nil, fmt.Errorf("attach PTY stream: %w", err)
+	}
+
+	// 3. Send first message with session_id to bind the stream
+	if err := stream.Send(&agentpb.PTYInput{SessionId: sessionID}); err != nil {
+		cancel()
+		_ = agent.PTYKill(context.Background(), sessionID)
+		return nil, fmt.Errorf("send PTY session ID: %w", err)
+	}
+
+	// 4. Wrap in grpcPTYConn
+	conn := &grpcPTYConn{
+		stream: stream,
+		cancel: cancel,
 	}
 
 	done := make(chan struct{})

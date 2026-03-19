@@ -32,7 +32,11 @@ func main() {
 	}
 
 	srv := agent.NewServer(version)
-	srv.ListenPort = listenPortForPTY
+	// Only set ListenPort for vsock-based backends (Firecracker).
+	// For virtio-serial (QEMU), PTY I/O flows over gRPC PTYAttach instead.
+	if _, isVirtioSerial := lis.(*virtioSerialListener); !isVirtioSerial {
+		srv.ListenPort = listenPortForPTY
+	}
 
 	// Signal handling:
 	// SIGTERM/SIGINT: clean shutdown (exit)

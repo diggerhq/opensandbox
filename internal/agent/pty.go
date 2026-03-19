@@ -91,6 +91,15 @@ func (s *Server) PTYCreate(ctx context.Context, req *pb.PTYCreateRequest) (*pb.P
 	s.ptySessions[sessionID] = sess
 	s.ptyMu.Unlock()
 
+	// If ListenPort is nil (virtio-serial / QEMU mode), skip the vsock data
+	// listener — the caller will use PTYAttach for I/O instead.
+	if s.ListenPort == nil {
+		return &pb.PTYCreateResponse{
+			SessionId: sessionID,
+			DataPort:  0,
+		}, nil
+	}
+
 	// Start vsock listener for PTY data on the allocated port.
 	// We must ensure the listener is ready before returning the port to the
 	// caller, otherwise the host may CONNECT before we're listening.
@@ -167,6 +176,89 @@ func (s *Server) servePTYData(sess *ptySession, ctx context.Context, ready chan<
 	s.ptyMu.Lock()
 	delete(s.ptySessions, sess.id)
 	s.ptyMu.Unlock()
+}
+
+// PTYAttach opens a bidirectional gRPC stream for PTY I/O.
+// Used by the QEMU backend where vsock data ports are unavailable.
+func (s *Server) PTYAttach(stream pb.SandboxAgent_PTYAttachServer) error {
+	// First message must contain session_id
+	first, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("recv first message: %w", err)
+	}
+	sessionID := first.SessionId
+	if sessionID == "" {
+		return fmt.Errorf("first message must contain session_id")
+	}
+
+	s.ptyMu.Lock()
+	sess, ok := s.ptySessions[sessionID]
+	s.ptyMu.Unlock()
+	if !ok {
+		return fmt.Errorf("pty session %s not found", sessionID)
+	}
+
+	// Process any stdin/resize from the first message
+	if len(first.Stdin) > 0 {
+		sess.ptyFile.Write(first.Stdin)
+	}
+	if first.Cols > 0 && first.Rows > 0 {
+		pty.Setsize(sess.ptyFile, &pty.Winsize{
+			Cols: uint16(first.Cols),
+			Rows: uint16(first.Rows),
+		})
+	}
+
+	// Goroutine: read from PTY and send to client
+	sendErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := sess.ptyFile.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				if err := stream.Send(&pb.PTYOutput{Data: data}); err != nil {
+					sendErr <- err
+					return
+				}
+			}
+			if readErr != nil {
+				// PTY closed or process exited — wait for exit code
+				exitCode := 0
+				if sess.cmd != nil {
+					if waitErr := sess.cmd.Wait(); waitErr != nil {
+						if exitErr, ok := waitErr.(*exec.ExitError); ok {
+							exitCode = exitErr.ExitCode()
+						} else {
+							exitCode = 1
+						}
+					}
+				}
+				stream.Send(&pb.PTYOutput{Exited: true, ExitCode: int32(exitCode)})
+				sendErr <- nil
+				return
+			}
+		}
+	}()
+
+	// Main loop: recv from client, write to PTY
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			// Client disconnected
+			return nil
+		}
+		if len(msg.Stdin) > 0 {
+			sess.ptyFile.Write(msg.Stdin)
+		}
+		if msg.Cols > 0 && msg.Rows > 0 {
+			pty.Setsize(sess.ptyFile, &pty.Winsize{
+				Cols: uint16(msg.Cols),
+				Rows: uint16(msg.Rows),
+			})
+		}
+	}
 }
 
 // PTYResize changes the terminal size for an active PTY session.

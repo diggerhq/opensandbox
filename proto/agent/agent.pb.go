@@ -116,7 +116,7 @@ func (x ExecSessionOutput_Type) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ExecSessionOutput_Type.Descriptor instead.
 func (ExecSessionOutput_Type) EnumDescriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{31, 0}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{33, 0}
 }
 
 type ExecRequest struct {
@@ -1519,6 +1519,136 @@ func (*PTYKillResponse) Descriptor() ([]byte, []int) {
 	return file_proto_agent_agent_proto_rawDescGZIP(), []int{27}
 }
 
+// PTYInput is a client→agent message for the PTYAttach bidi stream.
+type PTYInput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SessionId     string                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // required on first message to identify the session
+	Stdin         []byte                 `protobuf:"bytes,2,opt,name=stdin,proto3" json:"stdin,omitempty"`                          // raw bytes to write to the PTY
+	Cols          int32                  `protobuf:"varint,3,opt,name=cols,proto3" json:"cols,omitempty"`                           // if > 0, resize the PTY
+	Rows          int32                  `protobuf:"varint,4,opt,name=rows,proto3" json:"rows,omitempty"`                           // if > 0, resize the PTY
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PTYInput) Reset() {
+	*x = PTYInput{}
+	mi := &file_proto_agent_agent_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PTYInput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PTYInput) ProtoMessage() {}
+
+func (x *PTYInput) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PTYInput.ProtoReflect.Descriptor instead.
+func (*PTYInput) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *PTYInput) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *PTYInput) GetStdin() []byte {
+	if x != nil {
+		return x.Stdin
+	}
+	return nil
+}
+
+func (x *PTYInput) GetCols() int32 {
+	if x != nil {
+		return x.Cols
+	}
+	return 0
+}
+
+func (x *PTYInput) GetRows() int32 {
+	if x != nil {
+		return x.Rows
+	}
+	return 0
+}
+
+// PTYOutput is an agent→client message for the PTYAttach bidi stream.
+type PTYOutput struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`                          // raw bytes read from the PTY
+	Exited        bool                   `protobuf:"varint,2,opt,name=exited,proto3" json:"exited,omitempty"`                     // true when the PTY process has exited
+	ExitCode      int32                  `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"` // only valid when exited = true
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PTYOutput) Reset() {
+	*x = PTYOutput{}
+	mi := &file_proto_agent_agent_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PTYOutput) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PTYOutput) ProtoMessage() {}
+
+func (x *PTYOutput) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_agent_agent_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PTYOutput.ProtoReflect.Descriptor instead.
+func (*PTYOutput) Descriptor() ([]byte, []int) {
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *PTYOutput) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *PTYOutput) GetExited() bool {
+	if x != nil {
+		return x.Exited
+	}
+	return false
+}
+
+func (x *PTYOutput) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
 type ExecSessionCreateRequest struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	Command               string                 `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
@@ -1534,7 +1664,7 @@ type ExecSessionCreateRequest struct {
 
 func (x *ExecSessionCreateRequest) Reset() {
 	*x = ExecSessionCreateRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_agent_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1546,7 +1676,7 @@ func (x *ExecSessionCreateRequest) String() string {
 func (*ExecSessionCreateRequest) ProtoMessage() {}
 
 func (x *ExecSessionCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[28]
+	mi := &file_proto_agent_agent_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1559,7 +1689,7 @@ func (x *ExecSessionCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionCreateRequest.ProtoReflect.Descriptor instead.
 func (*ExecSessionCreateRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{28}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ExecSessionCreateRequest) GetCommand() string {
@@ -1620,7 +1750,7 @@ type ExecSessionCreateResponse struct {
 
 func (x *ExecSessionCreateResponse) Reset() {
 	*x = ExecSessionCreateResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_agent_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1632,7 +1762,7 @@ func (x *ExecSessionCreateResponse) String() string {
 func (*ExecSessionCreateResponse) ProtoMessage() {}
 
 func (x *ExecSessionCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[29]
+	mi := &file_proto_agent_agent_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1645,7 +1775,7 @@ func (x *ExecSessionCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionCreateResponse.ProtoReflect.Descriptor instead.
 func (*ExecSessionCreateResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{29}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ExecSessionCreateResponse) GetSessionId() string {
@@ -1665,7 +1795,7 @@ type ExecSessionInput struct {
 
 func (x *ExecSessionInput) Reset() {
 	*x = ExecSessionInput{}
-	mi := &file_proto_agent_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1677,7 +1807,7 @@ func (x *ExecSessionInput) String() string {
 func (*ExecSessionInput) ProtoMessage() {}
 
 func (x *ExecSessionInput) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[30]
+	mi := &file_proto_agent_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1690,7 +1820,7 @@ func (x *ExecSessionInput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionInput.ProtoReflect.Descriptor instead.
 func (*ExecSessionInput) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{30}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ExecSessionInput) GetSessionId() string {
@@ -1718,7 +1848,7 @@ type ExecSessionOutput struct {
 
 func (x *ExecSessionOutput) Reset() {
 	*x = ExecSessionOutput{}
-	mi := &file_proto_agent_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1730,7 +1860,7 @@ func (x *ExecSessionOutput) String() string {
 func (*ExecSessionOutput) ProtoMessage() {}
 
 func (x *ExecSessionOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[31]
+	mi := &file_proto_agent_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1743,7 +1873,7 @@ func (x *ExecSessionOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionOutput.ProtoReflect.Descriptor instead.
 func (*ExecSessionOutput) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{31}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ExecSessionOutput) GetType() ExecSessionOutput_Type {
@@ -1775,7 +1905,7 @@ type ExecSessionListRequest struct {
 
 func (x *ExecSessionListRequest) Reset() {
 	*x = ExecSessionListRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1787,7 +1917,7 @@ func (x *ExecSessionListRequest) String() string {
 func (*ExecSessionListRequest) ProtoMessage() {}
 
 func (x *ExecSessionListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[32]
+	mi := &file_proto_agent_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1800,7 +1930,7 @@ func (x *ExecSessionListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionListRequest.ProtoReflect.Descriptor instead.
 func (*ExecSessionListRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{32}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{34}
 }
 
 type ExecSessionListResponse struct {
@@ -1812,7 +1942,7 @@ type ExecSessionListResponse struct {
 
 func (x *ExecSessionListResponse) Reset() {
 	*x = ExecSessionListResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_agent_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1824,7 +1954,7 @@ func (x *ExecSessionListResponse) String() string {
 func (*ExecSessionListResponse) ProtoMessage() {}
 
 func (x *ExecSessionListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[33]
+	mi := &file_proto_agent_agent_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1837,7 +1967,7 @@ func (x *ExecSessionListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionListResponse.ProtoReflect.Descriptor instead.
 func (*ExecSessionListResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{33}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ExecSessionListResponse) GetSessions() []*ExecSessionInfo {
@@ -1862,7 +1992,7 @@ type ExecSessionInfo struct {
 
 func (x *ExecSessionInfo) Reset() {
 	*x = ExecSessionInfo{}
-	mi := &file_proto_agent_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_agent_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1874,7 +2004,7 @@ func (x *ExecSessionInfo) String() string {
 func (*ExecSessionInfo) ProtoMessage() {}
 
 func (x *ExecSessionInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[34]
+	mi := &file_proto_agent_agent_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1887,7 +2017,7 @@ func (x *ExecSessionInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionInfo.ProtoReflect.Descriptor instead.
 func (*ExecSessionInfo) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{34}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ExecSessionInfo) GetSessionId() string {
@@ -1949,7 +2079,7 @@ type ExecSessionKillRequest struct {
 
 func (x *ExecSessionKillRequest) Reset() {
 	*x = ExecSessionKillRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_agent_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1961,7 +2091,7 @@ func (x *ExecSessionKillRequest) String() string {
 func (*ExecSessionKillRequest) ProtoMessage() {}
 
 func (x *ExecSessionKillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[35]
+	mi := &file_proto_agent_agent_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1974,7 +2104,7 @@ func (x *ExecSessionKillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionKillRequest.ProtoReflect.Descriptor instead.
 func (*ExecSessionKillRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{35}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ExecSessionKillRequest) GetSessionId() string {
@@ -1999,7 +2129,7 @@ type ExecSessionKillResponse struct {
 
 func (x *ExecSessionKillResponse) Reset() {
 	*x = ExecSessionKillResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_agent_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2011,7 +2141,7 @@ func (x *ExecSessionKillResponse) String() string {
 func (*ExecSessionKillResponse) ProtoMessage() {}
 
 func (x *ExecSessionKillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[36]
+	mi := &file_proto_agent_agent_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2024,7 +2154,7 @@ func (x *ExecSessionKillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecSessionKillResponse.ProtoReflect.Descriptor instead.
 func (*ExecSessionKillResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{36}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{38}
 }
 
 type SetEnvsRequest struct {
@@ -2036,7 +2166,7 @@ type SetEnvsRequest struct {
 
 func (x *SetEnvsRequest) Reset() {
 	*x = SetEnvsRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_agent_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2048,7 +2178,7 @@ func (x *SetEnvsRequest) String() string {
 func (*SetEnvsRequest) ProtoMessage() {}
 
 func (x *SetEnvsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[37]
+	mi := &file_proto_agent_agent_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2061,7 +2191,7 @@ func (x *SetEnvsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEnvsRequest.ProtoReflect.Descriptor instead.
 func (*SetEnvsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{37}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SetEnvsRequest) GetEnvs() map[string]string {
@@ -2079,7 +2209,7 @@ type SetEnvsResponse struct {
 
 func (x *SetEnvsResponse) Reset() {
 	*x = SetEnvsResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_agent_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2091,7 +2221,7 @@ func (x *SetEnvsResponse) String() string {
 func (*SetEnvsResponse) ProtoMessage() {}
 
 func (x *SetEnvsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[38]
+	mi := &file_proto_agent_agent_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2104,7 +2234,7 @@ func (x *SetEnvsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEnvsResponse.ProtoReflect.Descriptor instead.
 func (*SetEnvsResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{38}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{40}
 }
 
 type ShutdownRequest struct {
@@ -2115,7 +2245,7 @@ type ShutdownRequest struct {
 
 func (x *ShutdownRequest) Reset() {
 	*x = ShutdownRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_agent_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2127,7 +2257,7 @@ func (x *ShutdownRequest) String() string {
 func (*ShutdownRequest) ProtoMessage() {}
 
 func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[39]
+	mi := &file_proto_agent_agent_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2140,7 +2270,7 @@ func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{39}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{41}
 }
 
 type ShutdownResponse struct {
@@ -2151,7 +2281,7 @@ type ShutdownResponse struct {
 
 func (x *ShutdownResponse) Reset() {
 	*x = ShutdownResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_agent_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2163,7 +2293,7 @@ func (x *ShutdownResponse) String() string {
 func (*ShutdownResponse) ProtoMessage() {}
 
 func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[40]
+	mi := &file_proto_agent_agent_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2176,7 +2306,7 @@ func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{40}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{42}
 }
 
 type SyncFSRequest struct {
@@ -2187,7 +2317,7 @@ type SyncFSRequest struct {
 
 func (x *SyncFSRequest) Reset() {
 	*x = SyncFSRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_agent_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2199,7 +2329,7 @@ func (x *SyncFSRequest) String() string {
 func (*SyncFSRequest) ProtoMessage() {}
 
 func (x *SyncFSRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[41]
+	mi := &file_proto_agent_agent_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2212,7 +2342,7 @@ func (x *SyncFSRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncFSRequest.ProtoReflect.Descriptor instead.
 func (*SyncFSRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{41}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{43}
 }
 
 type SyncFSResponse struct {
@@ -2223,7 +2353,7 @@ type SyncFSResponse struct {
 
 func (x *SyncFSResponse) Reset() {
 	*x = SyncFSResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[42]
+	mi := &file_proto_agent_agent_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2235,7 +2365,7 @@ func (x *SyncFSResponse) String() string {
 func (*SyncFSResponse) ProtoMessage() {}
 
 func (x *SyncFSResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[42]
+	mi := &file_proto_agent_agent_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2248,7 +2378,7 @@ func (x *SyncFSResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncFSResponse.ProtoReflect.Descriptor instead.
 func (*SyncFSResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{42}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{44}
 }
 
 type SetResourceLimitsRequest struct {
@@ -2263,7 +2393,7 @@ type SetResourceLimitsRequest struct {
 
 func (x *SetResourceLimitsRequest) Reset() {
 	*x = SetResourceLimitsRequest{}
-	mi := &file_proto_agent_agent_proto_msgTypes[43]
+	mi := &file_proto_agent_agent_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2275,7 +2405,7 @@ func (x *SetResourceLimitsRequest) String() string {
 func (*SetResourceLimitsRequest) ProtoMessage() {}
 
 func (x *SetResourceLimitsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[43]
+	mi := &file_proto_agent_agent_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2288,7 +2418,7 @@ func (x *SetResourceLimitsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetResourceLimitsRequest.ProtoReflect.Descriptor instead.
 func (*SetResourceLimitsRequest) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{43}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *SetResourceLimitsRequest) GetMaxPids() int32 {
@@ -2327,7 +2457,7 @@ type SetResourceLimitsResponse struct {
 
 func (x *SetResourceLimitsResponse) Reset() {
 	*x = SetResourceLimitsResponse{}
-	mi := &file_proto_agent_agent_proto_msgTypes[44]
+	mi := &file_proto_agent_agent_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2339,7 +2469,7 @@ func (x *SetResourceLimitsResponse) String() string {
 func (*SetResourceLimitsResponse) ProtoMessage() {}
 
 func (x *SetResourceLimitsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_agent_agent_proto_msgTypes[44]
+	mi := &file_proto_agent_agent_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2352,7 +2482,7 @@ func (x *SetResourceLimitsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetResourceLimitsResponse.ProtoReflect.Descriptor instead.
 func (*SetResourceLimitsResponse) Descriptor() ([]byte, []int) {
-	return file_proto_agent_agent_proto_rawDescGZIP(), []int{44}
+	return file_proto_agent_agent_proto_rawDescGZIP(), []int{46}
 }
 
 var File_proto_agent_agent_proto protoreflect.FileDescriptor
@@ -2449,7 +2579,17 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x0ePTYKillRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\"\x11\n" +
-	"\x0fPTYKillResponse\"\xe6\x02\n" +
+	"\x0fPTYKillResponse\"g\n" +
+	"\bPTYInput\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x01 \x01(\tR\tsessionId\x12\x14\n" +
+	"\x05stdin\x18\x02 \x01(\fR\x05stdin\x12\x12\n" +
+	"\x04cols\x18\x03 \x01(\x05R\x04cols\x12\x12\n" +
+	"\x04rows\x18\x04 \x01(\x05R\x04rows\"T\n" +
+	"\tPTYOutput\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\x12\x16\n" +
+	"\x06exited\x18\x02 \x01(\bR\x06exited\x12\x1b\n" +
+	"\texit_code\x18\x03 \x01(\x05R\bexitCode\"\xe6\x02\n" +
 	"\x18ExecSessionCreateRequest\x12\x18\n" +
 	"\acommand\x18\x01 \x01(\tR\acommand\x12\x12\n" +
 	"\x04args\x18\x02 \x03(\tR\x04args\x12=\n" +
@@ -2513,8 +2653,7 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\fcpu_max_usec\x18\x03 \x01(\x03R\n" +
 	"cpuMaxUsec\x12&\n" +
 	"\x0fcpu_period_usec\x18\x04 \x01(\x03R\rcpuPeriodUsec\"\x1b\n" +
-	"\x19SetResourceLimitsResponse2\xf8\n" +
-	"\n" +
+	"\x19SetResourceLimitsResponse2\xac\v\n" +
 	"\fSandboxAgent\x12/\n" +
 	"\x04Exec\x12\x12.agent.ExecRequest\x1a\x13.agent.ExecResponse\x12:\n" +
 	"\n" +
@@ -2530,7 +2669,8 @@ const file_proto_agent_agent_proto_rawDesc = "" +
 	"\x04Ping\x12\x12.agent.PingRequest\x1a\x13.agent.PingResponse\x12>\n" +
 	"\tPTYCreate\x12\x17.agent.PTYCreateRequest\x1a\x18.agent.PTYCreateResponse\x12>\n" +
 	"\tPTYResize\x12\x17.agent.PTYResizeRequest\x1a\x18.agent.PTYResizeResponse\x128\n" +
-	"\aPTYKill\x12\x15.agent.PTYKillRequest\x1a\x16.agent.PTYKillResponse\x12V\n" +
+	"\aPTYKill\x12\x15.agent.PTYKillRequest\x1a\x16.agent.PTYKillResponse\x122\n" +
+	"\tPTYAttach\x12\x0f.agent.PTYInput\x1a\x10.agent.PTYOutput(\x010\x01\x12V\n" +
 	"\x11ExecSessionCreate\x12\x1f.agent.ExecSessionCreateRequest\x1a .agent.ExecSessionCreateResponse\x12J\n" +
 	"\x11ExecSessionAttach\x12\x17.agent.ExecSessionInput\x1a\x18.agent.ExecSessionOutput(\x010\x01\x12P\n" +
 	"\x0fExecSessionList\x12\x1d.agent.ExecSessionListRequest\x1a\x1e.agent.ExecSessionListResponse\x12P\n" +
@@ -2553,7 +2693,7 @@ func file_proto_agent_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_agent_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_proto_agent_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
 var file_proto_agent_agent_proto_goTypes = []any{
 	(ExecOutputChunk_Stream)(0),       // 0: agent.ExecOutputChunk.Stream
 	(ExecSessionOutput_Type)(0),       // 1: agent.ExecSessionOutput.Type
@@ -2585,35 +2725,37 @@ var file_proto_agent_agent_proto_goTypes = []any{
 	(*PTYResizeResponse)(nil),         // 27: agent.PTYResizeResponse
 	(*PTYKillRequest)(nil),            // 28: agent.PTYKillRequest
 	(*PTYKillResponse)(nil),           // 29: agent.PTYKillResponse
-	(*ExecSessionCreateRequest)(nil),  // 30: agent.ExecSessionCreateRequest
-	(*ExecSessionCreateResponse)(nil), // 31: agent.ExecSessionCreateResponse
-	(*ExecSessionInput)(nil),          // 32: agent.ExecSessionInput
-	(*ExecSessionOutput)(nil),         // 33: agent.ExecSessionOutput
-	(*ExecSessionListRequest)(nil),    // 34: agent.ExecSessionListRequest
-	(*ExecSessionListResponse)(nil),   // 35: agent.ExecSessionListResponse
-	(*ExecSessionInfo)(nil),           // 36: agent.ExecSessionInfo
-	(*ExecSessionKillRequest)(nil),    // 37: agent.ExecSessionKillRequest
-	(*ExecSessionKillResponse)(nil),   // 38: agent.ExecSessionKillResponse
-	(*SetEnvsRequest)(nil),            // 39: agent.SetEnvsRequest
-	(*SetEnvsResponse)(nil),           // 40: agent.SetEnvsResponse
-	(*ShutdownRequest)(nil),           // 41: agent.ShutdownRequest
-	(*ShutdownResponse)(nil),          // 42: agent.ShutdownResponse
-	(*SyncFSRequest)(nil),             // 43: agent.SyncFSRequest
-	(*SyncFSResponse)(nil),            // 44: agent.SyncFSResponse
-	(*SetResourceLimitsRequest)(nil),  // 45: agent.SetResourceLimitsRequest
-	(*SetResourceLimitsResponse)(nil), // 46: agent.SetResourceLimitsResponse
-	nil,                               // 47: agent.ExecRequest.EnvsEntry
-	nil,                               // 48: agent.ExecSessionCreateRequest.EnvsEntry
-	nil,                               // 49: agent.SetEnvsRequest.EnvsEntry
+	(*PTYInput)(nil),                  // 30: agent.PTYInput
+	(*PTYOutput)(nil),                 // 31: agent.PTYOutput
+	(*ExecSessionCreateRequest)(nil),  // 32: agent.ExecSessionCreateRequest
+	(*ExecSessionCreateResponse)(nil), // 33: agent.ExecSessionCreateResponse
+	(*ExecSessionInput)(nil),          // 34: agent.ExecSessionInput
+	(*ExecSessionOutput)(nil),         // 35: agent.ExecSessionOutput
+	(*ExecSessionListRequest)(nil),    // 36: agent.ExecSessionListRequest
+	(*ExecSessionListResponse)(nil),   // 37: agent.ExecSessionListResponse
+	(*ExecSessionInfo)(nil),           // 38: agent.ExecSessionInfo
+	(*ExecSessionKillRequest)(nil),    // 39: agent.ExecSessionKillRequest
+	(*ExecSessionKillResponse)(nil),   // 40: agent.ExecSessionKillResponse
+	(*SetEnvsRequest)(nil),            // 41: agent.SetEnvsRequest
+	(*SetEnvsResponse)(nil),           // 42: agent.SetEnvsResponse
+	(*ShutdownRequest)(nil),           // 43: agent.ShutdownRequest
+	(*ShutdownResponse)(nil),          // 44: agent.ShutdownResponse
+	(*SyncFSRequest)(nil),             // 45: agent.SyncFSRequest
+	(*SyncFSResponse)(nil),            // 46: agent.SyncFSResponse
+	(*SetResourceLimitsRequest)(nil),  // 47: agent.SetResourceLimitsRequest
+	(*SetResourceLimitsResponse)(nil), // 48: agent.SetResourceLimitsResponse
+	nil,                               // 49: agent.ExecRequest.EnvsEntry
+	nil,                               // 50: agent.ExecSessionCreateRequest.EnvsEntry
+	nil,                               // 51: agent.SetEnvsRequest.EnvsEntry
 }
 var file_proto_agent_agent_proto_depIdxs = []int32{
-	47, // 0: agent.ExecRequest.envs:type_name -> agent.ExecRequest.EnvsEntry
+	49, // 0: agent.ExecRequest.envs:type_name -> agent.ExecRequest.EnvsEntry
 	0,  // 1: agent.ExecOutputChunk.stream:type_name -> agent.ExecOutputChunk.Stream
 	10, // 2: agent.ListDirResponse.entries:type_name -> agent.DirEntry
-	48, // 3: agent.ExecSessionCreateRequest.envs:type_name -> agent.ExecSessionCreateRequest.EnvsEntry
+	50, // 3: agent.ExecSessionCreateRequest.envs:type_name -> agent.ExecSessionCreateRequest.EnvsEntry
 	1,  // 4: agent.ExecSessionOutput.type:type_name -> agent.ExecSessionOutput.Type
-	36, // 5: agent.ExecSessionListResponse.sessions:type_name -> agent.ExecSessionInfo
-	49, // 6: agent.SetEnvsRequest.envs:type_name -> agent.SetEnvsRequest.EnvsEntry
+	38, // 5: agent.ExecSessionListResponse.sessions:type_name -> agent.ExecSessionInfo
+	51, // 6: agent.SetEnvsRequest.envs:type_name -> agent.SetEnvsRequest.EnvsEntry
 	2,  // 7: agent.SandboxAgent.Exec:input_type -> agent.ExecRequest
 	2,  // 8: agent.SandboxAgent.ExecStream:input_type -> agent.ExecRequest
 	5,  // 9: agent.SandboxAgent.ReadFile:input_type -> agent.ReadFileRequest
@@ -2628,38 +2770,40 @@ var file_proto_agent_agent_proto_depIdxs = []int32{
 	24, // 18: agent.SandboxAgent.PTYCreate:input_type -> agent.PTYCreateRequest
 	26, // 19: agent.SandboxAgent.PTYResize:input_type -> agent.PTYResizeRequest
 	28, // 20: agent.SandboxAgent.PTYKill:input_type -> agent.PTYKillRequest
-	30, // 21: agent.SandboxAgent.ExecSessionCreate:input_type -> agent.ExecSessionCreateRequest
-	32, // 22: agent.SandboxAgent.ExecSessionAttach:input_type -> agent.ExecSessionInput
-	34, // 23: agent.SandboxAgent.ExecSessionList:input_type -> agent.ExecSessionListRequest
-	37, // 24: agent.SandboxAgent.ExecSessionKill:input_type -> agent.ExecSessionKillRequest
-	39, // 25: agent.SandboxAgent.SetEnvs:input_type -> agent.SetEnvsRequest
-	41, // 26: agent.SandboxAgent.Shutdown:input_type -> agent.ShutdownRequest
-	43, // 27: agent.SandboxAgent.SyncFS:input_type -> agent.SyncFSRequest
-	45, // 28: agent.SandboxAgent.SetResourceLimits:input_type -> agent.SetResourceLimitsRequest
-	3,  // 29: agent.SandboxAgent.Exec:output_type -> agent.ExecResponse
-	4,  // 30: agent.SandboxAgent.ExecStream:output_type -> agent.ExecOutputChunk
-	6,  // 31: agent.SandboxAgent.ReadFile:output_type -> agent.ReadFileResponse
-	8,  // 32: agent.SandboxAgent.WriteFile:output_type -> agent.WriteFileResponse
-	11, // 33: agent.SandboxAgent.ListDir:output_type -> agent.ListDirResponse
-	13, // 34: agent.SandboxAgent.MakeDir:output_type -> agent.MakeDirResponse
-	15, // 35: agent.SandboxAgent.Remove:output_type -> agent.RemoveResponse
-	17, // 36: agent.SandboxAgent.Exists:output_type -> agent.ExistsResponse
-	19, // 37: agent.SandboxAgent.Stat:output_type -> agent.StatResponse
-	21, // 38: agent.SandboxAgent.Stats:output_type -> agent.StatsResponse
-	23, // 39: agent.SandboxAgent.Ping:output_type -> agent.PingResponse
-	25, // 40: agent.SandboxAgent.PTYCreate:output_type -> agent.PTYCreateResponse
-	27, // 41: agent.SandboxAgent.PTYResize:output_type -> agent.PTYResizeResponse
-	29, // 42: agent.SandboxAgent.PTYKill:output_type -> agent.PTYKillResponse
-	31, // 43: agent.SandboxAgent.ExecSessionCreate:output_type -> agent.ExecSessionCreateResponse
-	33, // 44: agent.SandboxAgent.ExecSessionAttach:output_type -> agent.ExecSessionOutput
-	35, // 45: agent.SandboxAgent.ExecSessionList:output_type -> agent.ExecSessionListResponse
-	38, // 46: agent.SandboxAgent.ExecSessionKill:output_type -> agent.ExecSessionKillResponse
-	40, // 47: agent.SandboxAgent.SetEnvs:output_type -> agent.SetEnvsResponse
-	42, // 48: agent.SandboxAgent.Shutdown:output_type -> agent.ShutdownResponse
-	44, // 49: agent.SandboxAgent.SyncFS:output_type -> agent.SyncFSResponse
-	46, // 50: agent.SandboxAgent.SetResourceLimits:output_type -> agent.SetResourceLimitsResponse
-	29, // [29:51] is the sub-list for method output_type
-	7,  // [7:29] is the sub-list for method input_type
+	30, // 21: agent.SandboxAgent.PTYAttach:input_type -> agent.PTYInput
+	32, // 22: agent.SandboxAgent.ExecSessionCreate:input_type -> agent.ExecSessionCreateRequest
+	34, // 23: agent.SandboxAgent.ExecSessionAttach:input_type -> agent.ExecSessionInput
+	36, // 24: agent.SandboxAgent.ExecSessionList:input_type -> agent.ExecSessionListRequest
+	39, // 25: agent.SandboxAgent.ExecSessionKill:input_type -> agent.ExecSessionKillRequest
+	41, // 26: agent.SandboxAgent.SetEnvs:input_type -> agent.SetEnvsRequest
+	43, // 27: agent.SandboxAgent.Shutdown:input_type -> agent.ShutdownRequest
+	45, // 28: agent.SandboxAgent.SyncFS:input_type -> agent.SyncFSRequest
+	47, // 29: agent.SandboxAgent.SetResourceLimits:input_type -> agent.SetResourceLimitsRequest
+	3,  // 30: agent.SandboxAgent.Exec:output_type -> agent.ExecResponse
+	4,  // 31: agent.SandboxAgent.ExecStream:output_type -> agent.ExecOutputChunk
+	6,  // 32: agent.SandboxAgent.ReadFile:output_type -> agent.ReadFileResponse
+	8,  // 33: agent.SandboxAgent.WriteFile:output_type -> agent.WriteFileResponse
+	11, // 34: agent.SandboxAgent.ListDir:output_type -> agent.ListDirResponse
+	13, // 35: agent.SandboxAgent.MakeDir:output_type -> agent.MakeDirResponse
+	15, // 36: agent.SandboxAgent.Remove:output_type -> agent.RemoveResponse
+	17, // 37: agent.SandboxAgent.Exists:output_type -> agent.ExistsResponse
+	19, // 38: agent.SandboxAgent.Stat:output_type -> agent.StatResponse
+	21, // 39: agent.SandboxAgent.Stats:output_type -> agent.StatsResponse
+	23, // 40: agent.SandboxAgent.Ping:output_type -> agent.PingResponse
+	25, // 41: agent.SandboxAgent.PTYCreate:output_type -> agent.PTYCreateResponse
+	27, // 42: agent.SandboxAgent.PTYResize:output_type -> agent.PTYResizeResponse
+	29, // 43: agent.SandboxAgent.PTYKill:output_type -> agent.PTYKillResponse
+	31, // 44: agent.SandboxAgent.PTYAttach:output_type -> agent.PTYOutput
+	33, // 45: agent.SandboxAgent.ExecSessionCreate:output_type -> agent.ExecSessionCreateResponse
+	35, // 46: agent.SandboxAgent.ExecSessionAttach:output_type -> agent.ExecSessionOutput
+	37, // 47: agent.SandboxAgent.ExecSessionList:output_type -> agent.ExecSessionListResponse
+	40, // 48: agent.SandboxAgent.ExecSessionKill:output_type -> agent.ExecSessionKillResponse
+	42, // 49: agent.SandboxAgent.SetEnvs:output_type -> agent.SetEnvsResponse
+	44, // 50: agent.SandboxAgent.Shutdown:output_type -> agent.ShutdownResponse
+	46, // 51: agent.SandboxAgent.SyncFS:output_type -> agent.SyncFSResponse
+	48, // 52: agent.SandboxAgent.SetResourceLimits:output_type -> agent.SetResourceLimitsResponse
+	30, // [30:53] is the sub-list for method output_type
+	7,  // [7:30] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -2676,7 +2820,7 @@ func file_proto_agent_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_agent_agent_proto_rawDesc), len(file_proto_agent_agent_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   48,
+			NumMessages:   50,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

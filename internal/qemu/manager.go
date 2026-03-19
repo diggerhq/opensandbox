@@ -1547,9 +1547,11 @@ func (m *Manager) TemplateCachePath(templateID, filename string) string {
 	return ""
 }
 
-// checkpointCacheDir returns the local cache directory for a checkpoint.
+// checkpointCacheDir returns the local cache directory for a checkpoint's qcow2 files.
+// Uses "checkpoint-snapshots/" (not "checkpoints/") to avoid collision with the S3
+// checkpoint cache which stores tar.zst files in the "checkpoints/" directory.
 func (m *Manager) checkpointCacheDir(checkpointID string) string {
-	return filepath.Join(m.cfg.DataDir, "checkpoints", checkpointID)
+	return filepath.Join(m.cfg.DataDir, "checkpoint-snapshots", checkpointID)
 }
 
 // CheckpointCachePath returns the path to a specific file in the checkpoint cache.
@@ -1576,15 +1578,15 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("no QMP client for VM %s", sandboxID)
 	}
 
-	// Sync filesystem and close agent before snapshot. Closing the agent
-	// puts it in Accept() mode — when ForkFromCheckpoint restores from this
-	// checkpoint, the agent immediately accepts the new connection (~1ms)
-	// instead of waiting for the stale gRPC stream to time out (~6s).
+	// Sync filesystem and quiesce agent before snapshot.
+	// SIGUSR1 resets the virtio-serial listener's active flag so that
+	// restores from this checkpoint (loadvm or fork) have a clean agent
+	// that immediately accepts the new host-side connection.
 	if vm.agent != nil {
 		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
 			Command: "/bin/sh",
-			Args:    []string{"-c", "umount /workspace 2>/dev/null; sync"},
+			Args:    []string{"-c", "umount /workspace 2>/dev/null; sync; kill -USR1 1"},
 		})
 		cancel()
 		if syncErr != nil {
@@ -1592,6 +1594,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		}
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond) // let guest process SIGUSR1
 	}
 
 	// savevm creates an internal snapshot — memory + device state + disk deltas
@@ -1616,20 +1619,16 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		mountCancel()
 	}
 
-	// Also cache the drive files for ForkFromCheckpoint (which needs a separate QEMU process)
+	// Cache the drive files for ForkFromCheckpoint (which needs a separate QEMU process).
+	// Synchronous: reflink copy is instant (~1ms), and the image builder destroys the
+	// build sandbox immediately after checkpoint — async would race with destruction.
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	rootfsKey = fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", sandboxID, checkpointID)
 	workspaceKey = fmt.Sprintf("checkpoints/%s/%s/workspace.tar.zst", sandboxID, checkpointID)
 
-	go func() {
-		if err := os.MkdirAll(filepath.Join(cacheDir, "snapshot"), 0755); err != nil {
-			log.Printf("qemu: checkpoint %s: mkdir cache failed: %v", checkpointID, err)
-			if onReady != nil {
-				onReady()
-			}
-			return
-		}
-
+	if mkErr := os.MkdirAll(filepath.Join(cacheDir, "snapshot"), 0755); mkErr != nil {
+		log.Printf("qemu: checkpoint %s: mkdir cache failed: %v", checkpointID, mkErr)
+	} else {
 		// Copy qcow2 drives (they contain the snapshot data)
 		srcRootfs := filepath.Join(vm.sandboxDir, "rootfs.qcow2")
 		srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.qcow2")
@@ -1654,10 +1653,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		_ = os.WriteFile(filepath.Join(cacheDir, "snapshot-name"), []byte(snapshotName), 0644)
 
 		log.Printf("qemu: checkpoint %s: cache saved (%dms)", checkpointID, time.Since(t0).Milliseconds())
-		if onReady != nil {
-			onReady()
-		}
-	}()
+	}
+	if onReady != nil {
+		onReady()
+	}
 
 	return rootfsKey, workspaceKey, nil
 }
@@ -1678,14 +1677,11 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 
 	snapshotName := "cp-" + checkpointID
 
-	// Close agent before loadvm (vsock state will revert)
+	// Close agent before loadvm — the checkpoint was created with the agent
+	// in a quiesced state (SIGUSR1 sent during CreateCheckpoint), so after
+	// loadvm the restored agent will immediately accept a new connection.
 	if vm.agent != nil {
-		closeDone := make(chan struct{})
-		go func() { vm.agent.Close(); close(closeDone) }()
-		select {
-		case <-closeDone:
-		case <-time.After(2 * time.Second):
-		}
+		vm.agent.Close()
 		vm.agent = nil
 	}
 

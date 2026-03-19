@@ -33,6 +33,10 @@ service SandboxAgent {
   rpc PTYResize(PTYResizeRequest) returns (PTYResizeResponse);
   rpc PTYKill(PTYKillRequest) returns (PTYKillResponse);
 
+  // PTYAttach opens a bidirectional stream for PTY I/O over gRPC.
+  // Used by QEMU backend (virtio-serial) where vsock data ports are unavailable.
+  rpc PTYAttach(stream PTYInput) returns (stream PTYOutput);
+
   // Exec sessions — persistent command execution with scrollback and reconnect.
   rpc ExecSessionCreate(ExecSessionCreateRequest) returns (ExecSessionCreateResponse);
   rpc ExecSessionAttach(stream ExecSessionInput) returns (stream ExecSessionOutput);
@@ -195,6 +199,21 @@ message PTYKillRequest {
 }
 
 message PTYKillResponse {}
+
+// PTYInput is a client→agent message for the PTYAttach bidi stream.
+message PTYInput {
+  string session_id = 1; // required on first message to identify the session
+  bytes stdin = 2;       // raw bytes to write to the PTY
+  int32 cols = 3;        // if > 0, resize the PTY
+  int32 rows = 4;        // if > 0, resize the PTY
+}
+
+// PTYOutput is an agent→client message for the PTYAttach bidi stream.
+message PTYOutput {
+  bytes data = 1;       // raw bytes read from the PTY
+  bool exited = 2;      // true when the PTY process has exited
+  int32 exit_code = 3;  // only valid when exited = true
+}
 
 // --- Exec Sessions ---
 
