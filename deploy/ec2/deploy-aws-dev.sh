@@ -355,6 +355,7 @@ cmd_deploy() {
         CGO_ENABLED=0 go build -o bin/opensandbox-worker ./cmd/worker/
         echo '  Building osb-agent...'
         CGO_ENABLED=0 go build -o bin/osb-agent ./cmd/agent/
+        sudo systemctl stop opensandbox-server opensandbox-worker 2>/dev/null || true
         sudo cp bin/opensandbox-server /usr/local/bin/opensandbox-server
         sudo cp bin/opensandbox-worker /usr/local/bin/opensandbox-worker
         sudo cp bin/osb-agent /usr/local/bin/osb-agent

@@ -16,6 +16,10 @@ service SandboxAgent {
   // Filesystem operations
   rpc ReadFile(ReadFileRequest) returns (ReadFileResponse);
   rpc WriteFile(WriteFileRequest) returns (WriteFileResponse);
+
+  // Streaming file operations for large files (256KB chunks over vsock gRPC)
+  rpc ReadFileStream(ReadFileStreamRequest) returns (stream FileChunk);
+  rpc WriteFileStream(stream WriteFileStreamRequest) returns (WriteFileStreamResponse);
   rpc ListDir(ListDirRequest) returns (ListDirResponse);
   rpc MakeDir(MakeDirRequest) returns (MakeDirResponse);
   rpc Remove(RemoveRequest) returns (RemoveResponse);
@@ -94,6 +98,27 @@ message WriteFileRequest {
 }
 
 message WriteFileResponse {}
+
+// --- Streaming Filesystem ---
+
+message ReadFileStreamRequest {
+  string path = 1;
+}
+
+message FileChunk {
+  bytes data = 1;
+  int64 total_size = 2; // set on first chunk only (0 on subsequent chunks)
+}
+
+message WriteFileStreamRequest {
+  string path = 1;   // set on first message only
+  bytes data = 2;
+  uint32 mode = 3;   // set on first message only (0 = default 0644)
+}
+
+message WriteFileStreamResponse {
+  int64 bytes_written = 1;
+}
 
 message ListDirRequest {
   string path = 1;
