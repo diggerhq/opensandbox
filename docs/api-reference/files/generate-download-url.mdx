@@ -1,0 +1,27 @@
+---
+title: 'Generate Download URL'
+api: 'POST /api/sandboxes/{id}/files/download-url'
+---
+
+Generates a signed URL for downloading a file without an API key. See [Signed URLs](/sandboxes/signed-urls) for usage guide.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+<ParamField body="expiresIn" type="number" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "url": "https://app.opencomputer.dev/api/sandboxes/sb-xxx/files/download?path=%2Fapp%2Foutput.zip&expires=1773906434&signature=abc123",
+  "expiresAt": "2025-01-01T01:00:00Z"
+}
+```
+</ResponseExample>

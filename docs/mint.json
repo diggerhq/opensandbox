@@ -190,7 +190,11 @@
             "api-reference/files/write",
             "api-reference/files/list-directory",
             "api-reference/files/mkdir",
-            "api-reference/files/delete"
+            "api-reference/files/delete",
+            "api-reference/files/generate-download-url",
+            "api-reference/files/generate-upload-url",
+            "api-reference/files/signed-download",
+            "api-reference/files/signed-upload"
           ]
         },
         {
