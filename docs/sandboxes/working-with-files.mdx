@@ -157,6 +157,56 @@ if await sandbox.files.exists("/app/config.json"):
   `exists()` is a client-side convenience — it attempts a file read and returns `false` on error. There is no dedicated HTTP endpoint for existence checks.
 </Note>
 
+## Large Files
+
+All file operations are streamed end-to-end using 256KB chunks — there is no file size limit beyond available disk space. Files up to 200MB+ transfer reliably at ~20 MB/s.
+
+The standard `read()`, `readBytes()`, and `write()` methods work for large files, but they buffer the full content in memory on the client side. For very large files, use the streaming methods to avoid high memory usage:
+
+<CodeGroup>
+
+```typescript TypeScript
+// Stream a large file download — returns a ReadableStream, not a buffer
+const stream = await sandbox.files.readStream("/data/model.bin");
+
+// Pipe to a file, or process chunks incrementally
+const reader = stream.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  // process each Uint8Array chunk...
+}
+
+// Stream a large file upload — accepts ReadableStream or Uint8Array
+const fileStream = someReadableStream; // e.g. from fs.createReadStream
+await sandbox.files.writeStream("/data/model.bin", fileStream);
+
+// Uint8Array also works (sent without buffering a copy)
+await sandbox.files.writeStream("/data/output.bin", largeUint8Array);
+```
+
+```python Python
+# Stream a large file download — returns an async byte iterator
+stream = await sandbox.files.read_stream("/data/model.bin")
+async for chunk in stream:
+    # process each bytes chunk...
+    pass
+
+# Stream a large file upload — accepts an async iterator
+async def file_chunks():
+    with open("local_model.bin", "rb") as f:
+        while chunk := f.read(256 * 1024):
+            yield chunk
+
+await sandbox.files.write_stream("/data/model.bin", file_chunks())
+```
+
+</CodeGroup>
+
+<Note>
+  All file I/O — including signed URL uploads/downloads — is streamed through the full stack (SDK → control plane → worker → VM). There is no separate "large file mode" to enable.
+</Note>
+
 ## Examples
 
 ### Upload and Run a Script
