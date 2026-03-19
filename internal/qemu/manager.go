@@ -108,6 +108,9 @@ type Manager struct {
 	nextCID  uint32
 	uploadWg sync.WaitGroup
 
+	// Checkpoint cache mutex: write-locked during cache creation, read-locked during fork
+	checkpointCacheMu sync.RWMutex
+
 	// Golden snapshot for fast VM creation
 	goldenDir     string // path to golden snapshot dir (empty = not available)
 	goldenCID     uint32 // CID used when the golden snapshot was created
@@ -193,6 +196,13 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	memFile := filepath.Join(goldenDir, "mem")
 	rootfsFile := filepath.Join(goldenDir, "rootfs.qcow2")
 
+	// If a previous PrepareGoldenSnapshot failed midway, clean up partial files
+	preparingMarker := filepath.Join(goldenDir, ".preparing")
+	if fileExists(preparingMarker) {
+		log.Printf("qemu: golden snapshot has .preparing marker — previous build failed, rebuilding")
+		os.RemoveAll(goldenDir)
+	}
+
 	// If golden snapshot already exists, just use it
 	if (fileExists(memFile) || fileExists(memFile+".zst")) && (fileExists(rootfsFile) || fileExists(filepath.Join(goldenDir, "rootfs.ext4"))) {
 		m.goldenDir = goldenDir
@@ -215,6 +225,11 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 
 	if err := os.MkdirAll(goldenDir, 0755); err != nil {
 		return fmt.Errorf("mkdir golden dir: %w", err)
+	}
+
+	// Write marker so partial failures are detected on next startup
+	if err := os.WriteFile(preparingMarker, []byte("in-progress"), 0644); err != nil {
+		return fmt.Errorf("write preparing marker: %w", err)
 	}
 
 	// Prepare rootfs from default template
@@ -392,6 +407,9 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	} else {
 		log.Printf("qemu: golden mem compressed with zstd")
 	}
+
+	// Remove preparing marker — golden snapshot is complete
+	os.Remove(preparingMarker)
 
 	m.goldenDir = goldenDir
 	m.goldenCID = goldenCID
@@ -1166,15 +1184,22 @@ func (m *Manager) destroyVM(vm *VMInstance) error {
 		vm.agent.Close()
 	}
 
-	// Try QMP quit first, fall back to process kill
+	// Try QMP quit first, then wait for QEMU to exit before cleaning up files
 	if vm.qmp != nil {
 		_ = vm.qmp.Quit()
 		vm.qmp.Close()
 	}
 
 	if vm.cmd != nil && vm.cmd.Process != nil {
-		vm.cmd.Process.Kill()
-		vm.cmd.Wait()
+		// Wait for QEMU to exit (with timeout) before removing files it may have open
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- vm.cmd.Wait() }()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			vm.cmd.Process.Kill()
+			<-waitDone
+		}
 	}
 
 	if vm.network != nil {
@@ -1456,7 +1481,10 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		additionalMB = ((additionalMB + 127) / 128) * 128
 		if additionalMB != vm.virtioMemRequestedMB {
 			if err := vm.qmp.SetVirtioMemSize(additionalMB); err != nil {
-				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v", sandboxID, additionalMB, err)
+				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — capping cgroup to current VM memory", sandboxID, additionalMB, err)
+				// Cap cgroup memory limit to actual VM memory so we don't set
+				// cgroup higher than the physical RAM available to the guest.
+				maxMemoryBytes = int64(vm.MemoryMB) * 1024 * 1024
 			} else {
 				vm.virtioMemRequestedMB = additionalMB
 				vm.MemoryMB = vm.baseMemoryMB + additionalMB
@@ -1608,8 +1636,13 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// Reconnect agent + remount workspace (VM resumed after savevm)
 	agentClient, reconnErr := m.waitForAgentSocket(context.Background(), vm.agentSockPath, 10*time.Second)
 	if reconnErr != nil {
-		log.Printf("qemu: CreateCheckpoint %s/%s: agent reconnect failed: %v", sandboxID, checkpointID, reconnErr)
-	} else {
+		log.Printf("qemu: CreateCheckpoint %s/%s: agent reconnect failed (attempt 1): %v, retrying with longer timeout", sandboxID, checkpointID, reconnErr)
+		agentClient, reconnErr = m.waitForAgentSocket(context.Background(), vm.agentSockPath, 30*time.Second)
+		if reconnErr != nil {
+			log.Printf("qemu: CreateCheckpoint %s/%s: WARNING: agent reconnect failed after retry: %v (checkpoint is valid, agent connection lost temporarily)", sandboxID, checkpointID, reconnErr)
+		}
+	}
+	if reconnErr == nil {
 		vm.agent = agentClient
 		mountCtx, mountCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, _ = agentClient.Exec(mountCtx, &pb.ExecRequest{
@@ -1622,6 +1655,8 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// Cache the drive files for ForkFromCheckpoint (which needs a separate QEMU process).
 	// Synchronous: reflink copy is instant (~1ms), and the image builder destroys the
 	// build sandbox immediately after checkpoint — async would race with destruction.
+	m.checkpointCacheMu.Lock()
+	defer m.checkpointCacheMu.Unlock()
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	rootfsKey = fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", sandboxID, checkpointID)
 	workspaceKey = fmt.Sprintf("checkpoints/%s/%s/workspace.tar.zst", sandboxID, checkpointID)
@@ -1729,6 +1764,9 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 // The new sandbox gets its own network, CID, and drives (reflinked from cache).
 func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error) {
 	t0 := time.Now()
+
+	// Lock checkpoint cache for reading — prevents race with CreateCheckpoint writing cache
+	m.checkpointCacheMu.RLock()
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	metaPath := filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")
 
@@ -1736,6 +1774,7 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	cachedRootfs := filepath.Join(cacheDir, "rootfs.qcow2")
 	cachedWorkspace := filepath.Join(cacheDir, "workspace.qcow2")
 	if !fileExists(cachedRootfs) || !fileExists(cachedWorkspace) {
+		m.checkpointCacheMu.RUnlock()
 		return nil, fmt.Errorf("checkpoint %s: qcow2 files not found in cache", checkpointID)
 	}
 
@@ -1756,6 +1795,7 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	}
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", id)
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
+		m.checkpointCacheMu.RUnlock()
 		return nil, fmt.Errorf("mkdir sandbox dir: %w", err)
 	}
 
@@ -1763,13 +1803,16 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	rootfsPath := filepath.Join(sandboxDir, "rootfs.qcow2")
 	workspacePath := filepath.Join(sandboxDir, "workspace.qcow2")
 	if err := copyFileReflink(cachedRootfs, rootfsPath); err != nil {
+		m.checkpointCacheMu.RUnlock()
 		os.RemoveAll(sandboxDir)
 		return nil, fmt.Errorf("copy rootfs: %w", err)
 	}
 	if err := copyFileReflink(cachedWorkspace, workspacePath); err != nil {
+		m.checkpointCacheMu.RUnlock()
 		os.RemoveAll(sandboxDir)
 		return nil, fmt.Errorf("copy workspace: %w", err)
 	}
+	m.checkpointCacheMu.RUnlock()
 
 	// Allocate network
 	netCfg, err := m.subnets.Allocate()

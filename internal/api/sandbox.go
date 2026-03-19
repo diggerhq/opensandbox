@@ -612,9 +612,8 @@ func (s *Server) setLimits(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	var req struct {
-		MaxPids     int `json:"maxPids"`
-		MaxMemoryMB int `json:"maxMemoryMB"`
-		CPUPercent  int `json:"cpuPercent"`
+		MemoryMB   int `json:"memoryMB"`
+		CPUPercent int `json:"cpuPercent"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -622,14 +621,22 @@ func (s *Server) setLimits(c echo.Context) error {
 		})
 	}
 
+	// Auto-calculate CPU from memory: 1 vCPU per 1GB
+	if req.MemoryMB > 0 && req.CPUPercent == 0 {
+		req.CPUPercent = (req.MemoryMB * 100) / 1024
+		if req.CPUPercent < 100 {
+			req.CPUPercent = 100
+		}
+	}
+
 	// Convert to cgroup values
-	maxMemoryBytes := int64(req.MaxMemoryMB) * 1024 * 1024
+	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
 	cpuMaxUsec := int64(req.CPUPercent) * 1000
 	cpuPeriodUsec := int64(100000)
 
 	// Server mode: dispatch to worker via gRPC
 	if s.workerRegistry != nil {
-		return s.setLimitsRemote(c, id, int32(req.MaxPids), maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
 	}
 
 	// Combined mode: apply locally
@@ -637,30 +644,29 @@ func (s *Server) setLimits(c echo.Context) error {
 		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
 	}
 
-	if err := s.manager.SetResourceLimits(ctx, id, int32(req.MaxPids), maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+	if err := s.manager.SetResourceLimits(ctx, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"sandboxID":      id,
-		"maxPids":        req.MaxPids,
-		"maxMemoryMB":    req.MaxMemoryMB,
-		"cpuPercent":     req.CPUPercent,
+		"sandboxID":  id,
+		"memoryMB":   req.MemoryMB,
+		"cpuPercent": req.CPUPercent,
 	})
 }
 
 // scaleSandbox is a simplified scaling endpoint: POST /sandboxes/:id/scale
-// Accepts {"memory_mb": 2048} and auto-calculates CPU (1 vCPU per 1GB).
+// Accepts {"memoryMB": 2048} and auto-calculates CPU (1 vCPU per 1GB).
 func (s *Server) scaleSandbox(c echo.Context) error {
 	id := c.Param("id")
 
 	var req struct {
-		MemoryMB int `json:"memory_mb"`
+		MemoryMB int `json:"memoryMB"`
 	}
 	if err := c.Bind(&req); err != nil || req.MemoryMB <= 0 {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memory_mb is required and must be positive"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memoryMB is required and must be positive"})
 	}
 
 	// Auto-calculate: 1 vCPU per 1GB = 100% CPU per 1024MB
@@ -725,11 +731,8 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"sandboxID":      sandboxID,
-		"maxPids":        maxPids,
-		"maxMemoryBytes": maxMemoryBytes,
-		"cpuMaxUsec":     cpuMaxUsec,
-		"cpuPeriodUsec":  cpuPeriodUsec,
+		"sandboxID": sandboxID,
+		"ok":        true,
 	})
 }
 

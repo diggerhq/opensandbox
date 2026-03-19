@@ -57,18 +57,21 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		return nil, fmt.Errorf("mkdir snapshot dir: %w", err)
 	}
 
-	// Step 1: Sync filesystems, unmount workspace, close agent.
-	// Same as CreateCheckpoint — puts agent in Accept() mode so loadvm
-	// on wake gets instant reconnection.
+	// Step 1: Sync filesystems, unmount workspace, quiesce agent.
+	// Send SIGUSR1 to PID 1 (agent) which calls PrepareHibernate() to reset
+	// the virtio-serial listener's active flag. This ensures savevm captures
+	// the agent in a clean "waiting for connection" state so loadvm on wake
+	// gets instant reconnection instead of waiting ~4s for gRPC timeout.
 	if vm.agent != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_, _ = vm.agent.Exec(shutdownCtx, &pb.ExecRequest{
 			Command: "/bin/sh",
-			Args:    []string{"-c", "umount /workspace 2>/dev/null; sync"},
+			Args:    []string{"-c", "umount /workspace 2>/dev/null; sync; kill -USR1 1"},
 		})
 		cancel()
 		vm.agent.Close()
 		vm.agent = nil
+		time.Sleep(500 * time.Millisecond) // let guest process SIGUSR1
 	}
 	log.Printf("qemu: hibernate %s: guest sync + unmount done (%dms)", vm.ID, time.Since(t0).Milliseconds())
 
@@ -80,6 +83,14 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	}
 	snapshotName := "hibernate"
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
+		// Try to resume VM so it's not left in a broken paused state
+		if contErr := vm.qmp.Cont(); contErr != nil {
+			log.Printf("qemu: hibernate %s: failed to resume after savevm failure: %v", vm.ID, contErr)
+		}
+		// Try to reconnect agent
+		if agent, reconnErr := m.waitForAgentSocket(context.Background(), vm.agentSockPath, 5*time.Second); reconnErr == nil {
+			vm.agent = agent
+		}
 		return nil, fmt.Errorf("savevm failed: %w", err)
 	}
 	log.Printf("qemu: hibernate %s: savevm complete (%dms)", vm.ID, time.Since(t0).Milliseconds())
@@ -176,13 +187,13 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		if _, err := checkpointStore.Upload(uploadCtx, checkpointKey, archivePath); err != nil {
-			log.Printf("qemu: async S3 upload failed for %s: %v", sandboxID, err)
+			log.Printf("qemu: async S3 upload failed for %s: %v (keeping local archive for retry)", sandboxID, err)
 			return
 		}
 		log.Printf("qemu: hibernate %s: S3 upload complete (%dms, key=%s)",
 			sandboxID, time.Since(t2).Milliseconds(), checkpointKey)
 
-		os.Remove(archivePath)
+		os.Remove(archivePath) // only delete after successful upload
 	}()
 
 	return &sandbox.HibernateResult{

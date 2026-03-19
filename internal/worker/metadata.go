@@ -183,7 +183,7 @@ func (ms *MetadataServer) handleLimits(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// POST /v1/scale → accepts {"memoryMB", "cpuPercent", "maxPids"}, applies cgroup limits.
+// POST /v1/scale → accepts {"memoryMB", "cpuPercent", "pids"}, applies cgroup limits.
 // Pricing model: 1 vCPU per 1GB RAM. memoryMB=2048 → cpuPercent=200 (2 vCPUs).
 func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -200,44 +200,34 @@ func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MemoryMB   int `json:"memoryMB"`
 		CPUPercent int `json:"cpuPercent"`
-		MaxPids    int `json:"maxPids"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Apply pricing model: 1 vCPU per 1GB RAM
-	// If memoryMB is set but cpuPercent is not, auto-calculate
+	// Auto-calculate CPU from memory: 1 vCPU per 1GB
 	if req.MemoryMB > 0 && req.CPUPercent == 0 {
-		// 1 vCPU = 100% = 1024 MB
 		req.CPUPercent = (req.MemoryMB * 100) / 1024
 		if req.CPUPercent < 100 {
-			req.CPUPercent = 100 // minimum 1 vCPU
+			req.CPUPercent = 100
 		}
 	}
 
 	// Convert to cgroup values
-	var maxPids int32
 	var maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64
-
-	if req.MaxPids > 0 {
-		maxPids = int32(req.MaxPids)
-	}
 	if req.MemoryMB > 0 {
 		maxMemoryBytes = int64(req.MemoryMB) * 1024 * 1024
 	}
 	if req.CPUPercent > 0 {
-		// cpu.max format: $MAX $PERIOD
-		// cpuPercent=200 means 2 vCPUs → cpuMaxUsec=200000, cpuPeriodUsec=100000
 		cpuPeriodUsec = 100000
-		cpuMaxUsec = int64(req.CPUPercent) * 1000 // 100% = 100000us per 100000us period
+		cpuMaxUsec = int64(req.CPUPercent) * 1000
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := ms.manager.SetResourceLimits(ctx, entry.SandboxID, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+	if err := ms.manager.SetResourceLimits(ctx, entry.SandboxID, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
 		http.Error(w, fmt.Sprintf("failed to set limits: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -247,7 +237,6 @@ func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 		"ok":         true,
 		"memoryMB":   req.MemoryMB,
 		"cpuPercent": req.CPUPercent,
-		"maxPids":    req.MaxPids,
 	})
 }
 

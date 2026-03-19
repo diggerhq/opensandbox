@@ -189,6 +189,22 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		}
 	}
 
+	// Record initial scale event for billing
+	if s.store != nil {
+		memMB := cfg.MemoryMB
+		if memMB <= 0 {
+			memMB = 1024 // default
+		}
+		cpuPct := (memMB * 100) / 1024
+		if cpuPct < 100 {
+			cpuPct = 100
+		}
+		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from session
+		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+		}
+	}
+
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
@@ -196,6 +212,13 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxRequest) (*pb.DestroySandboxResponse, error) {
+	// End billing scale event before destroying
+	if s.store != nil {
+		if err := s.store.EndScaleEvent(ctx, req.SandboxId); err != nil {
+			log.Printf("grpc: failed to end scale event for %s: %v", req.SandboxId, err)
+		}
+	}
+
 	if err := s.manager.Kill(ctx, req.SandboxId); err != nil {
 		return nil, fmt.Errorf("failed to destroy sandbox: %w", err)
 	}
@@ -474,6 +497,13 @@ func (s *GRPCServer) HibernateSandbox(ctx context.Context, req *pb.HibernateSand
 		return nil, fmt.Errorf("hibernation not configured on this worker")
 	}
 
+	// End billing scale event (sandbox going to sleep)
+	if s.store != nil {
+		if err := s.store.EndScaleEvent(ctx, req.SandboxId); err != nil {
+			log.Printf("grpc: failed to end scale event on hibernate for %s: %v", req.SandboxId, err)
+		}
+	}
+
 	result, err := s.manager.Hibernate(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hibernate sandbox: %w", err)
@@ -522,6 +552,16 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 			_ = sdb.LogEvent("woke", map[string]string{
 				"sandbox_id": sb.ID,
 			})
+		}
+	}
+
+	// Resume billing scale event after wake
+	if s.store != nil {
+		memMB := 1024 // TODO: get actual memory from sandbox state
+		cpuPct := 100
+		orgID := "00000000-0000-0000-0000-000000000001"
+		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
 		}
 	}
 
@@ -770,6 +810,17 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	if err := s.manager.SetResourceLimits(ctx, req.SandboxId, req.MaxPids, req.MaxMemoryBytes, req.CpuMaxUsec, req.CpuPeriodUsec); err != nil {
 		return nil, fmt.Errorf("set resource limits: %w", err)
 	}
+
+	// Record scale event for billing
+	if s.store != nil && req.MaxMemoryBytes > 0 {
+		memMB := int(req.MaxMemoryBytes / (1024 * 1024))
+		cpuPct := int(req.CpuMaxUsec / 1000) // 100000us → 100%
+		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from sandbox session
+		if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+		}
+	}
+
 	return &pb.SetSandboxLimitsResponse{}, nil
 }
 

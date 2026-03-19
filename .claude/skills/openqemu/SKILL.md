@@ -121,7 +121,7 @@ Pricing model: 1 vCPU per 1GB RAM (linear scaling). Setting memoryMB auto-calcul
 curl -s -X PUT $API_URL/api/sandboxes/{SANDBOX_ID}/limits \
   -H 'Content-Type: application/json' \
   -H "X-API-Key: $API_KEY" \
-  -d '{"maxMemoryMB": 2048, "cpuPercent": 200, "maxPids": 256}'
+  -d '{"memoryMB": 2048}'
 ```
 
 #### Internal API (from inside the sandbox — 169.254.169.254)
@@ -134,7 +134,7 @@ curl -s http://169.254.169.254/v1/limits
 # → {"cpuPercent":100,"memUsage":52428800,"memLimit":907051008,"pids":3}
 
 curl -s -X POST http://169.254.169.254/v1/scale -d '{"memoryMB": 4096}'
-# → {"ok":true,"memoryMB":4096,"cpuPercent":400,"maxPids":0}
+# → {"ok":true,"memoryMB":4096,"cpuPercent":400}
 # Auto-calculates: 4GB RAM → 400% CPU (4 vCPUs)
 
 curl -s http://169.254.169.254/v1/metadata

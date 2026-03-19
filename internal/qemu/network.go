@@ -164,10 +164,17 @@ func AddDNAT(cfg *NetworkConfig) error {
 	}
 
 	// Also add for locally-generated traffic
-	_ = run("iptables", "-t", "nat", "-A", "OUTPUT",
+	if err := run("iptables", "-t", "nat", "-A", "OUTPUT",
 		"-p", "tcp", "--dport", fmt.Sprintf("%d", cfg.HostPort),
 		"-j", "DNAT", "--to-destination",
-		fmt.Sprintf("%s:%d", cfg.GuestIP, cfg.GuestPort))
+		fmt.Sprintf("%s:%d", cfg.GuestIP, cfg.GuestPort)); err != nil {
+		// Roll back the PREROUTING rule we already added
+		_ = run("iptables", "-t", "nat", "-D", "PREROUTING",
+			"-p", "tcp", "--dport", fmt.Sprintf("%d", cfg.HostPort),
+			"-j", "DNAT", "--to-destination",
+			fmt.Sprintf("%s:%d", cfg.GuestIP, cfg.GuestPort))
+		return fmt.Errorf("add DNAT OUTPUT: %w", err)
+	}
 
 	cfg.DNATRuleAdded = true
 	return nil
@@ -272,6 +279,10 @@ func detectDefaultInterface() string {
 }
 
 // FindFreePort finds a free TCP port on the host.
+// Note: This has a TOCTOU race — two concurrent calls can get the same port.
+// In practice this is acceptable because the port is used for DNAT rules (not
+// a real listener), so collisions are extremely unlikely and would only occur
+// if two sandboxes are created in the same microsecond window.
 func FindFreePort() (int, error) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

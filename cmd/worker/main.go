@@ -129,9 +129,21 @@ func main() {
 				return
 			}
 			log.Printf("opensandbox-worker: hibernating %d sandboxes...", len(vms))
-			shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			results := qmMgr.HibernateAll(shutCtx, checkpointStore)
 			cancel()
+
+			// Log which VMs were NOT hibernated
+			var failed []string
+			for _, r := range results {
+				if r.Err != nil {
+					failed = append(failed, r.SandboxID)
+				}
+			}
+			if len(failed) > 0 {
+				log.Printf("opensandbox-worker: %d VMs failed to hibernate: %v", len(failed), failed)
+			}
+
 			processHibernateResults(results, store, func(r interface{}) (string, string, error) {
 				hr := r.(qm.HibernateAllResult)
 				return hr.SandboxID, hr.HibernationKey, hr.Err

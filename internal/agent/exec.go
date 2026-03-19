@@ -283,6 +283,16 @@ func killCgroup() {
 			syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+
+	// Brief wait, then check for survivors (e.g., D-state processes immune to SIGKILL)
+	time.Sleep(100 * time.Millisecond)
+	if remaining, err := os.ReadFile(sandboxCgroupProcs); err == nil {
+		lines := strings.TrimSpace(string(remaining))
+		if lines != "" {
+			fmt.Fprintf(os.Stderr, "agent: WARNING: %d PIDs remain in sandbox cgroup after SIGKILL: %s\n",
+				len(strings.Split(lines, "\n")), lines)
+		}
+	}
 }
 
 // SetResourceLimits adjusts the sandbox cgroup limits at runtime.

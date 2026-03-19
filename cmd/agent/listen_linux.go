@@ -99,37 +99,41 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 		}
 
 		l.mu.Lock()
-		if !l.active {
+		if l.active {
 			l.mu.Unlock()
-
-			// Drain any stale data from the previous gRPC session.
-			// After a gRPC connection drops, the serial port may have leftover
-			// bytes (GOAWAY frames, partial HTTP/2 frames). If we hand these to
-			// the new gRPC session, it gets a protocol error and closes immediately.
-			drainStaleData(l.f)
-
-			// Wait for the host to connect (port becomes readable with fresh data)
-			if waitForReadable(l.f, 500*time.Millisecond) {
-				l.mu.Lock()
-				if !l.active {
-					l.active = true
-					l.mu.Unlock()
-					log.Printf("agent: virtio-serial Accept: port readable, accepting connection")
-					return &virtioSerialConn{
-						f: l.f,
-						onClose: func() {
-							l.mu.Lock()
-							l.active = false
-							l.mu.Unlock()
-						},
-					}, nil
-				}
-				l.mu.Unlock()
-			}
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		l.mu.Unlock()
-		time.Sleep(100 * time.Millisecond)
+
+		// Drain any stale data from the previous gRPC session.
+		// After a gRPC connection drops, the serial port may have leftover
+		// bytes (GOAWAY frames, partial HTTP/2 frames). If we hand these to
+		// the new gRPC session, it gets a protocol error and closes immediately.
+		drainStaleData(l.f)
+
+		// Wait for the host to connect (port becomes readable with fresh data)
+		if !waitForReadable(l.f, 500*time.Millisecond) {
+			continue
+		}
+
+		// Re-check and set active atomically under a single lock hold
+		l.mu.Lock()
+		if l.active {
+			l.mu.Unlock()
+			continue
+		}
+		l.active = true
+		l.mu.Unlock()
+		log.Printf("agent: virtio-serial Accept: port readable, accepting connection")
+		return &virtioSerialConn{
+			f: l.f,
+			onClose: func() {
+				l.mu.Lock()
+				l.active = false
+				l.mu.Unlock()
+			},
+		}, nil
 	}
 }
 
