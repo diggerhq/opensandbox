@@ -100,8 +100,15 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 
 		l.mu.Lock()
 		if !l.active {
-			// Wait for port to be readable (host connected to chardev socket)
 			l.mu.Unlock()
+
+			// Drain any stale data from the previous gRPC session.
+			// After a gRPC connection drops, the serial port may have leftover
+			// bytes (GOAWAY frames, partial HTTP/2 frames). If we hand these to
+			// the new gRPC session, it gets a protocol error and closes immediately.
+			drainStaleData(l.f)
+
+			// Wait for the host to connect (port becomes readable with fresh data)
 			if waitForReadable(l.f, 500*time.Millisecond) {
 				l.mu.Lock()
 				if !l.active {
@@ -123,6 +130,32 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 		}
 		l.mu.Unlock()
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// drainStaleData reads and discards any pending bytes on the serial port.
+// This clears leftover gRPC frames from a previous session so the next
+// gRPC handshake starts clean.
+func drainStaleData(f *os.File) {
+	buf := make([]byte, 4096)
+	for {
+		// Non-blocking read: poll with 0 timeout
+		fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, 0) // immediate, non-blocking
+		if err != nil || n <= 0 {
+			return // no data pending
+		}
+		if fds[0].Revents&unix.POLLIN == 0 {
+			return
+		}
+		// Read and discard
+		nr, readErr := f.Read(buf)
+		if nr > 0 {
+			log.Printf("agent: virtio-serial: drained %d stale bytes", nr)
+		}
+		if readErr != nil || nr == 0 {
+			return
+		}
 	}
 }
 

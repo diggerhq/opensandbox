@@ -80,11 +80,14 @@ if [ -d /lib/modules/vsock ]; then
 fi
 
 # Load virtio-mem module (for dynamic memory scaling)
-KVER=$(uname -r)
-if [ -f "/lib/modules/$KVER/kernel/drivers/virtio/virtio_mem.ko" ]; then
-    insmod "/lib/modules/$KVER/kernel/drivers/virtio/virtio_mem.ko" 2>/dev/null || true
-    echo "init: virtio_mem module loaded"
-fi
+# Check both the standard kernel path and our guest-modules dir
+for vmem in "/lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko" "/lib/modules/vsock/virtio_mem.ko"; do
+    if [ -f "$vmem" ]; then
+        insmod "$vmem" 2>/dev/null || true
+        echo "init: virtio_mem module loaded ($vmem)"
+        break
+    fi
+done
 
 # ── Mount workspace: data disk at /workspace (persistent user data) ──
 mkdir -p /workspace
