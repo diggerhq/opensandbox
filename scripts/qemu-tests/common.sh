@@ -2,10 +2,10 @@
 # common.sh — Shared helpers for QEMU backend test scripts
 set -euo pipefail
 
-API_URL="${API_URL:-http://3.148.184.81:8080}"
-API_KEY="${API_KEY:-test-dev-key}"
+API_URL="${OPENSANDBOX_API_URL:?Set OPENSANDBOX_API_URL}"
+API_KEY="${OPENSANDBOX_API_KEY:?Set OPENSANDBOX_API_KEY}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/opensandbox-digger.pem}"
-WORKER_HOST="${WORKER_HOST:-3.148.184.81}"
+WORKER_HOST="${WORKER_HOST:?Set WORKER_HOST}"
 
 PASS=0
 FAIL=0

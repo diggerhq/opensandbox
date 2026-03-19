@@ -13,11 +13,12 @@ You have access to OpenSandbox, a cloud sandbox environment running QEMU VMs. Us
 ## Configuration
 
 ```
-API_URL=http://3.148.184.81:8080
-API_KEY=test-dev-key
+API_URL=${OPENSANDBOX_API_URL:-http://localhost:8080}
+API_KEY=${OPENSANDBOX_API_KEY}
 ```
 
-All requests require `-H 'X-API-Key: test-dev-key'` and `-H 'Content-Type: application/json'`.
+Set `OPENSANDBOX_API_URL` and `OPENSANDBOX_API_KEY` environment variables before using.
+All requests require `-H 'X-API-Key: $API_KEY'` and `-H 'Content-Type: application/json'`.
 
 ## Available Operations
 
@@ -25,7 +26,7 @@ All requests require `-H 'X-API-Key: test-dev-key'` and `-H 'Content-Type: appli
 ```bash
 curl -s -X POST $API_URL/api/sandboxes \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"timeout":3600}'
 ```
 Returns JSON with `sandboxID`, `status`, `token`.
@@ -34,7 +35,7 @@ Returns JSON with `sandboxID`, `status`, `token`.
 ```bash
 curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/exec/run \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"cmd":"python3","args":["-c","print(1+1)"],"timeout":30}'
 ```
 Returns JSON with `exitCode`, `stdout`, `stderr`. This is the simplest way to run commands.
@@ -43,20 +44,20 @@ Returns JSON with `exitCode`, `stdout`, `stderr`. This is the simplest way to ru
 ```bash
 curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/exec \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"cmd":"bash","args":["-c","echo hello"]}'
 ```
 
 ### Read a file
 ```bash
 curl -s $API_URL/api/sandboxes/{SANDBOX_ID}/files?path=/etc/os-release \
-  -H 'X-API-Key: test-dev-key'
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### Write a file
 ```bash
 curl -s -X PUT "$API_URL/api/sandboxes/{SANDBOX_ID}/files?path=/tmp/test.py" \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -H 'Content-Type: application/octet-stream' \
   --data-binary 'print("hello world")'
 ```
@@ -64,31 +65,31 @@ curl -s -X PUT "$API_URL/api/sandboxes/{SANDBOX_ID}/files?path=/tmp/test.py" \
 ### List directory
 ```bash
 curl -s "$API_URL/api/sandboxes/{SANDBOX_ID}/files/list?path=/workspace" \
-  -H 'X-API-Key: test-dev-key'
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### List sandboxes
 ```bash
 curl -s $API_URL/api/sandboxes \
-  -H 'X-API-Key: test-dev-key'
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### Destroy a sandbox
 ```bash
 curl -s -X DELETE $API_URL/api/sandboxes/{SANDBOX_ID} \
-  -H 'X-API-Key: test-dev-key'
+  -H "X-API-Key: $API_KEY"
 ```
 
 ### Hibernate / Wake
 ```bash
 # Hibernate (saves state to S3, stops billing)
 curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/hibernate \
-  -H 'X-API-Key: test-dev-key'
+  -H "X-API-Key: $API_KEY"
 
 # Wake (golden restore ~520ms, workspace + rootfs preserved)
 curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/wake \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"timeout":300}'
 ```
 
@@ -97,14 +98,14 @@ curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/wake \
 # Create checkpoint (savevm snapshot inside qcow2)
 curl -s -X POST $API_URL/api/sandboxes/{SANDBOX_ID}/checkpoints \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"name":"my-checkpoint"}'
 # Returns JSON with `id`, `status` (processing → ready)
 
 # Fork a new sandbox from a checkpoint
 curl -s -X POST $API_URL/api/sandboxes/from-checkpoint/{CHECKPOINT_ID} \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"timeout":3600}'
 # Returns JSON with `sandboxID` (status: creating → running)
 ```
@@ -119,7 +120,7 @@ Pricing model: 1 vCPU per 1GB RAM (linear scaling). Setting memoryMB auto-calcul
 # Scale up to 2GB RAM + 2 vCPUs
 curl -s -X PUT $API_URL/api/sandboxes/{SANDBOX_ID}/limits \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: test-dev-key' \
+  -H "X-API-Key: $API_KEY" \
   -d '{"maxMemoryMB": 2048, "cpuPercent": 200, "maxPids": 256}'
 ```
 

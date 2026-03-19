@@ -6,9 +6,10 @@
 #   ./scripts/qemu-tests/run-all.sh 01 03 05     # run specific tests
 #   ./scripts/qemu-tests/run-all.sh 05            # run just hibernate tests
 #
-# Environment:
-#   API_URL=http://3.148.184.81:8080   (default)
-#   API_KEY=test-dev-key               (default)
+# Environment (required):
+#   OPENSANDBOX_API_URL=http://your-server:8080
+#   OPENSANDBOX_API_KEY=your-api-key
+#   WORKER_HOST=your-worker-ip
 
 set -uo pipefail
 
@@ -26,6 +27,13 @@ ALL_TESTS=(
     "09-concurrent"
     "10-edge-cases"
     "11-secrets"
+    "12-templates"
+    "13-preview-urls"
+    "14-scale-timeout"
+    "15-snapshots-crud"
+    "16-exec-sessions"
+    "17-pty-sessions"
+    "18-restore-checkpoint"
 )
 
 # Filter tests if args provided
