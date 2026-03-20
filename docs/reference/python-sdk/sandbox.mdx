@@ -180,6 +180,34 @@ Revert in-place to a checkpoint. [HTTP API →](/api-reference/checkpoints/resto
 
 [HTTP API →](/api-reference/checkpoints/delete) — **Returns:** `None`
 
+### `await sandbox.download_url(path, *, expires_in=3600)`
+
+Generate a signed download URL. [HTTP API →](/api-reference/files/generate-download-url) · [Guide →](/sandboxes/signed-urls)
+
+<ParamField body="path" type="str" required>
+  Absolute path to the file
+</ParamField>
+
+<ParamField body="expires_in" type="int" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+**Returns:** `str`
+
+### `await sandbox.upload_url(path, *, expires_in=3600)`
+
+Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-upload-url) · [Guide →](/sandboxes/signed-urls)
+
+<ParamField body="path" type="str" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="expires_in" type="int" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+**Returns:** `str`
+
 ### `await sandbox.create_preview_url(port, domain?, auth_config?)`
 
 [HTTP API →](/api-reference/preview/create)

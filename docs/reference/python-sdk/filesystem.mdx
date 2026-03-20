@@ -93,6 +93,34 @@ Check if a path exists. Client-side wrapper — attempts a read and returns `Fal
 
 ---
 
+## `await sandbox.files.read_stream(path)`
+
+Stream a file as async byte chunks. Avoids buffering the full file in memory — ideal for large files (50MB+).
+
+<ParamField body="path" type="str" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `AsyncIterator[bytes]`
+
+---
+
+## `await sandbox.files.write_stream(path, stream)`
+
+Stream content to a file from an async iterator. Avoids buffering the full file in memory.
+
+<ParamField body="path" type="str" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="stream" type="AsyncIterator[bytes]" required>
+  Async iterator yielding byte chunks
+</ParamField>
+
+**Returns:** `None`
+
+---
+
 ## Types
 
 <Accordion title="EntryInfo">

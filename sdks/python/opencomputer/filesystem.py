@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import AsyncIterator
 
 import httpx
 
@@ -85,6 +86,26 @@ class Filesystem:
         resp = await self._client.delete(
             f"/sandboxes/{self._sandbox_id}/files",
             params={"path": path},
+        )
+        resp.raise_for_status()
+
+    async def read_stream(self, path: str) -> AsyncIterator[bytes]:
+        """Stream a file as async byte chunks. Avoids buffering the full file in memory."""
+        req = self._client.build_request(
+            "GET",
+            f"/sandboxes/{self._sandbox_id}/files",
+            params={"path": path},
+        )
+        resp = await self._client.send(req, stream=True)
+        resp.raise_for_status()
+        return resp.aiter_bytes()
+
+    async def write_stream(self, path: str, stream: AsyncIterator[bytes]) -> None:
+        """Stream content to a file from an async iterator. Avoids buffering the full file in memory."""
+        resp = await self._client.put(
+            f"/sandboxes/{self._sandbox_id}/files",
+            params={"path": path},
+            content=stream,
         )
         resp.raise_for_status()
 

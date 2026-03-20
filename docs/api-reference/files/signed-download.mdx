@@ -1,0 +1,36 @@
+---
+title: 'Signed Download'
+api: 'GET /api/sandboxes/{id}/files/download'
+---
+
+Download a file using a signed URL. No authentication required — the signature and expiry are validated from query parameters.
+
+Generate a signed URL first via [Generate Download URL](/api-reference/files/generate-download-url).
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+<ParamField query="expires" type="string" required>
+  Unix timestamp when the URL expires
+</ParamField>
+
+<ParamField query="signature" type="string" required>
+  HMAC-SHA256 signature
+</ParamField>
+
+<ResponseExample>
+```text 200
+(file content with Content-Length header)
+```
+
+```json 403
+{
+  "error": "signed URL has expired"
+}
+```
+</ResponseExample>

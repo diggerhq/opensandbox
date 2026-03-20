@@ -45,6 +45,9 @@ func (j *JWTIssuer) IssueSandboxToken(orgID uuid.UUID, sandboxID, workerID strin
 	return token.SignedString(j.secret)
 }
 
+// SigningSecret returns the raw HMAC secret for use by other signing functions (e.g. signed URLs).
+func (j *JWTIssuer) SigningSecret() []byte { return j.secret }
+
 // ValidateSandboxToken parses and validates a sandbox-scoped JWT.
 func (j *JWTIssuer) ValidateSandboxToken(tokenStr string) (*SandboxClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &SandboxClaims{}, func(t *jwt.Token) (interface{}, error) {
