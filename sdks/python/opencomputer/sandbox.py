@@ -217,6 +217,38 @@ class Sandbox:
         )
         resp.raise_for_status()
 
+    async def download_url(self, path: str, *, expires_in: int = 3600) -> str:
+        """Generate a signed download URL for a sandbox file.
+
+        The URL can be used by anyone (e.g. in a browser) without an API key.
+
+        Args:
+            path: Absolute path inside the sandbox.
+            expires_in: URL validity in seconds (default: 3600, max: 86400).
+        """
+        resp = await self._client.post(
+            f"/sandboxes/{self.sandbox_id}/files/download-url",
+            json={"path": path, "expiresIn": expires_in},
+        )
+        resp.raise_for_status()
+        return resp.json()["url"]
+
+    async def upload_url(self, path: str, *, expires_in: int = 3600) -> str:
+        """Generate a signed upload URL for a sandbox file.
+
+        The URL can be used by anyone to PUT file content without an API key.
+
+        Args:
+            path: Absolute path inside the sandbox.
+            expires_in: URL validity in seconds (default: 3600, max: 86400).
+        """
+        resp = await self._client.post(
+            f"/sandboxes/{self.sandbox_id}/files/upload-url",
+            json={"path": path, "expiresIn": expires_in},
+        )
+        resp.raise_for_status()
+        return resp.json()["url"]
+
     @property
     def agent(self) -> Agent:
         """Access Claude Agent SDK sessions."""

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -823,6 +824,24 @@ func (m *Manager) WriteFile(ctx context.Context, sandboxID, path, content string
 		return err
 	}
 	return vm.agent.WriteFile(ctx, path, []byte(content))
+}
+
+// ReadFileStream streams a file from the VM as an io.ReadCloser.
+func (m *Manager) ReadFileStream(ctx context.Context, sandboxID, path string) (io.ReadCloser, int64, error) {
+	vm, err := m.getReadyVM(ctx, sandboxID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return vm.agent.ReadFileStream(ctx, path)
+}
+
+// WriteFileStream streams a file into the VM from an io.Reader.
+func (m *Manager) WriteFileStream(ctx context.Context, sandboxID, path string, mode uint32, r io.Reader) (int64, error) {
+	vm, err := m.getReadyVM(ctx, sandboxID)
+	if err != nil {
+		return 0, err
+	}
+	return vm.agent.WriteFileStream(ctx, path, mode, r)
 }
 
 // ListDir lists a directory in the VM.

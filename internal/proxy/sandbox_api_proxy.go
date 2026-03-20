@@ -132,6 +132,8 @@ func (p *SandboxAPIProxy) forward(c echo.Context, sandboxID, workerURL, workerID
 }
 
 // doHTTP reverse-proxies a normal HTTP request to the worker.
+// Streams the response directly to the client without buffering, enabling
+// large file downloads via signed URLs.
 func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token string) error {
 	target, err := url.Parse(workerURL)
 	if err != nil {
@@ -141,6 +143,7 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.FlushInterval = -1 // flush chunks immediately
 	proxy.Transport = &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: 5 * time.Second,
@@ -149,9 +152,12 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 		MaxIdleConnsPerHost:   10,
 	}
 
-	var proxyErr error
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		proxyErr = err
+		log.Printf("sandbox-api-proxy: error proxying sandbox %s to %s: %v", sandboxID, workerURL, err)
+		// Write error JSON directly — headers may not have been sent yet
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprintf(w, `{"error":"sandbox %s: upstream unavailable"}`, sandboxID)
 	}
 
 	// Rewrite request to target worker, preserving the original path
@@ -170,19 +176,8 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 		}
 	}
 
-	rec := &responseRecorder{
-		header: make(http.Header),
-	}
-	proxy.ServeHTTP(rec, c.Request())
-
-	if proxyErr != nil {
-		log.Printf("sandbox-api-proxy: error proxying sandbox %s to %s: %v", sandboxID, workerURL, proxyErr)
-		return c.JSON(http.StatusBadGateway, map[string]string{
-			"error": fmt.Sprintf("sandbox %s: upstream unavailable", sandboxID),
-		})
-	}
-
-	rec.writeTo(c.Response())
+	// Serve directly to the client ResponseWriter — no buffering
+	proxy.ServeHTTP(c.Response().Writer, c.Request())
 	return nil
 }
 

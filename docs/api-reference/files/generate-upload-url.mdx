@@ -1,0 +1,27 @@
+---
+title: 'Generate Upload URL'
+api: 'POST /api/sandboxes/{id}/files/upload-url'
+---
+
+Generates a signed URL for uploading a file without an API key. See [Signed URLs](/sandboxes/signed-urls) for usage guide.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField body="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="expiresIn" type="number" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "url": "https://app.opencomputer.dev/api/sandboxes/sb-xxx/files/upload?path=%2Fapp%2Finput.csv&expires=1773906434&signature=abc123",
+  "expiresAt": "2025-01-01T01:00:00Z"
+}
+```
+</ResponseExample>

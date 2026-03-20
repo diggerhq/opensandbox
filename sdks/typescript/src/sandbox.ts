@@ -433,6 +433,62 @@ export class Sandbox {
     }
   }
 
+  /**
+   * Generate a signed download URL for a file in the sandbox.
+   * The URL can be used by anyone (e.g. in a browser) without an API key.
+   * @param path - absolute path inside the sandbox
+   * @param opts.expiresIn - URL validity in seconds (default: 3600, max: 86400)
+   */
+  async downloadUrl(path: string, opts?: { expiresIn?: number }): Promise<string> {
+    const resp = await fetch(
+      `${this.apiUrl}/sandboxes/${this.sandboxId}/files/download-url`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+        },
+        body: JSON.stringify({ path, expiresIn: opts?.expiresIn ?? 3600 }),
+      },
+    );
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to get download URL: ${resp.status} ${text}`);
+    }
+
+    const data: { url: string } = await resp.json();
+    return data.url;
+  }
+
+  /**
+   * Generate a signed upload URL for a file in the sandbox.
+   * The URL can be used by anyone (e.g. in a browser) to PUT file content without an API key.
+   * @param path - absolute path inside the sandbox
+   * @param opts.expiresIn - URL validity in seconds (default: 3600, max: 86400)
+   */
+  async uploadUrl(path: string, opts?: { expiresIn?: number }): Promise<string> {
+    const resp = await fetch(
+      `${this.apiUrl}/sandboxes/${this.sandboxId}/files/upload-url`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+        },
+        body: JSON.stringify({ path, expiresIn: opts?.expiresIn ?? 3600 }),
+      },
+    );
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to get upload URL: ${resp.status} ${text}`);
+    }
+
+    const data: { url: string } = await resp.json();
+    return data.url;
+  }
+
   async createPreviewURL(opts: { port: number; domain?: string; authConfig?: Record<string, unknown> }): Promise<PreviewURLResult> {
     const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/preview`, {
       method: "POST",

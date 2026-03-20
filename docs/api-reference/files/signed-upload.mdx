@@ -1,0 +1,36 @@
+---
+title: 'Signed Upload'
+api: 'PUT /api/sandboxes/{id}/files/upload'
+---
+
+Upload a file using a signed URL. No authentication required — the signature and expiry are validated from query parameters. Send file content as the request body.
+
+Generate a signed URL first via [Generate Upload URL](/api-reference/files/generate-upload-url).
+
+<ParamField path="id" type="string" required>
+  Sandbox ID
+</ParamField>
+
+<ParamField query="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField query="expires" type="string" required>
+  Unix timestamp when the URL expires
+</ParamField>
+
+<ParamField query="signature" type="string" required>
+  HMAC-SHA256 signature
+</ParamField>
+
+<ResponseExample>
+```text 204
+(no content)
+```
+
+```json 403
+{
+  "error": "invalid signature"
+}
+```
+</ResponseExample>

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+const streamChunkSize = 256 * 1024 // 256KB per gRPC chunk
 
 // AgentClient is the host-side gRPC client that connects to the
 // osb-agent running inside a Firecracker VM via vsock.
@@ -263,6 +266,91 @@ func (c *AgentClient) ExecSessionKill(ctx context.Context, sessionID string, sig
 		Signal:    signal,
 	})
 	return err
+}
+
+// ReadFileStream opens a server-streaming gRPC call and returns an io.ReadCloser
+// that yields the file contents in 256KB chunks, plus the total file size.
+func (c *AgentClient) ReadFileStream(ctx context.Context, path string) (io.ReadCloser, int64, error) {
+	stream, err := c.client.ReadFileStream(ctx, &pb.ReadFileStreamRequest{Path: path})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	pr, pw := io.Pipe()
+	var totalSize int64
+
+	// Read first chunk to get total_size
+	first, err := stream.Recv()
+	if err != nil {
+		pw.Close()
+		pr.Close()
+		return nil, 0, fmt.Errorf("recv first chunk: %w", err)
+	}
+	totalSize = first.TotalSize
+
+	go func() {
+		// Write first chunk data
+		if _, err := pw.Write(first.Data); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		// Read remaining chunks
+		for {
+			chunk, err := stream.Recv()
+			if err == io.EOF {
+				pw.Close()
+				return
+			}
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+			if _, err := pw.Write(chunk.Data); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+	}()
+
+	return pr, totalSize, nil
+}
+
+// WriteFileStream sends a file in 256KB chunks via client-streaming gRPC.
+// Returns the total bytes written.
+func (c *AgentClient) WriteFileStream(ctx context.Context, path string, mode uint32, r io.Reader) (int64, error) {
+	stream, err := c.client.WriteFileStream(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	buf := make([]byte, streamChunkSize)
+	first := true
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			msg := &pb.WriteFileStreamRequest{Data: buf[:n]}
+			if first {
+				msg.Path = path
+				msg.Mode = mode
+				first = false
+			}
+			if sendErr := stream.Send(msg); sendErr != nil {
+				return 0, fmt.Errorf("send chunk: %w", sendErr)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read source: %w", err)
+		}
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return 0, err
+	}
+	return resp.BytesWritten, nil
 }
 
 // ConnectPTYData connects to the PTY data stream on the given vsock port.
