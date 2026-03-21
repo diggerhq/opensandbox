@@ -28,9 +28,17 @@ import (
 )
 
 // GRPCServer implements the SandboxWorker gRPC service for control plane communication.
+// LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
+type LiveMigrator interface {
+	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
+	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
+	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
+}
+
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
+	migrator           LiveMigrator // optional, set if manager supports live migration
 	router             *sandbox.SandboxRouter
 	ptyManager         *sandbox.PTYManager
 	execSessionManager *sandbox.ExecSessionManager
@@ -822,6 +830,47 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	}
 
 	return &pb.SetSandboxLimitsResponse{}, nil
+}
+
+// SetMigrator sets the live migration handler (call after NewGRPCServer if the manager supports it).
+func (s *GRPCServer) SetMigrator(m LiveMigrator) {
+	s.migrator = m
+}
+
+func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.PrepareMigrationIncomingRequest) (*pb.PrepareMigrationIncomingResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	addr, hostPort, err := s.migrator.PrepareIncomingMigration(ctx,
+		req.SandboxId, req.RootfsPath, req.WorkspacePath,
+		int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template)
+	if err != nil {
+		return nil, fmt.Errorf("prepare incoming migration: %w", err)
+	}
+	return &pb.PrepareMigrationIncomingResponse{
+		IncomingAddr: addr,
+		HostPort:     int32(hostPort),
+	}, nil
+}
+
+func (s *GRPCServer) LiveMigrate(ctx context.Context, req *pb.LiveMigrateRequest) (*pb.LiveMigrateResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	if err := s.migrator.LiveMigrate(ctx, req.SandboxId, req.IncomingAddr); err != nil {
+		return nil, fmt.Errorf("live migrate: %w", err)
+	}
+	return &pb.LiveMigrateResponse{}, nil
+}
+
+func (s *GRPCServer) CompleteMigrationIncoming(ctx context.Context, req *pb.CompleteMigrationIncomingRequest) (*pb.CompleteMigrationIncomingResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	if err := s.migrator.CompleteIncomingMigration(ctx, req.SandboxId); err != nil {
+		return nil, fmt.Errorf("complete incoming migration: %w", err)
+	}
+	return &pb.CompleteMigrationIncomingResponse{}, nil
 }
 
 func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {

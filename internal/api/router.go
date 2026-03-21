@@ -155,6 +155,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
 
+	// Live migration
+	api.POST("/sandboxes/:id/migrate", s.migrateSandbox)
+
 	// Resource limits
 	api.PUT("/sandboxes/:id/limits", s.setLimits)
 	api.POST("/sandboxes/:id/scale", s.scaleSandbox)

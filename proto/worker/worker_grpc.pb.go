@@ -19,28 +19,31 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxWorker_CreateSandbox_FullMethodName     = "/worker.SandboxWorker/CreateSandbox"
-	SandboxWorker_DestroySandbox_FullMethodName    = "/worker.SandboxWorker/DestroySandbox"
-	SandboxWorker_GetSandbox_FullMethodName        = "/worker.SandboxWorker/GetSandbox"
-	SandboxWorker_ListSandboxes_FullMethodName     = "/worker.SandboxWorker/ListSandboxes"
-	SandboxWorker_ExecCommand_FullMethodName       = "/worker.SandboxWorker/ExecCommand"
-	SandboxWorker_ExecCommandStream_FullMethodName = "/worker.SandboxWorker/ExecCommandStream"
-	SandboxWorker_ReadFile_FullMethodName          = "/worker.SandboxWorker/ReadFile"
-	SandboxWorker_WriteFile_FullMethodName         = "/worker.SandboxWorker/WriteFile"
-	SandboxWorker_ListDir_FullMethodName           = "/worker.SandboxWorker/ListDir"
-	SandboxWorker_CreatePTY_FullMethodName         = "/worker.SandboxWorker/CreatePTY"
-	SandboxWorker_PTYStream_FullMethodName         = "/worker.SandboxWorker/PTYStream"
-	SandboxWorker_ExecSessionCreate_FullMethodName = "/worker.SandboxWorker/ExecSessionCreate"
-	SandboxWorker_ExecSessionList_FullMethodName   = "/worker.SandboxWorker/ExecSessionList"
-	SandboxWorker_ExecSessionKill_FullMethodName   = "/worker.SandboxWorker/ExecSessionKill"
-	SandboxWorker_HibernateSandbox_FullMethodName  = "/worker.SandboxWorker/HibernateSandbox"
-	SandboxWorker_WakeSandbox_FullMethodName       = "/worker.SandboxWorker/WakeSandbox"
-	SandboxWorker_SaveAsTemplate_FullMethodName    = "/worker.SandboxWorker/SaveAsTemplate"
-	SandboxWorker_CreateCheckpoint_FullMethodName  = "/worker.SandboxWorker/CreateCheckpoint"
-	SandboxWorker_RestoreCheckpoint_FullMethodName = "/worker.SandboxWorker/RestoreCheckpoint"
-	SandboxWorker_BuildTemplate_FullMethodName     = "/worker.SandboxWorker/BuildTemplate"
-	SandboxWorker_GetSandboxStats_FullMethodName   = "/worker.SandboxWorker/GetSandboxStats"
-	SandboxWorker_SetSandboxLimits_FullMethodName  = "/worker.SandboxWorker/SetSandboxLimits"
+	SandboxWorker_CreateSandbox_FullMethodName             = "/worker.SandboxWorker/CreateSandbox"
+	SandboxWorker_DestroySandbox_FullMethodName            = "/worker.SandboxWorker/DestroySandbox"
+	SandboxWorker_GetSandbox_FullMethodName                = "/worker.SandboxWorker/GetSandbox"
+	SandboxWorker_ListSandboxes_FullMethodName             = "/worker.SandboxWorker/ListSandboxes"
+	SandboxWorker_ExecCommand_FullMethodName               = "/worker.SandboxWorker/ExecCommand"
+	SandboxWorker_ExecCommandStream_FullMethodName         = "/worker.SandboxWorker/ExecCommandStream"
+	SandboxWorker_ReadFile_FullMethodName                  = "/worker.SandboxWorker/ReadFile"
+	SandboxWorker_WriteFile_FullMethodName                 = "/worker.SandboxWorker/WriteFile"
+	SandboxWorker_ListDir_FullMethodName                   = "/worker.SandboxWorker/ListDir"
+	SandboxWorker_CreatePTY_FullMethodName                 = "/worker.SandboxWorker/CreatePTY"
+	SandboxWorker_PTYStream_FullMethodName                 = "/worker.SandboxWorker/PTYStream"
+	SandboxWorker_ExecSessionCreate_FullMethodName         = "/worker.SandboxWorker/ExecSessionCreate"
+	SandboxWorker_ExecSessionList_FullMethodName           = "/worker.SandboxWorker/ExecSessionList"
+	SandboxWorker_ExecSessionKill_FullMethodName           = "/worker.SandboxWorker/ExecSessionKill"
+	SandboxWorker_HibernateSandbox_FullMethodName          = "/worker.SandboxWorker/HibernateSandbox"
+	SandboxWorker_WakeSandbox_FullMethodName               = "/worker.SandboxWorker/WakeSandbox"
+	SandboxWorker_SaveAsTemplate_FullMethodName            = "/worker.SandboxWorker/SaveAsTemplate"
+	SandboxWorker_CreateCheckpoint_FullMethodName          = "/worker.SandboxWorker/CreateCheckpoint"
+	SandboxWorker_RestoreCheckpoint_FullMethodName         = "/worker.SandboxWorker/RestoreCheckpoint"
+	SandboxWorker_BuildTemplate_FullMethodName             = "/worker.SandboxWorker/BuildTemplate"
+	SandboxWorker_GetSandboxStats_FullMethodName           = "/worker.SandboxWorker/GetSandboxStats"
+	SandboxWorker_SetSandboxLimits_FullMethodName          = "/worker.SandboxWorker/SetSandboxLimits"
+	SandboxWorker_PrepareMigrationIncoming_FullMethodName  = "/worker.SandboxWorker/PrepareMigrationIncoming"
+	SandboxWorker_LiveMigrate_FullMethodName               = "/worker.SandboxWorker/LiveMigrate"
+	SandboxWorker_CompleteMigrationIncoming_FullMethodName = "/worker.SandboxWorker/CompleteMigrationIncoming"
 )
 
 // SandboxWorkerClient is the client API for SandboxWorker service.
@@ -69,6 +72,10 @@ type SandboxWorkerClient interface {
 	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
 	GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(ctx context.Context, in *SetSandboxLimitsRequest, opts ...grpc.CallOption) (*SetSandboxLimitsResponse, error)
+	// Live migration between workers
+	PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error)
+	LiveMigrate(ctx context.Context, in *LiveMigrateRequest, opts ...grpc.CallOption) (*LiveMigrateResponse, error)
+	CompleteMigrationIncoming(ctx context.Context, in *CompleteMigrationIncomingRequest, opts ...grpc.CallOption) (*CompleteMigrationIncomingResponse, error)
 }
 
 type sandboxWorkerClient struct {
@@ -311,6 +318,36 @@ func (c *sandboxWorkerClient) SetSandboxLimits(ctx context.Context, in *SetSandb
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareMigrationIncomingResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_PrepareMigrationIncoming_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxWorkerClient) LiveMigrate(ctx context.Context, in *LiveMigrateRequest, opts ...grpc.CallOption) (*LiveMigrateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LiveMigrateResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_LiveMigrate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxWorkerClient) CompleteMigrationIncoming(ctx context.Context, in *CompleteMigrationIncomingRequest, opts ...grpc.CallOption) (*CompleteMigrationIncomingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompleteMigrationIncomingResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_CompleteMigrationIncoming_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxWorkerServer is the server API for SandboxWorker service.
 // All implementations must embed UnimplementedSandboxWorkerServer
 // for forward compatibility.
@@ -337,6 +374,10 @@ type SandboxWorkerServer interface {
 	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
 	GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error)
+	// Live migration between workers
+	PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error)
+	LiveMigrate(context.Context, *LiveMigrateRequest) (*LiveMigrateResponse, error)
+	CompleteMigrationIncoming(context.Context, *CompleteMigrationIncomingRequest) (*CompleteMigrationIncomingResponse, error)
 	mustEmbedUnimplementedSandboxWorkerServer()
 }
 
@@ -412,6 +453,15 @@ func (UnimplementedSandboxWorkerServer) GetSandboxStats(context.Context, *GetSan
 }
 func (UnimplementedSandboxWorkerServer) SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetSandboxLimits not implemented")
+}
+func (UnimplementedSandboxWorkerServer) PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareMigrationIncoming not implemented")
+}
+func (UnimplementedSandboxWorkerServer) LiveMigrate(context.Context, *LiveMigrateRequest) (*LiveMigrateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method LiveMigrate not implemented")
+}
+func (UnimplementedSandboxWorkerServer) CompleteMigrationIncoming(context.Context, *CompleteMigrationIncomingRequest) (*CompleteMigrationIncomingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteMigrationIncoming not implemented")
 }
 func (UnimplementedSandboxWorkerServer) mustEmbedUnimplementedSandboxWorkerServer() {}
 func (UnimplementedSandboxWorkerServer) testEmbeddedByValue()                       {}
@@ -812,6 +862,60 @@ func _SandboxWorker_SetSandboxLimits_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_PrepareMigrationIncoming_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareMigrationIncomingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).PrepareMigrationIncoming(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_PrepareMigrationIncoming_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).PrepareMigrationIncoming(ctx, req.(*PrepareMigrationIncomingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxWorker_LiveMigrate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LiveMigrateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).LiveMigrate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_LiveMigrate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).LiveMigrate(ctx, req.(*LiveMigrateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxWorker_CompleteMigrationIncoming_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteMigrationIncomingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).CompleteMigrationIncoming(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_CompleteMigrationIncoming_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).CompleteMigrationIncoming(ctx, req.(*CompleteMigrationIncomingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxWorker_ServiceDesc is the grpc.ServiceDesc for SandboxWorker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -898,6 +1002,18 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetSandboxLimits",
 			Handler:    _SandboxWorker_SetSandboxLimits_Handler,
+		},
+		{
+			MethodName: "PrepareMigrationIncoming",
+			Handler:    _SandboxWorker_PrepareMigrationIncoming_Handler,
+		},
+		{
+			MethodName: "LiveMigrate",
+			Handler:    _SandboxWorker_LiveMigrate_Handler,
+		},
+		{
+			MethodName: "CompleteMigrationIncoming",
+			Handler:    _SandboxWorker_CompleteMigrationIncoming_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -359,6 +359,15 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 	return nil
 }
 
+// LiveMigrate on Manager delegates to a MigrationCoordinator.
+func (m *Manager) LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error {
+	mc := &MigrationCoordinator{
+		manager:    m,
+		migrations: make(map[string]*MigrationState),
+	}
+	return mc.LiveMigrate(ctx, sandboxID, incomingAddr)
+}
+
 // uploadFile uploads a local file to S3.
 func (mc *MigrationCoordinator) uploadFile(ctx context.Context, localPath, s3Key string) (int64, error) {
 	info, err := os.Stat(localPath)

@@ -264,6 +264,11 @@ func main() {
 
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)
+	// Wire up live migration if using QEMU manager
+	if migrator, ok := mgr.(worker.LiveMigrator); ok {
+		grpcServer.SetMigrator(migrator)
+		log.Println("opensandbox-worker: live migration enabled")
+	}
 	grpcAddr := ":9090"
 	log.Printf("opensandbox-worker: starting gRPC server on %s", grpcAddr)
 	go func() {

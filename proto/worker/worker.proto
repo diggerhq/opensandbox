@@ -37,6 +37,11 @@ service SandboxWorker {
   rpc GetSandboxStats(GetSandboxStatsRequest) returns (GetSandboxStatsResponse);
 
   rpc SetSandboxLimits(SetSandboxLimitsRequest) returns (SetSandboxLimitsResponse);
+
+  // Live migration between workers
+  rpc PrepareMigrationIncoming(PrepareMigrationIncomingRequest) returns (PrepareMigrationIncomingResponse);
+  rpc LiveMigrate(LiveMigrateRequest) returns (LiveMigrateResponse);
+  rpc CompleteMigrationIncoming(CompleteMigrationIncomingRequest) returns (CompleteMigrationIncomingResponse);
 }
 
 message CreateSandboxRequest {
@@ -305,3 +310,32 @@ message SetSandboxLimitsRequest {
 }
 
 message SetSandboxLimitsResponse {}
+
+// Live migration messages
+message PrepareMigrationIncomingRequest {
+  string sandbox_id = 1;
+  string rootfs_path = 2;    // local path to rootfs on target (pre-copied)
+  string workspace_path = 3; // local path to workspace on target (pre-copied)
+  int32 cpu_count = 4;
+  int32 memory_mb = 5;
+  int32 guest_port = 6;
+  string template = 7;
+}
+
+message PrepareMigrationIncomingResponse {
+  string incoming_addr = 1;  // TCP address for source to migrate to (e.g. "10.100.1.7:49152")
+  int32 host_port = 2;       // mapped host port on target worker
+}
+
+message LiveMigrateRequest {
+  string sandbox_id = 1;
+  string incoming_addr = 2;  // TCP address from PrepareMigrationIncoming
+}
+
+message LiveMigrateResponse {}
+
+message CompleteMigrationIncomingRequest {
+  string sandbox_id = 1;
+}
+
+message CompleteMigrationIncomingResponse {}

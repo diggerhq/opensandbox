@@ -2710,6 +2710,319 @@ func (*SetSandboxLimitsResponse) Descriptor() ([]byte, []int) {
 	return file_proto_worker_worker_proto_rawDescGZIP(), []int{45}
 }
 
+// Live migration messages
+type PrepareMigrationIncomingRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	RootfsPath    string                 `protobuf:"bytes,2,opt,name=rootfs_path,json=rootfsPath,proto3" json:"rootfs_path,omitempty"`          // local path to rootfs on target (pre-copied)
+	WorkspacePath string                 `protobuf:"bytes,3,opt,name=workspace_path,json=workspacePath,proto3" json:"workspace_path,omitempty"` // local path to workspace on target (pre-copied)
+	CpuCount      int32                  `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
+	MemoryMb      int32                  `protobuf:"varint,5,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
+	GuestPort     int32                  `protobuf:"varint,6,opt,name=guest_port,json=guestPort,proto3" json:"guest_port,omitempty"`
+	Template      string                 `protobuf:"bytes,7,opt,name=template,proto3" json:"template,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareMigrationIncomingRequest) Reset() {
+	*x = PrepareMigrationIncomingRequest{}
+	mi := &file_proto_worker_worker_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareMigrationIncomingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareMigrationIncomingRequest) ProtoMessage() {}
+
+func (x *PrepareMigrationIncomingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareMigrationIncomingRequest.ProtoReflect.Descriptor instead.
+func (*PrepareMigrationIncomingRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *PrepareMigrationIncomingRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *PrepareMigrationIncomingRequest) GetRootfsPath() string {
+	if x != nil {
+		return x.RootfsPath
+	}
+	return ""
+}
+
+func (x *PrepareMigrationIncomingRequest) GetWorkspacePath() string {
+	if x != nil {
+		return x.WorkspacePath
+	}
+	return ""
+}
+
+func (x *PrepareMigrationIncomingRequest) GetCpuCount() int32 {
+	if x != nil {
+		return x.CpuCount
+	}
+	return 0
+}
+
+func (x *PrepareMigrationIncomingRequest) GetMemoryMb() int32 {
+	if x != nil {
+		return x.MemoryMb
+	}
+	return 0
+}
+
+func (x *PrepareMigrationIncomingRequest) GetGuestPort() int32 {
+	if x != nil {
+		return x.GuestPort
+	}
+	return 0
+}
+
+func (x *PrepareMigrationIncomingRequest) GetTemplate() string {
+	if x != nil {
+		return x.Template
+	}
+	return ""
+}
+
+type PrepareMigrationIncomingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	IncomingAddr  string                 `protobuf:"bytes,1,opt,name=incoming_addr,json=incomingAddr,proto3" json:"incoming_addr,omitempty"` // TCP address for source to migrate to (e.g. "10.100.1.7:49152")
+	HostPort      int32                  `protobuf:"varint,2,opt,name=host_port,json=hostPort,proto3" json:"host_port,omitempty"`            // mapped host port on target worker
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareMigrationIncomingResponse) Reset() {
+	*x = PrepareMigrationIncomingResponse{}
+	mi := &file_proto_worker_worker_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareMigrationIncomingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareMigrationIncomingResponse) ProtoMessage() {}
+
+func (x *PrepareMigrationIncomingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareMigrationIncomingResponse.ProtoReflect.Descriptor instead.
+func (*PrepareMigrationIncomingResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *PrepareMigrationIncomingResponse) GetIncomingAddr() string {
+	if x != nil {
+		return x.IncomingAddr
+	}
+	return ""
+}
+
+func (x *PrepareMigrationIncomingResponse) GetHostPort() int32 {
+	if x != nil {
+		return x.HostPort
+	}
+	return 0
+}
+
+type LiveMigrateRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	IncomingAddr  string                 `protobuf:"bytes,2,opt,name=incoming_addr,json=incomingAddr,proto3" json:"incoming_addr,omitempty"` // TCP address from PrepareMigrationIncoming
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LiveMigrateRequest) Reset() {
+	*x = LiveMigrateRequest{}
+	mi := &file_proto_worker_worker_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LiveMigrateRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LiveMigrateRequest) ProtoMessage() {}
+
+func (x *LiveMigrateRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LiveMigrateRequest.ProtoReflect.Descriptor instead.
+func (*LiveMigrateRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *LiveMigrateRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *LiveMigrateRequest) GetIncomingAddr() string {
+	if x != nil {
+		return x.IncomingAddr
+	}
+	return ""
+}
+
+type LiveMigrateResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LiveMigrateResponse) Reset() {
+	*x = LiveMigrateResponse{}
+	mi := &file_proto_worker_worker_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LiveMigrateResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LiveMigrateResponse) ProtoMessage() {}
+
+func (x *LiveMigrateResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LiveMigrateResponse.ProtoReflect.Descriptor instead.
+func (*LiveMigrateResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{49}
+}
+
+type CompleteMigrationIncomingRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteMigrationIncomingRequest) Reset() {
+	*x = CompleteMigrationIncomingRequest{}
+	mi := &file_proto_worker_worker_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteMigrationIncomingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteMigrationIncomingRequest) ProtoMessage() {}
+
+func (x *CompleteMigrationIncomingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteMigrationIncomingRequest.ProtoReflect.Descriptor instead.
+func (*CompleteMigrationIncomingRequest) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *CompleteMigrationIncomingRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+type CompleteMigrationIncomingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteMigrationIncomingResponse) Reset() {
+	*x = CompleteMigrationIncomingResponse{}
+	mi := &file_proto_worker_worker_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteMigrationIncomingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteMigrationIncomingResponse) ProtoMessage() {}
+
+func (x *CompleteMigrationIncomingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_worker_worker_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteMigrationIncomingResponse.ProtoReflect.Descriptor instead.
+func (*CompleteMigrationIncomingResponse) Descriptor() ([]byte, []int) {
+	return file_proto_worker_worker_proto_rawDescGZIP(), []int{51}
+}
+
 var File_proto_worker_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_worker_proto_rawDesc = "" +
@@ -2935,7 +3248,30 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\fcpu_max_usec\x18\x04 \x01(\x03R\n" +
 	"cpuMaxUsec\x12&\n" +
 	"\x0fcpu_period_usec\x18\x05 \x01(\x03R\rcpuPeriodUsec\"\x1a\n" +
-	"\x18SetSandboxLimitsResponse2\xa6\r\n" +
+	"\x18SetSandboxLimitsResponse\"\xfd\x01\n" +
+	"\x1fPrepareMigrationIncomingRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
+	"\vrootfs_path\x18\x02 \x01(\tR\n" +
+	"rootfsPath\x12%\n" +
+	"\x0eworkspace_path\x18\x03 \x01(\tR\rworkspacePath\x12\x1b\n" +
+	"\tcpu_count\x18\x04 \x01(\x05R\bcpuCount\x12\x1b\n" +
+	"\tmemory_mb\x18\x05 \x01(\x05R\bmemoryMb\x12\x1d\n" +
+	"\n" +
+	"guest_port\x18\x06 \x01(\x05R\tguestPort\x12\x1a\n" +
+	"\btemplate\x18\a \x01(\tR\btemplate\"d\n" +
+	" PrepareMigrationIncomingResponse\x12#\n" +
+	"\rincoming_addr\x18\x01 \x01(\tR\fincomingAddr\x12\x1b\n" +
+	"\thost_port\x18\x02 \x01(\x05R\bhostPort\"X\n" +
+	"\x12LiveMigrateRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12#\n" +
+	"\rincoming_addr\x18\x02 \x01(\tR\fincomingAddr\"\x15\n" +
+	"\x13LiveMigrateResponse\"A\n" +
+	" CompleteMigrationIncomingRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"#\n" +
+	"!CompleteMigrationIncomingResponse2\xcf\x0f\n" +
 	"\rSandboxWorker\x12L\n" +
 	"\rCreateSandbox\x12\x1c.worker.CreateSandboxRequest\x1a\x1d.worker.CreateSandboxResponse\x12O\n" +
 	"\x0eDestroySandbox\x12\x1d.worker.DestroySandboxRequest\x1a\x1e.worker.DestroySandboxResponse\x12C\n" +
@@ -2959,7 +3295,10 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\x11RestoreCheckpoint\x12 .worker.RestoreCheckpointRequest\x1a!.worker.RestoreCheckpointResponse\x12L\n" +
 	"\rBuildTemplate\x12\x1c.worker.BuildTemplateRequest\x1a\x1d.worker.BuildTemplateResponse\x12R\n" +
 	"\x0fGetSandboxStats\x12\x1e.worker.GetSandboxStatsRequest\x1a\x1f.worker.GetSandboxStatsResponse\x12U\n" +
-	"\x10SetSandboxLimits\x12\x1f.worker.SetSandboxLimitsRequest\x1a .worker.SetSandboxLimitsResponseB1Z/github.com/opensandbox/opensandbox/proto/workerb\x06proto3"
+	"\x10SetSandboxLimits\x12\x1f.worker.SetSandboxLimitsRequest\x1a .worker.SetSandboxLimitsResponse\x12m\n" +
+	"\x18PrepareMigrationIncoming\x12'.worker.PrepareMigrationIncomingRequest\x1a(.worker.PrepareMigrationIncomingResponse\x12F\n" +
+	"\vLiveMigrate\x12\x1a.worker.LiveMigrateRequest\x1a\x1b.worker.LiveMigrateResponse\x12p\n" +
+	"\x19CompleteMigrationIncoming\x12(.worker.CompleteMigrationIncomingRequest\x1a).worker.CompleteMigrationIncomingResponseB1Z/github.com/opensandbox/opensandbox/proto/workerb\x06proto3"
 
 var (
 	file_proto_worker_worker_proto_rawDescOnce sync.Once
@@ -2974,69 +3313,75 @@ func file_proto_worker_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_worker_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
 var file_proto_worker_worker_proto_goTypes = []any{
-	(ExecOutputChunk_Stream)(0),       // 0: worker.ExecOutputChunk.Stream
-	(*CreateSandboxRequest)(nil),      // 1: worker.CreateSandboxRequest
-	(*CreateSandboxResponse)(nil),     // 2: worker.CreateSandboxResponse
-	(*DestroySandboxRequest)(nil),     // 3: worker.DestroySandboxRequest
-	(*DestroySandboxResponse)(nil),    // 4: worker.DestroySandboxResponse
-	(*GetSandboxRequest)(nil),         // 5: worker.GetSandboxRequest
-	(*GetSandboxResponse)(nil),        // 6: worker.GetSandboxResponse
-	(*ListSandboxesRequest)(nil),      // 7: worker.ListSandboxesRequest
-	(*ListSandboxesResponse)(nil),     // 8: worker.ListSandboxesResponse
-	(*ExecCommandRequest)(nil),        // 9: worker.ExecCommandRequest
-	(*ExecCommandResponse)(nil),       // 10: worker.ExecCommandResponse
-	(*ExecOutputChunk)(nil),           // 11: worker.ExecOutputChunk
-	(*ReadFileRequest)(nil),           // 12: worker.ReadFileRequest
-	(*ReadFileResponse)(nil),          // 13: worker.ReadFileResponse
-	(*WriteFileRequest)(nil),          // 14: worker.WriteFileRequest
-	(*WriteFileResponse)(nil),         // 15: worker.WriteFileResponse
-	(*ListDirRequest)(nil),            // 16: worker.ListDirRequest
-	(*DirEntry)(nil),                  // 17: worker.DirEntry
-	(*ListDirResponse)(nil),           // 18: worker.ListDirResponse
-	(*CreatePTYRequest)(nil),          // 19: worker.CreatePTYRequest
-	(*CreatePTYResponse)(nil),         // 20: worker.CreatePTYResponse
-	(*PTYInput)(nil),                  // 21: worker.PTYInput
-	(*PTYResize)(nil),                 // 22: worker.PTYResize
-	(*PTYOutput)(nil),                 // 23: worker.PTYOutput
-	(*HibernateSandboxRequest)(nil),   // 24: worker.HibernateSandboxRequest
-	(*HibernateSandboxResponse)(nil),  // 25: worker.HibernateSandboxResponse
-	(*WakeSandboxRequest)(nil),        // 26: worker.WakeSandboxRequest
-	(*WakeSandboxResponse)(nil),       // 27: worker.WakeSandboxResponse
-	(*SaveAsTemplateRequest)(nil),     // 28: worker.SaveAsTemplateRequest
-	(*SaveAsTemplateResponse)(nil),    // 29: worker.SaveAsTemplateResponse
-	(*BuildTemplateRequest)(nil),      // 30: worker.BuildTemplateRequest
-	(*BuildTemplateResponse)(nil),     // 31: worker.BuildTemplateResponse
-	(*ExecSessionCreateRequest)(nil),  // 32: worker.ExecSessionCreateRequest
-	(*ExecSessionCreateResponse)(nil), // 33: worker.ExecSessionCreateResponse
-	(*ExecSessionListRequest)(nil),    // 34: worker.ExecSessionListRequest
-	(*ExecSessionListResponse)(nil),   // 35: worker.ExecSessionListResponse
-	(*ExecSessionInfoEntry)(nil),      // 36: worker.ExecSessionInfoEntry
-	(*ExecSessionKillRequest)(nil),    // 37: worker.ExecSessionKillRequest
-	(*ExecSessionKillResponse)(nil),   // 38: worker.ExecSessionKillResponse
-	(*GetSandboxStatsRequest)(nil),    // 39: worker.GetSandboxStatsRequest
-	(*GetSandboxStatsResponse)(nil),   // 40: worker.GetSandboxStatsResponse
-	(*CreateCheckpointRequest)(nil),   // 41: worker.CreateCheckpointRequest
-	(*CreateCheckpointResponse)(nil),  // 42: worker.CreateCheckpointResponse
-	(*RestoreCheckpointRequest)(nil),  // 43: worker.RestoreCheckpointRequest
-	(*RestoreCheckpointResponse)(nil), // 44: worker.RestoreCheckpointResponse
-	(*SetSandboxLimitsRequest)(nil),   // 45: worker.SetSandboxLimitsRequest
-	(*SetSandboxLimitsResponse)(nil),  // 46: worker.SetSandboxLimitsResponse
-	nil,                               // 47: worker.CreateSandboxRequest.EnvsEntry
-	nil,                               // 48: worker.CreateSandboxRequest.SecretAllowedHostsEntry
-	nil,                               // 49: worker.ExecCommandRequest.EnvsEntry
-	nil,                               // 50: worker.ExecSessionCreateRequest.EnvsEntry
+	(ExecOutputChunk_Stream)(0),               // 0: worker.ExecOutputChunk.Stream
+	(*CreateSandboxRequest)(nil),              // 1: worker.CreateSandboxRequest
+	(*CreateSandboxResponse)(nil),             // 2: worker.CreateSandboxResponse
+	(*DestroySandboxRequest)(nil),             // 3: worker.DestroySandboxRequest
+	(*DestroySandboxResponse)(nil),            // 4: worker.DestroySandboxResponse
+	(*GetSandboxRequest)(nil),                 // 5: worker.GetSandboxRequest
+	(*GetSandboxResponse)(nil),                // 6: worker.GetSandboxResponse
+	(*ListSandboxesRequest)(nil),              // 7: worker.ListSandboxesRequest
+	(*ListSandboxesResponse)(nil),             // 8: worker.ListSandboxesResponse
+	(*ExecCommandRequest)(nil),                // 9: worker.ExecCommandRequest
+	(*ExecCommandResponse)(nil),               // 10: worker.ExecCommandResponse
+	(*ExecOutputChunk)(nil),                   // 11: worker.ExecOutputChunk
+	(*ReadFileRequest)(nil),                   // 12: worker.ReadFileRequest
+	(*ReadFileResponse)(nil),                  // 13: worker.ReadFileResponse
+	(*WriteFileRequest)(nil),                  // 14: worker.WriteFileRequest
+	(*WriteFileResponse)(nil),                 // 15: worker.WriteFileResponse
+	(*ListDirRequest)(nil),                    // 16: worker.ListDirRequest
+	(*DirEntry)(nil),                          // 17: worker.DirEntry
+	(*ListDirResponse)(nil),                   // 18: worker.ListDirResponse
+	(*CreatePTYRequest)(nil),                  // 19: worker.CreatePTYRequest
+	(*CreatePTYResponse)(nil),                 // 20: worker.CreatePTYResponse
+	(*PTYInput)(nil),                          // 21: worker.PTYInput
+	(*PTYResize)(nil),                         // 22: worker.PTYResize
+	(*PTYOutput)(nil),                         // 23: worker.PTYOutput
+	(*HibernateSandboxRequest)(nil),           // 24: worker.HibernateSandboxRequest
+	(*HibernateSandboxResponse)(nil),          // 25: worker.HibernateSandboxResponse
+	(*WakeSandboxRequest)(nil),                // 26: worker.WakeSandboxRequest
+	(*WakeSandboxResponse)(nil),               // 27: worker.WakeSandboxResponse
+	(*SaveAsTemplateRequest)(nil),             // 28: worker.SaveAsTemplateRequest
+	(*SaveAsTemplateResponse)(nil),            // 29: worker.SaveAsTemplateResponse
+	(*BuildTemplateRequest)(nil),              // 30: worker.BuildTemplateRequest
+	(*BuildTemplateResponse)(nil),             // 31: worker.BuildTemplateResponse
+	(*ExecSessionCreateRequest)(nil),          // 32: worker.ExecSessionCreateRequest
+	(*ExecSessionCreateResponse)(nil),         // 33: worker.ExecSessionCreateResponse
+	(*ExecSessionListRequest)(nil),            // 34: worker.ExecSessionListRequest
+	(*ExecSessionListResponse)(nil),           // 35: worker.ExecSessionListResponse
+	(*ExecSessionInfoEntry)(nil),              // 36: worker.ExecSessionInfoEntry
+	(*ExecSessionKillRequest)(nil),            // 37: worker.ExecSessionKillRequest
+	(*ExecSessionKillResponse)(nil),           // 38: worker.ExecSessionKillResponse
+	(*GetSandboxStatsRequest)(nil),            // 39: worker.GetSandboxStatsRequest
+	(*GetSandboxStatsResponse)(nil),           // 40: worker.GetSandboxStatsResponse
+	(*CreateCheckpointRequest)(nil),           // 41: worker.CreateCheckpointRequest
+	(*CreateCheckpointResponse)(nil),          // 42: worker.CreateCheckpointResponse
+	(*RestoreCheckpointRequest)(nil),          // 43: worker.RestoreCheckpointRequest
+	(*RestoreCheckpointResponse)(nil),         // 44: worker.RestoreCheckpointResponse
+	(*SetSandboxLimitsRequest)(nil),           // 45: worker.SetSandboxLimitsRequest
+	(*SetSandboxLimitsResponse)(nil),          // 46: worker.SetSandboxLimitsResponse
+	(*PrepareMigrationIncomingRequest)(nil),   // 47: worker.PrepareMigrationIncomingRequest
+	(*PrepareMigrationIncomingResponse)(nil),  // 48: worker.PrepareMigrationIncomingResponse
+	(*LiveMigrateRequest)(nil),                // 49: worker.LiveMigrateRequest
+	(*LiveMigrateResponse)(nil),               // 50: worker.LiveMigrateResponse
+	(*CompleteMigrationIncomingRequest)(nil),  // 51: worker.CompleteMigrationIncomingRequest
+	(*CompleteMigrationIncomingResponse)(nil), // 52: worker.CompleteMigrationIncomingResponse
+	nil, // 53: worker.CreateSandboxRequest.EnvsEntry
+	nil, // 54: worker.CreateSandboxRequest.SecretAllowedHostsEntry
+	nil, // 55: worker.ExecCommandRequest.EnvsEntry
+	nil, // 56: worker.ExecSessionCreateRequest.EnvsEntry
 }
 var file_proto_worker_worker_proto_depIdxs = []int32{
-	47, // 0: worker.CreateSandboxRequest.envs:type_name -> worker.CreateSandboxRequest.EnvsEntry
-	48, // 1: worker.CreateSandboxRequest.secret_allowed_hosts:type_name -> worker.CreateSandboxRequest.SecretAllowedHostsEntry
+	53, // 0: worker.CreateSandboxRequest.envs:type_name -> worker.CreateSandboxRequest.EnvsEntry
+	54, // 1: worker.CreateSandboxRequest.secret_allowed_hosts:type_name -> worker.CreateSandboxRequest.SecretAllowedHostsEntry
 	6,  // 2: worker.ListSandboxesResponse.sandboxes:type_name -> worker.GetSandboxResponse
-	49, // 3: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
+	55, // 3: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
 	0,  // 4: worker.ExecOutputChunk.stream:type_name -> worker.ExecOutputChunk.Stream
 	17, // 5: worker.ListDirResponse.entries:type_name -> worker.DirEntry
 	22, // 6: worker.PTYInput.resize:type_name -> worker.PTYResize
-	50, // 7: worker.ExecSessionCreateRequest.envs:type_name -> worker.ExecSessionCreateRequest.EnvsEntry
+	56, // 7: worker.ExecSessionCreateRequest.envs:type_name -> worker.ExecSessionCreateRequest.EnvsEntry
 	36, // 8: worker.ExecSessionListResponse.sessions:type_name -> worker.ExecSessionInfoEntry
 	1,  // 9: worker.SandboxWorker.CreateSandbox:input_type -> worker.CreateSandboxRequest
 	3,  // 10: worker.SandboxWorker.DestroySandbox:input_type -> worker.DestroySandboxRequest
@@ -3060,30 +3405,36 @@ var file_proto_worker_worker_proto_depIdxs = []int32{
 	30, // 28: worker.SandboxWorker.BuildTemplate:input_type -> worker.BuildTemplateRequest
 	39, // 29: worker.SandboxWorker.GetSandboxStats:input_type -> worker.GetSandboxStatsRequest
 	45, // 30: worker.SandboxWorker.SetSandboxLimits:input_type -> worker.SetSandboxLimitsRequest
-	2,  // 31: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
-	4,  // 32: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
-	6,  // 33: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
-	8,  // 34: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
-	10, // 35: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
-	11, // 36: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
-	13, // 37: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
-	15, // 38: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
-	18, // 39: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
-	20, // 40: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
-	23, // 41: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
-	33, // 42: worker.SandboxWorker.ExecSessionCreate:output_type -> worker.ExecSessionCreateResponse
-	35, // 43: worker.SandboxWorker.ExecSessionList:output_type -> worker.ExecSessionListResponse
-	38, // 44: worker.SandboxWorker.ExecSessionKill:output_type -> worker.ExecSessionKillResponse
-	25, // 45: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
-	27, // 46: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
-	29, // 47: worker.SandboxWorker.SaveAsTemplate:output_type -> worker.SaveAsTemplateResponse
-	42, // 48: worker.SandboxWorker.CreateCheckpoint:output_type -> worker.CreateCheckpointResponse
-	44, // 49: worker.SandboxWorker.RestoreCheckpoint:output_type -> worker.RestoreCheckpointResponse
-	31, // 50: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
-	40, // 51: worker.SandboxWorker.GetSandboxStats:output_type -> worker.GetSandboxStatsResponse
-	46, // 52: worker.SandboxWorker.SetSandboxLimits:output_type -> worker.SetSandboxLimitsResponse
-	31, // [31:53] is the sub-list for method output_type
-	9,  // [9:31] is the sub-list for method input_type
+	47, // 31: worker.SandboxWorker.PrepareMigrationIncoming:input_type -> worker.PrepareMigrationIncomingRequest
+	49, // 32: worker.SandboxWorker.LiveMigrate:input_type -> worker.LiveMigrateRequest
+	51, // 33: worker.SandboxWorker.CompleteMigrationIncoming:input_type -> worker.CompleteMigrationIncomingRequest
+	2,  // 34: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
+	4,  // 35: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
+	6,  // 36: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
+	8,  // 37: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
+	10, // 38: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
+	11, // 39: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
+	13, // 40: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
+	15, // 41: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
+	18, // 42: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
+	20, // 43: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
+	23, // 44: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
+	33, // 45: worker.SandboxWorker.ExecSessionCreate:output_type -> worker.ExecSessionCreateResponse
+	35, // 46: worker.SandboxWorker.ExecSessionList:output_type -> worker.ExecSessionListResponse
+	38, // 47: worker.SandboxWorker.ExecSessionKill:output_type -> worker.ExecSessionKillResponse
+	25, // 48: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
+	27, // 49: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
+	29, // 50: worker.SandboxWorker.SaveAsTemplate:output_type -> worker.SaveAsTemplateResponse
+	42, // 51: worker.SandboxWorker.CreateCheckpoint:output_type -> worker.CreateCheckpointResponse
+	44, // 52: worker.SandboxWorker.RestoreCheckpoint:output_type -> worker.RestoreCheckpointResponse
+	31, // 53: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
+	40, // 54: worker.SandboxWorker.GetSandboxStats:output_type -> worker.GetSandboxStatsResponse
+	46, // 55: worker.SandboxWorker.SetSandboxLimits:output_type -> worker.SetSandboxLimitsResponse
+	48, // 56: worker.SandboxWorker.PrepareMigrationIncoming:output_type -> worker.PrepareMigrationIncomingResponse
+	50, // 57: worker.SandboxWorker.LiveMigrate:output_type -> worker.LiveMigrateResponse
+	52, // 58: worker.SandboxWorker.CompleteMigrationIncoming:output_type -> worker.CompleteMigrationIncomingResponse
+	34, // [34:59] is the sub-list for method output_type
+	9,  // [9:34] is the sub-list for method input_type
 	9,  // [9:9] is the sub-list for extension type_name
 	9,  // [9:9] is the sub-list for extension extendee
 	0,  // [0:9] is the sub-list for field type_name
@@ -3104,7 +3455,7 @@ func file_proto_worker_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_worker_worker_proto_rawDesc), len(file_proto_worker_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   50,
+			NumMessages:   56,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -607,6 +607,99 @@ func (s *Server) setTimeout(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// migrateSandbox performs live migration of a sandbox to a different worker.
+// POST /api/sandboxes/:id/migrate {"targetWorker": "w-azure-osb-worker-xxx"}
+func (s *Server) migrateSandbox(c echo.Context) error {
+	id := c.Param("id")
+	ctx := c.Request().Context()
+
+	var req struct {
+		TargetWorker string `json:"targetWorker"`
+	}
+	if err := c.Bind(&req); err != nil || req.TargetWorker == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "targetWorker is required"})
+	}
+
+	if s.workerRegistry == nil || s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "migration requires server mode with worker registry"})
+	}
+
+	// Look up sandbox to find source worker
+	session, err := s.store.GetSandboxSession(ctx, id)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	if session.Status != "running" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox must be running to migrate"})
+	}
+
+	// Get source and target worker gRPC clients
+	sourceClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "source worker unreachable: " + err.Error()})
+	}
+	targetClient, err := s.workerRegistry.GetWorkerClient(req.TargetWorker)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "target worker unreachable: " + err.Error()})
+	}
+
+	t0 := time.Now()
+
+	// Step 1: Prepare target worker — starts QEMU with -incoming tcp
+	// Use session config for VM parameters. Drives are created fresh on target;
+	// memory contents (including filesystem cache) migrate via QMP tcp.
+	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer prepCancel()
+	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
+		SandboxId: id,
+		CpuCount:  1,
+		MemoryMb:  1024,
+		GuestPort: 80,
+		Template:  session.Template,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
+	}
+
+	log.Printf("migrate %s: target prepared at %s (host port %d)", id, prepResp.IncomingAddr, prepResp.HostPort)
+
+	// Step 3: Live migrate from source to target
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer migrateCancel()
+	_, err = sourceClient.LiveMigrate(migrateCtx, &pb.LiveMigrateRequest{
+		SandboxId:    id,
+		IncomingAddr: prepResp.IncomingAddr,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "live migrate: " + err.Error()})
+	}
+
+	log.Printf("migrate %s: QMP migration complete (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Step 4: Complete migration on target (reconnect agent, patch network)
+	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer completeCancel()
+	_, err = targetClient.CompleteMigrationIncoming(completeCtx, &pb.CompleteMigrationIncomingRequest{
+		SandboxId: id,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "complete migration: " + err.Error()})
+	}
+
+	// Step 5: Update DB — sandbox now on target worker
+	_, _ = s.store.Pool().Exec(ctx, "UPDATE sandbox_sessions SET worker_id = $1 WHERE sandbox_id = $2", req.TargetWorker, id)
+
+	elapsed := time.Since(t0).Milliseconds()
+	log.Printf("migrate %s: complete in %dms (source=%s target=%s)", id, elapsed, session.WorkerID, req.TargetWorker)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID":    id,
+		"sourceWorker": session.WorkerID,
+		"targetWorker": req.TargetWorker,
+		"elapsedMs":    elapsed,
+	})
+}
+
 func (s *Server) setLimits(c echo.Context) error {
 	id := c.Param("id")
 	ctx := c.Request().Context()
