@@ -67,15 +67,6 @@
       ]
     },
     {
-      "group": "Sessions API",
-      "pages": [
-        "sessions-api/overview",
-        "sessions-api/sessions",
-        "sessions-api/messages",
-        "sessions-api/events"
-      ]
-    },
-    {
       "group": "Sandboxes",
       "pages": [
         "sandboxes/overview",
@@ -88,6 +79,15 @@
         "sandboxes/secrets",
         "sandboxes/patches",
         "sandboxes/preview-urls"
+      ]
+    },
+    {
+      "group": "Sessions API",
+      "pages": [
+        "sessions-api/overview",
+        "sessions-api/sessions",
+        "sessions-api/messages",
+        "sessions-api/events"
       ]
     },
     {
