@@ -3,24 +3,24 @@ title: "How It Works"
 description: "Architecture and key technical decisions"
 ---
 
-Your code talks to a **control plane** API, which provisions a Firecracker microVM on a worker node. Commands, file operations, and agent sessions run inside that VM — events and I/O stream back over WebSocket. The control plane transparently proxies data-plane requests to the correct worker.
+Your code talks to a **control plane** API, which provisions a virtual machine on a worker node. Commands, file operations, and agent sessions run inside that VM — events and I/O stream back over WebSocket. The control plane transparently proxies data-plane requests to the correct worker.
 
 SDK users only need an API key. The SDK handles routing automatically.
 
 <Steps>
   <Step title="Create">
-    Your code calls the control plane (`X-API-Key` auth). A Firecracker microVM boots in ~150ms.
+    Your code calls the control plane (`X-API-Key` auth). A VM boots from a golden snapshot in ~300ms.
   </Step>
   <Step title="Operate">
     Run commands, read/write files, start agent sessions. All execution happens inside the VM. The control plane routes requests to the correct worker automatically.
   </Step>
 </Steps>
 
-## Firecracker microVMs
+## Virtual Machines
 
 Each sandbox is a real virtual machine with its own Linux kernel, memory, and disk. Isolation is hardware-level (KVM), not namespace-based like containers.
 
-Why not containers? Containers share a kernel. A kernel exploit in one container compromises every other container on the host. Firecracker VMs eliminate that attack surface entirely — the same isolation model that powers AWS Lambda.
+Why not containers? Containers share a kernel. A kernel exploit in one container compromises every other container on the host. KVM-based VMs eliminate that attack surface entirely.
 
 ## Hibernation
 
