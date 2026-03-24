@@ -274,14 +274,14 @@ func TestDocumentedSandboxResponseFields(t *testing.T) {
 
 // TestDocumentedDefaultValues verifies that QEMU manager defaults match docs.
 //
-// Docs say: cpuCount=1, memoryMB=512, timeout=300, port=80
+// Docs say: cpuCount=1, memoryMB=256, timeout=300, port=80
 func TestDocumentedDefaultValues(t *testing.T) {
 	// NewManager applies defaults to zero-valued Config fields.
 	// We simulate that logic here since NewManager needs real dirs.
 	cfg := Config{DataDir: "/tmp"}
 	// Apply the same defaults as NewManager (lines 110-120 of manager.go)
 	if cfg.DefaultMemoryMB == 0 {
-		cfg.DefaultMemoryMB = 512
+		cfg.DefaultMemoryMB = 256
 	}
 	if cfg.DefaultCPUs == 0 {
 		cfg.DefaultCPUs = 1
@@ -296,7 +296,7 @@ func TestDocumentedDefaultValues(t *testing.T) {
 		expected int
 	}{
 		{"DefaultCPUs (docs: 1)", cfg.DefaultCPUs, 1},
-		{"DefaultMemoryMB (docs: 512)", cfg.DefaultMemoryMB, 512},
+		{"DefaultMemoryMB (docs: 256)", cfg.DefaultMemoryMB, 256},
 		{"DefaultPort (docs: 80)", cfg.DefaultPort, 80},
 	}
 

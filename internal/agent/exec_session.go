@@ -44,7 +44,7 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	cmd := exec.CommandContext(sessCtx, req.Command, req.Args...)
 	cmd.Dir = req.Cwd
 	if cmd.Dir == "" {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build environment: base < sandbox-level < per-command
@@ -55,8 +55,11 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	env = append(env, mapToEnv(req.Envs)...)
 	cmd.Env = env
 
-	// Run in its own process group (for clean kill on timeout)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Run as sandbox user in its own process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:    true,
+		Credential: sandboxCredential(),
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {

@@ -44,22 +44,26 @@ async function main() {
     green(`Created sandbox: ${sandbox.sandboxId}`);
     console.log();
 
-    // ── Test 1: Running as root ─────────────────────────────────
-    bold("━━━ Test 1: Running as root ━━━\n");
+    // ── Test 1: Running as sandbox user with sudo ──────────────
+    bold("━━━ Test 1: Running as sandbox user ━━━\n");
 
     const whoami = await sandbox.commands.run("whoami");
-    check("Running as root", whoami.stdout.trim() === "root",
+    check("Running as sandbox", whoami.stdout.trim() === "sandbox",
       `got "${whoami.stdout.trim()}"`);
 
     const idResult = await sandbox.commands.run("id -u");
-    check("UID is 0", idResult.stdout.trim() === "0",
+    check("UID is 1000", idResult.stdout.trim() === "1000",
       `got "${idResult.stdout.trim()}"`);
 
-    // ── Test 2: HOME is /root ───────────────────────────────────
+    const sudoResult = await sandbox.commands.run("sudo whoami");
+    check("sudo works (passwordless)", sudoResult.stdout.trim() === "root",
+      `got "${sudoResult.stdout.trim()}"`);
+
+    // ── Test 2: HOME is /home/sandbox ────────────────────────────
     bold("━━━ Test 2: HOME environment ━━━\n");
 
     const homeResult = await sandbox.commands.run("echo $HOME");
-    check("HOME is /root", homeResult.stdout.trim() === "/root",
+    check("HOME is /home/sandbox", homeResult.stdout.trim() === "/home/sandbox",
       `got "${homeResult.stdout.trim()}"`);
 
     // ── Test 3: /workspace is a separate disk ───────────────────

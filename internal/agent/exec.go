@@ -13,15 +13,24 @@ import (
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
-// baseEnv returns the current OS environment with HOME set to /root and
-// PATH guaranteed to include /usr/local/bin and /usr/local/sbin.
-// With overlayfs, the entire filesystem is backed by the data disk,
-// so /root (the standard root home) has full disk space available.
+const (
+	sandboxHome = "/home/sandbox"
+	sandboxUser = "sandbox"
+)
+
+// sandboxCredential returns the SysProcAttr.Credential for the sandbox user.
+func sandboxCredential() *syscall.Credential {
+	return &syscall.Credential{Uid: sandboxUID, Gid: sandboxGID}
+}
+
+// baseEnv returns the environment for sandbox user commands.
+// HOME is set to /home/sandbox, USER to sandbox, and
+// PATH is guaranteed to include /usr/local/bin and /usr/local/sbin.
 func baseEnv() []string {
 	var env []string
 	hasPath := false
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "HOME=") {
+		if strings.HasPrefix(e, "HOME=") || strings.HasPrefix(e, "USER=") || strings.HasPrefix(e, "LOGNAME=") {
 			continue
 		}
 		if strings.HasPrefix(e, "PATH=") {
@@ -39,7 +48,9 @@ func baseEnv() []string {
 	if !hasPath {
 		env = append(env, "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin")
 	}
-	env = append(env, "HOME=/root")
+	env = append(env, "HOME="+sandboxHome)
+	env = append(env, "USER="+sandboxUser)
+	env = append(env, "LOGNAME="+sandboxUser)
 	return env
 }
 
@@ -69,7 +80,7 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	} else {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build env: base < sandbox-level < per-command
@@ -83,8 +94,11 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		cmd.Env = append(cmd.Env, mapToEnv(req.Envs)...)
 	}
 
-	// Set process group so we can kill the entire tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Run as sandbox user in its own process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:    true,
+		Credential: sandboxCredential(),
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -151,7 +165,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	} else {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build env: base < sandbox-level < per-command
@@ -166,7 +180,8 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
+		Setpgid:    true,
+		Credential: sandboxCredential(),
 	}
 
 	stdoutPipe, err := cmd.StdoutPipe()

@@ -43,7 +43,7 @@ type SandboxConfig struct {
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	Timeout    int               `json:"timeout,omitempty"`    // seconds, default 300
 	CpuCount   int               `json:"cpuCount,omitempty"`   // default 1
-	MemoryMB   int               `json:"memoryMB,omitempty"`   // default 512
+	MemoryMB   int               `json:"memoryMB,omitempty"`   // default 256
 	Envs       map[string]string `json:"envs,omitempty"`
 	Port       int               `json:"port,omitempty"`       // container port to expose via subdomain (default 80)
 	NetworkEnabled bool          `json:"networkEnabled,omitempty"`

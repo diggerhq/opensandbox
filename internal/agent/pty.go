@@ -50,13 +50,15 @@ func (s *Server) PTYCreate(ctx context.Context, req *pb.PTYCreateRequest) (*pb.P
 	sessCtx, cancel := context.WithCancel(context.Background())
 
 	cmd := exec.CommandContext(sessCtx, shell)
-	cmd.Dir = "/root"
+	cmd.Dir = sandboxHome
 	cmd.Env = append(baseEnv(),
 		"TERM=xterm-256color",
 		fmt.Sprintf("COLUMNS=%d", req.Cols),
 		fmt.Sprintf("LINES=%d", req.Rows),
 	)
-	_ = syscall.Getuid() // keep syscall import for future use
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: sandboxCredential(),
+	}
 
 	cols := uint16(req.Cols)
 	rows := uint16(req.Rows)

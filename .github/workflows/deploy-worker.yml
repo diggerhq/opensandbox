@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 env:
-  SSH_USER: ubuntu
-  GOARCH: arm64
+  SSH_USER: azureuser
+  GOARCH: amd64
 
 jobs:
   deploy:
@@ -42,15 +42,15 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
-          ssh-keyscan -H ${{ secrets.WORKER_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
 
-      - name: Upload binaries
+      - name: Upload binaries and rootfs context to control plane
         run: |
-          scp -i ~/.ssh/deploy.pem bin/opensandbox-worker ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }}:/tmp/opensandbox-worker
-          scp -i ~/.ssh/deploy.pem bin/osb-agent ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }}:/tmp/osb-agent
+          # Upload binaries to control plane as staging area
+          scp -i ~/.ssh/deploy.pem bin/opensandbox-worker bin/osb-agent \
+            ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/
 
-      - name: Sync rootfs build context to instance
-        run: |
+          # Sync rootfs build context
           rsync -az \
             -e "ssh -i ~/.ssh/deploy.pem" \
             --include='deploy/ec2/build-rootfs-docker.sh' \
@@ -61,37 +61,90 @@ jobs:
             --include='deploy/firecracker/' \
             --include='scripts/' \
             --exclude='*' \
-            ./ ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }}:/tmp/osb-rootfs-ctx/
+            ./ ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/osb-rootfs-ctx/
 
-      - name: Install binaries, rebuild rootfs, and restart
+      - name: Discover workers and deploy
         run: |
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }} '
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
             set -euo pipefail
 
-            # Install binaries
-            sudo mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker
-            sudo chmod +x /usr/local/bin/opensandbox-worker
-            sudo mv /tmp/osb-agent /usr/local/bin/osb-agent
-            sudo chmod +x /usr/local/bin/osb-agent
+            API_KEY=$(grep OPENSANDBOX_API_KEY /etc/opensandbox/server.env | cut -d= -f2-)
 
-            # Rebuild rootfs with new agent baked in
-            # Read IMAGES_DIR from the worker systemd unit (matches OPENSANDBOX_IMAGES_DIR)
-            IMAGES_DIR=$(systemctl show opensandbox-worker -p Environment --value | tr " " "\n" | grep OPENSANDBOX_IMAGES_DIR | cut -d= -f2-)
-            IMAGES_DIR="${IMAGES_DIR:-/data/sandboxes/firecracker/images}"
-            echo "Rebuilding rootfs in $IMAGES_DIR"
-            cd /tmp/osb-rootfs-ctx
-            sudo rm -f "$IMAGES_DIR/default.ext4"
-            sudo bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent "$IMAGES_DIR" default
+            # Get all worker private IPs from the control plane API
+            WORKER_IPS=$(curl -sf -H "X-API-Key: $API_KEY" http://localhost:8080/api/workers \
+              | python3 -c "
+            import json, sys, re
+            workers = json.load(sys.stdin)
+            for w in workers:
+                addr = w.get(\"http_addr\", \"\")
+                # Extract IP from http://10.200.1.5:8081
+                m = re.search(r\"//([^:]+)\", addr)
+                if m:
+                    print(m.group(1))
+            ")
 
-            # Cleanup
+            if [ -z "$WORKER_IPS" ]; then
+              echo "ERROR: No workers found"
+              exit 1
+            fi
+
+            echo "Found workers:"
+            echo "$WORKER_IPS"
+
+            # Deploy to each worker
+            for IP in $WORKER_IPS; do
+              echo ""
+              echo "=== Deploying to worker $IP ==="
+
+              # Copy binaries from control plane to worker (via private network)
+              scp -o StrictHostKeyChecking=no /tmp/opensandbox-worker /tmp/osb-agent \
+                '"${{ env.SSH_USER }}"'@${IP}:/tmp/
+
+              # Copy rootfs build context
+              rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+                /tmp/osb-rootfs-ctx/ '"${{ env.SSH_USER }}"'@${IP}:/tmp/osb-rootfs-ctx/
+
+              # Install and restart on worker
+              ssh -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} "
+                set -euo pipefail
+
+                # Install binaries
+                sudo mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker
+                sudo chmod +x /usr/local/bin/opensandbox-worker
+                sudo mv /tmp/osb-agent /usr/local/bin/osb-agent
+                sudo chmod +x /usr/local/bin/osb-agent
+
+                # Rebuild rootfs with new agent
+                IMAGES_DIR=\$(grep OPENSANDBOX_IMAGES_DIR /etc/opensandbox/worker.env 2>/dev/null | cut -d= -f2- || echo '/data/firecracker/images')
+                IMAGES_DIR=\"\${IMAGES_DIR:-/data/firecracker/images}\"
+                echo \"Rebuilding rootfs in \$IMAGES_DIR\"
+                cd /tmp/osb-rootfs-ctx
+                sudo rm -f \"\$IMAGES_DIR/default.ext4\"
+                sudo bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent \"\$IMAGES_DIR\" default
+
+                # Delete golden snapshot so it rebuilds with new agent
+                DATA_DIR=\$(grep OPENSANDBOX_DATA_DIR /etc/opensandbox/worker.env 2>/dev/null | cut -d= -f2- || echo '/data/sandboxes')
+                sudo rm -rf \"\${DATA_DIR}/golden\" 2>/dev/null || true
+
+                # Cleanup
+                rm -rf /tmp/osb-rootfs-ctx
+
+                # Restart worker
+                sudo systemctl restart opensandbox-worker
+                echo \"Worker on \$(hostname) deployed and restarted\"
+              "
+
+              # Verify
+              sleep 3
+              ssh -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} \
+                "sudo systemctl is-active opensandbox-worker"
+              echo "=== Worker $IP: OK ==="
+            done
+
+            # Cleanup staging on control plane
+            rm -f /tmp/opensandbox-worker /tmp/osb-agent
             rm -rf /tmp/osb-rootfs-ctx
-
-            # Restart worker
-            sudo systemctl restart opensandbox-worker
           '
 
-      - name: Verify deployment
-        run: |
-          sleep 3
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.WORKER_IP }} 'sudo systemctl is-active opensandbox-worker'
-          echo "Worker deployed successfully!"
+      - name: Summary
+        run: echo "Worker deployment complete!"
