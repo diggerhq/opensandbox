@@ -40,6 +40,7 @@ func main() {
 	ctx := context.Background()
 
 	var mgr sandbox.Manager
+	var qemuMgr *qm.Manager // saved for rolling upgrade
 
 	// Backend-specific exec session factory
 	var execSessionFactory func(sandboxID string, req types.ExecSessionCreateRequest) (*sandbox.ExecSessionHandle, error)
@@ -100,6 +101,7 @@ func main() {
 		}
 
 		mgr = qmMgr
+		qemuMgr = qmMgr
 		autosaverSyncer = qmMgr
 
 		// Start metadata server (169.254.169.254 equivalent, served on :8888)
@@ -261,6 +263,12 @@ func main() {
 	})
 	defer sbRouter.Close()
 	log.Println("opensandbox-worker: sandbox router initialized (rolling timeouts, auto-wake)")
+
+	// Rolling agent upgrade: wake hibernated sandboxes with old agent, upgrade, re-hibernate.
+	// Runs in background so worker starts serving immediately.
+	if qemuMgr != nil && checkpointStore != nil {
+		go qemuMgr.RollingUpgradeHibernated(checkpointStore, 2)
+	}
 
 	// Metrics
 	metricsSrv := metrics.StartMetricsServer(":9091")

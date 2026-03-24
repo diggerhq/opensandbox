@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -318,6 +317,16 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 		return fmt.Errorf("golden agent not ready: %w", err)
 	}
 	log.Printf("qemu: golden VM booted, agent ready (%dms)", time.Since(t0).Milliseconds())
+
+	// Upgrade the agent in the golden VM if the rootfs image has an older version.
+	// This ensures every sandbox created from golden has the correct agent.
+	goldenVM := &VMInstance{
+		ID:            "golden",
+		agent:         agentClient,
+		agentSockPath: agentSockPath,
+	}
+	m.upgradeAgentIfNeeded(context.Background(), goldenVM)
+	agentClient = goldenVM.agent // may have been swapped by upgrade
 
 	// Load virtio_mem kernel module for memory scaling support.
 	// The module must be loaded before the golden snapshot so that restored
@@ -1557,6 +1566,20 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 	if err != nil {
 		return nil, err
 	}
+
+	// Check if agent needs upgrading before we hibernate.
+	// If so, we'll do a background wake→upgrade→re-hibernate after returning
+	// the hibernate result to the client, so the next wake is instant.
+	needsUpgrade := false
+	if m.cfg.AgentVersion != "" && m.cfg.AgentVersion != "dev" && vm.agent != nil {
+		vCtx, vCancel := context.WithTimeout(ctx, 3*time.Second)
+		ver, err := vm.agent.GetVersion(vCtx)
+		vCancel()
+		if err == nil && ver != m.cfg.AgentVersion {
+			needsUpgrade = true
+		}
+	}
+
 	result, err := m.doHibernate(ctx, vm, checkpointStore)
 	if err != nil {
 		return nil, err
@@ -1565,6 +1588,14 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 	m.mu.Lock()
 	delete(m.vms, sandboxID)
 	m.mu.Unlock()
+
+	if needsUpgrade && checkpointStore != nil {
+		go func() {
+			log.Printf("qemu: post-hibernate upgrade %s: agent outdated, doing wake→upgrade→re-hibernate", sandboxID)
+			result := m.rollingUpgradeOne(sandboxID, checkpointStore)
+			log.Printf("qemu: post-hibernate upgrade %s: %s", sandboxID, result)
+		}()
+	}
 
 	return result, nil
 }
@@ -1770,10 +1801,6 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	}
 	m.checkpointCacheMu.RUnlock()
 
-	// Pre-stage agent binary into rootfs qcow2 before QEMU boots.
-	// This avoids in-VM binary transfer — the VM boots with the correct agent.
-	m.prestageAgentBinary(sandboxID, rootfsPath)
-
 	// Step 4: Allocate new network
 	netCfg, err := m.subnets.Allocate()
 	if err != nil {
@@ -1884,6 +1911,8 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	vm.guestMAC = guestMAC
 	vm.bootArgs = bootArgs
 	vm.pid = cmd.Process.Pid
+
+	m.upgradeAgentIfNeeded(context.Background(), vm)
 
 	log.Printf("qemu: RestoreFromCheckpoint %s/%s: complete (%dms, port=%d, tap=%s)",
 		sandboxID, checkpointID, time.Since(t0).Milliseconds(), hostPort, netCfg.TAPName)
@@ -2341,132 +2370,239 @@ func (m *Manager) RecoverLocalSandboxes() []LocalRecovery {
 	return recoveries
 }
 
-// prestageAgentBinary replaces the agent binary inside a rootfs qcow2 image
-// BEFORE QEMU boots. Uses qemu-nbd to mount the qcow2 on the host, copies
-// the new binary, and unmounts. The VM then boots with the correct agent —
-// no in-VM transfer, no gRPC overhead, no contention issues.
-//
-// This must be called before startQEMU, while the qcow2 is not in use.
-// If the agent binary path or version is not configured, this is a no-op.
-func (m *Manager) prestageAgentBinary(sandboxID, rootfsPath string) {
-	if m.cfg.AgentVersion == "" || m.cfg.AgentVersion == "dev" || m.cfg.AgentBinaryPath == "" {
+// upgradeAgentIfNeeded checks the agent version inside a running VM and
+// hot-upgrades it if the version doesn't match. Transfers the binary in
+// 256KB chunks, then tells the agent to re-exec. Blocks until complete.
+func (m *Manager) upgradeAgentIfNeeded(ctx context.Context, vm *VMInstance) {
+	if m.cfg.AgentVersion == "" || m.cfg.AgentVersion == "dev" || m.cfg.AgentBinaryPath == "" || vm.agent == nil {
 		return
 	}
-	if !fileExists(m.cfg.AgentBinaryPath) {
+
+	versionCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	agentVersion, err := vm.agent.GetVersion(versionCtx)
+	if err != nil {
+		log.Printf("qemu: agent %s: GetVersion unavailable (pre-upgrade agent, skipping)", vm.ID)
+		return
+	}
+	if agentVersion == m.cfg.AgentVersion {
+		return
+	}
+	log.Printf("qemu: agent %s: version mismatch (agent=%s, expected=%s), upgrading", vm.ID, agentVersion, m.cfg.AgentVersion)
+
+	agentData, err := os.ReadFile(m.cfg.AgentBinaryPath)
+	if err != nil {
+		log.Printf("qemu: agent %s: upgrade failed (read binary): %v", vm.ID, err)
 		return
 	}
 
 	t0 := time.Now()
+	const chunkSize = 512 * 1024 // 512KB chunks
+	tmpPath := "/tmp/osb-agent-new"
 
-	// Find a free /dev/nbdN device. We use a per-sandbox temp dir for the mount.
-	nbdDev, err := findFreeNBD()
-	if err != nil {
-		log.Printf("qemu: prestage %s: no free nbd device: %v (skipping)", sandboxID, err)
-		return
-	}
+	createCtx, createCancel := context.WithTimeout(ctx, 5*time.Second)
+	vm.agent.WriteFileBinary(createCtx, tmpPath, []byte{}, 0755)
+	createCancel()
 
-	// Connect qcow2 to NBD device
-	connectCmd := exec.Command("qemu-nbd", "--connect", nbdDev, "--format", "qcow2", rootfsPath)
-	if out, err := connectCmd.CombinedOutput(); err != nil {
-		log.Printf("qemu: prestage %s: qemu-nbd connect failed: %v (%s)", sandboxID, err, strings.TrimSpace(string(out)))
-		return
-	}
-	// Always disconnect NBD when done
-	defer func() {
-		exec.Command("qemu-nbd", "--disconnect", nbdDev).Run()
-	}()
+	for offset := 0; offset < len(agentData); offset += chunkSize {
+		end := offset + chunkSize
+		if end > len(agentData) {
+			end = len(agentData)
+		}
 
-	// Brief pause to let the kernel register the block device
-	time.Sleep(200 * time.Millisecond)
-
-	// Mount the rootfs partition
-	mountDir := filepath.Join(os.TempDir(), "osb-prestage-"+sandboxID)
-	os.MkdirAll(mountDir, 0755)
-	defer os.RemoveAll(mountDir)
-
-	mountCmd := exec.Command("mount", "-o", "rw", nbdDev, mountDir)
-	if out, err := mountCmd.CombinedOutput(); err != nil {
-		// Try partition 1 if the whole device didn't work
-		mountCmd = exec.Command("mount", "-o", "rw", nbdDev+"p1", mountDir)
-		if out2, err2 := mountCmd.CombinedOutput(); err2 != nil {
-			log.Printf("qemu: prestage %s: mount failed: %v (%s / %s)", sandboxID, err, strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
+		chunkCtx, chunkCancel := context.WithTimeout(ctx, 120*time.Second)
+		err := vm.agent.WriteFileBinary(chunkCtx, tmpPath+".chunk", agentData[offset:end], 0644)
+		chunkCancel()
+		if err != nil {
+			log.Printf("qemu: agent %s: upgrade aborted (chunk at %d): %v", vm.ID, offset, err)
+			cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			vm.agent.Exec(cleanCtx, &pb.ExecRequest{
+				Command: "/bin/sh",
+				Args:    []string{"-c", fmt.Sprintf("rm -f %s %s.chunk", tmpPath, tmpPath)},
+			})
+			cleanCancel()
 			return
 		}
-	}
-	defer exec.Command("umount", mountDir).Run()
 
-	// Check current agent version inside the image
-	agentPath := filepath.Join(mountDir, "usr/local/bin/osb-agent")
-	needsUpdate := true
-
-	// Quick version check: run the existing agent with a version flag if possible,
-	// or just compare file sizes as a heuristic. For reliability, always overwrite
-	// if we can't confirm the version matches.
-	hostInfo, err := os.Stat(m.cfg.AgentBinaryPath)
-	if err == nil {
-		guestInfo, gErr := os.Stat(agentPath)
-		if gErr == nil && guestInfo.Size() == hostInfo.Size() {
-			// Same size — likely same binary, skip copy
-			needsUpdate = false
-		}
+		appendCtx, appendCancel := context.WithTimeout(ctx, 5*time.Second)
+		_, _ = vm.agent.Exec(appendCtx, &pb.ExecRequest{
+			Command: "/bin/sh",
+			Args:    []string{"-c", fmt.Sprintf("cat %s.chunk >> %s", tmpPath, tmpPath)},
+		})
+		appendCancel()
 	}
 
-	if !needsUpdate {
-		log.Printf("qemu: prestage %s: agent binary already up-to-date (skipping, %dms)", sandboxID, time.Since(t0).Milliseconds())
+	chmodCtx, chmodCancel := context.WithTimeout(ctx, 5*time.Second)
+	_, _ = vm.agent.Exec(chmodCtx, &pb.ExecRequest{
+		Command: "/bin/sh",
+		Args:    []string{"-c", fmt.Sprintf("chmod +x %s && rm -f %s.chunk", tmpPath, tmpPath)},
+	})
+	chmodCancel()
+
+	log.Printf("qemu: agent %s: binary written (%d bytes, %d chunks, %dms)",
+		vm.ID, len(agentData), (len(agentData)+chunkSize-1)/chunkSize, time.Since(t0).Milliseconds())
+
+	upgradeCtx, upgradeCancel := context.WithTimeout(ctx, 10*time.Second)
+	if err := vm.agent.Upgrade(upgradeCtx, tmpPath); err != nil {
+		upgradeCancel()
+		log.Printf("qemu: agent %s: upgrade RPC failed: %v", vm.ID, err)
 		return
 	}
+	upgradeCancel()
 
-	// Copy the new agent binary
-	if err := copyFile(m.cfg.AgentBinaryPath, agentPath); err != nil {
-		log.Printf("qemu: prestage %s: copy agent failed: %v", sandboxID, err)
-		return
-	}
-	os.Chmod(agentPath, 0755)
+	log.Printf("qemu: agent %s: upgrade initiated, waiting for new version...", vm.ID)
 
-	log.Printf("qemu: prestage %s: agent binary updated in rootfs (%dms)", sandboxID, time.Since(t0).Milliseconds())
-}
-
-// findFreeNBD finds an unused /dev/nbdN device.
-func findFreeNBD() (string, error) {
-	// Ensure nbd module is loaded
-	exec.Command("modprobe", "nbd", "max_part=8").Run()
-
-	for i := 0; i < 16; i++ {
-		dev := fmt.Sprintf("/dev/nbd%d", i)
-		if _, err := os.Stat(dev); err != nil {
-			continue
-		}
-		// Check if it's in use by reading the size — unused NBD devices report 0
-		sizeFile := fmt.Sprintf("/sys/block/nbd%d/size", i)
-		data, err := os.ReadFile(sizeFile)
+	// Poll the existing connection until either:
+	// 1. GetVersion returns the new version (re-exec completed, new agent up)
+	// 2. The connection breaks (re-exec killed the old process)
+	// 3. Timeout (30s)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		pollCtx, pollCancel := context.WithTimeout(ctx, 2*time.Second)
+		ver, err := vm.agent.GetVersion(pollCtx)
+		pollCancel()
 		if err != nil {
-			continue
+			// Connection broke — old agent is gone, new one starting
+			break
 		}
-		if strings.TrimSpace(string(data)) == "0" {
-			return dev, nil
+		if ver == m.cfg.AgentVersion {
+			// New agent is already up on the same connection
+			log.Printf("qemu: agent %s: upgraded to %s (%dms total)", vm.ID, m.cfg.AgentVersion, time.Since(t0).Milliseconds())
+			return
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return "", fmt.Errorf("all /dev/nbd[0-15] devices in use")
+
+	// Old connection is dead — reconnect to the new agent
+	vm.agent.Close()
+	newAgent, err := m.waitForAgentSocket(ctx, vm.agentSockPath, 30*time.Second)
+	if err != nil {
+		log.Printf("qemu: agent %s: reconnect failed: %v", vm.ID, err)
+		fallback, fbErr := m.waitForAgentSocket(ctx, vm.agentSockPath, 15*time.Second)
+		if fbErr == nil {
+			vm.agent = fallback
+			log.Printf("qemu: agent %s: fallback reconnect succeeded", vm.ID)
+		}
+		return
+	}
+	vm.agent = newAgent
+	log.Printf("qemu: agent %s: upgraded to %s (%dms total)", vm.ID, m.cfg.AgentVersion, time.Since(t0).Milliseconds())
 }
 
-// copyFile copies src to dst using io.Copy.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+// RollingUpgradeHibernated wakes each hibernated sandbox on disk, upgrades the
+// agent if needed, and re-hibernates it. This runs in the background on worker
+// startup so that future client wakes never hit a version mismatch.
+// concurrency controls how many VMs are upgraded simultaneously.
+func (m *Manager) RollingUpgradeHibernated(checkpointStore *storage.CheckpointStore, concurrency int) {
+	if m.cfg.AgentVersion == "" || m.cfg.AgentVersion == "dev" || m.cfg.AgentBinaryPath == "" {
+		return
 	}
-	defer in.Close()
+	if concurrency <= 0 {
+		concurrency = 2
+	}
 
-	out, err := os.Create(dst)
+	sandboxesDir := filepath.Join(m.cfg.DataDir, "sandboxes")
+	entries, err := os.ReadDir(sandboxesDir)
 	if err != nil {
-		return err
+		log.Printf("qemu: rolling-upgrade: cannot read %s: %v", sandboxesDir, err)
+		return
 	}
-	defer out.Close()
 
-	if _, err := io.Copy(out, in); err != nil {
-		return err
+	// Find hibernated sandboxes (have snapshot-meta.json, not currently running)
+	var candidates []string
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "sb-") {
+			continue
+		}
+		sid := e.Name()
+		metaPath := filepath.Join(sandboxesDir, sid, "snapshot", "snapshot-meta.json")
+		if !fileExists(metaPath) {
+			continue
+		}
+		// Skip if already running
+		m.mu.RLock()
+		_, running := m.vms[sid]
+		m.mu.RUnlock()
+		if running {
+			continue
+		}
+		candidates = append(candidates, sid)
 	}
-	return out.Close()
+
+	if len(candidates) == 0 {
+		log.Printf("qemu: rolling-upgrade: no hibernated sandboxes to upgrade")
+		return
+	}
+	log.Printf("qemu: rolling-upgrade: found %d hibernated sandboxes, upgrading (concurrency=%d)", len(candidates), concurrency)
+
+	sem := make(chan struct{}, concurrency)
+	var upgraded, skipped, failed int
+	var mu sync.Mutex
+
+	var wg sync.WaitGroup
+	for _, sid := range candidates {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(sandboxID string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			result := m.rollingUpgradeOne(sandboxID, checkpointStore)
+			mu.Lock()
+			switch result {
+			case "upgraded":
+				upgraded++
+			case "skipped":
+				skipped++
+			default:
+				failed++
+			}
+			mu.Unlock()
+		}(sid)
+	}
+	wg.Wait()
+
+	log.Printf("qemu: rolling-upgrade: complete (%d upgraded, %d skipped, %d failed)", upgraded, skipped, failed)
+}
+
+// rollingUpgradeOne wakes a single hibernated sandbox, upgrades the agent
+// (handled by upgradeAgentIfNeeded inside doWake), and re-hibernates to
+// bake the new agent into the snapshot. Returns "upgraded", "skipped", or "failed".
+func (m *Manager) rollingUpgradeOne(sandboxID string, checkpointStore *storage.CheckpointStore) string {
+	t0 := time.Now()
+
+	// Wake — upgradeAgentIfNeeded runs inside doWake if version mismatches
+	_, err := m.doWake(context.Background(), sandboxID, "local://rolling-upgrade", checkpointStore, 60)
+	if err != nil {
+		log.Printf("qemu: rolling-upgrade %s: wake failed: %v", sandboxID, err)
+		return "failed"
+	}
+
+	m.mu.RLock()
+	vm, ok := m.vms[sandboxID]
+	m.mu.RUnlock()
+	if !ok {
+		log.Printf("qemu: rolling-upgrade %s: VM not found after wake", sandboxID)
+		return "failed"
+	}
+
+	// Re-hibernate to bake the upgraded agent into the snapshot
+	_, err = m.doHibernate(context.Background(), vm, checkpointStore)
+	if err != nil {
+		log.Printf("qemu: rolling-upgrade %s: re-hibernate failed: %v", sandboxID, err)
+		m.destroyVM(vm)
+		m.mu.Lock()
+		delete(m.vms, sandboxID)
+		m.mu.Unlock()
+		return "failed"
+	}
+
+	m.mu.Lock()
+	delete(m.vms, sandboxID)
+	m.mu.Unlock()
+
+	log.Printf("qemu: rolling-upgrade %s: done (%dms)", sandboxID, time.Since(t0).Milliseconds())
+	return "upgraded"
 }
 
 // dropPageCache evicts a file's pages from the kernel page cache.
