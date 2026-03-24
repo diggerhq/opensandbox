@@ -47,7 +47,7 @@ async function main() {
     // ── Setup: Create sandbox with a persistent server ──────────────
     bold("━━━ Setup: Create sandbox with counter server ━━━\n");
 
-    sandbox = await Sandbox.create({ template: "node", timeout: 300 });
+    sandbox = await Sandbox.create({ timeout: 300 });
     green(`Created: ${sandbox.sandboxId}`);
     dim(`Domain: ${sandbox.domain}`);
 

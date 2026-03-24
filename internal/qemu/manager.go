@@ -54,6 +54,7 @@ type VMInstance struct {
 	guestCID      uint32
 	bootArgs      string
 	restoring     chan struct{}
+	opMu          sync.Mutex   // serializes destructive VM ops (checkpoint, restore, hibernate)
 	baseMemoryMB         int  // initial memory passed to -m (before virtio-mem)
 	virtioMemRequestedMB int  // additional memory via virtio-mem (beyond base)
 }
@@ -1567,6 +1568,9 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 		return nil, err
 	}
 
+	vm.opMu.Lock()
+	defer vm.opMu.Unlock()
+
 	// Check if agent needs upgrading before we hibernate.
 	// If so, we'll do a background wake→upgrade→re-hibernate after returning
 	// the hibernate result to the client, so the next wake is instant.
@@ -1635,10 +1639,13 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", err
 	}
 
+	vm.opMu.Lock()
+	defer vm.opMu.Unlock()
+
 	t0 := time.Now()
 
 	if vm.qmp == nil {
-		return "", "", fmt.Errorf("no QMP client for VM %s", sandboxID)
+		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	// Sync filesystem and quiesce agent before snapshot.
@@ -1665,6 +1672,9 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 
 	// savevm creates an internal snapshot — memory + device state + disk deltas
 	// all stored inside the qcow2 files. The VM pauses during savevm and resumes after.
+	if vm.qmp == nil {
+		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
+	}
 	snapshotName := "cp-" + checkpointID
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
 		return "", "", fmt.Errorf("savevm failed: %w", err)
@@ -1737,6 +1747,9 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	if err != nil {
 		return err
 	}
+
+	vm.opMu.Lock()
+	defer vm.opMu.Unlock()
 
 	t0 := time.Now()
 

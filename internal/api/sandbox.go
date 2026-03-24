@@ -30,14 +30,14 @@ func (s *Server) createSandbox(c echo.Context) error {
 	if cfg.CpuCount < 0 {
 		cfg.CpuCount = 0
 	}
-	if cfg.CpuCount > 4 {
+	if cfg.CpuCount > 16 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "cpuCount must not exceed 4",
+			"error": "cpuCount must not exceed 16",
 		})
 	}
-	if cfg.MemoryMB > 2048 {
+	if cfg.MemoryMB > 16384 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "memoryMB must not exceed 2048",
+			"error": "memoryMB must not exceed 16384",
 		})
 	}
 	if cfg.MemoryMB < 0 {
@@ -301,12 +301,15 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 	grpcCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
+	// Save requested resource limits — create with defaults (golden snapshot),
+	// then scale up after creation. This avoids needing a golden per CPU config.
+	requestedMemoryMB := cfg.MemoryMB
+	requestedCpuCount := cfg.CpuCount
+
 	grpcResp, err := grpcClient.CreateSandbox(grpcCtx, &pb.CreateSandboxRequest{
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
-		MemoryMb:             int32(cfg.MemoryMB),
-		CpuCount:             int32(cfg.CpuCount),
 		NetworkEnabled:       cfg.NetworkEnabled,
 		Port:                 int32(cfg.Port),
 		TemplateRootfsKey:    templateRootfsKey,
@@ -316,6 +319,37 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "worker create failed: " + err.Error(),
 		})
+	}
+
+	// Scale to requested resources after creation (virtio-mem hotplug + cgroup).
+	// Golden snapshot has fixed CPU/RAM — we create with defaults then scale up.
+	if requestedMemoryMB > 0 || requestedCpuCount > 0 {
+		scaleMB := requestedMemoryMB
+		if scaleMB <= 0 {
+			scaleMB = 1024
+		}
+		cpuCount := requestedCpuCount
+		if cpuCount <= 0 {
+			cpuCount = scaleMB / 4096 // 1 vCPU per 4GB
+			if cpuCount < 1 {
+				cpuCount = 1
+			}
+		}
+		maxMemBytes := int64(scaleMB) * 1024 * 1024
+		cpuPeriod := int64(100000)
+		cpuMax := int64(cpuCount) * cpuPeriod
+
+		scaleCtx, scaleCancel := context.WithTimeout(ctx, 10*time.Second)
+		_, scaleErr := grpcClient.SetSandboxLimits(scaleCtx, &pb.SetSandboxLimitsRequest{
+			SandboxId:      grpcResp.SandboxId,
+			MaxMemoryBytes: maxMemBytes,
+			CpuMaxUsec:     cpuMax,
+			CpuPeriodUsec:  cpuPeriod,
+		})
+		scaleCancel()
+		if scaleErr != nil {
+			log.Printf("sandbox: post-create scale failed for %s: %v (continuing with defaults)", grpcResp.SandboxId, scaleErr)
+		}
 	}
 
 	// Issue sandbox-scoped JWT (24h TTL — independent of sandbox idle timeout)
@@ -349,6 +383,9 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		"status":    grpcResp.Status,
 		"region":    region,
 		"workerID":  worker.ID,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusCreated, resp)
@@ -414,6 +451,9 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 			"template":  session.Template,
 			"startedAt": session.StartedAt,
 		}
+		if s.sandboxDomain != "" {
+			resp["sandboxDomain"] = s.sandboxDomain
+		}
 		return c.JSON(http.StatusOK, resp)
 	}
 
@@ -434,6 +474,9 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		"workerID":  session.WorkerID,
 		"startedAt": session.StartedAt,
 		"template":  session.Template,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusOK, resp)
@@ -714,9 +757,9 @@ func (s *Server) setLimits(c echo.Context) error {
 		})
 	}
 
-	// Auto-calculate CPU from memory: 1 vCPU per 1GB
+	// Auto-calculate CPU from memory: 1 vCPU per 4GB
 	if req.MemoryMB > 0 && req.CPUPercent == 0 {
-		req.CPUPercent = (req.MemoryMB * 100) / 1024
+		req.CPUPercent = (req.MemoryMB * 100) / 4096
 		if req.CPUPercent < 100 {
 			req.CPUPercent = 100
 		}
@@ -762,8 +805,8 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memoryMB is required and must be positive"})
 	}
 
-	// Auto-calculate: 1 vCPU per 1GB = 100% CPU per 1024MB
-	cpuPercent := (req.MemoryMB * 100) / 1024
+	// Auto-calculate: 1 vCPU per 4GB = 100% CPU per 4096MB
+	cpuPercent := (req.MemoryMB * 100) / 4096
 	if cpuPercent < 100 {
 		cpuPercent = 100
 	}
@@ -1069,12 +1112,14 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	}
 
 	resp := map[string]interface{}{
-		"sandboxID":  sandboxID,
-		"connectURL": worker.HTTPAddr,
-		"token":      token,
-		"status":     grpcResp.Status,
-		"region":     region,
-		"workerID":   worker.ID,
+		"sandboxID": sandboxID,
+		"token":     token,
+		"status":    grpcResp.Status,
+		"region":    region,
+		"workerID":  worker.ID,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusOK, resp)
@@ -1521,14 +1566,18 @@ func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{
 		}
 	}()
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"sandboxID":        sandboxID,
 		"status":           "creating",
 		"token":            token,
 		"region":           region,
 		"workerID":         workerID,
 		"fromCheckpointId": checkpointID.String(),
-	}, http.StatusCreated, nil
+	}
+	if s.sandboxDomain != "" {
+		result["sandboxDomain"] = s.sandboxDomain
+	}
+	return result, http.StatusCreated, nil
 }
 
 // deleteCheckpoint deletes a checkpoint.

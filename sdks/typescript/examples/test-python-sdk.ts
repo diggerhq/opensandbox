@@ -84,7 +84,7 @@ async function main() {
     // --- Create sandbox with Python template ---
     bold("[1/4] Creating Python sandbox...");
     sandbox = await Sandbox.create({
-      template: "python",
+      template: "base",
       timeout: 120,
     });
     green(`Created: ${sandbox.sandboxId}`);

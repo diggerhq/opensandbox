@@ -145,8 +145,9 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 		DialContext: (&net.Dialer{
 			Timeout: 5 * time.Second,
 		}).DialContext,
-		ResponseHeaderTimeout: 120 * time.Second, // exec/run can be long
+		ResponseHeaderTimeout: 600 * time.Second, // exec/run can take minutes (npm build, etc.)
 		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       120 * time.Second,
 	}
 
 	var proxyErr error

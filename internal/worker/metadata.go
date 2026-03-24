@@ -184,7 +184,7 @@ func (ms *MetadataServer) handleLimits(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /v1/scale → accepts {"memoryMB", "cpuPercent", "pids"}, applies cgroup limits.
-// Pricing model: 1 vCPU per 1GB RAM. memoryMB=2048 → cpuPercent=200 (2 vCPUs).
+// Pricing model: 1 vCPU per 4GB RAM. memoryMB=4096 → cpuPercent=100 (1 vCPU).
 func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -206,9 +206,9 @@ func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-calculate CPU from memory: 1 vCPU per 1GB
+	// Auto-calculate CPU from memory: 1 vCPU per 4GB
 	if req.MemoryMB > 0 && req.CPUPercent == 0 {
-		req.CPUPercent = (req.MemoryMB * 100) / 1024
+		req.CPUPercent = (req.MemoryMB * 100) / 4096
 		if req.CPUPercent < 100 {
 			req.CPUPercent = 100
 		}

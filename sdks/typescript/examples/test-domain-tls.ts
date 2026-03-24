@@ -87,7 +87,7 @@ async function main() {
 
     // Create 3 sandboxes and verify unique domains
     for (let i = 0; i < 3; i++) {
-      const sb = await Sandbox.create({ template: "node", timeout: 120 });
+      const sb = await Sandbox.create({ timeout: 120 });
       sandboxes.push(sb);
       dim(`Sandbox ${i + 1}: ${sb.sandboxId} → ${sb.domain}`);
     }
@@ -117,13 +117,15 @@ async function main() {
     try {
       const certInfo = await getTlsCertInfo(sandboxes[0].domain);
       check("TLS certificate is valid", certInfo.valid);
-      check("Certificate issued by Let's Encrypt or similar",
+      check("Certificate issued by trusted CA",
         certInfo.issuer.includes("Let's Encrypt") ||
         certInfo.issuer.includes("R3") ||
         certInfo.issuer.includes("R10") ||
         certInfo.issuer.includes("R11") ||
         certInfo.issuer.includes("E5") ||
-        certInfo.issuer.includes("E6"),
+        certInfo.issuer.includes("E6") ||
+        certInfo.issuer.includes("Google Trust Services") ||
+        certInfo.issuer.includes("GTS"),
         certInfo.issuer);
       dim(`Issuer: ${certInfo.issuer}`);
       dim(`Subject: ${certInfo.subject}`);
