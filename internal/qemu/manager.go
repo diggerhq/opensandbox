@@ -144,7 +144,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg.QEMUBin = "qemu-system-x86_64"
 	}
 	if cfg.DefaultMemoryMB == 0 {
-		cfg.DefaultMemoryMB = 512
+		cfg.DefaultMemoryMB = 256
 	}
 	if cfg.DefaultCPUs == 0 {
 		cfg.DefaultCPUs = 1
@@ -655,10 +655,19 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 
 	// Mount /workspace — the golden snapshot was taken with /workspace unmounted
 	// to keep the vdb device state clean for fresh workspace qcow2 files.
+	// Then bind-mount /home/sandbox onto /workspace/.home so that user home writes
+	// (cargo install, rustup, pip --user, etc.) use the large workspace disk
+	// instead of the small ~1.7GB rootfs.
 	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, mountErr := agentClient.Exec(mountCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
-		Args:    []string{"-c", "mount /dev/vdb /workspace 2>/dev/null || true"},
+		Args: []string{"-c", strings.Join([]string{
+			"mount /dev/vdb /workspace 2>/dev/null || true",
+			"mkdir -p /workspace/.home",
+			"cp -a /home/sandbox/. /workspace/.home/ 2>/dev/null || true",
+			"mount --bind /workspace/.home /home/sandbox",
+			"chown 1000:1000 /workspace /workspace/.home",
+		}, " && ")},
 	})
 	mountCancel()
 	if mountErr != nil {
@@ -720,7 +729,9 @@ func patchGuestNetwork(ctx context.Context, agent *AgentClient, netCfg *NetworkC
 		"ip addr flush dev eth0 && "+
 			"ip addr add %s/%d dev eth0 && "+
 			"ip link set eth0 up && "+
-			"ip route add default via %s",
+			"ip route add default via %s && "+
+			"echo 'nameserver 8.8.8.8' > /etc/resolv.conf && "+
+			"echo 'nameserver 1.1.1.1' >> /etc/resolv.conf",
 		netCfg.GuestIP, prefixLen, netCfg.HostIP,
 	)
 

@@ -203,10 +203,10 @@ func (s *Server) WriteFileStream(stream pb.SandboxAgent_WriteFileStreamServer) e
 	return stream.SendAndClose(&pb.WriteFileStreamResponse{BytesWritten: total})
 }
 
-// resolvePath ensures paths are rooted in /root for relative paths.
+// resolvePath ensures paths are rooted in the sandbox home for relative paths.
 func resolvePath(path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}
-	return filepath.Join("/root", path)
+	return filepath.Join(sandboxHome, path)
 }

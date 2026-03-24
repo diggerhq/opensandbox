@@ -258,6 +258,41 @@ func (s *HTTPServer) execRun(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cmd is required"})
 	}
 
+	// For long-running commands (timeout > 30s), send response headers
+	// immediately and write periodic keepalive whitespace. This prevents
+	// Cloudflare (and other reverse proxies) from timing out:
+	//   - 524 first-byte timeout (~100s): solved by sending headers early
+	//   - Body idle timeout (~600s): solved by periodic space bytes
+	// JSON parsers ignore leading whitespace, so the final JSON body
+	// is parsed cleanly regardless of how many spaces precede it.
+	earlyFlush := req.Timeout > 30
+	var keepaliveDone chan struct{}
+	if earlyFlush {
+		c.Response().Header().Set("Content-Type", "application/json")
+		c.Response().WriteHeader(http.StatusOK)
+		flusher, _ := c.Response().Writer.(http.Flusher)
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+		keepaliveDone = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					c.Response().Write([]byte(" "))
+					if flusher != nil {
+						flusher.Flush()
+					}
+				case <-keepaliveDone:
+					return
+				}
+			}
+		}()
+	}
+
 	var result *types.ProcessResult
 
 	routeOp := func(ctx context.Context) error {
@@ -266,16 +301,27 @@ func (s *HTTPServer) execRun(c echo.Context) error {
 		return err
 	}
 
+	var execErr error
 	if s.router != nil {
-		if err := s.router.Route(c.Request().Context(), id, "execRun", routeOp); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		}
+		execErr = s.router.Route(c.Request().Context(), id, "execRun", routeOp)
 	} else {
-		if err := routeOp(c.Request().Context()); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		}
+		execErr = routeOp(c.Request().Context())
 	}
 
+	if keepaliveDone != nil {
+		close(keepaliveDone)
+	}
+
+	if execErr != nil {
+		if earlyFlush {
+			return json.NewEncoder(c.Response()).Encode(map[string]string{"error": execErr.Error()})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": execErr.Error()})
+	}
+
+	if earlyFlush {
+		return json.NewEncoder(c.Response()).Encode(result)
+	}
 	return c.JSON(http.StatusOK, result)
 }
 

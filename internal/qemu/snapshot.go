@@ -397,11 +397,16 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("agent not ready: %w", err)
 	}
 
-	// Mount workspace (was unmounted before savevm) + patch network + clock
+	// Mount workspace (was unmounted before savevm) + bind-mount /home/sandbox onto workspace
 	postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, _ = agentClient.Exec(postCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
-		Args:    []string{"-c", "mount /dev/vdb /workspace 2>/dev/null || true"},
+		Args: []string{"-c", strings.Join([]string{
+			"mount /dev/vdb /workspace 2>/dev/null || true",
+			"mkdir -p /workspace/.home",
+			"mount --bind /workspace/.home /home/sandbox 2>/dev/null || true",
+			"chown 1000:1000 /workspace /workspace/.home",
+		}, " && ")},
 	})
 	postCancel()
 

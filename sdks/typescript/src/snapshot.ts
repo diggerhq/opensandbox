@@ -54,10 +54,10 @@ export class Snapshots {
    * The server boots a sandbox, runs the image steps, checkpoints it, and stores it under the given name.
    */
   async create(opts: CreateSnapshotOpts): Promise<SnapshotInfo> {
-    const headers: Record<string, string> = { ...this.headers };
-    if (opts.onBuildLogs) {
-      headers["Accept"] = "text/event-stream";
-    }
+    const headers: Record<string, string> = {
+      ...this.headers,
+      Accept: "text/event-stream",
+    };
 
     const resp = await fetch(`${this.apiUrl}/snapshots`, {
       method: "POST",
@@ -73,8 +73,9 @@ export class Snapshots {
       throw new Error(`Failed to create snapshot: ${resp.status} ${text}`);
     }
 
-    if (opts.onBuildLogs && resp.headers.get("content-type")?.includes("text/event-stream")) {
-      return parseSSEStream<SnapshotInfo>(resp, opts.onBuildLogs);
+    if (resp.headers.get("content-type")?.includes("text/event-stream")) {
+      const onLog = opts.onBuildLogs ?? (() => {});
+      return parseSSEStream<SnapshotInfo>(resp, onLog);
     }
 
     return resp.json();
