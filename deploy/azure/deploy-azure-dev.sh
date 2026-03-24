@@ -163,12 +163,14 @@ set -euo pipefail
 export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
 cd ~/opensandbox
 
+VERSION=$(cat VERSION 2>/dev/null || echo "dev")
+echo "Building version $VERSION..."
 echo "Building server..."
 CGO_ENABLED=0 go build -o bin/opensandbox-server ./cmd/server/
 echo "Building worker..."
-CGO_ENABLED=0 go build -o bin/opensandbox-worker ./cmd/worker/
+CGO_ENABLED=0 go build -ldflags="-X main.AgentVersion=$VERSION" -o bin/opensandbox-worker ./cmd/worker/
 echo "Building agent..."
-CGO_ENABLED=0 GOARCH=amd64 go build -o bin/osb-agent ./cmd/agent/
+CGO_ENABLED=0 GOARCH=amd64 go build -ldflags="-X main.Version=$VERSION" -o bin/osb-agent ./cmd/agent/
 
 # Stop services before overwriting binaries (avoids "text file busy")
 sudo systemctl stop opensandbox-worker 2>/dev/null || true

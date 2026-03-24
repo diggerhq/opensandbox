@@ -287,9 +287,6 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("workspace not found at %s", workspacePath)
 	}
 
-	// Pre-stage agent binary into rootfs before QEMU boots.
-	m.prestageAgentBinary(sandboxID, rootfsPath)
-
 	// Step 3: Set up network
 	netCfg, err := m.subnets.Allocate()
 	if err != nil {
@@ -449,6 +446,8 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 	vm.agent = agentClient
 
+	m.upgradeAgentIfNeeded(context.Background(), vm)
+
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
@@ -493,9 +492,6 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 		}
 		log.Printf("qemu: cold-boot-local %s: rootfs recreated from template %q", sandboxID, meta.Template)
 	}
-
-	// Pre-stage agent binary into rootfs before QEMU boots.
-	m.prestageAgentBinary(sandboxID, rootfsPath)
 
 	netCfg, err := m.subnets.Allocate()
 	if err != nil {
