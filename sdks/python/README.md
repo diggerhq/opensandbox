@@ -5,7 +5,7 @@ Python SDK for [OpenComputer](https://github.com/diggerhq/opensandbox) — cloud
 ## Install
 
 ```bash
-pip install opencomputer
+pip install opencomputer-sdk
 ```
 
 ## Quick Start

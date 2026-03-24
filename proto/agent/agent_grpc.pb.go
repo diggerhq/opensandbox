@@ -23,6 +23,8 @@ const (
 	SandboxAgent_ExecStream_FullMethodName        = "/agent.SandboxAgent/ExecStream"
 	SandboxAgent_ReadFile_FullMethodName          = "/agent.SandboxAgent/ReadFile"
 	SandboxAgent_WriteFile_FullMethodName         = "/agent.SandboxAgent/WriteFile"
+	SandboxAgent_ReadFileStream_FullMethodName    = "/agent.SandboxAgent/ReadFileStream"
+	SandboxAgent_WriteFileStream_FullMethodName   = "/agent.SandboxAgent/WriteFileStream"
 	SandboxAgent_ListDir_FullMethodName           = "/agent.SandboxAgent/ListDir"
 	SandboxAgent_MakeDir_FullMethodName           = "/agent.SandboxAgent/MakeDir"
 	SandboxAgent_Remove_FullMethodName            = "/agent.SandboxAgent/Remove"
@@ -60,6 +62,9 @@ type SandboxAgentClient interface {
 	// Filesystem operations
 	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error)
 	WriteFile(ctx context.Context, in *WriteFileRequest, opts ...grpc.CallOption) (*WriteFileResponse, error)
+	// Streaming file operations for large files (256KB chunks over vsock gRPC)
+	ReadFileStream(ctx context.Context, in *ReadFileStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error)
+	WriteFileStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileStreamRequest, WriteFileStreamResponse], error)
 	ListDir(ctx context.Context, in *ListDirRequest, opts ...grpc.CallOption) (*ListDirResponse, error)
 	MakeDir(ctx context.Context, in *MakeDirRequest, opts ...grpc.CallOption) (*MakeDirResponse, error)
 	Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
@@ -156,6 +161,38 @@ func (c *sandboxAgentClient) WriteFile(ctx context.Context, in *WriteFileRequest
 	}
 	return out, nil
 }
+
+func (c *sandboxAgentClient) ReadFileStream(ctx context.Context, in *ReadFileStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FileChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[1], SandboxAgent_ReadFileStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReadFileStreamRequest, FileChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_ReadFileStreamClient = grpc.ServerStreamingClient[FileChunk]
+
+func (c *sandboxAgentClient) WriteFileStream(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WriteFileStreamRequest, WriteFileStreamResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[2], SandboxAgent_WriteFileStream_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WriteFileStreamRequest, WriteFileStreamResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_WriteFileStreamClient = grpc.ClientStreamingClient[WriteFileStreamRequest, WriteFileStreamResponse]
 
 func (c *sandboxAgentClient) ListDir(ctx context.Context, in *ListDirRequest, opts ...grpc.CallOption) (*ListDirResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -259,7 +296,7 @@ func (c *sandboxAgentClient) PTYKill(ctx context.Context, in *PTYKillRequest, op
 
 func (c *sandboxAgentClient) PTYAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PTYInput, PTYOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[1], SandboxAgent_PTYAttach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[3], SandboxAgent_PTYAttach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +319,7 @@ func (c *sandboxAgentClient) ExecSessionCreate(ctx context.Context, in *ExecSess
 
 func (c *sandboxAgentClient) ExecSessionAttach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ExecSessionInput, ExecSessionOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[2], SandboxAgent_ExecSessionAttach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxAgent_ServiceDesc.Streams[4], SandboxAgent_ExecSessionAttach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +424,9 @@ type SandboxAgentServer interface {
 	// Filesystem operations
 	ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error)
 	WriteFile(context.Context, *WriteFileRequest) (*WriteFileResponse, error)
+	// Streaming file operations for large files (256KB chunks over vsock gRPC)
+	ReadFileStream(*ReadFileStreamRequest, grpc.ServerStreamingServer[FileChunk]) error
+	WriteFileStream(grpc.ClientStreamingServer[WriteFileStreamRequest, WriteFileStreamResponse]) error
 	ListDir(context.Context, *ListDirRequest) (*ListDirResponse, error)
 	MakeDir(context.Context, *MakeDirRequest) (*MakeDirResponse, error)
 	Remove(context.Context, *RemoveRequest) (*RemoveResponse, error)
@@ -446,6 +486,12 @@ func (UnimplementedSandboxAgentServer) ReadFile(context.Context, *ReadFileReques
 }
 func (UnimplementedSandboxAgentServer) WriteFile(context.Context, *WriteFileRequest) (*WriteFileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WriteFile not implemented")
+}
+func (UnimplementedSandboxAgentServer) ReadFileStream(*ReadFileStreamRequest, grpc.ServerStreamingServer[FileChunk]) error {
+	return status.Error(codes.Unimplemented, "method ReadFileStream not implemented")
+}
+func (UnimplementedSandboxAgentServer) WriteFileStream(grpc.ClientStreamingServer[WriteFileStreamRequest, WriteFileStreamResponse]) error {
+	return status.Error(codes.Unimplemented, "method WriteFileStream not implemented")
 }
 func (UnimplementedSandboxAgentServer) ListDir(context.Context, *ListDirRequest) (*ListDirResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListDir not implemented")
@@ -595,6 +641,24 @@ func _SandboxAgent_WriteFile_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _SandboxAgent_ReadFileStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadFileStreamRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SandboxAgentServer).ReadFileStream(m, &grpc.GenericServerStream[ReadFileStreamRequest, FileChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_ReadFileStreamServer = grpc.ServerStreamingServer[FileChunk]
+
+func _SandboxAgent_WriteFileStream_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxAgentServer).WriteFileStream(&grpc.GenericServerStream[WriteFileStreamRequest, WriteFileStreamResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxAgent_WriteFileStreamServer = grpc.ClientStreamingServer[WriteFileStreamRequest, WriteFileStreamResponse]
 
 func _SandboxAgent_ListDir_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListDirRequest)
@@ -1053,6 +1117,16 @@ var SandboxAgent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "ExecStream",
 			Handler:       _SandboxAgent_ExecStream_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "ReadFileStream",
+			Handler:       _SandboxAgent_ReadFileStream_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WriteFileStream",
+			Handler:       _SandboxAgent_WriteFileStream_Handler,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "PTYAttach",

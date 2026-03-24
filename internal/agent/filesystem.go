@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
+
+const streamChunkSize = 256 * 1024 // 256KB per gRPC chunk
 
 // ReadFile reads a file from the VM filesystem.
 func (s *Server) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.ReadFileResponse, error) {
@@ -104,6 +107,100 @@ func (s *Server) Stat(ctx context.Context, req *pb.StatRequest) (*pb.StatRespons
 		ModTime: info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
 		Path:    path,
 	}, nil
+}
+
+// ReadFileStream streams a file in 256KB chunks over gRPC.
+func (s *Server) ReadFileStream(req *pb.ReadFileStreamRequest, stream pb.SandboxAgent_ReadFileStreamServer) error {
+	path := resolvePath(req.Path)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	buf := make([]byte, streamChunkSize)
+	first := true
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			chunk := &pb.FileChunk{Data: buf[:n]}
+			if first {
+				chunk.TotalSize = info.Size()
+				first = false
+			}
+			if sendErr := stream.Send(chunk); sendErr != nil {
+				return fmt.Errorf("send chunk: %w", sendErr)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// WriteFileStream receives a file in chunks over gRPC and writes it to disk.
+func (s *Server) WriteFileStream(stream pb.SandboxAgent_WriteFileStreamServer) error {
+	// First message carries path and mode
+	msg, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("recv first chunk: %w", err)
+	}
+
+	path := resolvePath(msg.Path)
+	mode := os.FileMode(msg.Mode)
+	if mode == 0 {
+		mode = 0644
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var total int64
+	// Write first message's data
+	if len(msg.Data) > 0 {
+		n, err := f.Write(msg.Data)
+		if err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		total += int64(n)
+	}
+
+	// Receive remaining chunks
+	for {
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("recv chunk: %w", err)
+		}
+		if len(msg.Data) > 0 {
+			n, err := f.Write(msg.Data)
+			if err != nil {
+				return fmt.Errorf("write %s: %w", path, err)
+			}
+			total += int64(n)
+		}
+	}
+
+	return stream.SendAndClose(&pb.WriteFileStreamResponse{BytesWritten: total})
 }
 
 // resolvePath ensures paths are rooted in /root for relative paths.

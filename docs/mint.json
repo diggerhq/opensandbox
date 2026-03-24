@@ -67,26 +67,27 @@
       ]
     },
     {
-      "group": "Sessions API",
-      "pages": [
-        "sessions-api/overview",
-        "sessions-api/sessions",
-        "sessions-api/messages",
-        "sessions-api/events"
-      ]
-    },
-    {
       "group": "Sandboxes",
       "pages": [
         "sandboxes/overview",
         "sandboxes/running-commands",
         "sandboxes/working-with-files",
+        "sandboxes/signed-urls",
         "sandboxes/interactive-terminals",
         "sandboxes/checkpoints",
         "sandboxes/templates",
         "sandboxes/secrets",
         "sandboxes/patches",
         "sandboxes/preview-urls"
+      ]
+    },
+    {
+      "group": "Sessions API (Experimental)",
+      "pages": [
+        "sessions-api/overview",
+        "sessions-api/sessions",
+        "sessions-api/messages",
+        "sessions-api/events"
       ]
     },
     {
@@ -189,7 +190,11 @@
             "api-reference/files/write",
             "api-reference/files/list-directory",
             "api-reference/files/mkdir",
-            "api-reference/files/delete"
+            "api-reference/files/delete",
+            "api-reference/files/generate-download-url",
+            "api-reference/files/generate-upload-url",
+            "api-reference/files/signed-download",
+            "api-reference/files/signed-upload"
           ]
         },
         {

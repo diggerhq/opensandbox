@@ -141,6 +141,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	// Signed URL endpoints (self-authenticated via HMAC, no API key required)
+	e.GET("/api/sandboxes/:id/files/download", s.signedDownload)
+	e.PUT("/api/sandboxes/:id/files/upload", s.signedUpload)
+
 	// API routes (with API key auth)
 	api := e.Group("/api")
 	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey))
@@ -173,6 +177,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/checkpoints/:checkpointId/patches", s.createCheckpointPatch)
 	api.GET("/sandboxes/checkpoints/:checkpointId/patches", s.listCheckpointPatches)
 	api.DELETE("/sandboxes/checkpoints/:checkpointId/patches/:patchId", s.deleteCheckpointPatch)
+
+	// Signed file URLs
+	api.POST("/sandboxes/:id/files/download-url", s.createDownloadURL)
+	api.POST("/sandboxes/:id/files/upload-url", s.createUploadURL)
 
 	// Preview URLs (on-demand port-based)
 	api.POST("/sandboxes/:id/preview", s.createPreviewURL)

@@ -1,0 +1,162 @@
+---
+title: "Signed URLs"
+description: "Generate pre-signed URLs for direct file uploads and downloads without API keys"
+---
+
+Signed URLs let you upload or download files from a sandbox without exposing your API key. This is useful for:
+
+- Letting browsers download files directly from a sandbox
+- Sharing temporary download links with users
+- Uploading files from untrusted clients (e.g. a frontend app)
+
+## How It Works
+
+1. Your backend generates a signed URL using your API key
+2. The URL contains an HMAC signature and expiry timestamp
+3. Anyone with the URL can upload/download — no API key needed
+4. The URL expires automatically (default: 1 hour, max: 24 hours)
+
+## Generating URLs
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.create();
+
+// Generate a download URL (default: 1 hour expiry)
+const downloadUrl = await sandbox.downloadUrl("/app/output.zip");
+
+// Generate an upload URL
+const uploadUrl = await sandbox.uploadUrl("/app/input.csv");
+
+// Custom expiry (in seconds)
+const shortUrl = await sandbox.downloadUrl("/app/output.zip", { expiresIn: 300 }); // 5 minutes
+```
+
+```python Python
+from opencomputer import Sandbox
+
+sandbox = await Sandbox.create()
+
+# Generate a download URL (default: 1 hour expiry)
+download_url = await sandbox.download_url("/app/output.zip")
+
+# Generate an upload URL
+upload_url = await sandbox.upload_url("/app/input.csv")
+
+# Custom expiry (in seconds)
+short_url = await sandbox.download_url("/app/output.zip", expires_in=300)  # 5 minutes
+```
+
+</CodeGroup>
+
+## Downloading Files
+
+Use the signed download URL with a plain GET request — no headers required:
+
+<CodeGroup>
+
+```typescript TypeScript
+const url = await sandbox.downloadUrl("/app/results.csv");
+
+// Fetch from browser or server — no API key needed
+const resp = await fetch(url);
+const data = await resp.arrayBuffer();
+```
+
+```python Python
+import httpx
+
+url = await sandbox.download_url("/app/results.csv")
+
+async with httpx.AsyncClient() as http:
+    resp = await http.get(url)
+    data = resp.content
+```
+
+```bash cURL
+# The URL is self-contained — just GET it
+curl -o results.csv "https://app.opencomputer.dev/api/sandboxes/sb-xxx/files/download?path=%2Fapp%2Fresults.csv&expires=1773906434&signature=abc123"
+```
+
+</CodeGroup>
+
+## Uploading Files
+
+Use the signed upload URL with a PUT request:
+
+<CodeGroup>
+
+```typescript TypeScript
+const url = await sandbox.uploadUrl("/app/data.csv");
+
+// Upload from browser or server — no API key needed
+await fetch(url, {
+  method: "PUT",
+  body: fileContent, // string, Uint8Array, Blob, etc.
+});
+```
+
+```python Python
+import httpx
+
+url = await sandbox.upload_url("/app/data.csv")
+
+async with httpx.AsyncClient() as http:
+    await http.put(url, content=file_bytes)
+```
+
+```bash cURL
+curl -X PUT --data-binary @data.csv "https://app.opencomputer.dev/api/sandboxes/sb-xxx/files/upload?path=%2Fapp%2Fdata.csv&expires=1773906434&signature=abc123"
+```
+
+</CodeGroup>
+
+## Large Files
+
+Signed URLs support files of any size — the entire pipeline streams data in 256KB chunks without buffering. Files up to 200MB+ have been tested at ~20 MB/s throughput.
+
+<CodeGroup>
+
+```typescript TypeScript
+// Upload a 100MB file via signed URL
+const data = new Uint8Array(100 * 1024 * 1024);
+const uploadUrl = await sandbox.uploadUrl("/data/model.bin");
+await fetch(uploadUrl, { method: "PUT", body: data });
+
+// Download it back
+const downloadUrl = await sandbox.downloadUrl("/data/model.bin");
+const resp = await fetch(downloadUrl);
+const downloaded = new Uint8Array(await resp.arrayBuffer());
+```
+
+```python Python
+import httpx
+
+# Upload a 100MB file via signed URL
+data = b"\x00" * (100 * 1024 * 1024)
+upload_url = await sandbox.upload_url("/data/model.bin")
+async with httpx.AsyncClient(timeout=120.0) as http:
+    await http.put(upload_url, content=data)
+
+# Download it back
+download_url = await sandbox.download_url("/data/model.bin")
+async with httpx.AsyncClient(timeout=120.0) as http:
+    resp = await http.get(download_url)
+    downloaded = resp.content
+```
+
+</CodeGroup>
+
+## Security
+
+- **Tamper-proof:** URLs are signed with HMAC-SHA256. Changing the path, sandbox ID, or expiry invalidates the signature.
+- **Time-limited:** URLs expire after the specified duration (default 1 hour, max 24 hours). Expired URLs return `403`.
+- **Operation-scoped:** Download URLs cannot be used for uploads and vice versa.
+- **Path-scoped:** Each URL is bound to a specific file path. Changing the path in the URL returns `403`.
+
+<Tip>
+  Full reference: [TypeScript SDK](/reference/typescript-sdk#filesystem) · [Python SDK](/reference/python-sdk#filesystem) · [HTTP API](/api-reference/files/generate-download-url).
+</Tip>

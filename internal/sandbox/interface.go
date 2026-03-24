@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -43,6 +44,8 @@ type Manager interface {
 	// Filesystem
 	ReadFile(ctx context.Context, sandboxID, path string) (string, error)
 	WriteFile(ctx context.Context, sandboxID, path, content string) error
+	ReadFileStream(ctx context.Context, sandboxID, path string) (io.ReadCloser, int64, error)
+	WriteFileStream(ctx context.Context, sandboxID, path string, mode uint32, r io.Reader) (int64, error)
 	ListDir(ctx context.Context, sandboxID, path string) ([]types.EntryInfo, error)
 	MakeDir(ctx context.Context, sandboxID, path string) error
 	Remove(ctx context.Context, sandboxID, path string) error

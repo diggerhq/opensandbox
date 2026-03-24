@@ -230,6 +230,34 @@ console.log(`https://${domain}`);
 
 ---
 
+### `sandbox.downloadUrl(path, opts?)`
+
+Generate a signed download URL. [HTTP API →](/api-reference/files/generate-download-url) · [Guide →](/sandboxes/signed-urls)
+
+<ParamField body="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+<ParamField body="opts.expiresIn" type="number" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+**Returns:** `Promise<string>`
+
+### `sandbox.uploadUrl(path, opts?)`
+
+Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-upload-url) · [Guide →](/sandboxes/signed-urls)
+
+<ParamField body="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="opts.expiresIn" type="number" default="3600">
+  URL lifetime in seconds (max: 86400)
+</ParamField>
+
+**Returns:** `Promise<string>`
+
 ### `sandbox.createPreviewURL(opts)`
 
 [HTTP API →](/api-reference/preview/create)

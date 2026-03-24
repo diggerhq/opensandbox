@@ -81,6 +81,34 @@ Delete a file or directory. [HTTP API →](/api-reference/files/delete)
 
 ---
 
+## `sandbox.files.readStream(path)`
+
+Stream a file as a `ReadableStream`. Avoids buffering the entire file in memory — ideal for large files (50MB+).
+
+<ParamField body="path" type="string" required>
+  Absolute path to the file
+</ParamField>
+
+**Returns:** `Promise<ReadableStream<Uint8Array>>`
+
+---
+
+## `sandbox.files.writeStream(path, stream)`
+
+Stream content to a file. Accepts a `ReadableStream` or `Uint8Array` without buffering an extra copy in memory.
+
+<ParamField body="path" type="string" required>
+  Absolute path for the destination file
+</ParamField>
+
+<ParamField body="stream" type="ReadableStream<Uint8Array> | Uint8Array" required>
+  File content as a stream or byte array
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
 ## `sandbox.files.exists(path)`
 
 Check if a path exists. Client-side wrapper — attempts a read and returns `false` on error.

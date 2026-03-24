@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -22,11 +23,12 @@ func (s *Server) readFile(c echo.Context) error {
 		})
 	}
 
-	var content string
+	var reader io.ReadCloser
+	var totalSize int64
 
 	routeOp := func(ctx context.Context) error {
 		var err error
-		content, err = s.manager.ReadFile(ctx, id, path)
+		reader, totalSize, err = s.manager.ReadFileStream(ctx, id, path)
 		return err
 	}
 
@@ -43,8 +45,16 @@ func (s *Server) readFile(c echo.Context) error {
 			})
 		}
 	}
+	defer reader.Close()
 
-	return c.String(http.StatusOK, content)
+	resp := c.Response()
+	resp.Header().Set("Content-Type", "application/octet-stream")
+	if totalSize > 0 {
+		resp.Header().Set("Content-Length", fmt.Sprintf("%d", totalSize))
+	}
+	resp.WriteHeader(http.StatusOK)
+	_, err := io.Copy(resp.Writer, reader)
+	return err
 }
 
 func (s *Server) writeFile(c echo.Context) error {
@@ -60,15 +70,9 @@ func (s *Server) writeFile(c echo.Context) error {
 		})
 	}
 
-	body, err := io.ReadAll(c.Request().Body)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "failed to read request body: " + err.Error(),
-		})
-	}
-
 	routeOp := func(ctx context.Context) error {
-		return s.manager.WriteFile(ctx, id, path, string(body))
+		_, err := s.manager.WriteFileStream(ctx, id, path, 0644, c.Request().Body)
+		return err
 	}
 
 	if s.router != nil {
