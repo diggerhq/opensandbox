@@ -44,6 +44,12 @@ jobs:
           chmod 600 ~/.ssh/deploy.pem
           ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
 
+      - name: Stage SSH key on control plane for worker access
+        run: |
+          scp -i ~/.ssh/deploy.pem ~/.ssh/deploy.pem \
+            ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/deploy.pem
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} 'chmod 600 /tmp/deploy.pem'
+
       - name: Upload binaries and rootfs context to control plane
         run: |
           # Upload binaries to control plane as staging area
@@ -97,15 +103,15 @@ jobs:
               echo "=== Deploying to worker $IP ==="
 
               # Copy binaries from control plane to worker (via private network)
-              scp -o StrictHostKeyChecking=no /tmp/opensandbox-worker /tmp/osb-agent \
+              scp -i /tmp/deploy.pem -o StrictHostKeyChecking=no /tmp/opensandbox-worker /tmp/osb-agent \
                 '"${{ env.SSH_USER }}"'@${IP}:/tmp/
 
               # Copy rootfs build context
-              rsync -az -e "ssh -o StrictHostKeyChecking=no" \
+              rsync -az -e "ssh -i /tmp/deploy.pem -o StrictHostKeyChecking=no" \
                 /tmp/osb-rootfs-ctx/ '"${{ env.SSH_USER }}"'@${IP}:/tmp/osb-rootfs-ctx/
 
               # Install and restart on worker
-              ssh -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} "
+              ssh -i /tmp/deploy.pem -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} "
                 set -euo pipefail
 
                 # Install binaries
@@ -136,13 +142,13 @@ jobs:
 
               # Verify
               sleep 3
-              ssh -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} \
+              ssh -i /tmp/deploy.pem -o StrictHostKeyChecking=no '"${{ env.SSH_USER }}"'@${IP} \
                 "sudo systemctl is-active opensandbox-worker"
               echo "=== Worker $IP: OK ==="
             done
 
             # Cleanup staging on control plane
-            rm -f /tmp/opensandbox-worker /tmp/osb-agent
+            rm -f /tmp/opensandbox-worker /tmp/osb-agent /tmp/deploy.pem
             rm -rf /tmp/osb-rootfs-ctx
           '
 
