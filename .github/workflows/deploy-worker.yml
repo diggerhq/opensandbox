@@ -78,15 +78,7 @@ jobs:
 
             # Get all worker private IPs from the control plane API
             WORKER_IPS=$(curl -sf -H "X-API-Key: $API_KEY" http://localhost:8080/api/workers \
-              | python3 -c "
-import json, sys, re
-workers = json.load(sys.stdin)
-for w in workers:
-    addr = w.get('http_addr', '')
-    m = re.search(r'//([^:]+)', addr)
-    if m:
-        print(m.group(1))
-")
+              | python3 -c "import json,sys,re; [print(m.group(1)) for w in json.load(sys.stdin) for m in [re.search(r'//([^:]+)',w.get('http_addr',''))] if m]")
 
             if [ -z "$WORKER_IPS" ]; then
               echo "ERROR: No workers found"
