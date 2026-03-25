@@ -16,7 +16,6 @@ import (
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
-	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -44,7 +43,6 @@ type Server struct {
 	workerRegistry  *controlplane.RedisWorkerRegistry // nil in combined/worker mode
 	checkpointStore *storage.CheckpointStore          // nil if hibernation not configured
 	sandboxDomain   string                            // base domain for sandbox subdomains
-	ecrConfig       *ecr.Config                       // nil if ECR not configured
 	cfClient        *cloudflare.Client                // nil if Cloudflare not configured
 	pendingCreates  sync.Map                          // map[sandboxID]*pendingCreate — async sandbox creation tracking
 	sandboxAPIProxy *proxy.SandboxAPIProxy            // nil except in server mode (proxies data-plane to workers)
@@ -73,7 +71,6 @@ type ServerOpts struct {
 	WorkOSConfig    *auth.WorkOSConfig                // nil if WorkOS not configured
 	WorkerRegistry  *controlplane.RedisWorkerRegistry  // nil in combined/worker mode
 	CheckpointStore *storage.CheckpointStore           // nil if hibernation not configured
-	ECRConfig       *ecr.Config                        // nil if ECR not configured
 	CFClient        *cloudflare.Client                 // nil if Cloudflare not configured
 	SandboxAPIProxy *proxy.SandboxAPIProxy             // nil except in server mode (proxies data-plane to workers)
 }
@@ -103,7 +100,6 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.workerRegistry = opts.WorkerRegistry
 		s.checkpointStore = opts.CheckpointStore
 		s.sandboxDomain = opts.SandboxDomain
-		s.ecrConfig = opts.ECRConfig
 		s.cfClient = opts.CFClient
 		s.sandboxAPIProxy = opts.SandboxAPIProxy
 
@@ -162,6 +158,13 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Hibernation
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
+
+	// Live migration
+	api.POST("/sandboxes/:id/migrate", s.migrateSandbox)
+
+	// Resource limits
+	api.PUT("/sandboxes/:id/limits", s.setLimits)
+	api.POST("/sandboxes/:id/scale", s.scaleSandbox)
 
 	// Checkpoints
 	api.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)

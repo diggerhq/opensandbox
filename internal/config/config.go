@@ -61,22 +61,18 @@ type Config struct {
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool // true for R2/MinIO
 
-	// ECR for template images
-	ECRRegistry   string // e.g. "086971355112.dkr.ecr.us-east-2.amazonaws.com"
-	ECRRepository string // e.g. "opensandbox-templates"
-
 	// Sandbox resource defaults (overridable per-sandbox via API)
 	DefaultSandboxMemoryMB int // default RAM per sandbox (MB), default 1024
 	DefaultSandboxCPUs     int // default vCPUs per sandbox, default 1
 	DefaultSandboxDiskMB   int // default disk quota per sandbox (MB), 0 = no quota
 
-	// Firecracker microVM configuration (worker mode)
-	FirecrackerBin string // Path to firecracker binary (default: "firecracker")
-	KernelPath     string // Path to vmlinux kernel (default: $DataDir/firecracker/vmlinux-arm64)
-	ImagesDir      string // Path to base rootfs images (default: $DataDir/firecracker/images/)
+	// QEMU VM configuration (worker mode)
+	KernelPath string // Path to vmlinux kernel
+	ImagesDir  string // Path to base rootfs images
+	QEMUBin    string // Path to qemu-system binary (default: "qemu-system-x86_64")
 
 	// AWS EC2 compute pool (server mode only — for auto-scaling worker machines)
-	EC2AMI             string // Custom AMI with Firecracker pre-installed
+	EC2AMI             string // Custom AMI for worker instances
 	EC2InstanceType    string // e.g. "c7gd.metal", "r6gd.metal", "r7gd.metal"
 	EC2SubnetID        string // VPC subnet for worker instances
 	EC2SecurityGroupID string // Security group (allow 8080, 9090, 9091)
@@ -84,12 +80,22 @@ type Config struct {
 	EC2WorkerImage         string // Docker image for containerized workers
 	EC2IAMInstanceProfile  string // IAM instance profile for worker instances (Secrets Manager + S3)
 
+	// Azure compute pool (server mode — for auto-scaling worker VMs)
+	AzureSubscriptionID string // Azure subscription ID
+	AzureResourceGroup  string // Resource group for worker VMs
+	AzureVMSize         string // e.g. "Standard_D16s_v5"
+	AzureImageID        string // Custom image ID or URN
+	AzureSubnetID       string // Full resource ID of the VNet subnet
+	AzureSSHPublicKey   string // SSH public key for worker VMs
+
 	// Cloudflare (custom hostname for org sandbox domains)
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
 	CFZoneID   string // Cloudflare zone ID for the shared zone (e.g. opencomputer.dev)
 
 	// Autoscaler
-	ScaleCooldownSec int // Cooldown between scale-up actions (seconds), default 300
+	ScaleCooldownSec    int // Cooldown between scale-up actions (seconds), default 300
+	MinWorkersPerRegion int // Minimum workers per region (for pre-provisioned capacity), default 1
+	MaxWorkersPerRegion int // Maximum workers per region (hard cap), default 10
 
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
@@ -147,16 +153,13 @@ func Load() (*Config, error) {
 		S3SecretAccessKey: os.Getenv("OPENSANDBOX_S3_SECRET_ACCESS_KEY"),
 		S3ForcePathStyle:  os.Getenv("OPENSANDBOX_S3_FORCE_PATH_STYLE") == "true",
 
-		ECRRegistry:   os.Getenv("OPENSANDBOX_ECR_REGISTRY"),
-		ECRRepository: envOrDefault("OPENSANDBOX_ECR_REPOSITORY", "opensandbox-templates"),
-
-		DefaultSandboxMemoryMB: envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB", 1024),
+		DefaultSandboxMemoryMB: envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB", 256),
 		DefaultSandboxCPUs:     envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_CPUS", 1),
 		DefaultSandboxDiskMB:   envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB", 0),
 
-		FirecrackerBin: envOrDefault("OPENSANDBOX_FIRECRACKER_BIN", "firecracker"),
 		KernelPath:     os.Getenv("OPENSANDBOX_KERNEL_PATH"),     // default derived from DataDir
 		ImagesDir:      os.Getenv("OPENSANDBOX_IMAGES_DIR"),      // default derived from DataDir
+		QEMUBin:        envOrDefault("OPENSANDBOX_QEMU_BIN", "qemu-system-x86_64"),
 
 		EC2AMI:             os.Getenv("OPENSANDBOX_EC2_AMI"),
 		EC2InstanceType:    envOrDefault("OPENSANDBOX_EC2_INSTANCE_TYPE", "c7gd.metal"),
@@ -166,10 +169,19 @@ func Load() (*Config, error) {
 		EC2WorkerImage:         envOrDefault("OPENSANDBOX_EC2_WORKER_IMAGE", "opensandbox-worker:latest"),
 		EC2IAMInstanceProfile:  os.Getenv("OPENSANDBOX_EC2_IAM_INSTANCE_PROFILE"),
 
+		AzureSubscriptionID: os.Getenv("OPENSANDBOX_AZURE_SUBSCRIPTION_ID"),
+		AzureResourceGroup:  os.Getenv("OPENSANDBOX_AZURE_RESOURCE_GROUP"),
+		AzureVMSize:         envOrDefault("OPENSANDBOX_AZURE_VM_SIZE", "Standard_D16s_v5"),
+		AzureImageID:        os.Getenv("OPENSANDBOX_AZURE_IMAGE_ID"),
+		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
+		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
+
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
 
-		ScaleCooldownSec: envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
+		ScaleCooldownSec:    envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
+		MinWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MIN_WORKERS", 1),
+		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 

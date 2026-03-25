@@ -23,15 +23,22 @@ import (
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
 	"github.com/opensandbox/opensandbox/internal/storage"
-	"github.com/opensandbox/opensandbox/internal/template"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
 // GRPCServer implements the SandboxWorker gRPC service for control plane communication.
+// LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
+type LiveMigrator interface {
+	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
+	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
+	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
+}
+
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
+	migrator           LiveMigrator // optional, set if manager supports live migration
 	router             *sandbox.SandboxRouter
 	ptyManager         *sandbox.PTYManager
 	execSessionManager *sandbox.ExecSessionManager
@@ -43,7 +50,7 @@ type GRPCServer struct {
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
 // If OPENSANDBOX_GRPC_TLS_* env vars are set, the server uses mTLS.
-func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder *template.Builder, store *db.Store) *GRPCServer {
+func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *sandbox.ExecSessionManager, sandboxDBs *sandbox.SandboxDBManager, checkpointStore *storage.CheckpointStore, router *sandbox.SandboxRouter, builder interface{}, store *db.Store) *GRPCServer {
 	serverOpts := []grpc.ServerOption{
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             5 * time.Second,
@@ -190,6 +197,22 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		}
 	}
 
+	// Record initial scale event for billing
+	if s.store != nil {
+		memMB := cfg.MemoryMB
+		if memMB <= 0 {
+			memMB = 1024 // default
+		}
+		cpuPct := (memMB * 100) / 1024
+		if cpuPct < 100 {
+			cpuPct = 100
+		}
+		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from session
+		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+		}
+	}
+
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
@@ -197,6 +220,13 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxRequest) (*pb.DestroySandboxResponse, error) {
+	// End billing scale event before destroying
+	if s.store != nil {
+		if err := s.store.EndScaleEvent(ctx, req.SandboxId); err != nil {
+			log.Printf("grpc: failed to end scale event for %s: %v", req.SandboxId, err)
+		}
+	}
+
 	if err := s.manager.Kill(ctx, req.SandboxId); err != nil {
 		return nil, fmt.Errorf("failed to destroy sandbox: %w", err)
 	}
@@ -475,6 +505,13 @@ func (s *GRPCServer) HibernateSandbox(ctx context.Context, req *pb.HibernateSand
 		return nil, fmt.Errorf("hibernation not configured on this worker")
 	}
 
+	// End billing scale event (sandbox going to sleep)
+	if s.store != nil {
+		if err := s.store.EndScaleEvent(ctx, req.SandboxId); err != nil {
+			log.Printf("grpc: failed to end scale event on hibernate for %s: %v", req.SandboxId, err)
+		}
+	}
+
 	result, err := s.manager.Hibernate(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hibernate sandbox: %w", err)
@@ -523,6 +560,16 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 			_ = sdb.LogEvent("woke", map[string]string{
 				"sandbox_id": sb.ID,
 			})
+		}
+	}
+
+	// Resume billing scale event after wake
+	if s.store != nil {
+		memMB := 1024 // TODO: get actual memory from sandbox state
+		cpuPct := 100
+		orgID := "00000000-0000-0000-0000-000000000001"
+		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
 		}
 	}
 
@@ -595,48 +642,12 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 	}, nil
 }
 
+// RestoreCheckpoint reverts a running sandbox to a checkpoint using QEMU's loadvm.
+// The snapshot is already stored inside the qcow2 files — no S3 download needed.
 func (s *GRPCServer) RestoreCheckpoint(ctx context.Context, req *pb.RestoreCheckpointRequest) (*pb.RestoreCheckpointResponse, error) {
-	checkpointID := req.CheckpointId
-	if _, err := uuid.Parse(checkpointID); err != nil {
-		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
+	if err := s.manager.RestoreFromCheckpoint(ctx, req.SandboxId, req.CheckpointId); err != nil {
+		return nil, fmt.Errorf("restore checkpoint: %w", err)
 	}
-
-	// Check local cache first; if not available, download from S3
-	cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
-	cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
-	if cachedRootfs == "" || cachedWorkspace == "" {
-		// Need to download from S3
-		if s.checkpointStore == nil {
-			return nil, fmt.Errorf("checkpoint not cached locally and no S3 store configured")
-		}
-		log.Printf("grpc: RestoreCheckpoint %s: not cached locally, downloading from S3", checkpointID)
-		rootfsKey := fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", req.SandboxId, checkpointID)
-		workspaceKey := fmt.Sprintf("checkpoints/%s/%s/workspace.sparse.zst", req.SandboxId, checkpointID)
-
-		cacheDir := filepath.Join(s.manager.DataDir(), "checkpoints", checkpointID)
-		if err := os.MkdirAll(cacheDir, 0755); err != nil {
-			return nil, fmt.Errorf("create checkpoint cache dir: %w", err)
-		}
-
-		cachedRootfsPath := filepath.Join(cacheDir, "rootfs.ext4")
-		cachedWorkspacePath := filepath.Join(cacheDir, "workspace.ext4")
-
-		if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
-			os.RemoveAll(cacheDir)
-			return nil, fmt.Errorf("download checkpoint rootfs: %w", err)
-		}
-		if err := downloadAndExtract(ctx, s.checkpointStore, workspaceKey, cachedWorkspacePath, extractSparseCmd); err != nil {
-			os.RemoveAll(cacheDir)
-			return nil, fmt.Errorf("download checkpoint workspace: %w", err)
-		}
-		log.Printf("grpc: RestoreCheckpoint %s: cached locally at %s", checkpointID, cacheDir)
-		_ = cachedRootfsPath // used implicitly by manager.CheckpointCachePath after download
-	}
-
-	if err := s.manager.RestoreFromCheckpoint(ctx, req.SandboxId, checkpointID); err != nil {
-		return nil, fmt.Errorf("restore from checkpoint failed: %w", err)
-	}
-
 	return &pb.RestoreCheckpointResponse{Success: true}, nil
 }
 
@@ -799,6 +810,67 @@ func downloadAndExtract(ctx context.Context, store *storage.CheckpointStore, s3K
 	data.Close()
 
 	return extract(tmpPath, dest)
+}
+
+// SetSandboxLimits adjusts resource limits (memory, CPU, PIDs) on a running sandbox.
+// Memory increases trigger virtio-mem hotplug; decreases adjust cgroup limits only.
+func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLimitsRequest) (*pb.SetSandboxLimitsResponse, error) {
+	if err := s.manager.SetResourceLimits(ctx, req.SandboxId, req.MaxPids, req.MaxMemoryBytes, req.CpuMaxUsec, req.CpuPeriodUsec); err != nil {
+		return nil, fmt.Errorf("set resource limits: %w", err)
+	}
+
+	// Record scale event for billing
+	if s.store != nil && req.MaxMemoryBytes > 0 {
+		memMB := int(req.MaxMemoryBytes / (1024 * 1024))
+		cpuPct := int(req.CpuMaxUsec / 1000) // 100000us → 100%
+		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from sandbox session
+		if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
+			log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+		}
+	}
+
+	return &pb.SetSandboxLimitsResponse{}, nil
+}
+
+// SetMigrator sets the live migration handler (call after NewGRPCServer if the manager supports it).
+func (s *GRPCServer) SetMigrator(m LiveMigrator) {
+	s.migrator = m
+}
+
+func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.PrepareMigrationIncomingRequest) (*pb.PrepareMigrationIncomingResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	addr, hostPort, err := s.migrator.PrepareIncomingMigration(ctx,
+		req.SandboxId, req.RootfsPath, req.WorkspacePath,
+		int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template)
+	if err != nil {
+		return nil, fmt.Errorf("prepare incoming migration: %w", err)
+	}
+	return &pb.PrepareMigrationIncomingResponse{
+		IncomingAddr: addr,
+		HostPort:     int32(hostPort),
+	}, nil
+}
+
+func (s *GRPCServer) LiveMigrate(ctx context.Context, req *pb.LiveMigrateRequest) (*pb.LiveMigrateResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	if err := s.migrator.LiveMigrate(ctx, req.SandboxId, req.IncomingAddr); err != nil {
+		return nil, fmt.Errorf("live migrate: %w", err)
+	}
+	return &pb.LiveMigrateResponse{}, nil
+}
+
+func (s *GRPCServer) CompleteMigrationIncoming(ctx context.Context, req *pb.CompleteMigrationIncomingRequest) (*pb.CompleteMigrationIncomingResponse, error) {
+	if s.migrator == nil {
+		return nil, fmt.Errorf("live migration not supported on this worker")
+	}
+	if err := s.migrator.CompleteIncomingMigration(ctx, req.SandboxId); err != nil {
+		return nil, fmt.Errorf("complete incoming migration: %w", err)
+	}
+	return &pb.CompleteMigrationIncomingResponse{}, nil
 }
 
 func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {

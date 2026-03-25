@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -258,6 +257,41 @@ func (s *HTTPServer) execRun(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "cmd is required"})
 	}
 
+	// For long-running commands (timeout > 30s), send response headers
+	// immediately and write periodic keepalive whitespace. This prevents
+	// Cloudflare (and other reverse proxies) from timing out:
+	//   - 524 first-byte timeout (~100s): solved by sending headers early
+	//   - Body idle timeout (~600s): solved by periodic space bytes
+	// JSON parsers ignore leading whitespace, so the final JSON body
+	// is parsed cleanly regardless of how many spaces precede it.
+	earlyFlush := req.Timeout > 30
+	var keepaliveDone chan struct{}
+	if earlyFlush {
+		c.Response().Header().Set("Content-Type", "application/json")
+		c.Response().WriteHeader(http.StatusOK)
+		flusher, _ := c.Response().Writer.(http.Flusher)
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+		keepaliveDone = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					c.Response().Write([]byte(" "))
+					if flusher != nil {
+						flusher.Flush()
+					}
+				case <-keepaliveDone:
+					return
+				}
+			}
+		}()
+	}
+
 	var result *types.ProcessResult
 
 	routeOp := func(ctx context.Context) error {
@@ -266,16 +300,27 @@ func (s *HTTPServer) execRun(c echo.Context) error {
 		return err
 	}
 
+	var execErr error
 	if s.router != nil {
-		if err := s.router.Route(c.Request().Context(), id, "execRun", routeOp); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		}
+		execErr = s.router.Route(c.Request().Context(), id, "execRun", routeOp)
 	} else {
-		if err := routeOp(c.Request().Context()); err != nil {
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		}
+		execErr = routeOp(c.Request().Context())
 	}
 
+	if keepaliveDone != nil {
+		close(keepaliveDone)
+	}
+
+	if execErr != nil {
+		if earlyFlush {
+			return json.NewEncoder(c.Response()).Encode(map[string]string{"error": execErr.Error()})
+		}
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": execErr.Error()})
+	}
+
+	if earlyFlush {
+		return json.NewEncoder(c.Response()).Encode(result)
+	}
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -320,11 +365,10 @@ func (s *HTTPServer) readFile(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "path query parameter is required"})
 	}
 
-	var reader io.ReadCloser
-	var totalSize int64
+	var content string
 	routeOp := func(ctx context.Context) error {
 		var err error
-		reader, totalSize, err = s.manager.ReadFileStream(ctx, id, path)
+		content, err = s.manager.ReadFile(ctx, id, path)
 		return err
 	}
 
@@ -337,16 +381,8 @@ func (s *HTTPServer) readFile(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		}
 	}
-	defer reader.Close()
 
-	resp := c.Response()
-	resp.Header().Set("Content-Type", "application/octet-stream")
-	if totalSize > 0 {
-		resp.Header().Set("Content-Length", fmt.Sprintf("%d", totalSize))
-	}
-	resp.WriteHeader(http.StatusOK)
-	_, err := io.Copy(resp.Writer, reader)
-	return err
+	return c.Blob(http.StatusOK, "application/octet-stream", []byte(content))
 }
 
 func (s *HTTPServer) writeFile(c echo.Context) error {
@@ -356,9 +392,14 @@ func (s *HTTPServer) writeFile(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "path query parameter is required"})
 	}
 
+	// Read body — use streaming for large files, direct write for small/empty
+	body, err := io.ReadAll(c.Request().Body)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+	}
+
 	routeOp := func(ctx context.Context) error {
-		_, err := s.manager.WriteFileStream(ctx, id, path, 0644, c.Request().Body)
-		return err
+		return s.manager.WriteFile(ctx, id, path, string(body))
 	}
 
 	if s.router != nil {

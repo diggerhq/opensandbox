@@ -47,9 +47,9 @@ async function main() {
     // ── Setup: Create sandbox with a persistent server ──────────────
     bold("━━━ Setup: Create sandbox with counter server ━━━\n");
 
-    sandbox = await Sandbox.create({ template: "node", timeout: 300 });
+    sandbox = await Sandbox.create({ timeout: 300 });
     green(`Created: ${sandbox.sandboxId}`);
-    dim(`Domain: ${sandbox.domain}`);
+    dim(`Domain: ${sandbox.getPreviewDomain(8080)}`);
 
     // Write a server that maintains an in-memory counter
     const SERVER_CODE = `
@@ -70,7 +70,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(404); res.end('not found');
   }
 });
-server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
+server.listen(8080, '0.0.0.0', () => console.log('Counter server on port 8080'));
 `;
 
     await sandbox.files.write("/tmp/counter-server.js", SERVER_CODE);
@@ -78,7 +78,7 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
     await sleep(1500);
 
     // Verify server is up
-    const healthResp = await fetch(`https://${sandbox.domain}/health`);
+    const healthResp = await fetch(`https://${sandbox.getPreviewDomain(8080)}/health`);
     check("Counter server started", healthResp.ok);
     const health = await healthResp.json();
     dim(`Initial state: counter=${health.counter}, uptime=${health.uptime}`);
@@ -92,7 +92,7 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
       cyan(`Cycle ${cycle}/3: Incrementing counter...`);
 
       // Increment counter before hibernate
-      const incResp = await fetch(`https://${sandbox.domain}/increment`);
+      const incResp = await fetch(`https://${sandbox.getPreviewDomain(8080)}/increment`);
       const incData = await incResp.json();
       dim(`Counter = ${incData.counter}`);
 
@@ -117,7 +117,7 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
       dim(`Hibernate: ${hibMs}ms, Wake: ${wakeMs}ms`);
 
       // Verify counter persisted
-      const postWakeResp = await fetch(`https://${sandbox.domain}/health`);
+      const postWakeResp = await fetch(`https://${sandbox.getPreviewDomain(8080)}/health`);
       if (postWakeResp.ok) {
         const postWake = await postWakeResp.json();
         check(`Cycle ${cycle}: Counter persisted (${postWake.counter})`, postWake.counter === cycle);
@@ -187,7 +187,7 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
     // Immediately hit the domain - should trigger auto-wake
     cyan("Sending HTTP request to sleeping sandbox...");
     const autoWakeStart = Date.now();
-    const autoWakeResp = await fetch(`https://${sandbox.domain}/health`);
+    const autoWakeResp = await fetch(`https://${sandbox.getPreviewDomain(8080)}/health`);
     const autoWakeMs = Date.now() - autoWakeStart;
 
     check("Auto-wake HTTP returned 200", autoWakeResp.ok, `status ${autoWakeResp.status}`);
@@ -209,8 +209,8 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
     dim(`Server log: ${pidBefore.stdout.trim()}`);
 
     // Increment counter to 4
-    await fetch(`https://${sandbox.domain}/increment`);
-    const preHibHealth = await fetch(`https://${sandbox.domain}/health`);
+    await fetch(`https://${sandbox.getPreviewDomain(8080)}/increment`);
+    const preHibHealth = await fetch(`https://${sandbox.getPreviewDomain(8080)}/health`);
     const preHibData = await preHibHealth.json();
     check("Counter at 4 before final hibernate", preHibData.counter === 4, `counter=${preHibData.counter}`);
 
@@ -219,7 +219,7 @@ server.listen(80, '0.0.0.0', () => console.log('Counter server on port 80'));
     await sleep(1000);
 
     // Auto-wake by hitting the domain instead of explicit wake()
-    const finalHealth = await fetch(`https://${sandbox.domain}/health`);
+    const finalHealth = await fetch(`https://${sandbox.getPreviewDomain(8080)}/health`);
     if (finalHealth.ok) {
       const finalData = await finalHealth.json();
       check("Counter persisted through final cycle", finalData.counter === 4, `counter=${finalData.counter}`);

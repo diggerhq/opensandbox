@@ -66,21 +66,19 @@ class Snapshots:
         """
         body = {"name": name, "image": image.to_dict()}
 
-        if on_build_logs is not None:
-            headers = {**self._headers, "Accept": "text/event-stream"}
-            client = httpx.AsyncClient(
-                base_url=self._api_base, headers=headers, timeout=300.0,
-            )
-            try:
-                async with client.stream("POST", "/snapshots", json=body) as resp:
-                    resp.raise_for_status()
-                    return await parse_sse_stream(resp, on_build_logs)
-            finally:
-                await client.aclose()
-
-        resp = await self._client.post("/snapshots", json=body)
-        resp.raise_for_status()
-        return resp.json()
+        # Always use SSE streaming — builds can take minutes and
+        # non-streaming requests will hit Cloudflare 524 timeouts.
+        headers = {**self._headers, "Accept": "text/event-stream"}
+        log_fn = on_build_logs if on_build_logs is not None else lambda _: None
+        client = httpx.AsyncClient(
+            base_url=self._api_base, headers=headers, timeout=600.0,
+        )
+        try:
+            async with client.stream("POST", "/snapshots", json=body) as resp:
+                resp.raise_for_status()
+                return await parse_sse_stream(resp, log_fn)
+        finally:
+            await client.aclose()
 
     async def list(self) -> list[dict[str, Any]]:
         """List all named snapshots for the current org."""

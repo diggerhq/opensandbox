@@ -31,6 +31,7 @@ dist/
 # Compiled binaries
 bin/
 opensandbox-worker
+/worker
 
 # Worker env (secrets)
 worker.env
@@ -57,3 +58,4 @@ deploy/ec2/*.pem
 *.tmp
 *.log
 delme
+deploy/azure/.dev-env-state-*

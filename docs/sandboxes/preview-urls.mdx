@@ -3,7 +3,29 @@ title: "Preview URLs"
 description: "Expose sandbox ports to the internet"
 ---
 
-A preview URL is a public HTTPS endpoint that routes traffic to a port inside your sandbox. Start a web server, create a preview URL, and share the link.
+A preview URL is a public HTTPS endpoint that routes traffic to a port inside your sandbox. Start a web server and access it immediately via the sandbox's domain.
+
+## Quick Access
+
+Every sandbox has a built-in `domain` property that gives you instant access to port 80 without creating a preview URL explicitly:
+
+```typescript
+const sandbox = await Sandbox.create();
+await sandbox.exec.run("python3 -m http.server 80 &");
+
+console.log(sandbox.domain);
+// → sb-abc123-p80.workers.opencomputer.dev
+
+// For other ports:
+console.log(sandbox.getPreviewDomain(3000));
+// → sb-abc123-p3000.workers.opencomputer.dev
+```
+
+The `domain` and `getPreviewDomain(port)` properties construct the preview hostname directly — no API call needed. Traffic is routed through the control plane proxy to the correct sandbox.
+
+## Explicit Preview URLs
+
+For tracking, custom domains, or auth configuration, use the preview URL API:
 
 <CodeGroup>
 
@@ -15,7 +37,7 @@ await sandbox.exec.run("npx create-next-app@latest /app --yes", { timeout: 120 }
 sandbox.exec.start("npm run dev -- --port 3000", { cwd: "/app" });
 
 const preview = await sandbox.createPreviewURL({ port: 3000 });
-console.log(preview.hostname); // sb-abc123-p3000.preview.opencomputer.dev
+console.log(preview.hostname); // sb-abc123-p3000.workers.opencomputer.dev
 ```
 
 ```python Python

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"os/signal"
 	"syscall"
 
@@ -18,7 +20,6 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
-	"github.com/opensandbox/opensandbox/internal/ecr"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -122,19 +123,6 @@ func main() {
 		}
 	}
 
-	// Initialize ECR config for template images (if configured)
-	if cfg.ECRRegistry != "" {
-		ecrCfg := &ecr.Config{
-			Registry:   cfg.ECRRegistry,
-			Repository: cfg.ECRRepository,
-			Region:     cfg.S3Region, // reuse S3 region (same AWS account)
-			AccessKey:  cfg.S3AccessKeyID,
-			SecretKey:  cfg.S3SecretAccessKey,
-		}
-		opts.ECRConfig = ecrCfg
-		log.Printf("opensandbox: ECR configured (registry=%s, repo=%s)", cfg.ECRRegistry, cfg.ECRRepository)
-	}
-
 	// Set sandbox domain for API responses
 	if cfg.SandboxDomain != "" && cfg.SandboxDomain != "localhost" {
 		opts.SandboxDomain = cfg.SandboxDomain
@@ -161,33 +149,113 @@ func main() {
 		}
 	}
 
-	// Initialize EC2 compute pool + autoscaler (server mode with AWS configured)
-	if cfg.Mode == "server" && cfg.EC2AMI != "" && redisRegistry != nil {
-		ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
-			Region:             cfg.S3Region, // reuse S3 region (same AWS account)
-			AccessKeyID:        cfg.S3AccessKeyID,
-			SecretAccessKey:    cfg.S3SecretAccessKey,
-			AMI:                cfg.EC2AMI,
-			InstanceType:       cfg.EC2InstanceType,
-			SubnetID:           cfg.EC2SubnetID,
-			SecurityGroupID:    cfg.EC2SecurityGroupID,
-			KeyName:            cfg.EC2KeyName,
-			IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
-			SecretsARN:         cfg.SecretsARN,
-		})
-		if err != nil {
-			log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
+	// Initialize compute pool + autoscaler (server mode)
+	if cfg.Mode == "server" && redisRegistry != nil {
+		var pool compute.Pool
+		var poolName string
+
+		if cfg.AzureSubscriptionID != "" && cfg.AzureImageID != "" {
+			// Build worker env template — new VMs get this via cloud-init.
+			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are patched by cloud-init
+			// with the VM's actual private IP and hostname.
+			// Workers need to reach Postgres/Redis on the control plane's private IP,
+			// not localhost. Replace localhost with the control plane's IP.
+			cpIP := os.Getenv("OPENSANDBOX_CONTROLPLANE_IP")
+			workerDBURL := cfg.DatabaseURL
+			workerRedisURL := cfg.RedisURL
+			if cpIP != "" {
+				workerDBURL = strings.ReplaceAll(workerDBURL, "localhost", cpIP)
+				workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
+				workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
+				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
+			}
+
+			workerEnv := fmt.Sprintf(
+				"OPENSANDBOX_MODE=worker\n"+
+					"OPENSANDBOX_VM_BACKEND=qemu\n"+
+					"OPENSANDBOX_QEMU_BIN=qemu-system-x86_64\n"+
+					"OPENSANDBOX_DATA_DIR=/data/sandboxes\n"+
+					"OPENSANDBOX_KERNEL_PATH=/opt/opensandbox/vmlinux\n"+
+					"OPENSANDBOX_IMAGES_DIR=/data/firecracker/images\n"+
+					"OPENSANDBOX_GRPC_ADVERTISE=PLACEHOLDER:9090\n"+
+					"OPENSANDBOX_HTTP_ADDR=http://PLACEHOLDER:8081\n"+
+					"OPENSANDBOX_JWT_SECRET=%s\n"+
+					"OPENSANDBOX_WORKER_ID=PLACEHOLDER\n"+
+					"OPENSANDBOX_REGION=%s\n"+
+					"OPENSANDBOX_MAX_CAPACITY=100\n"+
+					"OPENSANDBOX_PORT=8081\n"+
+					"OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=%d\n"+
+					"OPENSANDBOX_DEFAULT_SANDBOX_CPUS=%d\n"+
+					"OPENSANDBOX_DATABASE_URL=%s\n"+
+					"OPENSANDBOX_REDIS_URL=%s\n"+
+					"OPENSANDBOX_S3_BUCKET=%s\n"+
+					"OPENSANDBOX_S3_REGION=%s\n"+
+					"OPENSANDBOX_S3_ENDPOINT=%s\n"+
+					"OPENSANDBOX_S3_ACCESS_KEY_ID=%s\n"+
+					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n",
+				cfg.JWTSecret,
+				cfg.Region,
+				cfg.DefaultSandboxMemoryMB,
+				cfg.DefaultSandboxCPUs,
+				workerDBURL,
+				workerRedisURL,
+				cfg.S3Bucket,
+				cfg.S3Region,
+				cfg.S3Endpoint,
+				cfg.S3AccessKeyID,
+				cfg.S3SecretAccessKey,
+			)
+			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
+
+			azPool, err := compute.NewAzurePool(compute.AzurePoolConfig{
+				SubscriptionID:  cfg.AzureSubscriptionID,
+				ResourceGroup:   cfg.AzureResourceGroup,
+				Region:          cfg.Region,
+				VMSize:          cfg.AzureVMSize,
+				ImageID:         cfg.AzureImageID,
+				SubnetID:        cfg.AzureSubnetID,
+				SSHPublicKey:    cfg.AzureSSHPublicKey,
+				WorkerEnvBase64: workerEnvB64,
+			})
+			if err != nil {
+				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)
+			}
+			pool = azPool
+			poolName = fmt.Sprintf("Azure (size=%s, image=%s)", cfg.AzureVMSize, cfg.AzureImageID)
+		} else if cfg.EC2AMI != "" {
+			// AWS EC2 compute pool
+			ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
+				Region:             cfg.S3Region,
+				AccessKeyID:        cfg.S3AccessKeyID,
+				SecretAccessKey:    cfg.S3SecretAccessKey,
+				AMI:                cfg.EC2AMI,
+				InstanceType:       cfg.EC2InstanceType,
+				SubnetID:           cfg.EC2SubnetID,
+				SecurityGroupID:    cfg.EC2SecurityGroupID,
+				KeyName:            cfg.EC2KeyName,
+				IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
+				SecretsARN:         cfg.SecretsARN,
+			})
+			if err != nil {
+				log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
+			}
+			pool = ec2Pool
+			poolName = fmt.Sprintf("EC2 (ami=%s, type=%s)", cfg.EC2AMI, cfg.EC2InstanceType)
 		}
 
-		scaler := controlplane.NewScaler(controlplane.ScalerConfig{
-			Pool:        ec2Pool,
-			Registry:    redisRegistry,
-			WorkerImage: cfg.EC2WorkerImage,
-			Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
-		})
-		scaler.Start()
-		defer scaler.Stop()
-		log.Printf("opensandbox: EC2 autoscaler started (ami=%s, type=%s)", cfg.EC2AMI, cfg.EC2InstanceType)
+		if pool != nil {
+			scaler := controlplane.NewScaler(controlplane.ScalerConfig{
+				Pool:        pool,
+				Registry:    redisRegistry,
+				WorkerImage: cfg.EC2WorkerImage,
+				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
+				MinWorkers:  cfg.MinWorkersPerRegion,
+				MaxWorkers:  cfg.MaxWorkersPerRegion,
+			})
+			scaler.Start()
+			defer scaler.Stop()
+			log.Printf("opensandbox: autoscaler started (%s)", poolName)
+		}
 	}
 
 	// Initialize control plane subdomain proxy (server mode only).

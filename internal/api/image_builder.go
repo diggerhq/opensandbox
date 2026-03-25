@@ -63,7 +63,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("apt_install: %w", err)
 		}
-		return fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq %s", strings.Join(packages, " ")), nil
+		return fmt.Sprintf("sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo apt-get install -y -qq %s", strings.Join(packages, " ")), nil
 
 	case "pip_install":
 		pkgs, ok := step.Args["packages"]
@@ -74,7 +74,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("pip_install: %w", err)
 		}
-		return fmt.Sprintf("pip install -q %s", strings.Join(packages, " ")), nil
+		return fmt.Sprintf("sudo pip install -q %s", strings.Join(packages, " ")), nil
 
 	case "run":
 		cmds, ok := step.Args["commands"]
@@ -100,9 +100,9 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		for k, v := range varsMap {
 			val := fmt.Sprintf("%v", v)
 			// Write to /etc/environment for persistence across sessions
-			parts = append(parts, fmt.Sprintf("echo '%s=%s' >> /etc/environment", k, val))
+			parts = append(parts, fmt.Sprintf("sudo sh -c \"echo '%s=%s' >> /etc/environment\"", k, val))
 			// Also write to profile.d for interactive shells
-			parts = append(parts, fmt.Sprintf("echo 'export %s=\"%s\"' >> /etc/profile.d/osb-image.sh", k, val))
+			parts = append(parts, fmt.Sprintf("sudo sh -c \"echo 'export %s=\\\"%s\\\"' >> /etc/profile.d/osb-image.sh\"", k, val))
 		}
 		return strings.Join(parts, " && "), nil
 
@@ -115,7 +115,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("workdir: path must be a string")
 		}
-		return fmt.Sprintf("mkdir -p %s", pathStr), nil
+		return fmt.Sprintf("sudo mkdir -p %s", pathStr), nil
 
 	case "add_file":
 		remotePath, ok := step.Args["path"]
@@ -136,7 +136,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		}
 		// Create parent directory and decode base64 content
 		dir := pathStr[:strings.LastIndex(pathStr, "/")]
-		return fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d > %s", dir, contentStr, pathStr), nil
+		return fmt.Sprintf("sudo mkdir -p %s && echo '%s' | base64 -d | sudo tee %s > /dev/null", dir, contentStr, pathStr), nil
 
 	case "add_dir":
 		remotePath, ok := step.Args["path"]
@@ -157,7 +157,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 		}
 
 		var parts []string
-		parts = append(parts, fmt.Sprintf("mkdir -p %s", pathStr))
+		parts = append(parts, fmt.Sprintf("sudo mkdir -p %s", pathStr))
 		for _, fileRaw := range filesArr {
 			fileMap, ok := fileRaw.(map[string]interface{})
 			if !ok {
@@ -170,7 +170,7 @@ func translateStepToCommand(step ImageStep) (string, error) {
 			}
 			fullPath := pathStr + "/" + relPath
 			dir := fullPath[:strings.LastIndex(fullPath, "/")]
-			parts = append(parts, fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d > %s", dir, fileContent, fullPath))
+			parts = append(parts, fmt.Sprintf("sudo mkdir -p %s && echo '%s' | base64 -d | sudo tee %s > /dev/null", dir, fileContent, fullPath))
 		}
 		return strings.Join(parts, " && "), nil
 
@@ -376,19 +376,25 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		return uuid.Nil, fmt.Errorf("no execution backend available")
 	}
 
-	// Cleanup: always destroy the build sandbox and mark it stopped in PG
+	// Cleanup: destroy the build sandbox after a delay.
+	// The checkpoint cache (qcow2 files) must survive long enough for the first
+	// ForkFromCheckpoint to copy them. With reflink the fork is instant, but the
+	// server-side create flow is async — the fork gRPC call may arrive seconds later.
 	defer func() {
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if grpcClient != nil {
-			_, _ = grpcClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: buildSandboxID})
-		} else if s.manager != nil {
-			_ = s.manager.Kill(cleanCtx, buildSandboxID)
-		}
-		if s.store != nil {
-			_ = s.store.UpdateSandboxSessionStatus(cleanCtx, buildSandboxID, "stopped", nil)
-		}
-		log.Printf("image-builder: destroyed build sandbox %s", buildSandboxID)
+		go func() {
+			time.Sleep(30 * time.Second) // give forks time to copy from cache
+			cleanCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if grpcClient != nil {
+				_, _ = grpcClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: buildSandboxID})
+			} else if s.manager != nil {
+				_ = s.manager.Kill(cleanCtx, buildSandboxID)
+			}
+			if s.store != nil {
+				_ = s.store.UpdateSandboxSessionStatus(cleanCtx, buildSandboxID, "stopped", nil)
+			}
+			log.Printf("image-builder: destroyed build sandbox %s (delayed)", buildSandboxID)
+		}()
 	}()
 
 	// Record session in PG (so worker can find it)

@@ -37,6 +37,10 @@ service SandboxAgent {
   rpc PTYResize(PTYResizeRequest) returns (PTYResizeResponse);
   rpc PTYKill(PTYKillRequest) returns (PTYKillResponse);
 
+  // PTYAttach opens a bidirectional stream for PTY I/O over gRPC.
+  // Used by QEMU backend (virtio-serial) where vsock data ports are unavailable.
+  rpc PTYAttach(stream PTYInput) returns (stream PTYOutput);
+
   // Exec sessions — persistent command execution with scrollback and reconnect.
   rpc ExecSessionCreate(ExecSessionCreateRequest) returns (ExecSessionCreateResponse);
   rpc ExecSessionAttach(stream ExecSessionInput) returns (stream ExecSessionOutput);
@@ -54,6 +58,17 @@ service SandboxAgent {
   // SyncFS flushes all filesystem buffers without exiting.
   // Used before snapshot to ensure disk state is consistent.
   rpc SyncFS(SyncFSRequest) returns (SyncFSResponse);
+
+  // SetResourceLimits adjusts sandbox cgroup limits at runtime.
+  // Used for elastic scaling — raise/lower memory, CPU, pids without restart.
+  rpc SetResourceLimits(SetResourceLimitsRequest) returns (SetResourceLimitsResponse);
+
+  // GetVersion returns the agent's build version.
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+
+  // Upgrade replaces the agent binary and re-execs (same PID 1, no process loss).
+  // The worker writes the new binary to binary_path before calling this.
+  rpc Upgrade(UpgradeRequest) returns (UpgradeResponse);
 }
 
 // --- Exec ---
@@ -64,6 +79,7 @@ message ExecRequest {
   map<string, string> envs = 3;
   string cwd = 4;
   int32 timeout_seconds = 5; // 0 = default (60s)
+  bool run_as_root = 6;      // if true, skip sandbox user credential (for internal/system ops)
 }
 
 message ExecResponse {
@@ -217,6 +233,21 @@ message PTYKillRequest {
 
 message PTYKillResponse {}
 
+// PTYInput is a client→agent message for the PTYAttach bidi stream.
+message PTYInput {
+  string session_id = 1; // required on first message to identify the session
+  bytes stdin = 2;       // raw bytes to write to the PTY
+  int32 cols = 3;        // if > 0, resize the PTY
+  int32 rows = 4;        // if > 0, resize the PTY
+}
+
+// PTYOutput is an agent→client message for the PTYAttach bidi stream.
+message PTYOutput {
+  bytes data = 1;       // raw bytes read from the PTY
+  bool exited = 2;      // true when the PTY process has exited
+  int32 exit_code = 3;  // only valid when exited = true
+}
+
 // --- Exec Sessions ---
 
 message ExecSessionCreateRequest {
@@ -290,3 +321,30 @@ message ShutdownResponse {}
 message SyncFSRequest {}
 
 message SyncFSResponse {}
+
+// --- Resource Limits ---
+
+message SetResourceLimitsRequest {
+  int32 max_pids = 1;          // pids.max (0 = don't change)
+  int64 max_memory_bytes = 2;  // memory.max (0 = don't change)
+  int64 cpu_max_usec = 3;      // cpu.max quota (0 = don't change)
+  int64 cpu_period_usec = 4;   // cpu.max period (0 = default 100000)
+}
+
+message SetResourceLimitsResponse {}
+
+// --- Version + Upgrade ---
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  string version = 1;  // build version (git SHA or build timestamp)
+}
+
+message UpgradeRequest {
+  string binary_path = 1;  // path to new agent binary inside the VM
+}
+
+message UpgradeResponse {
+  bool ok = 1;
+}

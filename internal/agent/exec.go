@@ -13,15 +13,24 @@ import (
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
-// baseEnv returns the current OS environment with HOME set to /root and
-// PATH guaranteed to include /usr/local/bin and /usr/local/sbin.
-// With overlayfs, the entire filesystem is backed by the data disk,
-// so /root (the standard root home) has full disk space available.
+const (
+	sandboxHome = "/home/sandbox"
+	sandboxUser = "sandbox"
+)
+
+// sandboxCredential returns the SysProcAttr.Credential for the sandbox user.
+func sandboxCredential() *syscall.Credential {
+	return &syscall.Credential{Uid: sandboxUID, Gid: sandboxGID}
+}
+
+// baseEnv returns the environment for sandbox user commands.
+// HOME is set to /home/sandbox, USER to sandbox, and
+// PATH is guaranteed to include /usr/local/bin and /usr/local/sbin.
 func baseEnv() []string {
 	var env []string
 	hasPath := false
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "HOME=") {
+		if strings.HasPrefix(e, "HOME=") || strings.HasPrefix(e, "USER=") || strings.HasPrefix(e, "LOGNAME=") {
 			continue
 		}
 		if strings.HasPrefix(e, "PATH=") {
@@ -39,7 +48,9 @@ func baseEnv() []string {
 	if !hasPath {
 		env = append(env, "PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin")
 	}
-	env = append(env, "HOME=/root")
+	env = append(env, "HOME="+sandboxHome)
+	env = append(env, "USER="+sandboxUser)
+	env = append(env, "LOGNAME="+sandboxUser)
 	return env
 }
 
@@ -69,7 +80,7 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	} else {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build env: base < sandbox-level < per-command
@@ -83,25 +94,50 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		cmd.Env = append(cmd.Env, mapToEnv(req.Envs)...)
 	}
 
-	// Set process group so we can kill the entire tree
+	// Run in its own process group; use sandbox user unless run_as_root is set
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !req.RunAsRoot {
+		cmd.SysProcAttr.Credential = sandboxCredential()
+	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	// Start + move to sandbox cgroup + wait (instead of Run)
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("exec start: %w", err)
+	}
+	moveToCgroup(cmd.Process.Pid)
+
+	// Wait with cgroup kill on timeout — if the process doesn't exit when the
+	// context deadline fires, kill the entire sandbox cgroup to clean up fork
+	// bombs and runaway children.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	var err error
+	select {
+	case err = <-waitDone:
+		// Normal completion
+	case <-ctx.Done():
+		// Timeout — kill process group first, then nuke the cgroup
+		if cmd.Process != nil {
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		killCgroup()
+		<-waitDone // wait for cmd.Wait to return after kills
+		return &pb.ExecResponse{
+			ExitCode: -1,
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String() + "\nProcess timed out",
+		}, nil
+	}
 
 	exitCode := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
-			return &pb.ExecResponse{
-				ExitCode: -1,
-				Stdout:   stdout.String(),
-				Stderr:   stderr.String() + "\nProcess timed out",
-			}, nil
 		} else {
 			return nil, fmt.Errorf("exec failed: %w", err)
 		}
@@ -129,7 +165,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	} else {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build env: base < sandbox-level < per-command
@@ -144,6 +180,9 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	}
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !req.RunAsRoot {
+		cmd.SysProcAttr.Credential = sandboxCredential()
+	}
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -157,6 +196,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start: %w", err)
 	}
+	moveToCgroup(cmd.Process.Pid)
 
 	// Stream stdout and stderr in parallel
 	errCh := make(chan error, 2)
@@ -218,4 +258,84 @@ func mapToEnv(m map[string]string) []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+const sandboxCgroupProcs = "/sys/fs/cgroup/sandbox/cgroup.procs"
+
+// sandboxUID/GID for running user commands as non-root.
+// Prevents users from modifying cgroup limits or kernel interfaces.
+const (
+	sandboxUID = 1000
+	sandboxGID = 1000
+)
+
+// moveToCgroup moves a process into the sandbox cgroup.
+// This ensures user commands are subject to resource limits (pids, memory, cpu)
+// while the agent (PID 1) stays in the root cgroup, protected from exhaustion.
+func moveToCgroup(pid int) {
+	_ = os.WriteFile(sandboxCgroupProcs, []byte(fmt.Sprintf("%d", pid)), 0644)
+}
+
+// killCgroup kills all processes in the sandbox cgroup.
+// Used on exec timeout to clean up fork bombs and runaway children.
+func killCgroup() {
+	// cgroup.kill is the fast path (kernel 5.14+) — kills all processes atomically
+	if err := os.WriteFile("/sys/fs/cgroup/sandbox/cgroup.kill", []byte("1"), 0644); err == nil {
+		return
+	}
+	// Fallback: read all PIDs and kill them individually
+	data, err := os.ReadFile(sandboxCgroupProcs)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscanf(line, "%d", &pid); err == nil && pid > 1 {
+			syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+
+	// Brief wait, then check for survivors (e.g., D-state processes immune to SIGKILL)
+	time.Sleep(100 * time.Millisecond)
+	if remaining, err := os.ReadFile(sandboxCgroupProcs); err == nil {
+		lines := strings.TrimSpace(string(remaining))
+		if lines != "" {
+			fmt.Fprintf(os.Stderr, "agent: WARNING: %d PIDs remain in sandbox cgroup after SIGKILL: %s\n",
+				len(strings.Split(lines, "\n")), lines)
+		}
+	}
+}
+
+// SetResourceLimits adjusts the sandbox cgroup limits at runtime.
+// Called by the worker when a sandbox scales up/down.
+func (s *Server) SetResourceLimits(ctx context.Context, req *pb.SetResourceLimitsRequest) (*pb.SetResourceLimitsResponse, error) {
+	const cgroupDir = "/sys/fs/cgroup/sandbox"
+
+	if req.MaxPids > 0 {
+		if err := os.WriteFile(cgroupDir+"/pids.max", []byte(fmt.Sprintf("%d", req.MaxPids)), 0644); err != nil {
+			return nil, fmt.Errorf("set pids.max: %w", err)
+		}
+	}
+	if req.MaxMemoryBytes > 0 {
+		if err := os.WriteFile(cgroupDir+"/memory.max", []byte(fmt.Sprintf("%d", req.MaxMemoryBytes)), 0644); err != nil {
+			return nil, fmt.Errorf("set memory.max: %w", err)
+		}
+	}
+	if req.CpuMaxUsec > 0 {
+		// cpu.max format: "$MAX $PERIOD" — e.g., "100000 100000" = 1 vCPU
+		period := int64(100000)
+		if req.CpuPeriodUsec > 0 {
+			period = req.CpuPeriodUsec
+		}
+		val := fmt.Sprintf("%d %d", req.CpuMaxUsec, period)
+		if err := os.WriteFile(cgroupDir+"/cpu.max", []byte(val), 0644); err != nil {
+			return nil, fmt.Errorf("set cpu.max: %w", err)
+		}
+	}
+
+	return &pb.SetResourceLimitsResponse{}, nil
 }

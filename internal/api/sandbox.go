@@ -30,14 +30,14 @@ func (s *Server) createSandbox(c echo.Context) error {
 	if cfg.CpuCount < 0 {
 		cfg.CpuCount = 0
 	}
-	if cfg.CpuCount > 4 {
+	if cfg.CpuCount > 16 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "cpuCount must not exceed 4",
+			"error": "cpuCount must not exceed 16",
 		})
 	}
-	if cfg.MemoryMB > 2048 {
+	if cfg.MemoryMB > 16384 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "memoryMB must not exceed 2048",
+			"error": "memoryMB must not exceed 16384",
 		})
 	}
 	if cfg.MemoryMB < 0 {
@@ -216,6 +216,25 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 		flusher.Flush()
 	}
 
+	// Send SSE keepalive comments every 15s to prevent Cloudflare 524 timeouts
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(c.Response(), ": keepalive\n\n")
+				flusher.Flush()
+			case <-keepaliveDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	// Build log callback — emits SSE events during image build
 	logFn := BuildLogFunc(func(step int, stepType string, message string) {
 		emit("build_log", map[string]interface{}{
@@ -273,14 +292,12 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		})
 	}
 
-	// Resolve template image from DB (org-scoped lookup with public fallback)
-	var imageRef string
+	// Resolve template from DB (org-scoped lookup with public fallback)
 	var templateRootfsKey, templateWorkspaceKey string
 	var templateID *uuid.UUID
 	if s.store != nil && hasOrg {
 		tmpl, err := s.store.GetTemplateByName(ctx, orgID, cfg.Template)
 		if err == nil {
-			imageRef = tmpl.ImageRef
 			templateID = &tmpl.ID
 			log.Printf("sandbox: resolved template %q (type=%s, id=%s)", cfg.Template, tmpl.TemplateType, tmpl.ID)
 			// Sandbox-type templates provide S3 drive keys instead of ECR image refs
@@ -303,14 +320,16 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 	grpcCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
+	// Save requested resource limits — create with defaults (golden snapshot),
+	// then scale up after creation. This avoids needing a golden per CPU config.
+	requestedMemoryMB := cfg.MemoryMB
+	requestedCpuCount := cfg.CpuCount
+
 	grpcResp, err := grpcClient.CreateSandbox(grpcCtx, &pb.CreateSandboxRequest{
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
-		MemoryMb:             int32(cfg.MemoryMB),
-		CpuCount:             int32(cfg.CpuCount),
 		NetworkEnabled:       cfg.NetworkEnabled,
-		ImageRef:             imageRef,
 		Port:                 int32(cfg.Port),
 		TemplateRootfsKey:    templateRootfsKey,
 		TemplateWorkspaceKey: templateWorkspaceKey,
@@ -319,6 +338,37 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "worker create failed: " + err.Error(),
 		})
+	}
+
+	// Scale to requested resources after creation (virtio-mem hotplug + cgroup).
+	// Golden snapshot has fixed CPU/RAM — we create with defaults then scale up.
+	if requestedMemoryMB > 0 || requestedCpuCount > 0 {
+		scaleMB := requestedMemoryMB
+		if scaleMB <= 0 {
+			scaleMB = 1024
+		}
+		cpuCount := requestedCpuCount
+		if cpuCount <= 0 {
+			cpuCount = scaleMB / 4096 // 1 vCPU per 4GB
+			if cpuCount < 1 {
+				cpuCount = 1
+			}
+		}
+		maxMemBytes := int64(scaleMB) * 1024 * 1024
+		cpuPeriod := int64(100000)
+		cpuMax := int64(cpuCount) * cpuPeriod
+
+		scaleCtx, scaleCancel := context.WithTimeout(ctx, 10*time.Second)
+		_, scaleErr := grpcClient.SetSandboxLimits(scaleCtx, &pb.SetSandboxLimitsRequest{
+			SandboxId:      grpcResp.SandboxId,
+			MaxMemoryBytes: maxMemBytes,
+			CpuMaxUsec:     cpuMax,
+			CpuPeriodUsec:  cpuPeriod,
+		})
+		scaleCancel()
+		if scaleErr != nil {
+			log.Printf("sandbox: post-create scale failed for %s: %v (continuing with defaults)", grpcResp.SandboxId, scaleErr)
+		}
 	}
 
 	// Issue sandbox-scoped JWT (24h TTL — independent of sandbox idle timeout)
@@ -352,6 +402,9 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		"status":    grpcResp.Status,
 		"region":    region,
 		"workerID":  worker.ID,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusCreated, resp)
@@ -417,6 +470,9 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 			"template":  session.Template,
 			"startedAt": session.StartedAt,
 		}
+		if s.sandboxDomain != "" {
+			resp["sandboxDomain"] = s.sandboxDomain
+		}
 		return c.JSON(http.StatusOK, resp)
 	}
 
@@ -437,6 +493,9 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		"workerID":  session.WorkerID,
 		"startedAt": session.StartedAt,
 		"template":  session.Template,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusOK, resp)
@@ -608,6 +667,228 @@ func (s *Server) setTimeout(c echo.Context) error {
 	s.router.SetTimeout(id, time.Duration(req.Timeout)*time.Second)
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// migrateSandbox performs live migration of a sandbox to a different worker.
+// POST /api/sandboxes/:id/migrate {"targetWorker": "w-azure-osb-worker-xxx"}
+func (s *Server) migrateSandbox(c echo.Context) error {
+	id := c.Param("id")
+	ctx := c.Request().Context()
+
+	var req struct {
+		TargetWorker string `json:"targetWorker"`
+	}
+	if err := c.Bind(&req); err != nil || req.TargetWorker == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "targetWorker is required"})
+	}
+
+	if s.workerRegistry == nil || s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "migration requires server mode with worker registry"})
+	}
+
+	// Look up sandbox to find source worker
+	session, err := s.store.GetSandboxSession(ctx, id)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	if session.Status != "running" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox must be running to migrate"})
+	}
+
+	// Get source and target worker gRPC clients
+	sourceClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "source worker unreachable: " + err.Error()})
+	}
+	targetClient, err := s.workerRegistry.GetWorkerClient(req.TargetWorker)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "target worker unreachable: " + err.Error()})
+	}
+
+	t0 := time.Now()
+
+	// Step 1: Prepare target worker — starts QEMU with -incoming tcp
+	// Use session config for VM parameters. Drives are created fresh on target;
+	// memory contents (including filesystem cache) migrate via QMP tcp.
+	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer prepCancel()
+	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
+		SandboxId: id,
+		CpuCount:  1,
+		MemoryMb:  1024,
+		GuestPort: 80,
+		Template:  session.Template,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
+	}
+
+	log.Printf("migrate %s: target prepared at %s (host port %d)", id, prepResp.IncomingAddr, prepResp.HostPort)
+
+	// Step 3: Live migrate from source to target
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer migrateCancel()
+	_, err = sourceClient.LiveMigrate(migrateCtx, &pb.LiveMigrateRequest{
+		SandboxId:    id,
+		IncomingAddr: prepResp.IncomingAddr,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "live migrate: " + err.Error()})
+	}
+
+	log.Printf("migrate %s: QMP migration complete (%dms)", id, time.Since(t0).Milliseconds())
+
+	// Step 4: Complete migration on target (reconnect agent, patch network)
+	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer completeCancel()
+	_, err = targetClient.CompleteMigrationIncoming(completeCtx, &pb.CompleteMigrationIncomingRequest{
+		SandboxId: id,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "complete migration: " + err.Error()})
+	}
+
+	// Step 5: Update DB — sandbox now on target worker
+	_, _ = s.store.Pool().Exec(ctx, "UPDATE sandbox_sessions SET worker_id = $1 WHERE sandbox_id = $2", req.TargetWorker, id)
+
+	elapsed := time.Since(t0).Milliseconds()
+	log.Printf("migrate %s: complete in %dms (source=%s target=%s)", id, elapsed, session.WorkerID, req.TargetWorker)
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID":    id,
+		"sourceWorker": session.WorkerID,
+		"targetWorker": req.TargetWorker,
+		"elapsedMs":    elapsed,
+	})
+}
+
+func (s *Server) setLimits(c echo.Context) error {
+	id := c.Param("id")
+	ctx := c.Request().Context()
+
+	var req struct {
+		MemoryMB   int `json:"memoryMB"`
+		CPUPercent int `json:"cpuPercent"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "invalid request body: " + err.Error(),
+		})
+	}
+
+	// Auto-calculate CPU from memory: 1 vCPU per 4GB
+	if req.MemoryMB > 0 && req.CPUPercent == 0 {
+		req.CPUPercent = (req.MemoryMB * 100) / 4096
+		if req.CPUPercent < 100 {
+			req.CPUPercent = 100
+		}
+	}
+
+	// Convert to cgroup values
+	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
+	cpuMaxUsec := int64(req.CPUPercent) * 1000
+	cpuPeriodUsec := int64(100000)
+
+	// Server mode: dispatch to worker via gRPC
+	if s.workerRegistry != nil {
+		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+	}
+
+	// Combined mode: apply locally
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if err := s.manager.SetResourceLimits(ctx, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID":  id,
+		"memoryMB":   req.MemoryMB,
+		"cpuPercent": req.CPUPercent,
+	})
+}
+
+// scaleSandbox is a simplified scaling endpoint: POST /sandboxes/:id/scale
+// Accepts {"memoryMB": 2048} and auto-calculates CPU (1 vCPU per 1GB).
+func (s *Server) scaleSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	var req struct {
+		MemoryMB int `json:"memoryMB"`
+	}
+	if err := c.Bind(&req); err != nil || req.MemoryMB <= 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memoryMB is required and must be positive"})
+	}
+
+	// Auto-calculate: 1 vCPU per 4GB = 100% CPU per 4096MB
+	cpuPercent := (req.MemoryMB * 100) / 4096
+	if cpuPercent < 100 {
+		cpuPercent = 100
+	}
+	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
+	cpuMaxUsec := int64(cpuPercent) * 1000
+	cpuPeriodUsec := int64(100000)
+
+	if s.workerRegistry != nil {
+		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+	}
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+	if err := s.manager.SetResourceLimits(c.Request().Context(), id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID": id,
+		"memoryMB":  req.MemoryMB,
+		"cpuPercent": cpuPercent,
+	})
+}
+
+func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "database not configured",
+		})
+	}
+
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	if session.Status != "running" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox is not running"})
+	}
+
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable"})
+	}
+
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
+	defer cancel()
+
+	_, err = client.SetSandboxLimits(grpcCtx, &pb.SetSandboxLimitsRequest{
+		SandboxId:      sandboxID,
+		MaxPids:        maxPids,
+		MaxMemoryBytes: maxMemoryBytes,
+		CpuMaxUsec:     cpuMaxUsec,
+		CpuPeriodUsec:  cpuPeriodUsec,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "set limits failed: " + err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"sandboxID": sandboxID,
+		"ok":        true,
+	})
 }
 
 func (s *Server) hibernateSandbox(c echo.Context) error {
@@ -850,12 +1131,14 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	}
 
 	resp := map[string]interface{}{
-		"sandboxID":  sandboxID,
-		"connectURL": worker.HTTPAddr,
-		"token":      token,
-		"status":     grpcResp.Status,
-		"region":     region,
-		"workerID":   worker.ID,
+		"sandboxID": sandboxID,
+		"token":     token,
+		"status":    grpcResp.Status,
+		"region":    region,
+		"workerID":  worker.ID,
+	}
+	if s.sandboxDomain != "" {
+		resp["sandboxDomain"] = s.sandboxDomain
 	}
 
 	return c.JSON(http.StatusOK, resp)
@@ -1302,14 +1585,18 @@ func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{
 		}
 	}()
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"sandboxID":        sandboxID,
 		"status":           "creating",
 		"token":            token,
 		"region":           region,
 		"workerID":         workerID,
 		"fromCheckpointId": checkpointID.String(),
-	}, http.StatusCreated, nil
+	}
+	if s.sandboxDomain != "" {
+		result["sandboxDomain"] = s.sandboxDomain
+	}
+	return result, http.StatusCreated, nil
 }
 
 // deleteCheckpoint deletes a checkpoint.

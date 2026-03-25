@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     busybox \
     ca-certificates \
+    kmod \
     locales \
     sudo \
     # Editors
@@ -93,6 +94,14 @@ RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 
+# ── Sandbox user (non-root with passwordless sudo) ───────────────────────────
+# The agent (PID 1) runs as root, but all user commands run as "sandbox".
+# This matches user expectations for a normal Linux environment and allows
+# Claude Code to work without --allow-dangerously-skip-permissions.
+RUN useradd -m -s /bin/bash -G sudo sandbox \
+    && echo "sandbox ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sandbox \
+    && chmod 440 /etc/sudoers.d/sandbox
+
 # ── Overlay mount points (data disk backs all writes via overlayfs) ───────────
 RUN mkdir -p /mnt/data /mnt/overlay
-WORKDIR /root
+WORKDIR /home/sandbox

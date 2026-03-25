@@ -3,7 +3,7 @@ title: "Introduction"
 description: "Cloud sandboxes for AI agents"
 ---
 
-OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated Firecracker microVM with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
+OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated virtual machine with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
 
 <CardGroup cols={2}>
   <Card title="Claude Agent SDK built in" icon="robot">
@@ -16,7 +16,7 @@ OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is 
     Named snapshots you can fork from. Try five approaches in parallel from the same starting point — like git branches for VMs.
   </Card>
   <Card title="Full Linux VM" icon="server">
-    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via Firecracker — the same technology behind AWS Lambda.
+    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via KVM.
   </Card>
 </CardGroup>
 
@@ -87,7 +87,7 @@ await sandbox.kill()
     Working agent in 2 minutes
   </Card>
   <Card title="How It Works" icon="microchip" href="/how-it-works">
-    Architecture: Firecracker VMs, hibernation, checkpoints
+    Architecture: VMs, hibernation, checkpoints
   </Card>
   <Card title="Agents" icon="robot" href="/agents/overview">
     Run Claude inside sandboxes

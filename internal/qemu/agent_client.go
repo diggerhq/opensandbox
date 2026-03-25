@@ -1,40 +1,37 @@
-package firecracker
+package qemu
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"time"
 
-	pb "github.com/opensandbox/opensandbox/proto/agent"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+
+	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
 const streamChunkSize = 256 * 1024 // 256KB per gRPC chunk
 
 // AgentClient is the host-side gRPC client that connects to the
-// osb-agent running inside a Firecracker VM via vsock.
+// osb-agent running inside a QEMU VM via AF_VSOCK.
 type AgentClient struct {
 	conn   *grpc.ClientConn
 	client pb.SandboxAgentClient
 }
 
-// NewAgentClient connects to the agent via the Firecracker vsock UDS.
-// In --no-api mode, Firecracker creates a single UDS file (vsock.sock).
-// To reach a guest port, the host connects to the UDS and sends
-// "CONNECT <port>\n". Firecracker responds with "OK <buf_size>\n"
-// and the connection is then relayed to the guest.
-func NewAgentClient(vsockPath string) (*AgentClient, error) {
+// NewAgentClient connects to the agent via AF_VSOCK using the guest CID.
+// QEMU uses the kernel's vhost-vsock directly — no UDS file needed.
+// Port 1024 is the agent gRPC server inside the VM.
+func NewAgentClient(guestCID uint32) (*AgentClient, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	conn, err := grpc.DialContext(ctx,
-		// Use passthrough scheme — the custom dialer handles the actual connection
 		"passthrough:///vsock",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
@@ -47,7 +44,7 @@ func NewAgentClient(vsockPath string) (*AgentClient, error) {
 			},
 		}),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return dialVsock(ctx, vsockPath, 1024)
+			return dialVsock(ctx, guestCID, 1024)
 		}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(64*1024*1024),
@@ -55,7 +52,7 @@ func NewAgentClient(vsockPath string) (*AgentClient, error) {
 		),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("connect to agent at %s: %w", vsockPath, err)
+		return nil, fmt.Errorf("connect to agent at CID %d: %w", guestCID, err)
 	}
 
 	return &AgentClient{
@@ -64,57 +61,104 @@ func NewAgentClient(vsockPath string) (*AgentClient, error) {
 	}, nil
 }
 
-// dialVsock connects to a guest port via Firecracker's vsock UDS protocol.
-// Protocol: connect to the UDS, send "CONNECT <port>\n", read "OK ...\n".
-func dialVsock(ctx context.Context, vsockPath string, port int) (net.Conn, error) {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(5 * time.Second)
-	}
-
-	d := net.Dialer{Deadline: deadline}
-	conn, err := d.DialContext(ctx, "unix", vsockPath)
+// dialVsock connects to a guest port via AF_VSOCK (kernel vhost-vsock).
+func dialVsock(ctx context.Context, cid uint32, port uint32) (net.Conn, error) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
-		return nil, fmt.Errorf("dial vsock UDS %s: %w", vsockPath, err)
+		return nil, fmt.Errorf("create AF_VSOCK socket: %w", err)
 	}
 
-	// Send CONNECT command
-	_ = conn.SetDeadline(deadline)
-	if _, err := fmt.Fprintf(conn, "CONNECT %d\n", port); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("send CONNECT %d: %w", port, err)
+	sa := &unix.SockaddrVM{
+		CID:  cid,
+		Port: port,
 	}
 
-	// Read response line (e.g., "OK 1073741824\n")
-	reader := bufio.NewReader(conn)
-	line, err := reader.ReadString('\n')
+	// Use a goroutine for connect with context cancellation
+	connectDone := make(chan error, 1)
+	go func() {
+		connectDone <- unix.Connect(fd, sa)
+	}()
+
+	select {
+	case err := <-connectDone:
+		if err != nil {
+			unix.Close(fd)
+			return nil, fmt.Errorf("connect AF_VSOCK CID=%d port=%d: %w", cid, port, err)
+		}
+	case <-ctx.Done():
+		unix.Close(fd)
+		return nil, ctx.Err()
+	}
+
+	// Wrap the raw fd in a net.Conn
+	file := fdToConn(fd)
+	return file, nil
+}
+
+// fdToConn wraps a raw file descriptor into a net.Conn.
+func fdToConn(fd int) net.Conn {
+	// AF_VSOCK sockets are not supported by net.FileConn, so use
+	// the raw syscall-based implementation directly.
+	return &rawVsockConn{fd: fd}
+}
+
+// rawVsockConn is a fallback net.Conn implementation using raw syscalls.
+type rawVsockConn struct {
+	fd int
+}
+
+func (c *rawVsockConn) Read(b []byte) (int, error) {
+	n, err := unix.Read(c.fd, b)
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("read vsock response: %w", err)
+		return 0, err
 	}
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "OK") {
-		conn.Close()
-		return nil, fmt.Errorf("vsock CONNECT failed: %s", line)
+	return n, nil
+}
+
+func (c *rawVsockConn) Write(b []byte) (int, error) {
+	return unix.Write(c.fd, b)
+}
+
+func (c *rawVsockConn) Close() error {
+	return unix.Close(c.fd)
+}
+
+func (c *rawVsockConn) LocalAddr() net.Addr                { return vsockAddr{} }
+func (c *rawVsockConn) RemoteAddr() net.Addr               { return vsockAddr{} }
+func (c *rawVsockConn) SetDeadline(t time.Time) error {
+	if err := c.SetReadDeadline(t); err != nil {
+		return err
 	}
-
-	// Clear deadline — gRPC manages its own timeouts
-	_ = conn.SetDeadline(time.Time{})
-
-	// Wrap to handle the buffered reader (there may be buffered data from the OK line)
-	return &vsockConn{Conn: conn, reader: reader}, nil
+	return c.SetWriteDeadline(t)
 }
 
-// vsockConn wraps a net.Conn with a bufio.Reader to handle buffered reads
-// from the CONNECT handshake.
-type vsockConn struct {
-	net.Conn
-	reader *bufio.Reader
+func (c *rawVsockConn) SetReadDeadline(t time.Time) error {
+	return setSockTimeout(c.fd, unix.SO_RCVTIMEO, t)
 }
 
-func (c *vsockConn) Read(p []byte) (int, error) {
-	return c.reader.Read(p)
+func (c *rawVsockConn) SetWriteDeadline(t time.Time) error {
+	return setSockTimeout(c.fd, unix.SO_SNDTIMEO, t)
 }
+
+// setSockTimeout sets SO_RCVTIMEO or SO_SNDTIMEO on a raw fd.
+// A zero time clears the timeout (blocks indefinitely).
+func setSockTimeout(fd int, opt int, t time.Time) error {
+	var tv unix.Timeval
+	if !t.IsZero() {
+		d := time.Until(t)
+		if d <= 0 {
+			d = 1 * time.Microsecond // already expired — set minimal timeout
+		}
+		tv = unix.NsecToTimeval(int64(d))
+	}
+	// Zero tv clears the timeout
+	return unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, opt, &tv)
+}
+
+type vsockAddr struct{}
+
+func (vsockAddr) Network() string { return "vsock" }
+func (vsockAddr) String() string  { return "vsock" }
 
 // Close closes the gRPC connection.
 func (c *AgentClient) Close() error {
@@ -201,9 +245,46 @@ func (c *AgentClient) Shutdown(ctx context.Context) error {
 	return err
 }
 
-// SyncFS flushes all filesystem buffers inside the VM without exiting the agent.
+// SetResourceLimits adjusts sandbox cgroup limits at runtime.
+func (c *AgentClient) SetResourceLimits(ctx context.Context, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error {
+	_, err := c.client.SetResourceLimits(ctx, &pb.SetResourceLimitsRequest{
+		MaxPids:        maxPids,
+		MaxMemoryBytes: maxMemoryBytes,
+		CpuMaxUsec:     cpuMaxUsec,
+		CpuPeriodUsec:  cpuPeriodUsec,
+	})
+	return err
+}
+
+// SyncFS flushes all filesystem buffers inside the VM.
 func (c *AgentClient) SyncFS(ctx context.Context) error {
 	_, err := c.client.SyncFS(ctx, &pb.SyncFSRequest{})
+	return err
+}
+
+// WriteFileBinary writes binary content to a path inside the VM.
+func (c *AgentClient) WriteFileBinary(ctx context.Context, path string, content []byte, mode uint32) error {
+	_, err := c.client.WriteFile(ctx, &pb.WriteFileRequest{
+		Path:    path,
+		Content: content,
+		Mode:    mode,
+	})
+	return err
+}
+
+// GetVersion returns the agent's build version.
+func (c *AgentClient) GetVersion(ctx context.Context) (string, error) {
+	resp, err := c.client.GetVersion(ctx, &pb.GetVersionRequest{})
+	if err != nil {
+		return "", err
+	}
+	return resp.Version, nil
+}
+
+// Upgrade tells the agent to replace its binary and re-exec.
+// The new binary must already be written to binaryPath inside the VM.
+func (c *AgentClient) Upgrade(ctx context.Context, binaryPath string) error {
+	_, err := c.client.Upgrade(ctx, &pb.UpgradeRequest{BinaryPath: binaryPath})
 	return err
 }
 
@@ -266,6 +347,11 @@ func (c *AgentClient) ExecSessionKill(ctx context.Context, sessionID string, sig
 		Signal:    signal,
 	})
 	return err
+}
+
+// PTYAttach opens a bidirectional gRPC stream for PTY I/O.
+func (c *AgentClient) PTYAttach(ctx context.Context) (pb.SandboxAgent_PTYAttachClient, error) {
+	return c.client.PTYAttach(ctx)
 }
 
 // ReadFileStream opens a server-streaming gRPC call and returns an io.ReadCloser
@@ -354,13 +440,46 @@ func (c *AgentClient) WriteFileStream(ctx context.Context, path string, mode uin
 }
 
 // ConnectPTYData connects to the PTY data stream on the given vsock port.
-// Returns a raw TCP-like connection for bidirectional PTY I/O.
-func (c *AgentClient) ConnectPTYData(vsockPath string, dataPort uint32) (net.Conn, error) {
+// Uses AF_VSOCK directly instead of Firecracker's UDS protocol.
+func (c *AgentClient) ConnectPTYData(guestCID uint32, dataPort uint32) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := dialVsock(ctx, vsockPath, int(dataPort))
+	conn, err := dialVsock(ctx, guestCID, dataPort)
 	if err != nil {
 		return nil, fmt.Errorf("connect to PTY data port %d: %w", dataPort, err)
 	}
 	return conn, nil
+}
+
+// NewAgentClientSocket connects to the agent via a Unix socket (virtio-serial chardev).
+// Used by QEMU backend — virtio-serial survives QEMU live migration.
+func NewAgentClientSocket(socketPath string) (*AgentClient, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx,
+		"unix://"+socketPath,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  10 * time.Millisecond,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   1 * time.Second,
+			},
+		}),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(64*1024*1024),
+			grpc.MaxCallSendMsgSize(64*1024*1024),
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to agent at %s: %w", socketPath, err)
+	}
+
+	return &AgentClient{
+		conn:   conn,
+		client: pb.NewSandboxAgentClient(conn),
+	}, nil
 }

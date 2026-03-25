@@ -44,13 +44,12 @@ interface TestSuite {
 }
 
 const SUITES: TestSuite[] = [
-  { name: "Environment", file: "test-environment.ts", description: "HOME=/workspace, npm/pip cache dirs, dotfiles" },
+  { name: "Environment", file: "test-environment.ts", description: "Root access, apt/npm/pip install, dev tools" },
   { name: "Commands", file: "test-commands.ts", description: "Shell commands, stderr, exit codes, pipes, concurrency" },
   { name: "File Ops", file: "test-file-ops.ts", description: "Large files, special chars, nested dirs, deletion" },
   { name: "Python SDK", file: "test-python-sdk.ts", description: "Python template, stdlib, file ops from Python" },
-  { name: "Multi-Template", file: "test-multi-template.ts", description: "base, python, node templates" },
   { name: "Reconnect", file: "test-reconnect.ts", description: "Sandbox.connect(), state persistence, multi-conn" },
-  { name: "Domain/TLS", file: "test-domain-tls.ts", description: "Subdomains, Let's Encrypt certs, routing isolation" },
+  { name: "Domain/TLS", file: "test-domain-tls.ts", description: "Subdomains, TLS certs, routing isolation" },
   { name: "Concurrent", file: "test-concurrent.ts", description: "5 sandboxes in parallel, isolation, parallel ops" },
   { name: "Hibernation", file: "test-hibernation-stress.ts", description: "Multi-cycle hibernate/wake, large state, auto-wake" },
   { name: "Checkpoints", file: "test-checkpoints.ts", description: "Create, list, restore, fork, delete checkpoints, limits" },

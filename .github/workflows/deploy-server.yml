@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 env:
-  SSH_USER: ubuntu
+  SSH_USER: azureuser
   GOARCH: amd64
 
 jobs:
@@ -51,38 +51,6 @@ jobs:
         run: |
           scp -i ~/.ssh/deploy.pem bin/opensandbox-server ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/opensandbox-server
           scp -i ~/.ssh/deploy.pem bin/web-dist.tar.gz ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/web-dist.tar.gz
-
-      - name: Pull secrets from AWS Secrets Manager
-        run: |
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
-            SECRETS_ARN=$(grep OPENSANDBOX_SECRETS_ARN /etc/opensandbox/server.env 2>/dev/null | cut -d= -f2-) || true
-            if [ -n "$SECRETS_ARN" ]; then
-              SECRETS_JSON=$(aws --region us-east-2 secretsmanager get-secret-value \
-                --secret-id "$SECRETS_ARN" --query SecretString --output text 2>&1) || {
-                echo "WARNING: Failed to pull secrets, using existing env file."
-                exit 0
-              }
-              echo "$SECRETS_JSON" | python3 -c "
-          import json, sys
-          secrets = json.load(sys.stdin)
-          existing = {}
-          try:
-              with open(\"/etc/opensandbox/server.env\") as f:
-                  for line in f:
-                      line = line.strip()
-                      if line and not line.startswith(\"#\") and \"=\" in line:
-                          k, v = line.split(\"=\", 1)
-                          existing[k] = v
-          except FileNotFoundError:
-              pass
-          existing.update(secrets)
-          with open(\"/tmp/server.env.new\", \"w\") as f:
-              for k, v in existing.items():
-                  f.write(f\"{k}={v}\n\")
-          " && sudo mv /tmp/server.env.new /etc/opensandbox/server.env
-              echo "Secrets merged."
-            fi
-          '
 
       - name: Install and restart
         run: |

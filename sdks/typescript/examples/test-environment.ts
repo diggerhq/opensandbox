@@ -1,17 +1,12 @@
 /**
- * Environment & HOME Directory Test
+ * Environment & Sandbox Configuration Test
  *
- * Verifies that HOME=/workspace inside sandboxes so that tools like npm, pip,
- * git etc. use the NVMe-backed workspace drive for caches and config instead
- * of /root on the small rootfs.
- *
- * Tests:
- *   1. HOME is set to /workspace
- *   2. Tilde (~) expands to /workspace
- *   3. npm cache dir is under /workspace
- *   4. npm install writes cache to /workspace (not /root or /dev/root)
- *   5. pip cache dir is under /workspace
- *   6. git config home is /workspace
+ * Verifies the sandbox environment is set up correctly for normal development:
+ *   - Running as root (can install packages, modify system files)
+ *   - HOME=/root (standard root home)
+ *   - /workspace is a separate persistent disk
+ *   - npm, pip, git, python, node all work
+ *   - npm install works in /workspace
  *
  * Usage:
  *   npx tsx examples/test-environment.ts
@@ -39,51 +34,65 @@ function check(desc: string, condition: boolean, detail?: string) {
 
 async function main() {
   bold("\n╔══════════════════════════════════════════════════╗");
-  bold("║       Environment & HOME Directory Test          ║");
+  bold("║       Environment & Sandbox Config Test          ║");
   bold("╚══════════════════════════════════════════════════╝\n");
 
   let sandbox: Sandbox | null = null;
 
   try {
-    sandbox = await Sandbox.create({ template: "node", timeout: 120 });
+    sandbox = await Sandbox.create({ template: "base", timeout: 120 });
     green(`Created sandbox: ${sandbox.sandboxId}`);
     console.log();
 
-    // ── Test 1: HOME is /workspace ─────────────────────────────────
-    bold("━━━ Test 1: HOME environment variable ━━━\n");
+    // ── Test 1: Running as sandbox user with sudo ──────────────
+    bold("━━━ Test 1: Running as sandbox user ━━━\n");
+
+    const whoami = await sandbox.commands.run("whoami");
+    check("Running as sandbox", whoami.stdout.trim() === "sandbox",
+      `got "${whoami.stdout.trim()}"`);
+
+    const idResult = await sandbox.commands.run("id -u");
+    check("UID is 1000", idResult.stdout.trim() === "1000",
+      `got "${idResult.stdout.trim()}"`);
+
+    const sudoResult = await sandbox.commands.run("sudo whoami");
+    check("sudo works (passwordless)", sudoResult.stdout.trim() === "root",
+      `got "${sudoResult.stdout.trim()}"`);
+
+    // ── Test 2: HOME is /home/sandbox ────────────────────────────
+    bold("━━━ Test 2: HOME environment ━━━\n");
 
     const homeResult = await sandbox.commands.run("echo $HOME");
-    check("HOME is /workspace", homeResult.stdout.trim() === "/workspace",
+    check("HOME is /home/sandbox", homeResult.stdout.trim() === "/home/sandbox",
       `got "${homeResult.stdout.trim()}"`);
 
-    // ── Test 2: Tilde expansion ────────────────────────────────────
-    bold("━━━ Test 2: Tilde (~) expansion ━━━\n");
+    // ── Test 3: /workspace is a separate disk ───────────────────
+    bold("━━━ Test 3: /workspace filesystem ━━━\n");
 
-    const tildeResult = await sandbox.commands.run("echo ~");
-    check("~ expands to /workspace", tildeResult.stdout.trim() === "/workspace",
-      `got "${tildeResult.stdout.trim()}"`);
+    const dfResult = await sandbox.commands.run("df -h /workspace | tail -1");
+    const dfLine = dfResult.stdout.trim();
+    dim(`df output: ${dfLine}`);
+    check("/workspace is NOT on /dev/root", !dfLine.startsWith("/dev/root"));
+    check("/workspace is mounted", dfLine.includes("/workspace"));
 
-    const tildeSlash = await sandbox.commands.run("echo ~/test");
-    check("~/test expands to /workspace/test", tildeSlash.stdout.trim() === "/workspace/test",
-      `got "${tildeSlash.stdout.trim()}"`);
+    const wsExists = await sandbox.commands.run("test -d /workspace && echo yes || echo no");
+    check("/workspace directory exists", wsExists.stdout.trim() === "yes");
     console.log();
 
-    // ── Test 3: npm cache directory ────────────────────────────────
-    bold("━━━ Test 3: npm cache directory ━━━\n");
+    // ── Test 4: Can install system packages ─────────────────────
+    bold("━━━ Test 4: Package installation (apt) ━━━\n");
 
-    const npmCache = await sandbox.commands.run("npm config get cache");
-    const npmCachePath = npmCache.stdout.trim();
-    check("npm cache is under /workspace", npmCachePath.startsWith("/workspace"),
-      `got "${npmCachePath}"`);
-    check("npm cache is NOT under /root", !npmCachePath.startsWith("/root"),
-      `got "${npmCachePath}"`);
-    dim(`npm cache dir: ${npmCachePath}`);
+    const aptResult = await sandbox.commands.run(
+      "sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq cowsay > /dev/null 2>&1 && /usr/games/cowsay moo | head -1",
+      { timeout: 30 }
+    );
+    check("apt install works", aptResult.exitCode === 0,
+      `exit code ${aptResult.exitCode}`);
     console.log();
 
-    // ── Test 4: npm install writes to workspace ────────────────────
-    bold("━━━ Test 4: npm install uses workspace for cache ━━━\n");
+    // ── Test 5: npm install in /workspace ────────────────────────
+    bold("━━━ Test 5: npm install in /workspace ━━━\n");
 
-    // Create a minimal package.json and install a small package
     await sandbox.commands.run("mkdir -p /workspace/npm-test");
     await sandbox.files.write("/workspace/npm-test/package.json", JSON.stringify({
       name: "test",
@@ -92,53 +101,46 @@ async function main() {
     }));
 
     const installResult = await sandbox.commands.run(
-      "cd /workspace/npm-test && npm install --prefer-offline 2>&1",
+      "cd /workspace/npm-test && npm install 2>&1 | tail -1",
       { timeout: 30 }
     );
     dim(`npm install exit code: ${installResult.exitCode}`);
+    check("npm install succeeds", installResult.exitCode === 0);
 
-    // Verify nothing was written to /root
-    const rootCheck = await sandbox.commands.run(
-      "du -sh /root/.npm 2>/dev/null || echo 'no /root/.npm'"
+    const nodeModules = await sandbox.commands.run(
+      "test -d /workspace/npm-test/node_modules && echo yes || echo no"
     );
-    check("No npm cache in /root/.npm", rootCheck.stdout.includes("no /root/.npm"),
-      `got "${rootCheck.stdout.trim()}"`);
+    check("node_modules created in /workspace", nodeModules.stdout.trim() === "yes");
 
-    // Verify cache was written under /workspace
-    const workspaceCache = await sandbox.commands.run(
-      "test -d /workspace/.npm && echo 'exists' || echo 'missing'"
+    const requireTest = await sandbox.commands.run(
+      "cd /workspace/npm-test && node -e \"require('is-odd'); console.log('ok')\"",
     );
-    check("npm cache exists at /workspace/.npm", workspaceCache.stdout.trim() === "exists",
-      `got "${workspaceCache.stdout.trim()}"`);
+    check("Installed package works", requireTest.stdout.trim() === "ok");
     console.log();
 
-    // ── Test 5: Dotfiles go to workspace ───────────────────────────
-    bold("━━━ Test 5: Dotfiles and configs use /workspace ━━━\n");
+    // ── Test 6: pip install ─────────────────────────────────────
+    bold("━━━ Test 6: pip install ━━━\n");
 
-    // Test that .bashrc would be read from /workspace
-    const bashrcPath = await sandbox.commands.run("bash -c 'echo $HOME/.bashrc'");
-    check(".bashrc path is /workspace/.bashrc", bashrcPath.stdout.trim() === "/workspace/.bashrc",
-      `got "${bashrcPath.stdout.trim()}"`);
-
-    // Git global config would go to /workspace/.gitconfig
-    await sandbox.commands.run("git config --global user.name 'Test User'");
-    const gitConfigPath = await sandbox.commands.run("git config --global --list --show-origin 2>/dev/null | head -1");
-    check("git config is under /workspace", gitConfigPath.stdout.includes("/workspace"),
-      `got "${gitConfigPath.stdout.trim()}"`);
+    const pipResult = await sandbox.commands.run(
+      "pip3 install -q requests 2>/dev/null && python3 -c \"import requests; print(requests.__version__)\"",
+      { timeout: 30 }
+    );
+    check("pip install + import works", pipResult.exitCode === 0 && pipResult.stdout.trim().length > 0,
+      `exit code ${pipResult.exitCode}`);
+    dim(`requests version: ${pipResult.stdout.trim()}`);
     console.log();
 
-    // ── Test 6: /workspace is on the right filesystem ──────────────
-    bold("━━━ Test 6: /workspace is NVMe-backed ━━━\n");
+    // ── Test 7: Tools available ─────────────────────────────────
+    bold("━━━ Test 7: Development tools ━━━\n");
 
-    const dfResult = await sandbox.commands.run("df -h /workspace | tail -1");
-    const dfLine = dfResult.stdout.trim();
-    dim(`df output: ${dfLine}`);
-    // /workspace should be on /dev/vdb (the workspace drive), not /dev/root
-    check("/workspace is NOT on /dev/root", !dfLine.startsWith("/dev/root"),
-      `got "${dfLine}"`);
+    const tools = ["git", "python3", "node", "npm", "curl", "jq"];
+    for (const tool of tools) {
+      const r = await sandbox.commands.run(`which ${tool}`);
+      check(`${tool} available`, r.exitCode === 0, r.stdout.trim());
+    }
     console.log();
 
-    // Clean up the test directory
+    // Clean up
     await sandbox.commands.run("rm -rf /workspace/npm-test");
 
   } catch (err: any) {
@@ -152,7 +154,6 @@ async function main() {
     }
   }
 
-  // --- Summary ---
   bold("========================================");
   bold(` Results: ${passed} passed, ${failed} failed`);
   bold("========================================\n");

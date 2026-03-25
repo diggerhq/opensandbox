@@ -95,7 +95,6 @@ async function main() {
   cyan("Creating sandbox...");
 
   const sandbox = await Sandbox.create({
-    template: "node",
     timeout: 300,
   });
 

@@ -34,11 +34,15 @@ Create a new sandbox. [HTTP API →](/api-reference/sandboxes/create)
 </ParamField>
 
 <ParamField body="cpuCount" type="number">
-  CPU cores (max 4)
+  CPU cores
 </ParamField>
 
 <ParamField body="memoryMB" type="number">
-  Memory in MB (max 2048)
+  Memory in MB
+</ParamField>
+
+<ParamField body="secretStore" type="string">
+  Secret store name — resolves encrypted secrets and egress allowlist
 </ParamField>
 
 <ParamField body="image" type="Image">
@@ -209,6 +213,23 @@ Revert in-place to a checkpoint. [HTTP API →](/api-reference/checkpoints/resto
 
 [HTTP API →](/api-reference/checkpoints/delete) — **Returns:** `Promise<void>`
 
+### `sandbox.getPreviewDomain(port)`
+
+Get the preview URL domain for a specific port. No API call — constructs the hostname locally.
+
+<ParamField body="port" type="number" required>
+  Port number
+</ParamField>
+
+**Returns:** `string` (e.g., `sb-abc123-p3000.workers.opencomputer.dev`)
+
+```typescript
+const domain = sandbox.getPreviewDomain(3000);
+console.log(`https://${domain}`);
+```
+
+---
+
 ### `sandbox.downloadUrl(path, opts?)`
 
 Generate a signed download URL. [HTTP API →](/api-reference/files/generate-download-url) · [Guide →](/sandboxes/signed-urls)
@@ -275,6 +296,10 @@ Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-uploa
   Current status (readonly)
 </ParamField>
 
+<ParamField body="domain" type="string">
+  Preview URL domain for port 80 (e.g., `sb-abc123-p80.workers.opencomputer.dev`). Returns empty string if sandbox domain is not configured.
+</ParamField>
+
 <ParamField body="agent" type="Agent">
   [Agent sessions](/reference/typescript-sdk/agent)
 </ParamField>
@@ -310,6 +335,7 @@ interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  secretStore?: string;
   image?: Image;
   snapshot?: string;
   onBuildLog?: (log: string) => void;

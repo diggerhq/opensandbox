@@ -71,7 +71,7 @@ const server = http.createServer((req, res) => {
     timestamp: Date.now()
   }));
 });
-server.listen(80, '0.0.0.0', () => console.log('Server ready'));
+server.listen(8080, '0.0.0.0', () => console.log('Server ready'));
 `;
 
 async function main() {
@@ -87,12 +87,12 @@ async function main() {
 
     // Create 3 sandboxes and verify unique domains
     for (let i = 0; i < 3; i++) {
-      const sb = await Sandbox.create({ template: "node", timeout: 120 });
+      const sb = await Sandbox.create({ timeout: 120 });
       sandboxes.push(sb);
-      dim(`Sandbox ${i + 1}: ${sb.sandboxId} → ${sb.domain}`);
+      dim(`Sandbox ${i + 1}: ${sb.sandboxId} → ${sb.getPreviewDomain(8080)}`);
     }
 
-    const domains = sandboxes.map(s => s.domain);
+    const domains = sandboxes.map(s => s.getPreviewDomain(8080));
     const uniqueDomains = new Set(domains);
     check("All 3 sandboxes got unique domains", uniqueDomains.size === 3);
     check("All domains end with .workers.opencomputer.dev",
@@ -115,15 +115,17 @@ async function main() {
 
     // Check TLS cert on first sandbox
     try {
-      const certInfo = await getTlsCertInfo(sandboxes[0].domain);
+      const certInfo = await getTlsCertInfo(sandboxes[0].getPreviewDomain(8080));
       check("TLS certificate is valid", certInfo.valid);
-      check("Certificate issued by Let's Encrypt or similar",
+      check("Certificate issued by trusted CA",
         certInfo.issuer.includes("Let's Encrypt") ||
         certInfo.issuer.includes("R3") ||
         certInfo.issuer.includes("R10") ||
         certInfo.issuer.includes("R11") ||
         certInfo.issuer.includes("E5") ||
-        certInfo.issuer.includes("E6"),
+        certInfo.issuer.includes("E6") ||
+        certInfo.issuer.includes("Google Trust Services") ||
+        certInfo.issuer.includes("GTS"),
         certInfo.issuer);
       dim(`Issuer: ${certInfo.issuer}`);
       dim(`Subject: ${certInfo.subject}`);
@@ -138,7 +140,7 @@ async function main() {
 
     for (let i = 0; i < sandboxes.length; i++) {
       try {
-        const resp = await fetch(`https://${sandboxes[i].domain}/test-path`);
+        const resp = await fetch(`https://${sandboxes[i].getPreviewDomain(8080)}/test-path`);
         check(`Sandbox ${i + 1}: HTTPS 200`, resp.ok, `status ${resp.status}`);
 
         if (resp.ok) {
@@ -159,7 +161,7 @@ async function main() {
     const routingResults = await Promise.all(
       sandboxes.map(async (sb, i) => {
         try {
-          const resp = await fetch(`https://${sb.domain}/`);
+          const resp = await fetch(`https://${sb.getPreviewDomain(8080)}/`);
           const data = await resp.json();
           return { index: i, sandboxId: sb.sandboxId, returnedId: data.sandboxId, hostname: data.hostname };
         } catch (err: any) {
@@ -178,9 +180,9 @@ async function main() {
 
     // Cross-check: request to sandbox 1's domain should NOT get sandbox 2's response
     if (sandboxes.length >= 2) {
-      const cross1 = await fetch(`https://${sandboxes[0].domain}/`);
+      const cross1 = await fetch(`https://${sandboxes[0].getPreviewDomain(8080)}/`);
       const cross1Data = await cross1.json();
-      const cross2 = await fetch(`https://${sandboxes[1].domain}/`);
+      const cross2 = await fetch(`https://${sandboxes[1].getPreviewDomain(8080)}/`);
       const cross2Data = await cross2.json();
       check(
         "Cross-routing: different sandboxes return different IDs",
@@ -192,7 +194,7 @@ async function main() {
     // ── Test 5: Multiple methods ────────────────────────────────────
     bold("━━━ Test 5: HTTP methods through TLS ━━━\n");
 
-    const domain = sandboxes[0].domain;
+    const domain = sandboxes[0].getPreviewDomain(8080);
     const getResp = await fetch(`https://${domain}/get-test`);
     check("GET request works", getResp.ok);
 

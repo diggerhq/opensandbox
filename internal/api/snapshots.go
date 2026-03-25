@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -136,6 +137,26 @@ func (s *Server) createSnapshotWithSSE(c echo.Context, ctx context.Context, orgI
 		fmt.Fprintf(c.Response(), "event: %s\ndata: %s\n\n", eventType, data)
 		flusher.Flush()
 	}
+
+	// Send SSE keepalive comments every 15s to prevent Cloudflare 524 timeouts
+	// during long build steps (e.g., installing Rust takes ~3 minutes with no output).
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(c.Response(), ": keepalive\n\n")
+				flusher.Flush()
+			case <-keepaliveDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	logFn := BuildLogFunc(func(step int, stepType string, message string) {
 		emit("build_log", map[string]interface{}{

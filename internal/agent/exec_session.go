@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -43,7 +44,7 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	cmd := exec.CommandContext(sessCtx, req.Command, req.Args...)
 	cmd.Dir = req.Cwd
 	if cmd.Dir == "" {
-		cmd.Dir = "/root"
+		cmd.Dir = sandboxHome
 	}
 
 	// Build environment: base < sandbox-level < per-command
@@ -54,8 +55,11 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	env = append(env, mapToEnv(req.Envs)...)
 	cmd.Env = env
 
-	// Set process group so we can kill the whole group
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Run as sandbox user in its own process group
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:    true,
+		Credential: sandboxCredential(),
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -94,10 +98,13 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 		sess.maxRunAfterDisc = time.Duration(req.MaxRunAfterDisconnect) * time.Second
 	}
 
+	log.Printf("exec-session: starting %s %v (SysProcAttr=%+v, Dir=%s)", req.Command, req.Args, cmd.SysProcAttr, cmd.Dir)
 	if err := cmd.Start(); err != nil {
 		cancel()
+		log.Printf("exec-session: start failed: %v (cmd=%s)", err, req.Command)
 		return nil, fmt.Errorf("start command: %w", err)
 	}
+	moveToCgroup(cmd.Process.Pid)
 
 	s.execMu.Lock()
 	s.execSessions[sessionID] = sess

@@ -71,31 +71,30 @@ cat > "$TMPDIR/init" << 'INIT_EOF'
 mount -t proc proc /proc
 mount -t devtmpfs devtmpfs /dev
 
-# ── Overlay root: data disk as writable upper layer over the rootfs ──
-mkdir -p /mnt/data
-if mount /dev/vdb /mnt/data 2>/dev/null || mount /dev/vdb1 /mnt/data 2>/dev/null; then
-    mkdir -p /mnt/data/upper /mnt/data/work /mnt/overlay
+# Load kernel modules (needed for QEMU with modular kernel)
+if [ -d /lib/modules/vsock ]; then
+    for mod in /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do
+        [ -f "$mod" ] && insmod "$mod" 2>/dev/null || true
+    done
+    echo "init: kernel modules loaded"
+fi
 
-    umount /dev
-    umount /proc
+# Load virtio-mem module (for dynamic memory scaling)
+# Check both the standard kernel path and our guest-modules dir
+for vmem in "/lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko" "/lib/modules/vsock/virtio_mem.ko"; do
+    if [ -f "$vmem" ]; then
+        insmod "$vmem" 2>/dev/null || true
+        echo "init: virtio_mem module loaded ($vmem)"
+        break
+    fi
+done
 
-    mount -t overlay overlay -o lowerdir=/,upperdir=/mnt/data/upper,workdir=/mnt/data/work /mnt/overlay
-
-    mkdir -p /mnt/overlay/mnt/data
-    mount --move /mnt/data /mnt/overlay/mnt/data
-
-    cd /mnt/overlay
-    mkdir -p mnt/old_root
-    pivot_root . mnt/old_root
-
-    umount -l /mnt/old_root 2>/dev/null
-    rmdir /mnt/old_root 2>/dev/null
-
-    echo "init: overlay root active (data disk backing all writes)"
+# ── Mount workspace: data disk at /workspace (persistent user data) ──
+mkdir -p /workspace
+if mount /dev/vdb /workspace 2>/dev/null || mount /dev/vdb1 /workspace 2>/dev/null; then
+    echo "init: workspace mounted (/dev/vdb -> /workspace)"
 else
-    umount /dev
-    umount /proc
-    echo "init: warning: no data disk found, running on rootfs only"
+    echo "init: warning: no data disk found, /workspace is ephemeral"
 fi
 
 # ── Mount virtual filesystems (in the final root) ──
@@ -145,6 +144,43 @@ echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 
 hostname sandbox
 
+# Debug: check for virtio-serial device
+ls -la /dev/vport* /dev/virtio-ports/ 2>/dev/null || echo "init: no virtio-serial devices found"
+
+# ── Cgroup v2: sandbox resource limits ──
+# Agent (PID 1) stays in root cgroup (protected from user resource exhaustion).
+# User processes are placed in /sys/fs/cgroup/sandbox/ by the agent's exec handler.
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    # Enable controllers in root
+    echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+    # Create sandbox cgroup
+    mkdir -p /sys/fs/cgroup/sandbox
+    # Defaults: 256 pids, 90% of total memory, 90% of CPUs
+    # CPU limit reserves 10% for the agent (PID 1) so it stays responsive
+    # even under fork bomb / CPU exhaustion attacks.
+    echo 128 > /sys/fs/cgroup/sandbox/pids.max
+    SANDBOX_MEM=$(awk '/MemTotal/{printf "%.0f", $2 * 1024 * 0.9}' /proc/meminfo)
+    echo "$SANDBOX_MEM" > /sys/fs/cgroup/sandbox/memory.max 2>/dev/null
+    # cpu.max: limit user processes to 80% of available CPUs.
+    # This reserves 20% for the agent (PID 1) so it stays responsive
+    # even under fork bomb / CPU saturation.
+    NUM_CPUS=$(nproc)
+    CPU_MAX=$(( 80000 * NUM_CPUS ))
+    echo "$CPU_MAX 100000" > /sys/fs/cgroup/sandbox/cpu.max 2>/dev/null
+    # cpu.weight: lower priority than agent
+    echo 50 > /sys/fs/cgroup/sandbox/cpu.weight 2>/dev/null
+    echo "init: cgroup sandbox ready (pids=128, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
+else
+    echo "init: warning: cgroup v2 not available"
+fi
+
+# Note: user commands run as root inside the VM. This is safe because:
+# - Each VM is fully isolated (separate QEMU process, separate kernel)
+# - cgroup v2 prevents processes inside a cgroup from modifying their own limits
+# - The agent (PID 1) is in the root cgroup, user processes in /sandbox cgroup
+
 exec /usr/local/bin/osb-agent
 INIT_EOF
 chmod +x "$TMPDIR/init"
@@ -160,6 +196,11 @@ fi
 cat >> "$TMPDIR/Dockerfile" << 'INJECT_EOF'
 
 # --- OpenSandbox agent injection ---
+# Create sandbox user (UID 1000) for exec sessions — agent runs as root (PID 1),
+# but user commands run as this non-root user for cgroup/security isolation.
+RUN useradd -m -u 1000 -s /bin/bash sandbox && \
+    echo 'sandbox ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
+    chown sandbox:sandbox /workspace 2>/dev/null || true
 COPY osb-agent /usr/local/bin/osb-agent
 RUN chmod +x /usr/local/bin/osb-agent
 COPY init /sbin/init
@@ -169,7 +210,7 @@ INJECT_EOF
 
 # Build with Docker
 log "Building container image..."
-docker build -t "osb-rootfs-${IMAGE_NAME}:build" -f "$TMPDIR/Dockerfile" "$TMPDIR"
+docker build --no-cache -t "osb-rootfs-${IMAGE_NAME}:build" -f "$TMPDIR/Dockerfile" "$TMPDIR"
 
 # Create container and export filesystem
 log "Exporting filesystem..."

@@ -1064,21 +1064,6 @@ func scanTemplate(row interface{ Scan(...any) error }, t *DBTemplate) error {
 	return row.Scan(&t.ID, &t.OrgID, &t.Name, &t.Tag, &t.ImageRef, &t.Dockerfile, &t.IsPublic, &t.TemplateType, &t.RootfsS3Key, &t.WorkspaceS3Key, &t.CreatedBySandboxID, &t.Status, &t.CreatedAt)
 }
 
-// CreateTemplate inserts a new dockerfile-based template record.
-func (s *Store) CreateTemplate(ctx context.Context, orgID *uuid.UUID, name, tag, imageRef string, dockerfile *string, isPublic bool) (*DBTemplate, error) {
-	t := &DBTemplate{}
-	err := scanTemplate(s.pool.QueryRow(ctx,
-		`INSERT INTO templates (org_id, name, tag, image_ref, dockerfile, is_public, template_type)
-		 VALUES ($1, $2, $3, $4, $5, $6, 'dockerfile')
-		 RETURNING `+templateColumns,
-		orgID, name, tag, imageRef, dockerfile, isPublic,
-	), t)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create template: %w", err)
-	}
-	return t, nil
-}
-
 // CreateSandboxTemplate inserts a new sandbox-snapshot template record (status=processing).
 func (s *Store) CreateSandboxTemplate(ctx context.Context, id uuid.UUID, orgID *uuid.UUID, name, tag, rootfsS3Key, workspaceS3Key, createdBySandboxID string) (*DBTemplate, error) {
 	t := &DBTemplate{}

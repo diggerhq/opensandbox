@@ -9,7 +9,7 @@ Create a public HTTPS URL that proxies traffic to a port inside your sandbox:
 
 ```bash
 oc preview create sb-abc123 --port 3000
-# → hostname: sb-abc123-p3000.preview.opencomputer.dev
+# → hostname: sb-abc123-p3000.workers.opencomputer.dev
 ```
 
 ## Sharing a Dev Server
@@ -37,8 +37,8 @@ oc preview create sb-abc123 --port 8080  # API server
 
 oc preview list sb-abc123
 # PORT  HOSTNAME                                      SSL     CREATED
-# 3000  sb-abc123-p3000.preview.opencomputer.dev      active  ...
-# 8080  sb-abc123-p8080.preview.opencomputer.dev      active  ...
+# 3000  sb-abc123-p3000.workers.opencomputer.dev      active  ...
+# 8080  sb-abc123-p8080.workers.opencomputer.dev      active  ...
 ```
 
 ## Custom Domains

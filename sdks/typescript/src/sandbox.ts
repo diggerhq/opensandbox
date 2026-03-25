@@ -36,6 +36,7 @@ interface SandboxData {
   templateID?: string;
   connectURL?: string;
   token?: string;
+  sandboxDomain?: string;
 }
 
 export interface CheckpointInfo {
@@ -92,6 +93,7 @@ export class Sandbox {
   private connectUrl: string;
   private token: string;
   private _status: string;
+  private _sandboxDomain: string;
 
   private constructor(data: SandboxData, apiUrl: string, apiKey: string) {
     this.sandboxId = data.sandboxID;
@@ -100,6 +102,7 @@ export class Sandbox {
     this.apiKey = apiKey;
     this.connectUrl = data.connectURL || "";
     this.token = data.token || "";
+    this._sandboxDomain = data.sandboxDomain || "";
 
     // Use direct worker URL for data operations if available
     const opsUrl = this.connectUrl || apiUrl;
@@ -115,6 +118,18 @@ export class Sandbox {
 
   get status(): string {
     return this._status;
+  }
+
+  /** Preview URL domain for port 80 (e.g., "sb-xxx-p80.workers.opencomputer.dev"). */
+  get domain(): string {
+    if (!this._sandboxDomain) return "";
+    return `${this.sandboxId}-p80.${this._sandboxDomain}`;
+  }
+
+  /** Get the preview URL domain for a specific port. */
+  getPreviewDomain(port: number): string {
+    if (!this._sandboxDomain) return "";
+    return `${this.sandboxId}-p${port}.${this._sandboxDomain}`;
   }
 
   static async create(opts: SandboxOpts = {}): Promise<Sandbox> {

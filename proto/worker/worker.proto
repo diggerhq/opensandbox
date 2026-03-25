@@ -35,6 +35,13 @@ service SandboxWorker {
   rpc BuildTemplate(BuildTemplateRequest) returns (BuildTemplateResponse);
 
   rpc GetSandboxStats(GetSandboxStatsRequest) returns (GetSandboxStatsResponse);
+
+  rpc SetSandboxLimits(SetSandboxLimitsRequest) returns (SetSandboxLimitsResponse);
+
+  // Live migration between workers
+  rpc PrepareMigrationIncoming(PrepareMigrationIncomingRequest) returns (PrepareMigrationIncomingResponse);
+  rpc LiveMigrate(LiveMigrateRequest) returns (LiveMigrateResponse);
+  rpc CompleteMigrationIncoming(CompleteMigrationIncomingRequest) returns (CompleteMigrationIncomingResponse);
 }
 
 message CreateSandboxRequest {
@@ -53,13 +60,9 @@ message CreateSandboxRequest {
   string checkpoint_id = 11;
   // Server-assigned sandbox ID. If non-empty, worker uses this instead of generating one.
   string sandbox_id = 12;
-  // Egress allowlist: restrict outbound HTTPS to these hosts.
-  // Supports exact ("api.anthropic.com") and wildcard ("*.openai.com") patterns.
-  // Empty = all hosts allowed.
+  // Egress allowlist: if non-empty, only these hosts can be reached.
   repeated string egress_allowlist = 13;
-  // Per-secret host restrictions: env var name → comma-separated allowed hosts.
-  // Secrets are only substituted in requests to matching hosts.
-  // Empty value or missing key = substitute on all allowed hosts.
+  // Per-secret host restrictions for secrets proxy.
   map<string, string> secret_allowed_hosts = 14;
 }
 
@@ -281,7 +284,7 @@ message GetSandboxStatsResponse {
 message CreateCheckpointRequest {
   string sandbox_id = 1;
   string checkpoint_id = 2;  // UUID assigned by control plane
-  bool prepare_golden = 3;   // If true, also create a per-template golden snapshot for fast future creates
+  bool prepare_golden = 3;   // If true, prepare a golden snapshot from this checkpoint
 }
 
 message CreateCheckpointResponse {
@@ -297,3 +300,42 @@ message RestoreCheckpointRequest {
 message RestoreCheckpointResponse {
   bool success = 1;
 }
+
+message SetSandboxLimitsRequest {
+  string sandbox_id = 1;
+  int32 max_pids = 2;
+  int64 max_memory_bytes = 3;
+  int64 cpu_max_usec = 4;
+  int64 cpu_period_usec = 5;
+}
+
+message SetSandboxLimitsResponse {}
+
+// Live migration messages
+message PrepareMigrationIncomingRequest {
+  string sandbox_id = 1;
+  string rootfs_path = 2;    // local path to rootfs on target (pre-copied)
+  string workspace_path = 3; // local path to workspace on target (pre-copied)
+  int32 cpu_count = 4;
+  int32 memory_mb = 5;
+  int32 guest_port = 6;
+  string template = 7;
+}
+
+message PrepareMigrationIncomingResponse {
+  string incoming_addr = 1;  // TCP address for source to migrate to (e.g. "10.100.1.7:49152")
+  int32 host_port = 2;       // mapped host port on target worker
+}
+
+message LiveMigrateRequest {
+  string sandbox_id = 1;
+  string incoming_addr = 2;  // TCP address from PrepareMigrationIncoming
+}
+
+message LiveMigrateResponse {}
+
+message CompleteMigrationIncomingRequest {
+  string sandbox_id = 1;
+}
+
+message CompleteMigrationIncomingResponse {}

@@ -75,13 +75,16 @@ curl -X POST https://app.opencomputer.dev/api/sandboxes \
 | `timeout` | number | `300` | Idle timeout in seconds (resets on every operation) |
 | `envs` | object | — | Environment variables set inside the VM |
 | `metadata` | object | — | Arbitrary key-value pairs stored with the sandbox |
-| `cpuCount` | number | — | CPU cores (max 4). TypeScript and HTTP API only |
-| `memoryMB` | number | — | Memory in MB (max 2048). TypeScript and HTTP API only |
+| `cpuCount` | number | — | CPU cores. TypeScript and HTTP API only |
+| `memoryMB` | number | — | Memory in MB. TypeScript and HTTP API only |
+| `secretStore` | string | — | Secret store name — resolves encrypted secrets and egress allowlist |
+| `image` | Image | — | Declarative image definition (see [Templates](/sandboxes/templates)) |
+| `snapshot` | string | — | Name of a pre-built snapshot for instant boot |
 | `apiKey` | string | — | Defaults to `OPENCOMPUTER_API_KEY` env var |
 | `apiUrl` | string | — | Defaults to `OPENCOMPUTER_API_URL` env var |
 
 <Note>
-  `cpuCount` and `memoryMB` are not available in the Python SDK. Use the [HTTP API](/reference/api#sandbox-lifecycle) directly for custom resources from Python.
+  `cpuCount`, `memoryMB`, and `secretStore` are not available in the Python SDK. Use the [HTTP API](/reference/api#sandbox-lifecycle) directly for custom resources from Python.
 </Note>
 
 ## Connecting to an Existing Sandbox
@@ -154,6 +157,7 @@ Content-Type: application/json
 | --- | --- | --- | --- |
 | Sandbox ID | `sandbox.sandboxId` | `sandbox.sandbox_id` | Unique identifier |
 | Status | `sandbox.status` | `sandbox.status` | Current lifecycle state |
+| Domain | `sandbox.domain` | — | Preview URL domain for port 80 |
 | Agent | `sandbox.agent` | `sandbox.agent` | [Agent sessions](/agents/overview) |
 | Exec | `sandbox.exec` | `sandbox.exec` | [Command execution](/sandboxes/running-commands) |
 | Files | `sandbox.files` | `sandbox.files` | [Filesystem](/sandboxes/working-with-files) |
