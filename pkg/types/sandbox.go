@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -74,6 +75,80 @@ type SandboxConfig struct {
 	// CheckpointID is the source checkpoint for template/snapshot creates.
 	// Used by the worker to key per-template golden snapshots.
 	CheckpointID string `json:"-"`
+}
+
+// ResourceTier defines an allowed memory/CPU combination.
+type ResourceTier struct {
+	MemoryMB int
+	VCPUs    int
+}
+
+// AllowedResourceTiers lists the valid memory→vCPU combinations.
+var AllowedResourceTiers = []ResourceTier{
+	{MemoryMB: 4096, VCPUs: 1},
+	{MemoryMB: 8192, VCPUs: 2},
+	{MemoryMB: 16384, VCPUs: 4},
+	{MemoryMB: 32768, VCPUs: 8},
+	{MemoryMB: 65536, VCPUs: 16},
+}
+
+// ValidateMemoryMB checks that memoryMB matches an allowed tier and returns the corresponding vCPU count.
+// Returns 0, nil if memoryMB is 0 (use defaults).
+func ValidateMemoryMB(memoryMB int) (vcpus int, err error) {
+	if memoryMB == 0 {
+		return 0, nil
+	}
+	for _, t := range AllowedResourceTiers {
+		if memoryMB == t.MemoryMB {
+			return t.VCPUs, nil
+		}
+	}
+	return 0, fmt.Errorf("memoryMB must be one of: 4096, 8192, 16384, 32768, 65536 (got %d)", memoryMB)
+}
+
+// ValidateCPUCount checks that cpuCount matches an allowed tier and returns the corresponding memoryMB.
+// Returns 0, nil if cpuCount is 0 (use defaults).
+func ValidateCPUCount(cpuCount int) (memoryMB int, err error) {
+	if cpuCount == 0 {
+		return 0, nil
+	}
+	for _, t := range AllowedResourceTiers {
+		if cpuCount == t.VCPUs {
+			return t.MemoryMB, nil
+		}
+	}
+	return 0, fmt.Errorf("cpuCount must be one of: 1, 2, 4, 8, 16 (got %d)", cpuCount)
+}
+
+// ValidateResourceTier validates and normalizes CPU/memory on a SandboxConfig.
+// If only one is set, the other is inferred from the tier. If both are set, they must match.
+func ValidateResourceTier(cfg *SandboxConfig) error {
+	if cfg.MemoryMB == 0 && cfg.CpuCount == 0 {
+		return nil // use defaults
+	}
+	if cfg.MemoryMB > 0 && cfg.CpuCount == 0 {
+		vcpus, err := ValidateMemoryMB(cfg.MemoryMB)
+		if err != nil {
+			return err
+		}
+		cfg.CpuCount = vcpus
+		return nil
+	}
+	if cfg.CpuCount > 0 && cfg.MemoryMB == 0 {
+		mem, err := ValidateCPUCount(cfg.CpuCount)
+		if err != nil {
+			return err
+		}
+		cfg.MemoryMB = mem
+		return nil
+	}
+	// Both set — verify they match a tier
+	for _, t := range AllowedResourceTiers {
+		if cfg.MemoryMB == t.MemoryMB && cfg.CpuCount == t.VCPUs {
+			return nil
+		}
+	}
+	return fmt.Errorf("cpuCount %d and memoryMB %d do not match an allowed tier; valid combinations: 1/4096, 2/8192, 4/16384, 8/32768, 16/65536", cfg.CpuCount, cfg.MemoryMB)
 }
 
 // SandboxListResponse is the response for listing sandboxes.

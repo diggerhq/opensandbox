@@ -1,0 +1,111 @@
+---
+title: "Elasticity"
+description: "Dynamically scale sandbox memory and CPU from inside the VM"
+---
+
+Sandboxes expose an internal metadata API at `http://169.254.169.254` that lets code **inside** the VM scale memory up or down on the fly. CPU scales proportionally to memory.
+
+This is useful for workloads with variable resource needs — scale up before a heavy compilation or ML inference, then scale back down to save resources.
+
+<Note>
+  The elasticity endpoint is only accessible from inside the sandbox. It is not exposed through the control plane API or SDKs.
+</Note>
+
+## Scale Memory
+
+Send a `POST` to `/v1/scale` with the desired memory in MB:
+
+```bash
+curl -s -X POST http://169.254.169.254/v1/scale \
+  -H "Content-Type: application/json" \
+  -d '{"memoryMB": 4096}'
+```
+
+CPU is adjusted proportionally — you only need to specify memory. The permissible sizes are:
+
+| Memory | vCPU |
+| --- | --- |
+| 4GB | 1 |
+| 8GB | 2 |
+| 16GB | 4 |
+| 32GB | 8 |
+| 64GB | 16 |
+
+## Check Current Limits
+
+```bash
+curl -s http://169.254.169.254/v1/limits
+```
+
+## Example: Rust Compilation
+
+Rust builds are memory-hungry. You can alias `cargo` to scale up before compilation and scale back down after:
+
+```bash
+alias cargo='_cargo_scaled'
+_cargo_scaled() {
+  # Scale up to 16GB / 4 vCPU before build
+  curl -sf -X POST http://169.254.169.254/v1/scale \
+    -H "Content-Type: application/json" -d '{"memoryMB": 16384}'
+
+  # Run the actual cargo command
+  command cargo "$@"
+  local exit_code=$?
+
+  # Scale back down to 4GB / 1 vCPU
+  curl -sf -X POST http://169.254.169.254/v1/scale \
+    -H "Content-Type: application/json" -d '{"memoryMB": 4096}'
+
+  return $exit_code
+}
+```
+
+Add this to your sandbox's `~/.bashrc` or inject it via `sandbox.exec.run` so every `cargo build`, `cargo test`, etc. automatically gets the extra resources.
+
+## Example: Auto-Scaling Script
+
+A simple shell script that monitors memory pressure and scales automatically:
+
+```bash
+#!/bin/sh
+SCALE_API="http://169.254.169.254/v1/scale"
+MIN_MB=1024
+MAX_MB=8192
+SCALE_UP_THRESHOLD=80
+SCALE_DOWN_THRESHOLD=30
+COOLDOWN=30
+last_scale=0
+
+while true; do
+  mem_total=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+  mem_avail=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  usage_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
+  total_mb=$((mem_total / 1024))
+  now=$(date +%s)
+  elapsed=$((now - last_scale))
+
+  if [ $usage_pct -gt $SCALE_UP_THRESHOLD ] && [ $elapsed -gt $COOLDOWN ]; then
+    new_mb=$((total_mb * 2))
+    [ $new_mb -gt $MAX_MB ] && new_mb=$MAX_MB
+    if [ $new_mb -gt $total_mb ]; then
+      echo "usage=$usage_pct% -> scaling UP to ${new_mb}MB"
+      curl -sf -X POST "$SCALE_API" \
+        -H "Content-Type: application/json" \
+        -d "{\"memoryMB\":$new_mb}"
+      last_scale=$now
+    fi
+  elif [ $usage_pct -lt $SCALE_DOWN_THRESHOLD ] && [ $total_mb -gt $MIN_MB ] && [ $elapsed -gt $COOLDOWN ]; then
+    new_mb=$((total_mb / 2))
+    [ $new_mb -lt $MIN_MB ] && new_mb=$MIN_MB
+    if [ $new_mb -lt $total_mb ]; then
+      echo "usage=$usage_pct% -> scaling DOWN to ${new_mb}MB"
+      curl -sf -X POST "$SCALE_API" \
+        -H "Content-Type: application/json" \
+        -d "{\"memoryMB\":$new_mb}"
+      last_scale=$now
+    fi
+  fi
+
+  sleep 5
+done
+```

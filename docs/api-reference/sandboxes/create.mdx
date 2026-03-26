@@ -14,12 +14,24 @@ Create a new sandbox.
 </ParamField>
 
 <ParamField body="cpuCount" type="integer">
-  CPU cores, 1–4 (default: `1`)
+  CPU cores. Must match an allowed tier: `1`, `2`, `4`, `8`, or `16`. If omitted but `memoryMB` is set, inferred automatically.
 </ParamField>
 
 <ParamField body="memoryMB" type="integer">
-  Memory in MB, up to 2048 (default: `512`)
+  Memory in MB. Must match an allowed tier: `4096`, `8192`, `16384`, `32768`, or `65536`. If omitted but `cpuCount` is set, inferred automatically.
 </ParamField>
+
+The allowed CPU/memory combinations are:
+
+| Memory | vCPU |
+| --- | --- |
+| 4096 MB (4 GB) | 1 |
+| 8192 MB (8 GB) | 2 |
+| 16384 MB (16 GB) | 4 |
+| 32768 MB (32 GB) | 8 |
+| 65536 MB (64 GB) | 16 |
+
+If both `cpuCount` and `memoryMB` are provided, they must match one of these tiers.
 
 <ParamField body="envs" type="object">
   Environment variables as key-value pairs

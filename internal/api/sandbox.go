@@ -26,22 +26,12 @@ func (s *Server) createSandbox(c echo.Context) error {
 		})
 	}
 
-	// Validate and clamp CPU/memory limits
-	if cfg.CpuCount < 0 {
-		cfg.CpuCount = 0
-	}
-	if cfg.CpuCount > 16 {
+	// Validate CPU/memory against allowed tiers.
+	// Allowed tiers (memoryMB → vCPU): 4096→1, 8192→2, 16384→4, 32768→8, 65536→16.
+	if err := types.ValidateResourceTier(&cfg); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "cpuCount must not exceed 16",
+			"error": err.Error(),
 		})
-	}
-	if cfg.MemoryMB > 16384 {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "memoryMB must not exceed 16384",
-		})
-	}
-	if cfg.MemoryMB < 0 {
-		cfg.MemoryMB = 0
 	}
 
 	ctx := c.Request().Context()
@@ -776,11 +766,14 @@ func (s *Server) setLimits(c echo.Context) error {
 		})
 	}
 
-	// Auto-calculate CPU from memory: 1 vCPU per 4GB
-	if req.MemoryMB > 0 && req.CPUPercent == 0 {
-		req.CPUPercent = (req.MemoryMB * 100) / 4096
-		if req.CPUPercent < 100 {
-			req.CPUPercent = 100
+	// Validate memory against allowed tiers
+	if req.MemoryMB > 0 {
+		vcpus, err := types.ValidateMemoryMB(req.MemoryMB)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+		}
+		if req.CPUPercent == 0 {
+			req.CPUPercent = vcpus * 100
 		}
 	}
 
@@ -824,11 +817,12 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "memoryMB is required and must be positive"})
 	}
 
-	// Auto-calculate: 1 vCPU per 4GB = 100% CPU per 4096MB
-	cpuPercent := (req.MemoryMB * 100) / 4096
-	if cpuPercent < 100 {
-		cpuPercent = 100
+	// Validate memory against allowed tiers
+	vcpus, err := types.ValidateMemoryMB(req.MemoryMB)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
+	cpuPercent := vcpus * 100
 	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
 	cpuMaxUsec := int64(cpuPercent) * 1000
 	cpuPeriodUsec := int64(100000)

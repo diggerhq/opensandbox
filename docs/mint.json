@@ -78,7 +78,8 @@
         "sandboxes/templates",
         "sandboxes/secrets",
         "sandboxes/patches",
-        "sandboxes/preview-urls"
+        "sandboxes/preview-urls",
+        "sandboxes/elasticity"
       ]
     },
     {

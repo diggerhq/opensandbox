@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/opensandbox/opensandbox/internal/sandbox"
+	"github.com/opensandbox/opensandbox/pkg/types"
 )
 
 // MetadataServer serves the instance metadata API at 169.254.169.254:80 (via DNAT to :8888).
@@ -206,11 +207,15 @@ func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-calculate CPU from memory: 1 vCPU per 4GB
-	if req.MemoryMB > 0 && req.CPUPercent == 0 {
-		req.CPUPercent = (req.MemoryMB * 100) / 4096
-		if req.CPUPercent < 100 {
-			req.CPUPercent = 100
+	// Validate memory against allowed tiers and auto-calculate CPU
+	if req.MemoryMB > 0 {
+		vcpus, err := types.ValidateMemoryMB(req.MemoryMB)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.CPUPercent == 0 {
+			req.CPUPercent = vcpus * 100
 		}
 	}
 

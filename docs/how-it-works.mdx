@@ -63,6 +63,10 @@ const sandbox = await Sandbox.create({ snapshot: 'my-custom-stack' });
 
 See [Templates](/sandboxes/templates) for the full guide.
 
+## Elasticity
+
+Sandboxes can scale memory at runtime via an internal metadata endpoint (`http://169.254.169.254/v1/scale`) accessible from inside the VM. CPU scales proportionally. This lets workloads request more resources before heavy tasks and release them after. See [Elasticity](/sandboxes/elasticity) for details.
+
 ## Networking
 
 Every sandbox gets full outbound internet access via a TAP device with NAT. No firewall or allowlist to configure.
