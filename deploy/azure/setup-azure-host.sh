@@ -62,7 +62,7 @@ if [ -n "$GENERIC_VMLINUZ" ]; then
     GENERIC_KVER=$(basename "$GENERIC_VMLINUZ" | sed 's/vmlinuz-//')
     echo "Guest kernel: $GENERIC_VMLINUZ ($GENERIC_KVER)"
 
-    # Extract vsock and overlay modules for the guest rootfs (loaded via insmod at boot)
+    # Extract vsock, overlay, and virtio_mem modules for the guest rootfs
     MODDIR="/lib/modules/$GENERIC_KVER"
     GUEST_MODDIR="$KERNEL_DIR/guest-modules"
     mkdir -p "$GUEST_MODDIR"
@@ -70,7 +70,8 @@ if [ -n "$GENERIC_VMLINUZ" ]; then
         "$MODDIR/kernel/fs/overlayfs/overlay.ko"* \
         "$MODDIR/kernel/net/vmw_vsock/vsock.ko"* \
         "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko"* \
-        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko"*; do
+        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko"* \
+        "$MODDIR/kernel/drivers/virtio/virtio_mem.ko"*; do
         [ -f "$mod" ] || continue
         base=$(basename "$mod")
         if [[ "$base" == *.zst ]]; then
@@ -81,6 +82,14 @@ if [ -n "$GENERIC_VMLINUZ" ]; then
     done
     echo "Guest modules extracted to $GUEST_MODDIR:"
     ls "$GUEST_MODDIR/"
+
+    # Validate virtio_mem.ko was extracted — fail fast if missing
+    if ! ls "$GUEST_MODDIR"/virtio_mem.ko* >/dev/null 2>&1; then
+        echo "FATAL: virtio_mem.ko not found for kernel $GENERIC_KVER"
+        echo "  Looked in: $MODDIR/kernel/drivers/virtio/virtio_mem.ko*"
+        echo "  Memory scaling will not work. Check that linux-image-generic includes virtio_mem."
+        exit 1
+    fi
 else
     echo "WARNING: No generic kernel found. Guest VMs may not boot correctly."
 fi

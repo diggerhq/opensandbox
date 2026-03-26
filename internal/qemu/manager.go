@@ -333,17 +333,17 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	// Load virtio_mem kernel module for memory scaling support.
 	// The module must be loaded before the golden snapshot so that restored
 	// VMs can use virtio-mem for dynamic memory add/remove.
-	modCtx, modCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Try modprobe first (handles signed modules + dependencies), fall back to insmod.
+	modCtx, modCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	modResp, modErr := agentClient.Exec(modCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
-		Args:    []string{"-c", "insmod /lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko 2>/dev/null; grep -q virtio_mem /proc/modules"},
+		Args:    []string{"-c", "modprobe virtio_mem 2>/dev/null || insmod /lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko 2>/dev/null; grep -q virtio_mem /proc/modules"},
 	})
 	modCancel()
 	if modErr != nil || (modResp != nil && modResp.ExitCode != 0) {
-		log.Printf("qemu: golden: WARNING: virtio_mem module not loaded (memory scaling may not work): err=%v", modErr)
-	} else {
-		log.Printf("qemu: golden: virtio_mem module loaded")
+		return fmt.Errorf("virtio_mem module failed to load (memory scaling will not work) — ensure the rootfs has kmod installed and virtio_mem.ko is present: %v", modErr)
 	}
+	log.Printf("qemu: golden: virtio_mem module loaded")
 
 	// Unmount /workspace and sync before snapshot — the golden migration state
 	// includes virtio-blk device state (ring buffers, pending I/O). If /workspace

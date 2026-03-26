@@ -80,14 +80,19 @@ if [ -d /lib/modules/vsock ]; then
 fi
 
 # Load virtio-mem module (for dynamic memory scaling)
-# Check both the standard kernel path and our guest-modules dir
-for vmem in "/lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko" "/lib/modules/vsock/virtio_mem.ko"; do
-    if [ -f "$vmem" ]; then
-        insmod "$vmem" 2>/dev/null || true
-        echo "init: virtio_mem module loaded ($vmem)"
-        break
-    fi
-done
+# Try modprobe first (handles signatures + deps), fall back to insmod.
+# This is best-effort at boot — golden snapshot creation will fail hard if not loaded.
+if command -v modprobe >/dev/null 2>&1; then
+    modprobe virtio_mem 2>/dev/null && echo "init: virtio_mem loaded (modprobe)" || true
+else
+    for vmem in "/lib/modules/$(uname -r)/kernel/drivers/virtio/virtio_mem.ko" "/lib/modules/vsock/virtio_mem.ko"; do
+        if [ -f "$vmem" ]; then
+            insmod "$vmem" 2>/dev/null || true
+            echo "init: virtio_mem loaded ($vmem)"
+            break
+        fi
+    done
+fi
 
 # ── Mount workspace: data disk at /workspace (persistent user data) ──
 mkdir -p /workspace
@@ -235,6 +240,28 @@ tar xf "$TMPDIR/rootfs.tar" -C "$MNT_DIR"
 for dir in proc sys dev dev/pts dev/shm tmp workspace run; do
     mkdir -p "$MNT_DIR/$dir"
 done
+
+# Inject host kernel modules (virtio_mem, vsock, overlay) into rootfs.
+# The Docker image has modules for the container kernel, but the guest runs
+# the host kernel — so we need the host's matching .ko files.
+GUEST_MODDIR="/opt/opensandbox/guest-modules"
+if [ -d "$GUEST_MODDIR" ] && ls "$GUEST_MODDIR"/*.ko >/dev/null 2>&1; then
+    # Detect guest kernel version from the kernel binary
+    GUEST_KVER=$(ls -d /lib/modules/*-generic 2>/dev/null | head -1 | xargs basename)
+    if [ -n "$GUEST_KVER" ]; then
+        DEST="$MNT_DIR/lib/modules/$GUEST_KVER/kernel/extra"
+        mkdir -p "$DEST"
+        cp "$GUEST_MODDIR"/*.ko "$DEST/"
+        # Run depmod so modprobe works inside the guest
+        depmod -b "$MNT_DIR" "$GUEST_KVER" 2>/dev/null || log "depmod failed (non-fatal)"
+        log "Injected guest modules into rootfs for kernel $GUEST_KVER:"
+        ls "$DEST/"
+    else
+        log "WARNING: Could not detect guest kernel version — guest modules not injected"
+    fi
+else
+    log "WARNING: No guest modules at $GUEST_MODDIR — virtio_mem may not load"
+fi
 
 sync
 umount "$MNT_DIR"
