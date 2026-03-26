@@ -243,6 +243,51 @@ export interface OrgInvitation {
 export interface Credits {
   balanceCents: number
   isPersonal: boolean
+  unbilledUsageCents: number
+  hasPaymentMethod: boolean
+  autoTopupEnabled: boolean
+}
+
+export interface BillingSettings {
+  autoTopupEnabled: boolean
+  autoTopupThresholdCents: number
+  autoTopupAmountCents: number
+  monthlySpendCapCents: number | null
+  creditBalanceCents: number
+  hasPaymentMethod: boolean
+}
+
+export interface UsageTier {
+  memoryMB: number
+  vcpus: number
+  totalSeconds: number
+  ratePerSecond: number
+  costCents: number
+}
+
+export interface UsageResponse {
+  from: string
+  to: string
+  tiers: UsageTier[]
+  totalCostCents: number
+}
+
+export interface CreditTransaction {
+  id: string
+  orgId: string
+  amountCents: number
+  balanceAfterCents: number
+  type: string
+  description?: string
+  stripePaymentIntentId?: string
+  stripeCheckoutSessionId?: string
+  createdAt: string
+}
+
+export interface TransactionsResponse {
+  transactions: CreditTransaction[]
+  limit: number
+  offset: number
 }
 
 // Organization members
@@ -271,3 +316,38 @@ export const switchOrg = (orgId: string) =>
 
 // Credits
 export const getCredits = () => apiFetch<Credits>('/org/credits')
+
+// Billing
+export const getBillingSettings = () => apiFetch<BillingSettings>('/billing/settings')
+
+export const updateBillingSettings = (settings: {
+  autoTopupEnabled: boolean
+  autoTopupThresholdCents: number
+  autoTopupAmountCents: number
+  monthlySpendCapCents: number | null
+}) => apiFetch<{ status: string }>('/billing/settings', {
+  method: 'PUT',
+  body: JSON.stringify(settings),
+})
+
+export const createCheckoutSession = (amountCents: number) =>
+  apiFetch<{ url: string; sessionId: string }>('/billing/checkout-session', {
+    method: 'POST',
+    body: JSON.stringify({ amountCents }),
+  })
+
+export const setupPaymentMethod = () =>
+  apiFetch<{ url: string; sessionId: string }>('/billing/setup-payment-method', {
+    method: 'POST',
+  })
+
+export const getBillingUsage = (from?: string, to?: string) => {
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  const qs = params.toString()
+  return apiFetch<UsageResponse>(`/billing/usage${qs ? `?${qs}` : ''}`)
+}
+
+export const getBillingTransactions = (limit = 20, offset = 0) =>
+  apiFetch<TransactionsResponse>(`/billing/transactions?limit=${limit}&offset=${offset}`)

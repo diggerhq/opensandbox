@@ -97,6 +97,12 @@ type Config struct {
 	MinWorkersPerRegion int // Minimum workers per region (for pre-provisioned capacity), default 1
 	MaxWorkersPerRegion int // Maximum workers per region (hard cap), default 10
 
+	// Stripe billing
+	StripeSecretKey     string // Stripe secret API key
+	StripeWebhookSecret string // Stripe webhook signing secret
+	StripeSuccessURL    string // Redirect URL after successful checkout
+	StripeCancelURL     string // Redirect URL after cancelled checkout
+
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
 	// Env vars take precedence over secret values (for local overrides).
@@ -182,6 +188,11 @@ func Load() (*Config, error) {
 		ScaleCooldownSec:    envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
 		MinWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MIN_WORKERS", 1),
 		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
+
+		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSuccessURL:    envOrDefault("STRIPE_SUCCESS_URL", "http://localhost:3000/billing?success=true"),
+		StripeCancelURL:     envOrDefault("STRIPE_CANCEL_URL", "http://localhost:3000/billing?cancelled=true"),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 

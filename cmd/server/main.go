@@ -14,6 +14,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/api"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/billing"
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/compute"
 	"github.com/opensandbox/opensandbox/internal/config"
@@ -273,8 +274,24 @@ func main() {
 		log.Println("opensandbox: Cloudflare custom hostnames configured")
 	}
 
+	// Initialize Stripe client (if configured)
+	var stripeClient *billing.StripeClient
+	if cfg.StripeSecretKey != "" {
+		stripeClient = billing.NewStripeClient(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripeSuccessURL, cfg.StripeCancelURL)
+		opts.StripeClient = stripeClient
+		log.Println("opensandbox: Stripe billing configured")
+	}
+
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
+
+	// Start billing worker (deducts credits every 60s for running sandboxes)
+	if opts.Store != nil {
+		billingWorker := billing.NewBillingWorker(opts.Store, stripeClient)
+		billingWorker.Start()
+		defer billingWorker.Stop()
+		log.Println("opensandbox: billing worker started (interval=60s)")
+	}
 
 	// Start NATS sync consumer if both PG and NATS are configured
 	if opts.Store != nil && cfg.NATSURL != "" {

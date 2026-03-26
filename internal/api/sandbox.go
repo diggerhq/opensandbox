@@ -36,16 +36,32 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	// Check org quota if PG is available
+	// Check org quota and credit balance if PG is available
 	orgID, hasOrg := auth.GetOrgID(c)
 	if hasOrg && s.store != nil {
 		org, err := s.store.GetOrg(ctx, orgID)
 		if err == nil {
+			// Check concurrent sandbox limit
 			count, err := s.store.CountActiveSandboxes(ctx, orgID)
 			if err == nil && count >= org.MaxConcurrentSandboxes {
 				return c.JSON(http.StatusTooManyRequests, map[string]string{
 					"error": "concurrent sandbox limit reached",
 				})
+			}
+			// Check credit balance
+			if org.CreditBalanceCents <= 0 {
+				return c.JSON(http.StatusPaymentRequired, map[string]string{
+					"error": "insufficient credits — please add credits to continue",
+				})
+			}
+			// Check monthly spend cap
+			if org.MonthlySpendCapCents != nil {
+				spend, err := s.store.GetOrUpdateMonthlySpend(ctx, orgID, time.Now(), 0)
+				if err == nil && spend >= *org.MonthlySpendCapCents {
+					return c.JSON(http.StatusPaymentRequired, map[string]string{
+						"error": "monthly spending cap reached",
+					})
+				}
 			}
 		}
 	}

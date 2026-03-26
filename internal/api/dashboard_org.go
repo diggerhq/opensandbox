@@ -375,8 +375,11 @@ func (s *Server) dashboardGetCredits(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"balanceCents": org.CreditBalanceCents,
-		"isPersonal":   org.IsPersonal,
+		"balanceCents":       org.CreditBalanceCents,
+		"isPersonal":         org.IsPersonal,
+		"unbilledUsageCents": org.UnbilledUsageCents,
+		"hasPaymentMethod":   org.StripeCustomerID != nil,
+		"autoTopupEnabled":   org.AutoTopupEnabled,
 	})
 }
 

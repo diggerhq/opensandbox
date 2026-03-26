@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/billing"
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -46,6 +47,7 @@ type Server struct {
 	cfClient        *cloudflare.Client                // nil if Cloudflare not configured
 	pendingCreates  sync.Map                          // map[sandboxID]*pendingCreate — async sandbox creation tracking
 	sandboxAPIProxy *proxy.SandboxAPIProxy            // nil except in server mode (proxies data-plane to workers)
+	stripeClient    *billing.StripeClient              // nil if Stripe not configured
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -73,6 +75,7 @@ type ServerOpts struct {
 	CheckpointStore *storage.CheckpointStore           // nil if hibernation not configured
 	CFClient        *cloudflare.Client                 // nil if Cloudflare not configured
 	SandboxAPIProxy *proxy.SandboxAPIProxy             // nil except in server mode (proxies data-plane to workers)
+	StripeClient    *billing.StripeClient              // nil if Stripe not configured
 }
 
 // NewServer creates a new API server with all routes configured.
@@ -102,6 +105,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.sandboxDomain = opts.SandboxDomain
 		s.cfClient = opts.CFClient
 		s.sandboxAPIProxy = opts.SandboxAPIProxy
+		s.stripeClient = opts.StripeClient
 
 		// Wire up readiness waiting so the proxy blocks until async creates finish
 		if s.sandboxAPIProxy != nil {
@@ -318,6 +322,14 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.POST("/org/switch", s.dashboardSwitchOrg)
 		dash.GET("/org/credits", s.dashboardGetCredits)
 
+		// Billing endpoints
+		dash.POST("/billing/checkout-session", s.billingCreateCheckoutSession)
+		dash.POST("/billing/setup-payment-method", s.billingSetupPaymentMethod)
+		dash.GET("/billing/settings", s.billingGetSettings)
+		dash.PUT("/billing/settings", s.billingUpdateSettings)
+		dash.GET("/billing/usage", s.billingGetUsage)
+		dash.GET("/billing/transactions", s.billingGetTransactions)
+
 		// Admin endpoints
 		dash.POST("/admin/backfill-workos-orgs", s.dashboardBackfillWorkOSOrgs)
 
@@ -329,6 +341,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)
 		dash.POST("/sessions/:sandboxId/pty/:sessionId/resize", s.dashboardResizePTY)
 		dash.DELETE("/sessions/:sandboxId/pty/:sessionId", s.dashboardKillPTY)
+	}
+
+	// Stripe webhook (public — uses Stripe signature verification, not auth middleware)
+	if s.stripeClient != nil {
+		e.POST("/webhooks/stripe", s.stripeWebhook)
 	}
 
 	// Auto-detect FrontendURL for dev: if web/dist doesn't exist, assume Vite dev on :3000

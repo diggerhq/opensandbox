@@ -88,6 +88,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{14, "migrations/014_image_cache.up.sql"},
 		{15, "migrations/015_projects.up.sql"},
 		{16, "migrations/016_orgs_workos.up.sql"},
+		{17, "migrations/015_sandbox_usage.up.sql"},
+		{18, "migrations/015_secret_allowed_hosts.up.sql"},
+		{19, "migrations/017_billing.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -145,13 +148,24 @@ type Org struct {
 	IsPersonal         bool       `json:"isPersonal"`
 	OwnerUserID        *uuid.UUID `json:"ownerUserId,omitempty"`
 	CreditBalanceCents int        `json:"creditBalanceCents"`
+
+	// Billing fields
+	StripeCustomerID       *string  `json:"stripeCustomerId,omitempty"`
+	LastBilledAt           time.Time `json:"lastBilledAt"`
+	UnbilledUsageCents     float64  `json:"unbilledUsageCents"`
+	AutoTopupEnabled       bool     `json:"autoTopupEnabled"`
+	AutoTopupThresholdCents int     `json:"autoTopupThresholdCents"`
+	AutoTopupAmountCents   int      `json:"autoTopupAmountCents"`
+	MonthlySpendCapCents   *int     `json:"monthlySpendCapCents,omitempty"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
 const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, created_at, updated_at,
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
-	workos_org_id, is_personal, owner_user_id, credit_balance_cents`
+	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
+	stripe_customer_id, last_billed_at, unbilled_usage_cents,
+	auto_topup_enabled, auto_topup_threshold_cents, auto_topup_amount_cents, monthly_spend_cap_cents`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -162,6 +176,8 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
+		&org.StripeCustomerID, &org.LastBilledAt, &org.UnbilledUsageCents,
+		&org.AutoTopupEnabled, &org.AutoTopupThresholdCents, &org.AutoTopupAmountCents, &org.MonthlySpendCapCents,
 	)
 	return org, err
 }
@@ -735,6 +751,8 @@ func (s *Store) ListOrgsWithoutWorkOS(ctx context.Context) ([]*Org, error) {
 			&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 			&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 			&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
+			&org.StripeCustomerID, &org.LastBilledAt, &org.UnbilledUsageCents,
+			&org.AutoTopupEnabled, &org.AutoTopupThresholdCents, &org.AutoTopupAmountCents, &org.MonthlySpendCapCents,
 		)
 		if err != nil {
 			return nil, err
