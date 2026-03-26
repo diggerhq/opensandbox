@@ -159,7 +159,7 @@ if await sandbox.files.exists("/app/config.json"):
 
 ## Large Files
 
-All file operations are streamed end-to-end using 256KB chunks — there is no file size limit beyond available disk space. Files up to 200MB+ transfer reliably at ~20 MB/s.
+All file operations are streamed end-to-end using 256KB chunks. The maximum file transfer size is **2 GB** per file. Files up to 2 GB transfer reliably at ~20 MB/s.
 
 The standard `read()`, `readBytes()`, and `write()` methods work for large files, but they buffer the full content in memory on the client side. For very large files, use the streaming methods to avoid high memory usage:
 

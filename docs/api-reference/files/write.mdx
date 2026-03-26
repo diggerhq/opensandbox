@@ -3,7 +3,7 @@ title: 'Write File'
 api: 'PUT /api/sandboxes/{id}/files'
 ---
 
-Write content to a file. The request body is written as raw file content (not JSON).
+Write content to a file. The request body is written as raw file content (not JSON). Files are streamed in 256KB chunks. Maximum file size: **2 GB**.
 
 <ParamField path="id" type="string" required>
   Sandbox ID

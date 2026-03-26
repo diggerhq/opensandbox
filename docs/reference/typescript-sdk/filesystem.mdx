@@ -83,7 +83,7 @@ Delete a file or directory. [HTTP API →](/api-reference/files/delete)
 
 ## `sandbox.files.readStream(path)`
 
-Stream a file as a `ReadableStream`. Avoids buffering the entire file in memory — ideal for large files (50MB+).
+Stream a file as a `ReadableStream`. Avoids buffering the entire file in memory — ideal for large files. Maximum file size: 2 GB.
 
 <ParamField body="path" type="string" required>
   Absolute path to the file

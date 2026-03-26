@@ -95,7 +95,7 @@ Check if a path exists. Client-side wrapper — attempts a read and returns `Fal
 
 ## `await sandbox.files.read_stream(path)`
 
-Stream a file as async byte chunks. Avoids buffering the full file in memory — ideal for large files (50MB+).
+Stream a file as async byte chunks. Avoids buffering the full file in memory — ideal for large files. Maximum file size: 2 GB.
 
 <ParamField body="path" type="str" required>
   Absolute path to the file

@@ -3,7 +3,7 @@ title: 'Read File'
 api: 'GET /api/sandboxes/{id}/files'
 ---
 
-Returns file content as plain text (not JSON).
+Returns file content as plain text (not JSON). Files are streamed in 256KB chunks. Maximum file size: **2 GB**.
 
 <ParamField path="id" type="string" required>
   Sandbox ID

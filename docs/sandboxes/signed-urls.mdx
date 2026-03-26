@@ -116,7 +116,7 @@ curl -X PUT --data-binary @data.csv "https://app.opencomputer.dev/api/sandboxes/
 
 ## Large Files
 
-Signed URLs support files of any size — the entire pipeline streams data in 256KB chunks without buffering. Files up to 200MB+ have been tested at ~20 MB/s throughput.
+Signed URLs support files up to **2 GB** — the entire pipeline streams data in 256KB chunks without buffering.
 
 <CodeGroup>
 
