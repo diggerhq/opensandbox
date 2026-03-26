@@ -1,6 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getOrg, updateOrg, setCustomDomain, deleteCustomDomain, refreshCustomDomain } from '../api/client'
+import {
+  getOrg, updateOrg, setCustomDomain, deleteCustomDomain, refreshCustomDomain,
+  getOrgMembers, getInvitations, sendInvitation, revokeInvitation, removeMember,
+  type OrgMember, type OrgInvitation,
+} from '../api/client'
 
 function StatusBadge({ status }: { status: string }) {
   let color = 'var(--text-tertiary)'
@@ -328,6 +332,220 @@ export default function Settings() {
           </>
         )}
       </div>
+
+      {/* Team Members */}
+      <TeamMembers />
+
+      {/* Pending Invitations */}
+      <PendingInvitations />
+    </div>
+  )
+}
+
+function TeamMembers() {
+  const queryClient = useQueryClient()
+  const { data: members, isLoading } = useQuery({
+    queryKey: ['org-members'],
+    queryFn: getOrgMembers,
+  })
+
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [showInvite, setShowInvite] = useState(false)
+
+  const inviteMutation = useMutation({
+    mutationFn: (email: string) => sendInvitation(email),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org-members'] })
+      queryClient.invalidateQueries({ queryKey: ['org-invitations'] })
+      setInviteEmail('')
+      setShowInvite(false)
+    },
+  })
+
+  const removeMutation = useMutation({
+    mutationFn: (membershipId: string) => removeMember(membershipId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org-members'] })
+    },
+  })
+
+  return (
+    <div className="glass-card animate-in stagger-3" style={{ padding: 28, maxWidth: 520, marginTop: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }}>
+        <div>
+          <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Team Members</h2>
+          <p style={{ fontSize: 13, color: 'var(--text-tertiary)', margin: '4px 0 0' }}>
+            People with access to this organization
+          </p>
+        </div>
+        <button
+          className="btn-primary"
+          onClick={() => setShowInvite(!showInvite)}
+          style={{ fontSize: 12, padding: '6px 14px' }}
+        >
+          Invite
+        </button>
+      </div>
+
+      {showInvite && (
+        <div style={{ marginBottom: 16, display: 'flex', gap: 8 }}>
+          <input
+            type="email"
+            value={inviteEmail}
+            onChange={e => setInviteEmail(e.target.value)}
+            placeholder="email@example.com"
+            className="input"
+            style={{ flex: 1 }}
+          />
+          <button
+            className="btn-primary"
+            onClick={() => inviteMutation.mutate(inviteEmail)}
+            disabled={inviteMutation.isPending || !inviteEmail.trim()}
+            style={{ fontSize: 12, padding: '6px 14px', whiteSpace: 'nowrap' }}
+          >
+            {inviteMutation.isPending ? 'Sending...' : 'Send'}
+          </button>
+        </div>
+      )}
+      {inviteMutation.isError && (
+        <div style={{ marginBottom: 10, fontSize: 12, color: 'var(--accent-red, #ef4444)' }}>
+          {inviteMutation.error?.message}
+        </div>
+      )}
+
+      {isLoading ? (
+        <div style={{ padding: 20, textAlign: 'center' }}>
+          <div className="loading-spinner" />
+        </div>
+      ) : (
+        <div>
+          {(members ?? []).map((member: OrgMember, i: number) => (
+            <div key={member.membershipId || member.id || i} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 0',
+              borderBottom: i < (members?.length ?? 0) - 1 ? '1px solid var(--border-subtle)' : 'none',
+            }}>
+              <div>
+                <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>
+                  {member.name || member.email}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  {member.email}
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{
+                  fontSize: 11, fontWeight: 600,
+                  color: 'var(--text-tertiary)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                }}>
+                  {member.role}
+                </span>
+                {member.membershipId && (
+                  <button
+                    onClick={() => {
+                      if (confirm(`Remove ${member.email} from this organization?`)) {
+                        removeMutation.mutate(member.membershipId!)
+                      }
+                    }}
+                    disabled={removeMutation.isPending}
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      color: 'var(--text-tertiary)', fontSize: 11,
+                      padding: '2px 6px',
+                    }}
+                    onMouseOver={e => (e.currentTarget.style.color = 'var(--accent-red, #ef4444)')}
+                    onMouseOut={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          {(!members || members.length === 0) && (
+            <div style={{ fontSize: 13, color: 'var(--text-tertiary)', padding: '10px 0' }}>
+              No members yet.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PendingInvitations() {
+  const queryClient = useQueryClient()
+  const { data: invitations, isLoading } = useQuery({
+    queryKey: ['org-invitations'],
+    queryFn: getInvitations,
+  })
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: string) => revokeInvitation(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['org-invitations'] })
+    },
+  })
+
+  const pending = (invitations ?? []).filter((inv: OrgInvitation) => inv.state === 'pending')
+
+  // Don't show the section if there are no pending invitations
+  if (!isLoading && pending.length === 0) {
+    return null
+  }
+
+  return (
+    <div className="glass-card animate-in stagger-4" style={{ padding: 28, maxWidth: 520, marginTop: 20 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>Pending Invitations</h2>
+        <p style={{ fontSize: 13, color: 'var(--text-tertiary)', margin: '4px 0 0' }}>
+          Invitations waiting to be accepted
+        </p>
+      </div>
+
+      {isLoading ? (
+        <div style={{ padding: 20, textAlign: 'center' }}>
+          <div className="loading-spinner" />
+        </div>
+      ) : (
+        <div>
+          {pending.map((inv: OrgInvitation, i: number) => (
+            <div key={inv.id} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '10px 0',
+              borderBottom: i < pending.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+            }}>
+              <div>
+                <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>
+                  {inv.email}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  {inv.state} &middot; expires {new Date(inv.expiresAt).toLocaleDateString()}
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  if (confirm(`Revoke invitation for ${inv.email}?`)) {
+                    revokeMutation.mutate(inv.id)
+                  }
+                }}
+                disabled={revokeMutation.isPending}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  color: 'var(--text-tertiary)', fontSize: 11,
+                  padding: '2px 6px',
+                }}
+                onMouseOver={e => (e.currentTarget.style.color = 'var(--accent-red, #ef4444)')}
+                onMouseOut={e => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+              >
+                Revoke
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
