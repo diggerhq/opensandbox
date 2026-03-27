@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { logout } from '../api/client'
@@ -69,7 +70,10 @@ const navItems = [
 ]
 
 export default function Layout() {
-  const { user } = useAuth()
+  const { user, switchOrg } = useAuth()
+  const [orgSwitcherOpen, setOrgSwitcherOpen] = useState(false)
+  const hasMultipleOrgs = (user?.orgs?.length ?? 0) > 1
+  const activeOrg = user?.orgs?.find(o => o.isActive)
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -113,6 +117,60 @@ export default function Layout() {
             </div>
           </div>
         </div>
+
+        {/* Org Switcher (only visible with multiple orgs) */}
+        {hasMultipleOrgs && (
+          <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border-subtle)', position: 'relative' }}>
+            <button
+              onClick={() => setOrgSwitcherOpen(!orgSwitcherOpen)}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '8px 10px', background: 'rgba(255,255,255,0.03)',
+                border: '1px solid var(--border-subtle)', borderRadius: 6,
+                cursor: 'pointer', color: 'var(--text-primary)', fontSize: 12,
+                fontFamily: 'var(--font-body)',
+              }}
+            >
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {activeOrg?.name || 'Select org'}
+              </span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            {orgSwitcherOpen && (
+              <div style={{
+                position: 'absolute', top: '100%', left: 12, right: 12,
+                background: 'var(--bg-deep)', border: '1px solid var(--border-subtle)',
+                borderRadius: 6, marginTop: 4, zIndex: 100,
+                boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+              }}>
+                {user?.orgs?.map(org => (
+                  <button
+                    key={org.id}
+                    onClick={() => {
+                      switchOrg(org.id)
+                      setOrgSwitcherOpen(false)
+                    }}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left',
+                      padding: '8px 12px', background: org.isActive ? 'rgba(99,102,241,0.1)' : 'none',
+                      border: 'none', cursor: 'pointer',
+                      color: org.isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                      fontSize: 12, fontFamily: 'var(--font-body)',
+                      borderBottom: '1px solid var(--border-subtle)',
+                    }}
+                    onMouseOver={e => { if (!org.isActive) e.currentTarget.style.background = 'rgba(255,255,255,0.03)' }}
+                    onMouseOut={e => { if (!org.isActive) e.currentTarget.style.background = 'none' }}
+                  >
+                    {org.name}
+                    {org.isPersonal && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 6 }}>(personal)</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Nav Links */}
         <div style={{ flex: 1, padding: '10px 8px' }}>

@@ -1,7 +1,6 @@
 -- Stripe billing fields on orgs
 ALTER TABLE orgs ADD COLUMN stripe_customer_id TEXT UNIQUE;
 ALTER TABLE orgs ADD COLUMN stripe_subscription_id TEXT;
-ALTER TABLE orgs ADD COLUMN credit_balance_cents INT NOT NULL DEFAULT 0;
 ALTER TABLE orgs ADD COLUMN monthly_spend_cap_cents INT;
 ALTER TABLE orgs ADD COLUMN last_usage_reported_at TIMESTAMPTZ NOT NULL DEFAULT now();
 

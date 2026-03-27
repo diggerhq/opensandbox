@@ -312,11 +312,24 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/images", s.dashboardListImages)
 		dash.DELETE("/images/:id", s.dashboardDeleteImage)
 
+		// Organization members and invitations
+		dash.GET("/org/members", s.dashboardListOrgMembers)
+		dash.DELETE("/org/members/:membershipId", s.dashboardRemoveMember)
+		dash.POST("/org/invitations", s.dashboardSendInvitation)
+		dash.GET("/org/invitations", s.dashboardListInvitations)
+		dash.DELETE("/org/invitations/:id", s.dashboardRevokeInvitation)
+		dash.GET("/orgs", s.dashboardListOrgs)
+		dash.POST("/org/switch", s.dashboardSwitchOrg)
+		dash.GET("/org/credits", s.dashboardGetCredits)
+
 		// Billing
 		dash.POST("/billing/setup", s.billingSetup)
 		dash.GET("/billing", s.billingGet)
 		dash.PUT("/billing/settings", s.billingUpdateSettings)
 		dash.GET("/billing/invoices", s.billingInvoices)
+
+		// Admin endpoints
+		dash.POST("/admin/backfill-workos-orgs", s.dashboardBackfillWorkOSOrgs)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
