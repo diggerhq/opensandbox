@@ -9,6 +9,7 @@ import APIKeys from './pages/APIKeys'
 import Checkpoints from './pages/Checkpoints'
 import Templates from './pages/Templates'
 import Settings from './pages/Settings'
+import Billing from './pages/Billing'
 import SessionDetail from './pages/SessionDetail'
 
 export default function App() {
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="checkpoints" element={<Checkpoints />} />
             <Route path="templates" element={<Templates />} />
             <Route path="api-keys" element={<APIKeys />} />
+            <Route path="billing" element={<Billing />} />
             <Route path="settings" element={<Settings />} />
           </Route>
         </Route>

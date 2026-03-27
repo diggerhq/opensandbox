@@ -271,3 +271,49 @@ export const switchOrg = (orgId: string) =>
 
 // Credits
 export const getCredits = () => apiFetch<Credits>('/org/credits')
+
+// Billing types
+export interface BillingTierUsage {
+  memoryMB: number
+  vcpus: number
+  totalSeconds: number
+  costCents: number
+}
+
+export interface BillingState {
+  plan: string
+  stripeCreditCents: number
+  monthlySpendCapCents: number | null
+  hasPaymentMethod: boolean
+  currentUsage: {
+    tiers: BillingTierUsage[]
+    totalCostCents: number
+  }
+}
+
+export interface StripeInvoice {
+  id: string
+  number: string
+  status: string
+  amountDue: number
+  amountPaid: number
+  currency: string
+  created: number
+  hostedUrl: string
+  pdfUrl: string
+}
+
+// Billing API
+export const getBilling = () => apiFetch<BillingState>('/billing')
+
+export const billingSetup = () =>
+  apiFetch<{ url: string }>('/billing/setup', { method: 'POST' })
+
+export const updateBillingSettings = (settings: { monthlySpendCapCents: number | null }) =>
+  apiFetch<{ status: string }>('/billing/settings', {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+
+export const getBillingInvoices = (limit = 10) =>
+  apiFetch<{ invoices: StripeInvoice[] }>(`/billing/invoices?limit=${limit}`)

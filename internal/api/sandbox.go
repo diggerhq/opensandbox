@@ -36,16 +36,31 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	// Check org quota if PG is available
+	// Check org quota and plan enforcement
 	orgID, hasOrg := auth.GetOrgID(c)
 	if hasOrg && s.store != nil {
 		org, err := s.store.GetOrg(ctx, orgID)
 		if err == nil {
+			// Concurrent sandbox limit
 			count, err := s.store.CountActiveSandboxes(ctx, orgID)
 			if err == nil && count >= org.MaxConcurrentSandboxes {
 				return c.JSON(http.StatusTooManyRequests, map[string]string{
 					"error": "concurrent sandbox limit reached",
 				})
+			}
+
+			// Free tier: 4GB / 1 vCPU only
+			if org.Plan == "free" {
+				if cfg.MemoryMB > 4096 || cfg.CpuCount > 1 {
+					return c.JSON(http.StatusPaymentRequired, map[string]string{
+						"error": "upgrade to pro for larger instances",
+					})
+				}
+				// Force 4GB/1vCPU if not specified
+				if cfg.MemoryMB == 0 {
+					cfg.MemoryMB = 4096
+					cfg.CpuCount = 1
+				}
 			}
 		}
 	}

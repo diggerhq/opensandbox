@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ScaleEvent represents a period at a specific resource tier.
@@ -122,4 +124,135 @@ func (s *Store) GetOrgUsage(ctx context.Context, orgID string, from, to time.Tim
 		results = append(results, s)
 	}
 	return results, rows.Err()
+}
+
+// --- Stripe billing methods ---
+
+// SetStripeCustomerID sets the Stripe customer ID for an org.
+func (s *Store) SetStripeCustomerID(ctx context.Context, orgID uuid.UUID, customerID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET stripe_customer_id = $2, updated_at = now() WHERE id = $1`,
+		orgID, customerID)
+	return err
+}
+
+// SetStripeSubscriptionID sets the Stripe subscription ID for an org.
+func (s *Store) SetStripeSubscriptionID(ctx context.Context, orgID uuid.UUID, subscriptionID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET stripe_subscription_id = $2, updated_at = now() WHERE id = $1`,
+		orgID, subscriptionID)
+	return err
+}
+
+// UpdateOrgPlan changes the org plan (e.g. "free" -> "pro").
+func (s *Store) UpdateOrgPlan(ctx context.Context, orgID uuid.UUID, plan string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET plan = $2, updated_at = now() WHERE id = $1`,
+		orgID, plan)
+	return err
+}
+
+// SetMonthlySpendCap updates the monthly spend cap for an org.
+func (s *Store) SetMonthlySpendCap(ctx context.Context, orgID uuid.UUID, capCents *int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET monthly_spend_cap_cents = $2, updated_at = now() WHERE id = $1`,
+		orgID, capCents)
+	return err
+}
+
+// UpdateLastUsageReportedAt updates the usage reporting watermark.
+func (s *Store) UpdateLastUsageReportedAt(ctx context.Context, orgID uuid.UUID, t time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET last_usage_reported_at = $2 WHERE id = $1`,
+		orgID, t)
+	return err
+}
+
+// ListBillableOrgIDs returns org IDs with plan="pro" and at least one open scale event.
+func (s *Store) ListBillableOrgIDs(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT se.org_id
+		 FROM sandbox_scale_events se
+		 JOIN orgs o ON o.id = se.org_id
+		 WHERE se.ended_at IS NULL AND o.plan = 'pro'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// SubscriptionItem maps a memory tier to a Stripe subscription item ID.
+type SubscriptionItem struct {
+	OrgID                    uuid.UUID `json:"orgId"`
+	MemoryMB                 int       `json:"memoryMB"`
+	StripeSubscriptionItemID string    `json:"stripeSubscriptionItemId"`
+}
+
+// SaveSubscriptionItems inserts or updates the org's subscription item mapping.
+func (s *Store) SaveSubscriptionItems(ctx context.Context, orgID uuid.UUID, items map[int]string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	for memoryMB, itemID := range items {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO org_subscription_items (org_id, memory_mb, stripe_subscription_item_id)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (org_id, memory_mb) DO UPDATE SET stripe_subscription_item_id = $3`,
+			orgID, memoryMB, itemID)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// DeductCredits subtracts cents from an org's credit balance.
+func (s *Store) DeductCredits(ctx context.Context, orgID uuid.UUID, amountCents int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET credit_balance_cents = credit_balance_cents - $2, updated_at = now() WHERE id = $1`,
+		orgID, amountCents)
+	return err
+}
+
+// AddCredits adds cents to an org's credit balance.
+func (s *Store) AddCredits(ctx context.Context, orgID uuid.UUID, amountCents int) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET credit_balance_cents = credit_balance_cents + $2, updated_at = now() WHERE id = $1`,
+		orgID, amountCents)
+	return err
+}
+
+// GetSubscriptionItems returns the subscription item mapping for an org.
+func (s *Store) GetSubscriptionItems(ctx context.Context, orgID uuid.UUID) (map[int]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT memory_mb, stripe_subscription_item_id FROM org_subscription_items WHERE org_id = $1`,
+		orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make(map[int]string)
+	for rows.Next() {
+		var memMB int
+		var itemID string
+		if err := rows.Scan(&memMB, &itemID); err != nil {
+			return nil, err
+		}
+		items[memMB] = itemID
+	}
+	return items, rows.Err()
 }

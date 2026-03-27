@@ -26,10 +26,10 @@ CREATE TABLE IF NOT EXISTS secret_store_entries (
 );
 CREATE INDEX IF NOT EXISTS idx_secret_store_entries_store ON secret_store_entries(store_id);
 
--- Drop old project tables (secrets first due to FK)
+-- Remove project_id FK from sandbox_sessions first, then drop old tables
+ALTER TABLE sandbox_sessions DROP COLUMN IF EXISTS project_id;
 DROP TABLE IF EXISTS project_secrets;
 DROP TABLE IF EXISTS projects;
 
--- Update sandbox_sessions: replace project_id with secret_store_id
-ALTER TABLE sandbox_sessions DROP COLUMN IF EXISTS project_id;
+-- Add secret_store_id reference
 ALTER TABLE sandbox_sessions ADD COLUMN IF NOT EXISTS secret_store_id UUID REFERENCES secret_stores(id);

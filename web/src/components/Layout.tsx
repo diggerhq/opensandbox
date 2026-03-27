@@ -38,6 +38,12 @@ const icons = {
       <line x1="12" y1="22.08" x2="12" y2="12" />
     </svg>
   ),
+  creditCard: (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
+      <line x1="1" y1="10" x2="23" y2="10" />
+    </svg>
+  ),
   gear: (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
@@ -59,6 +65,7 @@ const navItems = [
   { to: '/checkpoints', label: 'Checkpoints', icon: icons.layers },
   { to: '/templates', label: 'Templates', icon: icons.box },
   { to: '/api-keys', label: 'API Keys', icon: icons.key },
+  { to: '/billing', label: 'Billing', icon: icons.creditCard },
   { to: '/settings', label: 'Settings', icon: icons.gear },
 ]
 
