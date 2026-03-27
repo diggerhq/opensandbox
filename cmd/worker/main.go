@@ -30,6 +30,11 @@ import (
 var AgentVersion = "dev"
 
 func main() {
+	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
+	if err := config.LoadSecretsFromKeyVault(); err != nil {
+		log.Fatalf("failed to load secrets from Key Vault: %v", err)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
