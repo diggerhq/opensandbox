@@ -32,7 +32,15 @@ func (s *Store) SetEncryptor(enc *crypto.Encryptor) {
 
 // NewStore creates a new Store with a connection pool.
 func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	poolCfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse database URL: %w", err)
+	}
+	// Default pool is 4 connections — far too low for proxy-per-request pattern.
+	// Each proxied exec/file/pty call does a DB lookup before forwarding.
+	poolCfg.MaxConns = 50
+	poolCfg.MinConns = 5
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}

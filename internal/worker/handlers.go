@@ -36,9 +36,9 @@ func (s *HTTPServer) setTimeout(c echo.Context) error {
 		})
 	}
 
-	if req.Timeout <= 0 {
+	if req.Timeout < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "timeout must be positive",
+			"error": "timeout must be non-negative (0 = no timeout)",
 		})
 	}
 

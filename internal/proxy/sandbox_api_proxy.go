@@ -25,19 +25,84 @@ import (
 // termination: clients talk to the control plane through the ALB, and the
 // control plane forwards exec/files/pty/agent requests to workers over the
 // internal VPC network.
+// proxyRouteCache caches the sandbox→worker mapping + JWT to avoid DB/Redis
+// lookups and JWT minting on every proxied request. TTL-based eviction.
+type proxyRouteCache struct {
+	mu      sync.RWMutex
+	entries map[string]*routeCacheEntry
+}
+
+type routeCacheEntry struct {
+	workerURL string
+	workerID  string
+	token     string
+	expiresAt time.Time
+}
+
+const routeCacheTTL = 10 * time.Second
+
+func newProxyRouteCache() *proxyRouteCache {
+	return &proxyRouteCache{entries: make(map[string]*routeCacheEntry)}
+}
+
+func (c *proxyRouteCache) get(sandboxID string) (workerURL, workerID, token string, ok bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, exists := c.entries[sandboxID]
+	if !exists || time.Now().After(e.expiresAt) {
+		return "", "", "", false
+	}
+	return e.workerURL, e.workerID, e.token, true
+}
+
+func (c *proxyRouteCache) set(sandboxID, workerURL, workerID, token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[sandboxID] = &routeCacheEntry{
+		workerURL: workerURL,
+		workerID:  workerID,
+		token:     token,
+		expiresAt: time.Now().Add(routeCacheTTL),
+	}
+}
+
+func (c *proxyRouteCache) invalidate(sandboxID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, sandboxID)
+}
+
+// SandboxAPIProxy proxies data-plane HTTP/WebSocket requests from the control
+// plane to the worker that owns the sandbox.
 type SandboxAPIProxy struct {
 	store        *db.Store
 	registry     *controlplane.RedisWorkerRegistry
 	jwtIssuer    *auth.JWTIssuer
+	transport    *http.Transport      // shared connection pool for all proxy requests
+	routeCache   *proxyRouteCache     // sandbox→worker cache to avoid DB lookup per request
 	waitForReady func(ctx context.Context, sandboxID string) error // blocks until async sandbox creation completes; nil = no-op
 }
 
 // NewSandboxAPIProxy creates a new sandbox API proxy.
 func NewSandboxAPIProxy(store *db.Store, registry *controlplane.RedisWorkerRegistry, jwtIssuer *auth.JWTIssuer) *SandboxAPIProxy {
 	return &SandboxAPIProxy{
-		store:    store,
-		registry: registry,
-		jwtIssuer: jwtIssuer,
+		store:      store,
+		registry:   registry,
+		jwtIssuer:  jwtIssuer,
+		routeCache: newProxyRouteCache(),
+		// Shared transport with connection pooling — creating a new Transport per request
+		// exhausts ephemeral ports under load and causes 502s.
+		transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 600 * time.Second,
+			MaxIdleConns:          200,
+			MaxIdleConnsPerHost:   50,
+			MaxConnsPerHost:       100,
+			IdleConnTimeout:       120 * time.Second,
+		},
 	}
 }
 
@@ -48,9 +113,16 @@ func (p *SandboxAPIProxy) SetWaitForReady(fn func(ctx context.Context, sandboxID
 	p.waitForReady = fn
 }
 
+// InvalidateRouteCache removes a sandbox from the proxy route cache.
+// Call this on hibernate, kill, or any event that changes the sandbox→worker mapping.
+func (p *SandboxAPIProxy) InvalidateRouteCache(sandboxID string) {
+	if p.routeCache != nil {
+		p.routeCache.invalidate(sandboxID)
+	}
+}
+
 // ProxyHandler forwards requests for a sandbox to the worker that owns it.
-// It extracts the sandbox ID from the path param ":id", looks up the worker,
-// mints a short-lived JWT, and proxies the request.
+// Uses a short-TTL cache to avoid DB + Redis lookups on every request.
 func (p *SandboxAPIProxy) ProxyHandler(c echo.Context) error {
 	sandboxID := c.Param("id")
 	if sandboxID == "" {
@@ -60,6 +132,11 @@ func (p *SandboxAPIProxy) ProxyHandler(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
+
+	// Fast path: check route cache (avoids DB + Redis + JWT mint)
+	if workerURL, workerID, token, ok := p.routeCache.get(sandboxID); ok {
+		return p.forwardWithToken(c, sandboxID, workerURL, workerID, token)
+	}
 
 	// If this sandbox is still being created asynchronously, wait for it.
 	if p.waitForReady != nil {
@@ -113,9 +190,8 @@ func (p *SandboxAPIProxy) ProxyHandler(c echo.Context) error {
 	return p.forward(c, sandboxID, worker.HTTPAddr, session.WorkerID)
 }
 
-// forward proxies the request to the worker, adding a sandbox JWT for auth.
+// forward proxies the request to the worker, mints a JWT, caches the route.
 func (p *SandboxAPIProxy) forward(c echo.Context, sandboxID, workerURL, workerID string) error {
-	// Mint a short-lived JWT for the worker
 	token := ""
 	if p.jwtIssuer != nil {
 		orgID, _ := auth.GetOrgID(c)
@@ -125,6 +201,14 @@ func (p *SandboxAPIProxy) forward(c echo.Context, sandboxID, workerURL, workerID
 		}
 	}
 
+	// Cache the route for subsequent requests to the same sandbox
+	p.routeCache.set(sandboxID, workerURL, workerID, token)
+
+	return p.forwardWithToken(c, sandboxID, workerURL, workerID, token)
+}
+
+// forwardWithToken proxies the request using a pre-resolved worker URL and JWT.
+func (p *SandboxAPIProxy) forwardWithToken(c echo.Context, sandboxID, workerURL, workerID, token string) error {
 	if isWebSocketUpgrade(c.Request()) {
 		return p.doWebSocket(c, sandboxID, workerURL, token)
 	}
@@ -143,19 +227,13 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.FlushInterval = -1 // flush chunks immediately
-	proxy.Transport = &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: 5 * time.Second,
-		}).DialContext,
-		ResponseHeaderTimeout: 600 * time.Second, // exec/run can take minutes (npm build, etc.)
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       120 * time.Second,
-	}
+	proxy.FlushInterval = -1    // flush chunks immediately
+	proxy.Transport = p.transport // shared connection pool — avoids ephemeral port exhaustion
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("sandbox-api-proxy: error proxying sandbox %s to %s: %v", sandboxID, workerURL, err)
-		// Write error JSON directly — headers may not have been sent yet
+		// Invalidate cache — worker may have moved or restarted
+		p.routeCache.invalidate(sandboxID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
 		fmt.Fprintf(w, `{"error":"sandbox %s: upstream unavailable"}`, sandboxID)

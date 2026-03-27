@@ -66,7 +66,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_, _ = vm.agent.Exec(shutdownCtx, &pb.ExecRequest{
 			Command:   "/bin/sh",
-			Args:      []string{"-c", "sync; kill -USR1 1"},
+			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
 			RunAsRoot: true,
 		})
 		cancel()

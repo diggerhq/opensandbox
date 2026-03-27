@@ -1641,9 +1641,7 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 		return nil, err
 	}
 
-	if !vm.opMu.TryLock() {
-		return nil, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
-	}
+	vm.opMu.Lock()
 	defer vm.opMu.Unlock()
 
 	// Check if agent needs upgrading before we hibernate.
@@ -1760,7 +1758,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
 			Command:   "/bin/sh",
-			Args:      []string{"-c", "sync; kill -USR1 1"},
+			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
 			RunAsRoot: true,
 		})
 		cancel()
@@ -1863,9 +1861,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return err
 	}
 
-	if !vm.opMu.TryLock() {
-		return fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
-	}
+	vm.opMu.Lock()
 	defer vm.opMu.Unlock()
 
 	t0 := time.Now()
@@ -1912,6 +1908,15 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	snapshotName := "cp-" + checkpointID
 	if data, err := os.ReadFile(filepath.Join(cacheDir, "snapshot-name")); err == nil {
 		snapshotName = strings.TrimSpace(string(data))
+	}
+
+	// Read checkpoint metadata for base topology. loadvm requires the same CPU/memory
+	// topology as when the snapshot was taken. If the sandbox was scaled after checkpoint,
+	// vm.MemoryMB reflects the scaled value — but we must boot with the base value
+	// and re-scale after loadvm.
+	var cpMeta SnapshotMeta
+	if metaData, err := os.ReadFile(filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")); err == nil {
+		json.Unmarshal(metaData, &cpMeta)
 	}
 
 	sandboxDir := vm.sandboxDir
@@ -1969,8 +1974,24 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	os.Remove(qmpSockPath)
 	os.Remove(agentSockPath)
 
+	// Boot with checkpoint's base topology so loadvm succeeds.
+	// After loadvm, re-scale to the user's desired size if different.
+	bootCpus := cpMeta.CpuCount
+	if bootCpus <= 0 {
+		bootCpus = vm.CpuCount
+	}
+	bootMemMB := cpMeta.BaseMemoryMB
+	if bootMemMB <= 0 {
+		bootMemMB = vm.baseMemoryMB
+	}
+	if bootMemMB <= 0 {
+		bootMemMB = m.cfg.DefaultMemoryMB
+	}
+	// Remember what the user had so we can re-scale after loadvm
+	desiredMemMB := vm.MemoryMB
+
 	logFile, _ := os.Create(filepath.Join(sandboxDir, "qemu.log"))
-	args := m.buildQEMUArgs(vm.CpuCount, vm.MemoryMB, rootfsPath, workspacePath,
+	args := m.buildQEMUArgs(bootCpus, bootMemMB, rootfsPath, workspacePath,
 		netCfg.TAPName, guestMAC, agentSockPath, qmpSockPath, bootArgs)
 	args = append(args, "-S")
 
@@ -1989,7 +2010,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	}
 
 	// Step 6: QMP connect + loadvm + cont
-	qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
+	qmpClient, err := waitForQMP(qmpSockPath, 30*time.Second)
 	if err != nil {
 		cmd.Process.Kill()
 		cmd.Wait()
@@ -2005,6 +2026,21 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return fmt.Errorf("loadvm: %w", err)
 	}
 
+	// Re-scale virtio-mem BEFORE cont — the VM is paused, so the kernel sees full
+	// memory immediately on resume. Without this, restored processes that were using
+	// >baseMemMB would OOM before the post-resume re-scale completes.
+	if desiredMemMB > bootMemMB {
+		additionalMB := desiredMemMB - bootMemMB
+		additionalMB = ((additionalMB + 127) / 128) * 128 // align to 128MB block size
+		if err := qmpClient.SetVirtioMemSize(additionalMB); err != nil {
+			log.Printf("qemu: RestoreFromCheckpoint %s: pre-resume scale to %dMB failed: %v (continuing with base %dMB)",
+				sandboxID, desiredMemMB, err, bootMemMB)
+		} else {
+			log.Printf("qemu: RestoreFromCheckpoint %s: pre-resume scale to %dMB (base=%d + virtio-mem=%d)",
+				sandboxID, bootMemMB+additionalMB, bootMemMB, additionalMB)
+		}
+	}
+
 	if err := qmpClient.Cont(); err != nil {
 		qmpClient.Close()
 		cmd.Process.Kill()
@@ -2014,7 +2050,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	}
 
 	// Step 7: Reconnect agent + patch network
-	agentClient, err := m.waitForAgentSocket(context.Background(), agentSockPath, 10*time.Second)
+	agentClient, err := m.waitForAgentSocket(context.Background(), agentSockPath, 30*time.Second)
 	if err != nil {
 		qmpClient.Close()
 		cmd.Process.Kill()
@@ -2041,8 +2077,20 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	vm.guestMAC = guestMAC
 	vm.bootArgs = bootArgs
 	vm.pid = cmd.Process.Pid
+	vm.CpuCount = bootCpus
+	vm.baseMemoryMB = bootMemMB
+	if desiredMemMB > bootMemMB {
+		additionalMB := ((desiredMemMB - bootMemMB + 127) / 128) * 128
+		vm.MemoryMB = bootMemMB + additionalMB
+		vm.virtioMemRequestedMB = additionalMB
+	} else {
+		vm.MemoryMB = bootMemMB
+		vm.virtioMemRequestedMB = 0
+	}
 
-	m.upgradeAgentIfNeeded(context.Background(), vm)
+	// Don't upgrade agent during restore — the checkpoint was created from the
+	// same rootfs, and the upgrade's syscall.Exec + reconnect cycle is fragile.
+	// Agent upgrades happen on golden snapshot creation and wake instead.
 
 	log.Printf("qemu: RestoreFromCheckpoint %s/%s: complete (%dms, port=%d, tap=%s)",
 		sandboxID, checkpointID, time.Since(t0).Milliseconds(), hostPort, netCfg.TAPName)
@@ -2613,11 +2661,16 @@ func (m *Manager) upgradeAgentIfNeeded(ctx context.Context, vm *VMInstance) {
 	vm.agent.Close()
 	newAgent, err := m.waitForAgentSocket(ctx, vm.agentSockPath, 30*time.Second)
 	if err != nil {
-		log.Printf("qemu: agent %s: reconnect failed: %v", vm.ID, err)
+		log.Printf("qemu: agent %s: reconnect after upgrade failed: %v, retrying...", vm.ID, err)
 		fallback, fbErr := m.waitForAgentSocket(ctx, vm.agentSockPath, 15*time.Second)
 		if fbErr == nil {
 			vm.agent = fallback
 			log.Printf("qemu: agent %s: fallback reconnect succeeded", vm.ID)
+		} else {
+			// Both reconnect attempts failed — agent is dead.
+			// Set to nil so callers get "agent not available" instead of using a closed connection.
+			vm.agent = nil
+			log.Printf("qemu: agent %s: CRITICAL: all reconnect attempts failed after upgrade, agent unavailable", vm.ID)
 		}
 		return
 	}
