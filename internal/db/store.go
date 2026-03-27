@@ -99,6 +99,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{17, "migrations/015_sandbox_usage.up.sql"},
 		{18, "migrations/015_secret_allowed_hosts.up.sql"},
 		{19, "migrations/017_stripe_billing.up.sql"},
+		{20, "migrations/017_patch_error_tracking.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -453,6 +454,7 @@ type SandboxSession struct {
 	ErrorMsg             *string         `json:"errorMsg,omitempty"`
 	BasedOnCheckpointID  *uuid.UUID      `json:"basedOnCheckpointId,omitempty"`
 	LastPatchSequence    int             `json:"lastPatchSequence"`
+	PatchError           *string         `json:"patchError,omitempty"`
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
@@ -460,11 +462,11 @@ func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgI
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence`,
+		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error`,
 		sandboxID, orgID, userID, template, region, workerID, config, metadata,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
-		&session.BasedOnCheckpointID, &session.LastPatchSequence)
+		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sandbox session: %w", err)
 	}
@@ -495,11 +497,11 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 		 FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`, sandboxID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
-		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence)
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox session not found: %w", err)
 	}
@@ -511,12 +513,12 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 	var err error
 	if status != "" {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 			 FROM sandbox_sessions WHERE org_id = $1 AND status = $2 ORDER BY started_at DESC LIMIT $3 OFFSET $4`,
 			orgID, status, limit, offset)
 	} else {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 			 FROM sandbox_sessions WHERE org_id = $1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
 			orgID, limit, offset)
 	}
@@ -530,7 +532,7 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)
@@ -1176,6 +1178,15 @@ func (s *Store) UpdateSandboxPatchSequence(ctx context.Context, sandboxID string
 	return err
 }
 
+// SetSandboxPatchError sets or clears the patch_error on a sandbox session.
+// Pass nil to clear the error (e.g., after a successful patch or patch deletion).
+func (s *Store) SetSandboxPatchError(ctx context.Context, sandboxID string, patchError *string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET patch_error = $1 WHERE sandbox_id = $2`,
+		patchError, sandboxID)
+	return err
+}
+
 // SetSandboxCheckpointID sets the based_on_checkpoint_id for a sandbox session.
 func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, checkpointID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
@@ -1187,7 +1198,7 @@ func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, ch
 // ListSandboxesByCheckpoint returns all non-stopped sandboxes forked from a checkpoint.
 func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid.UUID) ([]SandboxSession, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 		 FROM sandbox_sessions WHERE based_on_checkpoint_id = $1 AND status IN ('running', 'hibernated') ORDER BY started_at DESC`,
 		checkpointID)
 	if err != nil {
@@ -1200,7 +1211,7 @@ func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)

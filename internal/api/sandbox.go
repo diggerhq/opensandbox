@@ -502,6 +502,9 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 	if s.sandboxDomain != "" {
 		resp["sandboxDomain"] = s.sandboxDomain
 	}
+	if session.PatchError != nil {
+		resp["patchError"] = *session.PatchError
+	}
 
 	return c.JSON(http.StatusOK, resp)
 }
@@ -1818,14 +1821,24 @@ func (s *Server) applyPendingPatches(sandboxID, workerID string) {
 
 	log.Printf("patches: %s: applying %d pending patches (from seq %d)", sandboxID, len(patches), session.LastPatchSequence+1)
 
+	// Clear any previous patch error before applying
+	_ = s.store.SetSandboxPatchError(ctx, sandboxID, nil)
+
 	for _, patch := range patches {
 		if err := s.execPatchOnSandbox(ctx, sandboxID, workerID, &patch); err != nil {
-			log.Printf("patches: %s: patch seq %d failed: %v (stopping)", sandboxID, patch.Sequence, err)
-			return // Stop on first failure
+			errMsg := fmt.Sprintf("patch seq %d failed: %v — delete the bad patch and retry (POST /snapshots/:name/patches/:id or POST /sandboxes/checkpoints/:id/patches/:id)", patch.Sequence, err)
+			log.Printf("patches: %s: %s", sandboxID, errMsg)
+			if dbErr := s.store.SetSandboxPatchError(ctx, sandboxID, &errMsg); dbErr != nil {
+				log.Printf("patches: %s: failed to save patch error to DB: %v", sandboxID, dbErr)
+			}
+			return // Stop on first failure — will retry on next wake
 		}
 		_ = s.store.UpdateSandboxPatchSequence(ctx, sandboxID, patch.Sequence)
 		log.Printf("patches: %s: patch seq %d applied successfully", sandboxID, patch.Sequence)
 	}
+
+	// All patches applied — clear any stale error
+	_ = s.store.SetSandboxPatchError(ctx, sandboxID, nil)
 }
 
 // listCheckpointPatches returns all patches for a checkpoint.
