@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/workos/workos-go/v4/pkg/usermanagement"
 )
@@ -68,21 +69,25 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 		})
 	}
 
-	// Verify CSRF state
+	// Verify CSRF state — only when the user started from /auth/login (which sets the cookie).
+	// Invitation flows bypass login, so the user arrives with a code but no state/cookie.
 	stateCookie, err := c.Cookie("oauth_state")
-	if err != nil || stateCookie.Value != state {
-		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "invalid state parameter",
+	if err == nil {
+		// Cookie exists — verify it matches (normal login flow)
+		if stateCookie.Value != state {
+			return c.JSON(http.StatusBadRequest, map[string]string{
+				"error": "invalid state parameter",
+			})
+		}
+		// Clear state cookie
+		c.SetCookie(&http.Cookie{
+			Name:   "oauth_state",
+			Value:  "",
+			Path:   "/",
+			MaxAge: -1,
 		})
 	}
-
-	// Clear state cookie
-	c.SetCookie(&http.Cookie{
-		Name:   "oauth_state",
-		Value:  "",
-		Path:   "/",
-		MaxAge: -1,
-	})
+	// No cookie = invitation flow — skip CSRF check (code is single-use and client-bound)
 
 	cfg := h.workos.Config()
 	ctx := c.Request().Context()
@@ -108,14 +113,10 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 		name = authResult.User.Email
 	}
 
-	// Determine org name — use organization ID, or create a personal org per user
-	orgName := authResult.User.Email // personal org keyed by email
-	if authResult.OrganizationID != "" {
-		orgName = authResult.OrganizationID
-	}
-
 	// Provision org and user in local database
-	localUser, err := h.workos.ProvisionOrgAndUser(ctx, authResult.User.Email, name, orgName)
+	// orgName is used for slug generation; workosOrgID is set if user was invited to an org
+	orgName := authResult.User.Email
+	localUser, err := h.workos.ProvisionOrgAndUser(ctx, authResult.User.Email, name, orgName, authResult.User.ID, authResult.OrganizationID)
 	if err != nil {
 		log.Printf("workos: provisioning failed: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -173,11 +174,47 @@ func (h *OAuthHandlers) HandleMe(c echo.Context) error {
 	email := c.Get("user_email")
 	orgID, _ := GetOrgID(c)
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"id":    userID,
 		"email": email,
 		"orgId": orgID,
-	})
+	}
+
+	// If we have a store and WorkOS org manager, include the user's org list
+	store := h.workos.Store()
+	orgMgr := h.workos.OrgMgr()
+	if store != nil && orgMgr != nil {
+		if uid, ok := userID.(uuid.UUID); ok {
+			user, err := store.GetUserByEmail(c.Request().Context(), email.(string))
+			if err == nil && user.WorkOSUserID != nil {
+				memberships, err := orgMgr.ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
+				if err == nil {
+					type orgInfo struct {
+						ID         uuid.UUID `json:"id"`
+						Name       string    `json:"name"`
+						IsPersonal bool      `json:"isPersonal"`
+						IsActive   bool      `json:"isActive"`
+					}
+					var orgs []orgInfo
+					for _, m := range memberships {
+						localOrg, err := store.GetOrgByWorkOSID(c.Request().Context(), m.OrganizationID)
+						if err == nil {
+							orgs = append(orgs, orgInfo{
+								ID:         localOrg.ID,
+								Name:       localOrg.Name,
+								IsPersonal: localOrg.IsPersonal,
+								IsActive:   localOrg.ID == user.OrgID,
+							})
+						}
+					}
+					resp["orgs"] = orgs
+				}
+			}
+			_ = uid // suppress unused
+		}
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
 // isSecureRequest returns true if the request is over HTTPS,

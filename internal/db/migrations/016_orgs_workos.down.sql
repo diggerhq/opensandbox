@@ -1,0 +1,5 @@
+ALTER TABLE users DROP COLUMN IF EXISTS workos_user_id;
+ALTER TABLE orgs DROP COLUMN IF EXISTS credit_balance_cents;
+ALTER TABLE orgs DROP COLUMN IF EXISTS owner_user_id;
+ALTER TABLE orgs DROP COLUMN IF EXISTS is_personal;
+ALTER TABLE orgs DROP COLUMN IF EXISTS workos_org_id;
