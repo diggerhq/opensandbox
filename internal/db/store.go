@@ -87,6 +87,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{13, "migrations/013_checkpoint_patches.up.sql"},
 		{14, "migrations/014_image_cache.up.sql"},
 		{15, "migrations/015_projects.up.sql"},
+		{16, "migrations/016_orgs_workos.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -138,12 +139,19 @@ type Org struct {
 	VerificationTxtValue       *string `json:"verificationTxtValue,omitempty"`
 	SSLTxtName                 *string `json:"sslTxtName,omitempty"`
 	SSLTxtValue                *string `json:"sslTxtValue,omitempty"`
+
+	// WorkOS organization fields
+	WorkOSOrgID        *string    `json:"workosOrgId,omitempty"`
+	IsPersonal         bool       `json:"isPersonal"`
+	OwnerUserID        *uuid.UUID `json:"ownerUserId,omitempty"`
+	CreditBalanceCents int        `json:"creditBalanceCents"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
 const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, created_at, updated_at,
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
-	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value`
+	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
+	workos_org_id, is_personal, owner_user_id, credit_balance_cents`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -153,6 +161,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.MaxSandboxTimeoutSec, &org.CreatedAt, &org.UpdatedAt,
 		&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
+		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
 	)
 	return org, err
 }
@@ -264,21 +273,41 @@ func (s *Store) UpdateOrgDomainStatus(ctx context.Context, orgID uuid.UUID, veri
 // --- User operations ---
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	OrgID     uuid.UUID `json:"orgId"`
-	Email     string    `json:"email"`
-	Name      string    `json:"name"`
-	Role      string    `json:"role"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID           uuid.UUID `json:"id"`
+	OrgID        uuid.UUID `json:"orgId"`
+	Email        string    `json:"email"`
+	Name         string    `json:"name"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"createdAt"`
+	WorkOSUserID *string   `json:"workosUserId,omitempty"`
+}
+
+const userColumns = `id, org_id, email, name, role, created_at, workos_user_id`
+
+func scanUser(row pgx.Row) (*User, error) {
+	user := &User{}
+	err := row.Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt, &user.WorkOSUserID)
+	return user, err
 }
 
 func (s *Store) CreateUser(ctx context.Context, orgID uuid.UUID, email, name, role string) (*User, error) {
-	user := &User{}
-	err := s.pool.QueryRow(ctx,
+	user, err := scanUser(s.pool.QueryRow(ctx,
 		`INSERT INTO users (org_id, email, name, role) VALUES ($1, $2, $3, $4)
-		 RETURNING id, org_id, email, name, role, created_at`,
+		 RETURNING `+userColumns,
 		orgID, email, name, role,
-	).Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt)
+	))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user: %w", err)
+	}
+	return user, nil
+}
+
+func (s *Store) CreateUserWithWorkOS(ctx context.Context, orgID uuid.UUID, email, name, role, workosUserID string) (*User, error) {
+	user, err := scanUser(s.pool.QueryRow(ctx,
+		`INSERT INTO users (org_id, email, name, role, workos_user_id) VALUES ($1, $2, $3, $4, $5)
+		 RETURNING `+userColumns,
+		orgID, email, name, role, workosUserID,
+	))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
@@ -286,10 +315,9 @@ func (s *Store) CreateUser(ctx context.Context, orgID uuid.UUID, email, name, ro
 }
 
 func (s *Store) GetUserByEmail(ctx context.Context, email string) (*User, error) {
-	user := &User{}
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, org_id, email, name, role, created_at FROM users WHERE email = $1`, email,
-	).Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt)
+	user, err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE email = $1`, email,
+	))
 	if err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
@@ -607,12 +635,12 @@ func (s *Store) StoreAccessToken(ctx context.Context, userID uuid.UUID, accessTo
 func (s *Store) GetUserByAccessToken(ctx context.Context, accessToken string) (*User, error) {
 	user := &User{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT u.id, u.org_id, u.email, u.name, u.role, u.created_at
+		`SELECT u.id, u.org_id, u.email, u.name, u.role, u.created_at, u.workos_user_id
 		 FROM users u
 		 INNER JOIN user_sessions s ON s.user_id = u.id
 		 WHERE s.access_token = $1 AND s.expires_at > now()`,
 		accessToken,
-	).Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt)
+	).Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt, &user.WorkOSUserID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found or expired: %w", err)
 	}
@@ -623,6 +651,129 @@ func (s *Store) GetUserByAccessToken(ctx context.Context, accessToken string) (*
 func (s *Store) DeleteAccessTokensForUser(ctx context.Context, userID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM user_sessions WHERE user_id = $1`, userID)
 	return err
+}
+
+// --- WorkOS Org integration operations ---
+
+// CreateOrgWithWorkOS creates an org with WorkOS organization fields.
+func (s *Store) CreateOrgWithWorkOS(ctx context.Context, name, slug, workosOrgID string, isPersonal bool, ownerUserID *uuid.UUID) (*Org, error) {
+	org, err := scanOrg(s.pool.QueryRow(ctx,
+		`INSERT INTO orgs (name, slug, workos_org_id, is_personal, owner_user_id)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING `+orgColumns,
+		name, slug, workosOrgID, isPersonal, ownerUserID,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create org: %w", err)
+	}
+	return org, nil
+}
+
+// GetOrgByWorkOSID looks up a local org by its WorkOS organization ID.
+func (s *Store) GetOrgByWorkOSID(ctx context.Context, workosOrgID string) (*Org, error) {
+	org, err := scanOrg(s.pool.QueryRow(ctx,
+		`SELECT `+orgColumns+` FROM orgs WHERE workos_org_id = $1`, workosOrgID,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("org not found by workos_org_id: %w", err)
+	}
+	return org, nil
+}
+
+// SetActiveOrg updates the user's active org (users.org_id).
+func (s *Store) SetActiveOrg(ctx context.Context, userID, orgID uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET org_id = $1 WHERE id = $2`, orgID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to set active org: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// SetOrgOwner sets the owner_user_id on an org.
+func (s *Store) SetOrgOwner(ctx context.Context, orgID, userID uuid.UUID) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET owner_user_id = $1, updated_at = now() WHERE id = $2`,
+		userID, orgID)
+	return err
+}
+
+// UpdateOrgWorkOSID sets the WorkOS org ID on an existing org (used for backfill).
+func (s *Store) UpdateOrgWorkOSID(ctx context.Context, orgID uuid.UUID, workosOrgID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET workos_org_id = $1, updated_at = now() WHERE id = $2`,
+		workosOrgID, orgID)
+	return err
+}
+
+// UpdateUserWorkOSID sets the WorkOS user ID on an existing user (used for backfill).
+func (s *Store) UpdateUserWorkOSID(ctx context.Context, userID uuid.UUID, workosUserID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET workos_user_id = $1 WHERE id = $2`,
+		workosUserID, userID)
+	return err
+}
+
+// ListOrgsWithoutWorkOS returns orgs that have no WorkOS org ID (for backfill).
+func (s *Store) ListOrgsWithoutWorkOS(ctx context.Context) ([]*Org, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+orgColumns+` FROM orgs WHERE workos_org_id IS NULL ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orgs []*Org
+	for rows.Next() {
+		org := &Org{}
+		err := rows.Scan(
+			&org.ID, &org.Name, &org.Slug, &org.Plan, &org.MaxConcurrentSandboxes,
+			&org.MaxSandboxTimeoutSec, &org.CreatedAt, &org.UpdatedAt,
+			&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
+			&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
+			&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
+		)
+		if err != nil {
+			return nil, err
+		}
+		orgs = append(orgs, org)
+	}
+	return orgs, nil
+}
+
+// GetUserByWorkOSID looks up a user by their WorkOS user ID.
+func (s *Store) GetUserByWorkOSID(ctx context.Context, workosUserID string) (*User, error) {
+	user, err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE workos_user_id = $1`, workosUserID,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("user not found by workos_user_id: %w", err)
+	}
+	return user, nil
+}
+
+// ListUsersByOrgID returns all users in an org.
+func (s *Store) ListUsersByOrgID(ctx context.Context, orgID uuid.UUID) ([]*User, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+userColumns+` FROM users WHERE org_id = $1 ORDER BY created_at`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		user := &User{}
+		err := rows.Scan(&user.ID, &user.OrgID, &user.Email, &user.Name, &user.Role, &user.CreatedAt, &user.WorkOSUserID)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+	return users, nil
 }
 
 // Pool returns the underlying pgx pool for advanced use cases.

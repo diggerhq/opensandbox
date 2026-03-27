@@ -1,22 +1,27 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { getMe } from '../api/client'
+import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
+import { getMe, switchOrg as switchOrgApi, type OrgInfo } from '../api/client'
 
 interface AuthUser {
   id: string
   email: string
   orgId: string
+  orgs?: OrgInfo[]
 }
 
 interface AuthContextValue {
   user: AuthUser | null
   loading: boolean
   error: string | null
+  switchOrg: (orgId: string) => Promise<void>
+  refreshUser: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
   error: null,
+  switchOrg: async () => {},
+  refreshUser: async () => {},
 })
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -24,19 +29,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => {
-    getMe()
-      .then(setUser)
-      .catch((err: Error) => {
-        if (!err.message.includes('Unauthorized')) {
-          setError(err.message)
-        }
-      })
-      .finally(() => setLoading(false))
+  const refreshUser = useCallback(async () => {
+    try {
+      const me = await getMe()
+      setUser(me)
+    } catch (err: unknown) {
+      if (err instanceof Error && !err.message.includes('Unauthorized')) {
+        setError(err.message)
+      }
+    }
   }, [])
 
+  useEffect(() => {
+    refreshUser().finally(() => setLoading(false))
+  }, [refreshUser])
+
+  const switchOrg = useCallback(async (orgId: string) => {
+    await switchOrgApi(orgId)
+    await refreshUser()
+  }, [refreshUser])
+
   return (
-    <AuthContext.Provider value={{ user, loading, error }}>
+    <AuthContext.Provider value={{ user, loading, error, switchOrg, refreshUser }}>
       {children}
     </AuthContext.Provider>
   )

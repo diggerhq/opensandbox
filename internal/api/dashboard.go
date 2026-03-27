@@ -29,11 +29,44 @@ func (s *Server) dashboardMe(c echo.Context) error {
 	email := c.Get("user_email")
 	orgID, _ := auth.GetOrgID(c)
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"id":    userID,
 		"email": email,
 		"orgId": orgID,
-	})
+	}
+
+	// Include the user's org list if WorkOS is configured
+	if s.store != nil && s.workos != nil && s.workos.OrgMgr() != nil {
+		if emailStr, ok := email.(string); ok {
+			user, err := s.store.GetUserByEmail(c.Request().Context(), emailStr)
+			if err == nil && user.WorkOSUserID != nil {
+				memberships, err := s.workos.OrgMgr().ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
+				if err == nil {
+					type orgInfo struct {
+						ID         uuid.UUID `json:"id"`
+						Name       string    `json:"name"`
+						IsPersonal bool      `json:"isPersonal"`
+						IsActive   bool      `json:"isActive"`
+					}
+					var orgs []orgInfo
+					for _, m := range memberships {
+						localOrg, err := s.store.GetOrgByWorkOSID(c.Request().Context(), m.OrganizationID)
+						if err == nil {
+							orgs = append(orgs, orgInfo{
+								ID:         localOrg.ID,
+								Name:       localOrg.Name,
+								IsPersonal: localOrg.IsPersonal,
+								IsActive:   localOrg.ID == user.OrgID,
+							})
+						}
+					}
+					resp["orgs"] = orgs
+				}
+			}
+		}
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
 // dashboardSessions returns session history for the authenticated org.
@@ -218,6 +251,18 @@ func (s *Server) dashboardUpdateOrg(c echo.Context) error {
 		})
 	}
 
+	// Only the org owner can rename
+	userID, _ := c.Get("user_id").(uuid.UUID)
+	currentOrg, err := s.store.GetOrg(c.Request().Context(), orgID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "org not found"})
+	}
+	if currentOrg.OwnerUserID == nil || *currentOrg.OwnerUserID != userID {
+		return c.JSON(http.StatusForbidden, map[string]string{
+			"error": "only the org owner can rename this organization",
+		})
+	}
+
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -232,6 +277,13 @@ func (s *Server) dashboardUpdateOrg(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": err.Error(),
 		})
+	}
+
+	// Sync name to WorkOS if linked
+	if org.WorkOSOrgID != nil && s.workos != nil && s.workos.OrgMgr() != nil {
+		if err := s.workos.OrgMgr().UpdateOrganization(c.Request().Context(), *org.WorkOSOrgID, req.Name); err != nil {
+			log.Printf("workos: failed to sync org name: %v", err)
+		}
 	}
 
 	return c.JSON(http.StatusOK, org)
