@@ -1364,9 +1364,16 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 	}
 
 	// Dispatch restore in background — return immediately.
-	// Commands will block until restore completes.
+	// Commands will block until restore completes (via pendingCreates + waitForReady).
 	pending := &pendingCreate{ready: make(chan struct{})}
 	s.pendingCreates.Store(sandboxID, pending)
+
+	// Invalidate the proxy route cache so subsequent requests go through
+	// the full ProxyHandler path and hit waitForReady. Without this, cached
+	// routes bypass the readiness check and hit the mid-restore VM.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
 
 	if s.workerRegistry != nil {
 		grpcClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)

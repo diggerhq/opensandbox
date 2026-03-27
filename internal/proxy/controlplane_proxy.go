@@ -26,6 +26,7 @@ type ControlPlaneProxy struct {
 	baseDomain string
 	store      *db.Store
 	registry   *controlplane.RedisWorkerRegistry
+	transport  *http.Transport
 }
 
 // NewControlPlaneProxy creates a proxy for control plane subdomain routing.
@@ -34,6 +35,17 @@ func NewControlPlaneProxy(baseDomain string, store *db.Store, registry *controlp
 		baseDomain: baseDomain,
 		store:      store,
 		registry:   registry,
+		transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ResponseHeaderTimeout: 30 * time.Second,
+			MaxIdleConns:          200,
+			MaxIdleConnsPerHost:   50,
+			MaxConnsPerHost:       100,
+			IdleConnTimeout:       120 * time.Second,
+		},
 	}
 }
 
@@ -213,13 +225,7 @@ func (p *ControlPlaneProxy) doHTTP(c echo.Context, sandboxID, workerURL string, 
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout: 5 * time.Second,
-		}).DialContext,
-		ResponseHeaderTimeout: 30 * time.Second,
-		MaxIdleConnsPerHost:   10,
-	}
+	proxy.Transport = p.transport
 
 	var proxyErr error
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
