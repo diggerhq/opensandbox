@@ -283,7 +283,7 @@ export interface BillingTierUsage {
 export interface BillingState {
   plan: string
   stripeCreditCents: number
-  monthlySpendCapCents: number | null
+  maxConcurrentSandboxes: number
   hasPaymentMethod: boolean
   currentUsage: {
     tiers: BillingTierUsage[]
@@ -309,11 +309,11 @@ export const getBilling = () => apiFetch<BillingState>('/billing')
 export const billingSetup = () =>
   apiFetch<{ url: string }>('/billing/setup', { method: 'POST' })
 
-export const updateBillingSettings = (settings: { monthlySpendCapCents: number | null }) =>
-  apiFetch<{ status: string }>('/billing/settings', {
-    method: 'PUT',
-    body: JSON.stringify(settings),
-  })
-
 export const getBillingInvoices = (limit = 10) =>
   apiFetch<{ invoices: StripeInvoice[] }>(`/billing/invoices?limit=${limit}`)
+
+export const redeemPromoCode = (code: string) =>
+  apiFetch<{ creditAppliedCents: number }>('/billing/redeem', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })

@@ -330,8 +330,8 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Billing
 		dash.POST("/billing/setup", s.billingSetup)
 		dash.GET("/billing", s.billingGet)
-		dash.PUT("/billing/settings", s.billingUpdateSettings)
 		dash.GET("/billing/invoices", s.billingInvoices)
+		dash.POST("/billing/redeem", s.billingRedeem)
 
 		// Admin endpoints
 		dash.POST("/admin/backfill-workos-orgs", s.dashboardBackfillWorkOSOrgs)

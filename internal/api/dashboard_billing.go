@@ -103,10 +103,10 @@ func (s *Server) billingGet(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"plan":                org.Plan,
-		"stripeCreditCents":   stripeCreditCents,
-		"monthlySpendCapCents": org.MonthlySpendCapCents,
-		"hasPaymentMethod":    org.StripeCustomerID != nil,
+		"plan":                    org.Plan,
+		"stripeCreditCents":       stripeCreditCents,
+		"maxConcurrentSandboxes":  org.MaxConcurrentSandboxes,
+		"hasPaymentMethod":        org.StripeCustomerID != nil,
 		"currentUsage": map[string]interface{}{
 			"tiers":          tiers,
 			"totalCostCents": totalCost,
@@ -114,25 +114,41 @@ func (s *Server) billingGet(c echo.Context) error {
 	})
 }
 
-// billingUpdateSettings updates the monthly spend cap.
-func (s *Server) billingUpdateSettings(c echo.Context) error {
-	if s.store == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "not configured"})
+// billingRedeem redeems a promotion code and applies the credit to the org's Stripe balance.
+func (s *Server) billingRedeem(c echo.Context) error {
+	if s.store == nil || s.stripeClient == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "billing not configured"})
 	}
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
 	}
 	var req struct {
-		MonthlySpendCapCents *int `json:"monthlySpendCapCents"`
+		Code string `json:"code"`
 	}
-	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	if err := c.Bind(&req); err != nil || req.Code == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "code is required"})
 	}
-	if err := s.store.SetMonthlySpendCap(c.Request().Context(), orgID, req.MonthlySpendCapCents); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update"})
+
+	ctx := c.Request().Context()
+	org, err := s.store.GetOrg(ctx, orgID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "org not found"})
 	}
-	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+	if org.StripeCustomerID == nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "billing not set up — upgrade to Pro first"})
+	}
+
+	amountCents, err := s.stripeClient.RedeemPromotionCode(*org.StripeCustomerID, req.Code)
+	if err != nil {
+		log.Printf("billing: redeem failed for org %s: %v", orgID, err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	log.Printf("billing: org %s redeemed promo code %q for $%.2f", orgID, req.Code, float64(amountCents)/100)
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"creditAppliedCents": amountCents,
+	})
 }
 
 // billingInvoices returns past Stripe invoices.

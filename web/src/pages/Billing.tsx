@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  getBilling, billingSetup, updateBillingSettings, getBillingInvoices,
+  getBilling, billingSetup, getBillingInvoices, redeemPromoCode,
   type BillingTierUsage, type StripeInvoice,
 } from '../api/client'
 
@@ -18,22 +18,21 @@ export default function Billing() {
   const { data: billing, isLoading } = useQuery({ queryKey: ['billing'], queryFn: getBilling })
   const { data: invoiceData } = useQuery({ queryKey: ['invoices'], queryFn: () => getBillingInvoices() })
 
-  const [spendCap, setSpendCap] = useState('')
-  const [settingsSaved, setSettingsSaved] = useState(false)
+  const [promoCode, setPromoCode] = useState('')
+  const [redeemSuccess, setRedeemSuccess] = useState('')
 
   const setupMutation = useMutation({
     mutationFn: billingSetup,
     onSuccess: (data) => { window.location.href = data.url },
   })
 
-  const settingsMutation = useMutation({
-    mutationFn: () => updateBillingSettings({
-      monthlySpendCapCents: spendCap ? Math.round(parseFloat(spendCap) * 100) : null,
-    }),
-    onSuccess: () => {
+  const redeemMutation = useMutation({
+    mutationFn: () => redeemPromoCode(promoCode),
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['billing'] })
-      setSettingsSaved(true)
-      setTimeout(() => setSettingsSaved(false), 2000)
+      setPromoCode('')
+      setRedeemSuccess(`$${(data.creditAppliedCents / 100).toFixed(2)} credit applied!`)
+      setTimeout(() => setRedeemSuccess(''), 4000)
     },
   })
 
@@ -67,11 +66,11 @@ export default function Billing() {
                 }}>
                   {isPro ? 'Pro' : 'Free'}
                 </span>
-                {!isPro && (
-                  <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                    1 sandbox, 4GB / 1 vCPU
-                  </span>
-                )}
+                <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  {isPro
+                    ? `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, all tiers`
+                    : `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, 4GB / 1 vCPU`}
+                </span>
               </div>
 
               {isPro && billing?.stripeCreditCents != null && billing.stripeCreditCents > 0 && (
@@ -82,6 +81,9 @@ export default function Billing() {
 
               {!isPro && (
                 <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
+                    Unlock larger machine sizes and get $30 free credit
+                  </div>
                   <button
                     onClick={() => setupMutation.mutate()}
                     disabled={setupMutation.isPending}
@@ -93,7 +95,7 @@ export default function Billing() {
                       opacity: setupMutation.isPending ? 0.6 : 1,
                     }}
                   >
-                    {setupMutation.isPending ? 'Redirecting...' : 'Upgrade to Pro — $30 free credit'}
+                    {setupMutation.isPending ? 'Redirecting...' : 'Upgrade to Pro'}
                   </button>
                   {setupMutation.isError && (
                     <p style={{ fontSize: 12, color: 'var(--accent-rose)', marginTop: 8 }}>
@@ -112,6 +114,14 @@ export default function Billing() {
                   Payment method on file — billed monthly via Stripe
                 </div>
               )}
+
+              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 12 }}>
+                Need more concurrency?{' '}
+                <a href="https://cal.com/team/digger/opencomputer-founder-chat" target="_blank" rel="noreferrer"
+                  style={{ color: 'var(--accent-indigo)', textDecoration: 'none' }}>
+                  Talk to us
+                </a>
+              </div>
             </div>
 
             {/* Current Usage */}
@@ -178,56 +188,64 @@ export default function Billing() {
                 <tr><th>Memory</th><th>vCPUs</th><th>Per Second</th></tr>
               </thead>
               <tbody>
-                {PRICING_TIERS.map(t => (
-                  <tr key={t.memory}>
-                    <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{t.memory}</td>
-                    <td>{t.vcpus}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--accent-cyan)' }}>
-                      ${t.perSec.toFixed(11)}
-                    </td>
-                  </tr>
-                ))}
+                {PRICING_TIERS.map((t, i) => {
+                  const locked = !isPro && i > 0
+                  return (
+                    <tr key={t.memory} style={{ opacity: locked ? 0.35 : 1 }}>
+                      <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                        {t.memory}{locked && ' — Pro'}
+                      </td>
+                      <td>{t.vcpus}</td>
+                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: locked ? 'var(--text-tertiary)' : 'var(--accent-cyan)' }}>
+                        ${t.perSec.toFixed(11)}
+                      </td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
 
-          {/* Monthly Spend Cap (pro only) */}
+          {/* Redeem Promotion Code (pro only) */}
           {isPro && (
             <div className="glass-card animate-in stagger-4" style={{ padding: '22px 24px', marginBottom: 14 }}>
-              <span className="section-title" style={{ marginBottom: 16, display: 'block' }}>Spending Cap</span>
+              <span className="section-title" style={{ marginBottom: 12, display: 'block' }}>Promotion Code</span>
               <div style={{ display: 'flex', alignItems: 'end', gap: 14 }}>
                 <div>
                   <label style={{ fontSize: 11, color: 'var(--text-tertiary)', display: 'block', marginBottom: 6 }}>
-                    Max monthly spend (optional)
+                    Enter a promotion code to apply credit
                   </label>
-                  <div style={{ position: 'relative' }}>
-                    <span style={{
-                      position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
-                      color: 'var(--text-tertiary)', fontSize: 13,
-                    }}>$</span>
-                    <input
-                      className="input"
-                      type="number" min="0" placeholder="No limit"
-                      value={spendCap}
-                      onChange={e => setSpendCap(e.target.value)}
-                      style={{ width: 200, paddingLeft: 22, boxSizing: 'border-box', fontFamily: 'var(--font-mono)', fontSize: 13 }}
-                    />
-                  </div>
+                  <input
+                    className="input"
+                    type="text"
+                    placeholder="e.g. WELCOME100"
+                    value={promoCode}
+                    onChange={e => setPromoCode(e.target.value.toUpperCase())}
+                    style={{ width: 240, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+                  />
                 </div>
                 <button
-                  onClick={() => settingsMutation.mutate()}
-                  disabled={settingsMutation.isPending}
+                  onClick={() => redeemMutation.mutate()}
+                  disabled={redeemMutation.isPending || !promoCode.trim()}
                   style={{
                     padding: '8px 20px', fontSize: 13, fontWeight: 600,
                     fontFamily: 'var(--font-body)', cursor: 'pointer',
                     border: 'none', borderRadius: 'var(--radius-sm)',
                     background: 'var(--accent-indigo)', color: '#fff',
+                    opacity: redeemMutation.isPending || !promoCode.trim() ? 0.5 : 1,
                   }}
                 >
-                  Save
+                  {redeemMutation.isPending ? 'Applying...' : 'Redeem'}
                 </button>
-                {settingsSaved && <span style={{ fontSize: 12, color: 'var(--accent-emerald)' }}>Saved</span>}
               </div>
+              {redeemSuccess && (
+                <p style={{ fontSize: 13, color: 'var(--accent-emerald)', marginTop: 10 }}>{redeemSuccess}</p>
+              )}
+              {redeemMutation.isError && (
+                <p style={{ fontSize: 12, color: 'var(--accent-rose)', marginTop: 10 }}>
+                  {(redeemMutation.error as Error).message}
+                </p>
+              )}
             </div>
           )}
 

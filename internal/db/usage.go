@@ -152,14 +152,6 @@ func (s *Store) UpdateOrgPlan(ctx context.Context, orgID uuid.UUID, plan string)
 	return err
 }
 
-// SetMonthlySpendCap updates the monthly spend cap for an org.
-func (s *Store) SetMonthlySpendCap(ctx context.Context, orgID uuid.UUID, capCents *int) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE orgs SET monthly_spend_cap_cents = $2, updated_at = now() WHERE id = $1`,
-		orgID, capCents)
-	return err
-}
-
 // UpdateLastUsageReportedAt updates the usage reporting watermark.
 func (s *Store) UpdateLastUsageReportedAt(ctx context.Context, orgID uuid.UUID, t time.Time) error {
 	_, err := s.pool.Exec(ctx,
@@ -168,13 +160,15 @@ func (s *Store) UpdateLastUsageReportedAt(ctx context.Context, orgID uuid.UUID, 
 	return err
 }
 
-// ListBillableOrgIDs returns org IDs with plan="pro" and at least one open scale event.
+// ListBillableOrgIDs returns org IDs with plan="pro" that have unreported usage:
+// either a currently-running sandbox or a scale event that ended after the last report.
 func (s *Store) ListBillableOrgIDs(ctx context.Context) ([]uuid.UUID, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT se.org_id
 		 FROM sandbox_scale_events se
 		 JOIN orgs o ON o.id = se.org_id
-		 WHERE se.ended_at IS NULL AND o.plan = 'pro'`)
+		 WHERE o.plan = 'pro'
+		   AND (se.ended_at IS NULL OR se.ended_at > o.last_usage_reported_at)`)
 	if err != nil {
 		return nil, err
 	}

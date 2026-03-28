@@ -100,6 +100,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{18, "migrations/015_secret_allowed_hosts.up.sql"},
 		{19, "migrations/017_stripe_billing.up.sql"},
 		{20, "migrations/017_patch_error_tracking.up.sql"},
+		{21, "migrations/018_drop_spend_cap.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -161,7 +162,6 @@ type Org struct {
 	// Stripe billing fields
 	StripeCustomerID     *string    `json:"stripeCustomerId,omitempty"`
 	StripeSubscriptionID *string    `json:"stripeSubscriptionId,omitempty"`
-	MonthlySpendCapCents *int       `json:"monthlySpendCapCents,omitempty"`
 	LastUsageReportedAt  time.Time  `json:"lastUsageReportedAt"`
 }
 
@@ -170,7 +170,7 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
-	stripe_customer_id, stripe_subscription_id, monthly_spend_cap_cents, last_usage_reported_at`
+	stripe_customer_id, stripe_subscription_id, last_usage_reported_at`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -181,7 +181,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
-		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.MonthlySpendCapCents, &org.LastUsageReportedAt,
+		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
 	)
 	return org, err
 }
