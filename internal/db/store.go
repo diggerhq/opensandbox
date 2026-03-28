@@ -99,6 +99,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{17, "migrations/015_sandbox_usage.up.sql"},
 		{18, "migrations/015_secret_allowed_hosts.up.sql"},
 		{19, "migrations/017_stripe_billing.up.sql"},
+		{20, "migrations/018_drop_spend_cap.up.sql"},
 	}
 
 	for _, m := range migrations {

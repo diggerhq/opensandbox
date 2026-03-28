@@ -322,23 +322,29 @@ func (s *StripeClient) RedeemPromotionCode(customerID, code string) (int64, erro
 	}
 	amountCents := promo.Coupon.AmountOff
 
-	// Add credit to customer balance (negative = credit in Stripe)
-	_, err := customerbalancetransaction.New(&stripe.CustomerBalanceTransactionParams{
+	// Deactivate first to prevent concurrent redemptions
+	_, err := promotioncode.Update(promo.ID, &stripe.PromotionCodeParams{
+		Active: stripe.Bool(false),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to redeem promotion code: %w", err)
+	}
+
+	// Apply credit to customer balance (negative = credit in Stripe)
+	_, err = customerbalancetransaction.New(&stripe.CustomerBalanceTransactionParams{
 		Customer:    stripe.String(customerID),
 		Amount:      stripe.Int64(-amountCents),
 		Currency:    stripe.String("usd"),
 		Description: stripe.String(fmt.Sprintf("Promotion code: %s", code)),
 	})
 	if err != nil {
+		// Re-activate the code since credit application failed
+		if _, reErr := promotioncode.Update(promo.ID, &stripe.PromotionCodeParams{
+			Active: stripe.Bool(true),
+		}); reErr != nil {
+			log.Printf("billing: CRITICAL: promo code %s deactivated but credit failed — manual fix needed: %v", promo.ID, reErr)
+		}
 		return 0, fmt.Errorf("apply credit: %w", err)
-	}
-
-	// Deactivate the promotion code so it can't be reused
-	_, err = promotioncode.Update(promo.ID, &stripe.PromotionCodeParams{
-		Active: stripe.Bool(false),
-	})
-	if err != nil {
-		log.Printf("billing: warning: failed to deactivate promo code %s: %v", promo.ID, err)
 	}
 
 	return amountCents, nil
