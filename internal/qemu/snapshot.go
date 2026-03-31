@@ -33,6 +33,7 @@ type SnapshotMeta struct {
 	BaseMemoryMB  int            `json:"baseMemoryMB,omitempty"`
 	Template      string         `json:"template"`
 	GuestPort     int            `json:"guestPort"`
+	GoldenVersion string         `json:"goldenVersion,omitempty"`
 	SnapshotedAt  time.Time      `json:"snapshotedAt,omitempty"`
 }
 
@@ -128,6 +129,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		BaseMemoryMB:  vm.baseMemoryMB,
 		Template:      vm.Template,
 		GuestPort:     vm.GuestPort,
+		GoldenVersion: vm.goldenVersion,
 		SnapshotedAt:  time.Now(),
 	}
 	metaJSON, err := json.Marshal(meta)
@@ -190,7 +192,17 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 			return nil, fmt.Errorf("copy %s for archive staging: %w", driveFile, err)
 		}
 	}
-	log.Printf("qemu: hibernate %s: archive staging ready (reflink copies)", sandboxID)
+	// Flatten staged rootfs for S3 portability — the qcow2 overlay references a
+	// local backing file (base ext4 image) that won't exist on other workers.
+	// `qemu-img rebase -b ""` merges backing file data into the overlay, making it
+	// self-contained while preserving internal savevm snapshots (unlike qemu-img convert).
+	stagedRootfs := filepath.Join(archiveDir, rootfsFile)
+	rebaseCmd := exec.Command("qemu-img", "rebase", "-b", "", stagedRootfs)
+	if out, err := rebaseCmd.CombinedOutput(); err != nil {
+		log.Printf("qemu: hibernate %s: rootfs rebase failed (archive may not be portable): %v (%s)",
+			sandboxID, err, strings.TrimSpace(string(out)))
+	}
+	log.Printf("qemu: hibernate %s: archive staging ready", sandboxID)
 
 	// Signal channel so destroyVM can wait for archive completion before deleting files.
 	archiveDone := make(chan struct{})

@@ -21,6 +21,8 @@ type redisHeartbeatPayload struct {
 	Current   int     `json:"current"`
 	CPUPct    float64 `json:"cpu_pct"`
 	MemPct    float64 `json:"mem_pct"`
+	DiskPct       float64 `json:"disk_pct"`
+	GoldenVersion string  `json:"golden_version,omitempty"`
 }
 
 // RedisHeartbeat publishes periodic heartbeats to Redis for worker discovery.
@@ -34,8 +36,9 @@ type RedisHeartbeat struct {
 	region    string
 	grpcAddr  string
 	httpAddr  string
-	getStats  func() (capacity, current int, cpuPct, memPct float64)
-	stop      chan struct{}
+	getStats      func() (capacity, current int, cpuPct, memPct, diskPct float64)
+	goldenVersion string
+	stop          chan struct{}
 }
 
 // NewRedisHeartbeat creates a new heartbeat publisher.
@@ -69,8 +72,13 @@ func (h *RedisHeartbeat) SetMachineID(id string) {
 	h.machineID = id
 }
 
+// SetGoldenVersion sets the golden snapshot version hash for the heartbeat.
+func (h *RedisHeartbeat) SetGoldenVersion(v string) {
+	h.goldenVersion = v
+}
+
 // Start begins publishing heartbeats every 10 seconds.
-func (h *RedisHeartbeat) Start(getStats func() (int, int, float64, float64)) {
+func (h *RedisHeartbeat) Start(getStats func() (int, int, float64, float64, float64)) {
 	h.getStats = getStats
 
 	go func() {
@@ -92,7 +100,7 @@ func (h *RedisHeartbeat) Start(getStats func() (int, int, float64, float64)) {
 }
 
 func (h *RedisHeartbeat) publish() {
-	capacity, current, cpuPct, memPct := h.getStats()
+	capacity, current, cpuPct, memPct, diskPct := h.getStats()
 
 	payload := redisHeartbeatPayload{
 		WorkerID:  h.workerID,
@@ -104,6 +112,8 @@ func (h *RedisHeartbeat) publish() {
 		Current:   current,
 		CPUPct:    cpuPct,
 		MemPct:    memPct,
+		DiskPct:       diskPct,
+		GoldenVersion: h.goldenVersion,
 	}
 
 	data, err := json.Marshal(payload)

@@ -31,16 +31,23 @@ import (
 // LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
 type LiveMigrator interface {
 	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
-	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore) (incomingAddr string, hostPort int, err error)
-	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey string, err error)
+	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool) (incomingAddr string, hostPort int, err error)
+	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore, flatten bool) (rootfsKey, workspaceKey, goldenVersion string, err error)
 	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
 	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
+}
+
+// GoldenRebuilder is implemented by VM managers that support golden snapshot rebuild.
+type GoldenRebuilder interface {
+	RebuildGoldenSnapshot() (oldVersion, newVersion string, err error)
+	GoldenVersion() string
 }
 
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
-	migrator           LiveMigrator // optional, set if manager supports live migration
+	migrator           LiveMigrator      // optional, set if manager supports live migration
+	goldenRebuilder    GoldenRebuilder   // optional, set if manager supports golden rebuild
 	router             *sandbox.SandboxRouter
 	ptyManager         *sandbox.PTYManager
 	execSessionManager *sandbox.ExecSessionManager
@@ -841,17 +848,23 @@ func (s *GRPCServer) SetMigrator(m LiveMigrator) {
 	s.migrator = m
 }
 
+// SetGoldenRebuilder sets the golden snapshot rebuild handler.
+func (s *GRPCServer) SetGoldenRebuilder(r GoldenRebuilder) {
+	s.goldenRebuilder = r
+}
+
 func (s *GRPCServer) PreCopyDrives(ctx context.Context, req *pb.PreCopyDrivesRequest) (*pb.PreCopyDrivesResponse, error) {
 	if s.migrator == nil {
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
-	rootfsKey, workspaceKey, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
+	rootfsKey, workspaceKey, goldenVersion, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore, req.FlattenRootfs)
 	if err != nil {
 		return nil, fmt.Errorf("pre-copy drives: %w", err)
 	}
 	return &pb.PreCopyDrivesResponse{
-		RootfsKey:    rootfsKey,
-		WorkspaceKey: workspaceKey,
+		RootfsKey:     rootfsKey,
+		WorkspaceKey:  workspaceKey,
+		GoldenVersion: goldenVersion,
 	}, nil
 }
 
@@ -867,7 +880,7 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 	if req.RootfsS3Key != "" && req.WorkspaceS3Key != "" {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigrationWithS3(ctx,
 			req.SandboxId, req.RootfsS3Key, req.WorkspaceS3Key,
-			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore)
+			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode)
 	} else {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigration(ctx,
 			req.SandboxId, req.RootfsPath, req.WorkspacePath,
@@ -900,6 +913,20 @@ func (s *GRPCServer) CompleteMigrationIncoming(ctx context.Context, req *pb.Comp
 		return nil, fmt.Errorf("complete incoming migration: %w", err)
 	}
 	return &pb.CompleteMigrationIncomingResponse{}, nil
+}
+
+func (s *GRPCServer) RebuildGoldenSnapshot(ctx context.Context, req *pb.RebuildGoldenSnapshotRequest) (*pb.RebuildGoldenSnapshotResponse, error) {
+	if s.goldenRebuilder == nil {
+		return nil, fmt.Errorf("golden snapshot rebuild not supported on this worker")
+	}
+	oldVersion, newVersion, err := s.goldenRebuilder.RebuildGoldenSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("rebuild golden snapshot: %w", err)
+	}
+	return &pb.RebuildGoldenSnapshotResponse{
+		OldVersion: oldVersion,
+		NewVersion: newVersion,
+	}, nil
 }
 
 func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStatsRequest) (*pb.GetSandboxStatsResponse, error) {

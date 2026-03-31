@@ -57,8 +57,9 @@ type VMInstance struct {
 	restoring     chan struct{}
 	opMu          sync.Mutex   // serializes destructive VM ops (checkpoint, restore, hibernate)
 	archiveDone   chan struct{} // closed when async hibernate archive completes (nil if no archive in flight)
-	baseMemoryMB         int  // initial memory passed to -m (before virtio-mem)
-	virtioMemRequestedMB int  // additional memory via virtio-mem (beyond base)
+	baseMemoryMB         int    // initial memory passed to -m (before virtio-mem)
+	virtioMemRequestedMB int    // additional memory via virtio-mem (beyond base)
+	goldenVersion        string // golden version this sandbox was created from (empty if cold-booted)
 }
 
 // SandboxMeta is persisted to sandbox-meta.json for recovery after hard kills.
@@ -122,6 +123,7 @@ type Manager struct {
 	goldenCID     uint32 // CID used when the golden snapshot was created
 	goldenGuestIP string // guest IP baked into the golden snapshot
 	goldenHostIP  string // host IP of the golden subnet (for temp addr on TAP)
+	goldenVersion string // hash of base image — used for overlay-based migration
 
 	// Metadata service callbacks (set via SetMetadataCallbacks)
 	onSandboxReady   func(sandboxID, guestIP, template string, startedAt time.Time)
@@ -205,6 +207,12 @@ func (m *Manager) SetSecretsProxy(sp SecretsProxyIntegration) {
 	m.secretsProxy = sp
 }
 
+// GoldenVersion returns the hash identifying this worker's golden snapshot base image.
+// Empty string means no golden snapshot is available.
+func (m *Manager) GoldenVersion() string {
+	return m.goldenVersion
+}
+
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
 // hibernates it to create a reusable snapshot. Subsequent Create() calls
 // restore from this snapshot instead of cold-booting, cutting start time
@@ -221,21 +229,49 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 		os.RemoveAll(goldenDir)
 	}
 
-	// If golden snapshot already exists, just use it
+	// If golden snapshot already exists, check if the base image has changed
 	if (fileExists(memFile) || fileExists(memFile+".zst")) && (fileExists(rootfsFile) || fileExists(filepath.Join(goldenDir, "rootfs.ext4"))) {
-		m.goldenDir = goldenDir
-		// Read saved golden CID + guest IP
-		if cidBytes, err := os.ReadFile(filepath.Join(goldenDir, "cid")); err == nil {
-			fmt.Sscanf(string(cidBytes), "%d", &m.goldenCID)
+		// Load stored golden version
+		versionFile := filepath.Join(goldenDir, "version")
+		var storedVersion string
+		if vBytes, err := os.ReadFile(versionFile); err == nil {
+			storedVersion = string(vBytes)
 		}
-		if ipBytes, err := os.ReadFile(filepath.Join(goldenDir, "guest_ip")); err == nil {
-			m.goldenGuestIP = string(ipBytes)
+
+		// Check if the base image on disk matches the golden snapshot
+		stale := false
+		baseImage, _ := ResolveBaseImage(m.cfg.ImagesDir, "default")
+		if baseImage != "" && storedVersion != "" {
+			if currentHash, err := computeGoldenVersion(baseImage); err == nil && currentHash != storedVersion {
+				log.Printf("qemu: base image changed (golden=%s, disk=%s), rebuilding golden snapshot", storedVersion, currentHash)
+				stale = true
+			}
 		}
-		if ipBytes, err := os.ReadFile(filepath.Join(goldenDir, "host_ip")); err == nil {
-			m.goldenHostIP = string(ipBytes)
+
+		if !stale {
+			m.goldenDir = goldenDir
+			m.goldenVersion = storedVersion
+			if cidBytes, err := os.ReadFile(filepath.Join(goldenDir, "cid")); err == nil {
+				fmt.Sscanf(string(cidBytes), "%d", &m.goldenCID)
+			}
+			if ipBytes, err := os.ReadFile(filepath.Join(goldenDir, "guest_ip")); err == nil {
+				m.goldenGuestIP = string(ipBytes)
+			}
+			if ipBytes, err := os.ReadFile(filepath.Join(goldenDir, "host_ip")); err == nil {
+				m.goldenHostIP = string(ipBytes)
+			}
+			if storedVersion == "" && baseImage != "" {
+				if v, err := computeGoldenVersion(baseImage); err == nil {
+					m.goldenVersion = v
+					_ = os.WriteFile(versionFile, []byte(v), 0644)
+				}
+			}
+			log.Printf("qemu: golden snapshot already exists at %s (CID=%d, guestIP=%s, version=%s)", goldenDir, m.goldenCID, m.goldenGuestIP, m.goldenVersion)
+			return nil
 		}
-		log.Printf("qemu: golden snapshot already exists at %s (CID=%d, guestIP=%s)", goldenDir, m.goldenCID, m.goldenGuestIP)
-		return nil
+
+		// Stale — remove old golden and fall through to rebuild
+		os.RemoveAll(goldenDir)
 	}
 
 	log.Printf("qemu: preparing golden snapshot...")
@@ -437,6 +473,12 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 		log.Printf("qemu: golden mem compressed with zstd")
 	}
 
+	// Compute and persist golden version hash
+	if v, err := computeGoldenVersion(baseImage); err == nil {
+		m.goldenVersion = v
+		_ = os.WriteFile(filepath.Join(goldenDir, "version"), []byte(v), 0644)
+	}
+
 	// Remove preparing marker — golden snapshot is complete
 	os.Remove(preparingMarker)
 
@@ -447,9 +489,53 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	_ = os.WriteFile(filepath.Join(goldenDir, "cid"), []byte(fmt.Sprintf("%d", goldenCID)), 0644)
 	_ = os.WriteFile(filepath.Join(goldenDir, "guest_ip"), []byte(netCfg.GuestIP), 0644)
 	_ = os.WriteFile(filepath.Join(goldenDir, "host_ip"), []byte(netCfg.HostIP), 0644)
-	log.Printf("qemu: golden snapshot ready (%dms total, mem=%s, CID=%d, guestIP=%s)",
-		time.Since(t0).Milliseconds(), memFile, goldenCID, netCfg.GuestIP)
+	log.Printf("qemu: golden snapshot ready (%dms total, mem=%s, CID=%d, guestIP=%s, version=%s)",
+		time.Since(t0).Milliseconds(), memFile, goldenCID, netCfg.GuestIP, m.goldenVersion)
 	return nil
+}
+
+// RebuildGoldenSnapshot builds a new golden snapshot alongside the old one,
+// then atomically swaps to it. Existing sandboxes keep running on their
+// independent reflink copies — only new sandboxes use the new golden.
+// Returns the old and new golden version strings.
+func (m *Manager) RebuildGoldenSnapshot() (oldVersion, newVersion string, err error) {
+	oldVersion = m.goldenVersion
+	goldenDir := filepath.Join(m.cfg.DataDir, "golden")
+
+	// Build new golden in a staging directory
+	stagingDir := filepath.Join(m.cfg.DataDir, "golden-staging")
+	os.RemoveAll(stagingDir) // clean up any prior failed attempt
+
+	// Temporarily point goldenDir to staging so PrepareGoldenSnapshot builds there
+	oldGoldenDir := m.goldenDir
+	m.goldenDir = ""
+
+	// Rename current golden out of the way so PrepareGoldenSnapshot sees no existing snapshot
+	backupDir := filepath.Join(m.cfg.DataDir, "golden-old")
+	os.RemoveAll(backupDir)
+	if err := os.Rename(goldenDir, backupDir); err != nil && !os.IsNotExist(err) {
+		m.goldenDir = oldGoldenDir
+		return oldVersion, "", fmt.Errorf("backup old golden: %w", err)
+	}
+
+	// Build fresh golden snapshot
+	if err := m.PrepareGoldenSnapshot(); err != nil {
+		// Restore old golden on failure
+		os.RemoveAll(goldenDir)
+		if backupErr := os.Rename(backupDir, goldenDir); backupErr == nil {
+			m.goldenDir = oldGoldenDir
+			m.goldenVersion = oldVersion
+		}
+		return oldVersion, "", fmt.Errorf("rebuild golden: %w", err)
+	}
+
+	newVersion = m.goldenVersion
+
+	// Clean up old golden — sandboxes created from it have independent reflink copies
+	os.RemoveAll(backupDir)
+
+	log.Printf("qemu: golden snapshot rebuilt (old=%s, new=%s)", oldVersion, newVersion)
+	return oldVersion, newVersion, nil
 }
 
 // createFromGolden creates a new VM by restoring from the golden snapshot.
@@ -641,6 +727,7 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.goldenVersion,
 	}
 
 	// Connect to agent via Unix socket

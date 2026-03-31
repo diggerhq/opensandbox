@@ -29,6 +29,8 @@ type WorkerEntry struct {
 	Current   int     `json:"current"`
 	CPUPct    float64 `json:"cpu_pct"`
 	MemPct    float64 `json:"mem_pct"`
+	DiskPct       float64 `json:"disk_pct"`
+	GoldenVersion string  `json:"golden_version,omitempty"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -199,6 +201,10 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		existing.Capacity = entry.Capacity
 		existing.CPUPct = entry.CPUPct
 		existing.MemPct = entry.MemPct
+		existing.DiskPct = entry.DiskPct
+		if entry.GoldenVersion != "" {
+			existing.GoldenVersion = entry.GoldenVersion
+		}
 		if entry.GRPCAddr != "" {
 			existing.GRPCAddr = entry.GRPCAddr
 		}
@@ -293,11 +299,11 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 			continue
 		}
 		// Skip workers under heavy resource pressure
-		if w.CPUPct > 90 || w.MemPct > 90 {
+		if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
 			continue
 		}
 		// Score: remaining capacity weighted by resource headroom
-		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
 		score := float64(remaining) * resourceScore
 		if score > bestScore {
 			best = w
@@ -312,10 +318,10 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 			if remaining <= 0 {
 				continue
 			}
-			if w.CPUPct > 90 || w.MemPct > 90 {
+			if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
 				continue
 			}
-			resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+			resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
 			score := float64(remaining) * resourceScore
 			if score > bestScore {
 				best = w
@@ -419,6 +425,8 @@ func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 				Current:   w.Current,
 				CPUPct:    w.CPUPct,
 				MemPct:    w.MemPct,
+				DiskPct:       w.DiskPct,
+				GoldenVersion: w.GoldenVersion,
 			})
 		}
 	}
@@ -426,7 +434,7 @@ func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 }
 
 // RegionResourcePressure returns the maximum CPU and memory usage across all workers in a region (satisfies ScalerRegistry).
-func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem float64) {
+func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem, maxDisk float64) {
 	workers := r.GetWorkersByRegion(region)
 	for _, w := range workers {
 		if w.CPUPct > maxCPU {
@@ -435,8 +443,11 @@ func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, max
 		if w.MemPct > maxMem {
 			maxMem = w.MemPct
 		}
+		if w.DiskPct > maxDisk {
+			maxDisk = w.DiskPct
+		}
 	}
-	return maxCPU, maxMem
+	return maxCPU, maxMem, maxDisk
 }
 
 // RegionUtilization returns the average utilization for a region (satisfies ScalerRegistry).

@@ -7,17 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// SystemStats returns current CPU and memory usage percentages.
+// SystemStats returns current CPU, memory, and disk usage percentages.
 // On Linux, reads from /proc. On other platforms, returns 0.0 gracefully.
-func SystemStats() (cpuPct, memPct float64) {
+// Disk usage uses syscall.Statfs which works on both Linux and macOS.
+func SystemStats() (cpuPct, memPct, diskPct float64) {
 	if runtime.GOOS == "linux" {
 		memPct = linuxMemoryPercent()
 		cpuPct = linuxCPUPercent()
 	}
-	return cpuPct, memPct
+	diskPct = diskPercent()
+	return cpuPct, memPct, diskPct
 }
 
 func linuxMemoryPercent() float64 {
@@ -128,4 +131,19 @@ func readProcStat() (total, idle uint64) {
 		}
 	}
 	return total, idle
+}
+
+// diskPercent returns the disk usage percentage for the root filesystem.
+// Uses syscall.Statfs which works on both Linux and macOS.
+func diskPercent() float64 {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		return 0.0
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bfree * uint64(stat.Bsize)
+	if total == 0 {
+		return 0.0
+	}
+	return float64(total-free) / float64(total) * 100.0
 }

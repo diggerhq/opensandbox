@@ -22,7 +22,9 @@ type WorkerInfo struct {
 	Current      int       `json:"current"`
 	CPUPct       float64   `json:"cpu_pct"`
 	MemPct       float64   `json:"mem_pct"`
-	LastSeen     time.Time `json:"-"`
+	DiskPct       float64   `json:"disk_pct"`
+	GoldenVersion string    `json:"golden_version,omitempty"`
+	LastSeen      time.Time `json:"-"`
 	MissedBeats  int       `json:"-"`
 }
 
@@ -125,11 +127,11 @@ func (r *WorkerRegistry) GetLeastLoadedWorker(region string) *WorkerInfo {
 			continue
 		}
 		// Skip workers under heavy resource pressure
-		if w.CPUPct > 90 || w.MemPct > 90 {
+		if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
 			continue
 		}
 		// Score: remaining capacity weighted by resource headroom
-		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
 		score := float64(remaining) * resourceScore
 		if score > bestScore {
 			best = w
@@ -178,7 +180,7 @@ func (r *WorkerRegistry) RegionUtilization(region string) float64 {
 
 // RegionResourcePressure returns the maximum CPU and memory usage across all workers in a region.
 // Used by the scaler to detect resource pressure even when count-based utilization is low.
-func (r *WorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem float64) {
+func (r *WorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem, maxDisk float64) {
 	workers := r.GetWorkersByRegion(region)
 	for _, w := range workers {
 		if w.CPUPct > maxCPU {
@@ -187,8 +189,11 @@ func (r *WorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem f
 		if w.MemPct > maxMem {
 			maxMem = w.MemPct
 		}
+		if w.DiskPct > maxDisk {
+			maxDisk = w.DiskPct
+		}
 	}
-	return maxCPU, maxMem
+	return maxCPU, maxMem, maxDisk
 }
 
 // Regions returns all known regions.
@@ -228,6 +233,10 @@ func (r *WorkerRegistry) handleHeartbeat(msg *nats.Msg) {
 		existing.Capacity = hb.Capacity
 		existing.CPUPct = hb.CPUPct
 		existing.MemPct = hb.MemPct
+		existing.DiskPct = hb.DiskPct
+		if hb.GoldenVersion != "" {
+			existing.GoldenVersion = hb.GoldenVersion
+		}
 		existing.LastSeen = time.Now()
 		existing.MissedBeats = 0
 		if hb.GRPCAddr != "" {

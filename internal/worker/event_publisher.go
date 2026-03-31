@@ -17,9 +17,10 @@ type EventPublisher struct {
 	js         nats.JetStreamContext
 	sandboxDBs *sandbox.SandboxDBManager
 	region     string
-	workerID   string
-	stop       chan struct{}
-	wg         sync.WaitGroup
+	workerID      string
+	goldenVersion string
+	stop          chan struct{}
+	wg            sync.WaitGroup
 }
 
 // NATSEvent is the JSON payload published to NATS.
@@ -98,8 +99,13 @@ func (p *EventPublisher) Stop() {
 	p.nc.Close()
 }
 
+// SetGoldenVersion sets the golden snapshot version hash for heartbeats.
+func (p *EventPublisher) SetGoldenVersion(v string) {
+	p.goldenVersion = v
+}
+
 // PublishHeartbeat sends a worker heartbeat to NATS.
-func (p *EventPublisher) PublishHeartbeat(capacity, current int, cpuPct, memPct float64) {
+func (p *EventPublisher) PublishHeartbeat(capacity, current int, cpuPct, memPct, diskPct float64) {
 	subject := fmt.Sprintf("workers.heartbeat.%s.%s", p.region, p.workerID)
 	payload := map[string]interface{}{
 		"worker_id": p.workerID,
@@ -108,6 +114,8 @@ func (p *EventPublisher) PublishHeartbeat(capacity, current int, cpuPct, memPct 
 		"current":   current,
 		"cpu_pct":   cpuPct,
 		"mem_pct":   memPct,
+		"disk_pct":        diskPct,
+		"golden_version":  p.goldenVersion,
 	}
 	data, _ := json.Marshal(payload)
 	if err := p.nc.Publish(subject, data); err != nil {
@@ -116,7 +124,7 @@ func (p *EventPublisher) PublishHeartbeat(capacity, current int, cpuPct, memPct 
 }
 
 // StartHeartbeat begins sending heartbeats every 5 seconds.
-func (p *EventPublisher) StartHeartbeat(getStats func() (capacity, current int, cpuPct, memPct float64)) {
+func (p *EventPublisher) StartHeartbeat(getStats func() (capacity, current int, cpuPct, memPct, diskPct float64)) {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -126,8 +134,8 @@ func (p *EventPublisher) StartHeartbeat(getStats func() (capacity, current int, 
 		for {
 			select {
 			case <-ticker.C:
-				cap, cur, cpu, mem := getStats()
-				p.PublishHeartbeat(cap, cur, cpu, mem)
+				cap, cur, cpu, mem, disk := getStats()
+				p.PublishHeartbeat(cap, cur, cpu, mem, disk)
 			case <-p.stop:
 				return
 			}

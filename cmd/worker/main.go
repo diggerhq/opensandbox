@@ -287,6 +287,10 @@ func main() {
 		grpcServer.SetMigrator(migrator)
 		log.Println("opensandbox-worker: live migration enabled")
 	}
+	if rebuilder, ok := mgr.(worker.GoldenRebuilder); ok {
+		grpcServer.SetGoldenRebuilder(rebuilder)
+		log.Println("opensandbox-worker: golden snapshot rebuild enabled")
+	}
 	grpcAddr := ":9090"
 	log.Printf("opensandbox-worker: starting gRPC server on %s", grpcAddr)
 	go func() {
@@ -323,6 +327,9 @@ func main() {
 		if err != nil {
 			log.Printf("opensandbox-worker: Redis heartbeat not available: %v", err)
 		} else {
+			if qemuMgr != nil {
+				hb.SetGoldenVersion(qemuMgr.GoldenVersion())
+			}
 			if envID := os.Getenv("OPENSANDBOX_MACHINE_ID"); envID != "" {
 				hb.SetMachineID(envID)
 				log.Printf("opensandbox-worker: machine ID (env): %s", envID)
@@ -333,10 +340,10 @@ func main() {
 				hb.SetMachineID(hostname)
 				log.Printf("opensandbox-worker: machine ID (hostname): %s", hostname)
 			}
-			hb.Start(func() (int, int, float64, float64) {
+			hb.Start(func() (int, int, float64, float64, float64) {
 				count, _ := mgr.Count(context.Background())
-				cpuPct, memPct := worker.SystemStats()
-				return cfg.MaxCapacity, count, cpuPct, memPct
+				cpuPct, memPct, diskPct := worker.SystemStats()
+				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
 			})
 			defer hb.Stop()
 			log.Println("opensandbox-worker: Redis heartbeat started")
@@ -350,10 +357,13 @@ func main() {
 			log.Printf("opensandbox-worker: NATS not available: %v (continuing without event sync)", err)
 		} else {
 			pub.Start()
-			pub.StartHeartbeat(func() (int, int, float64, float64) {
+			if qemuMgr != nil {
+				pub.SetGoldenVersion(qemuMgr.GoldenVersion())
+			}
+			pub.StartHeartbeat(func() (int, int, float64, float64, float64) {
 				count, _ := mgr.Count(context.Background())
-				cpuPct, memPct := worker.SystemStats()
-				return cfg.MaxCapacity, count, cpuPct, memPct
+				cpuPct, memPct, diskPct := worker.SystemStats()
+				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
 			})
 			defer pub.Stop()
 			log.Println("opensandbox-worker: NATS event publisher started")

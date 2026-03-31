@@ -21,12 +21,14 @@ const (
 	pendingWorkerTTL    = 10 * time.Minute // How long to wait for a launched worker to register
 
 	// Resource-based scaling thresholds (applied per-worker, trigger on ANY worker exceeding)
-	resourceCPUThreshold = 80.0 // Scale up if any worker CPU > 80%
-	resourceMemThreshold = 85.0 // Scale up if any worker memory > 85%
+	resourceCPUThreshold  = 80.0 // Scale up if any worker CPU > 80%
+	resourceMemThreshold  = 85.0 // Scale up if any worker memory > 85%
+	resourceDiskThreshold = 75.0 // Scale up if any worker disk > 75%
 
 	// Evacuation thresholds (per-worker, triggers live migration of sandboxes OFF the hot worker)
-	evacuationCPUThreshold = 90.0
-	evacuationMemThreshold = 90.0
+	evacuationCPUThreshold  = 90.0
+	evacuationMemThreshold  = 90.0
+	evacuationDiskThreshold = 80.0
 	evacuationBatchSize    = 3                  // sandboxes to migrate per eval cycle per worker
 	evacuationCooldown     = 60 * time.Second   // per-worker cooldown between evacuation batches
 	drainTimeout           = 5 * time.Minute    // max time to drain a worker before force-destroying
@@ -38,7 +40,7 @@ type ScalerRegistry interface {
 	Regions() []string
 	GetWorkersByRegion(region string) []*WorkerInfo
 	RegionUtilization(region string) float64
-	RegionResourcePressure(region string) (maxCPU, maxMem float64)
+	RegionResourcePressure(region string) (maxCPU, maxMem, maxDisk float64)
 	GetWorkerClient(workerID string) (pb.SandboxWorkerClient, error)
 }
 
@@ -172,7 +174,7 @@ func (s *Scaler) evaluate() {
 func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	workers := s.registry.GetWorkersByRegion(region)
 	utilization := s.registry.RegionUtilization(region)
-	maxCPU, maxMem := s.registry.RegionResourcePressure(region)
+	maxCPU, maxMem, maxDisk := s.registry.RegionResourcePressure(region)
 
 	// Expire stale pending launches
 	s.expirePending(region)
@@ -198,6 +200,10 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	if !needsScaleUp && maxMem > resourceMemThreshold {
 		needsScaleUp = true
 		reason = fmt.Sprintf("memory pressure %.1f%% > %.0f%%", maxMem, resourceMemThreshold)
+	}
+	if !needsScaleUp && maxDisk > resourceDiskThreshold {
+		needsScaleUp = true
+		reason = fmt.Sprintf("disk pressure %.1f%% > %.0f%%", maxDisk, resourceDiskThreshold)
 	}
 
 	// Ensure minimum workers are running (pre-provisioned capacity).
@@ -241,8 +247,8 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 			return
 		}
 
-		log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% util=%.1f%%)",
-			region, reason, maxCPU, maxMem, utilization*100)
+		log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% disk=%.1f%% util=%.1f%%)",
+			region, reason, maxCPU, maxMem, maxDisk, utilization*100)
 		s.scaleUp(ctx, region)
 	} else if utilization < scaleDownThreshold && len(workers) > s.minWorkers {
 		// Phase 4: Scale down via smart drain (live-migrate sandboxes, then destroy)
@@ -321,7 +327,7 @@ func (s *Scaler) expirePending(region string) {
 // evacuateHotWorkers live-migrates sandboxes off workers that exceed critical thresholds.
 func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []*WorkerInfo) {
 	for _, w := range workers {
-		if w.CPUPct < evacuationCPUThreshold && w.MemPct < evacuationMemThreshold {
+		if w.CPUPct < evacuationCPUThreshold && w.MemPct < evacuationMemThreshold && w.DiskPct < evacuationDiskThreshold {
 			continue
 		}
 		// Skip if already being drained for scale-down
@@ -336,13 +342,13 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 		// Find target: least-loaded worker that isn't the hot one and isn't draining
 		target := s.findMigrationTarget(region, w.ID)
 		if target == nil {
-			log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%%) but no migration target available",
-				w.ID, w.CPUPct, w.MemPct)
+			log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%) but no migration target available",
+				w.ID, w.CPUPct, w.MemPct, w.DiskPct)
 			continue
 		}
 
-		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%%), evacuating up to %d sandboxes to %s",
-			w.ID, w.CPUPct, w.MemPct, evacuationBatchSize, target.ID)
+		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), evacuating up to %d sandboxes to %s",
+			w.ID, w.CPUPct, w.MemPct, w.DiskPct, evacuationBatchSize, target.ID)
 
 		s.lastEvacuation[w.ID] = time.Now()
 		go s.evacuateBatch(w.ID, target.ID, evacuationBatchSize)
@@ -362,10 +368,10 @@ func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo
 			continue
 		}
 		remaining := w.Capacity - w.Current
-		if remaining <= 0 || w.CPUPct > 85 || w.MemPct > 85 {
+		if remaining <= 0 || w.CPUPct > 85 || w.MemPct > 85 || w.DiskPct > 85 {
 			continue
 		}
-		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
 		score := float64(remaining) * resourceScore
 		if score > bestScore {
 			best = w
@@ -565,6 +571,48 @@ func (s *Scaler) destroyDrainedMachine(machineID string) {
 	}()
 }
 
+// RebuildGoldenAll triggers a golden snapshot rebuild on all workers.
+// Workers rebuild one at a time to avoid fleet-wide disruption.
+// Returns a map of workerID → new golden version (or error string).
+func (s *Scaler) RebuildGoldenAll(ctx context.Context) map[string]string {
+	results := make(map[string]string)
+	for _, region := range s.registry.Regions() {
+		for _, w := range s.registry.GetWorkersByRegion(region) {
+			client, err := s.registry.GetWorkerClient(w.ID)
+			if err != nil {
+				results[w.ID] = fmt.Sprintf("error: %v", err)
+				continue
+			}
+
+			rebuildCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			resp, err := client.RebuildGoldenSnapshot(rebuildCtx, &pb.RebuildGoldenSnapshotRequest{})
+			cancel()
+
+			if err != nil {
+				results[w.ID] = fmt.Sprintf("error: %v", err)
+				log.Printf("scaler: golden rebuild failed for worker %s: %v", w.ID, err)
+			} else {
+				results[w.ID] = resp.NewVersion
+				log.Printf("scaler: golden rebuild complete for worker %s (%s → %s)",
+					w.ID, resp.OldVersion, resp.NewVersion)
+			}
+		}
+	}
+	return results
+}
+
+// getWorkerInfo returns WorkerInfo for a specific worker by searching all regions.
+func (s *Scaler) getWorkerInfo(workerID string) *WorkerInfo {
+	for _, region := range s.registry.Regions() {
+		for _, w := range s.registry.GetWorkersByRegion(region) {
+			if w.ID == workerID {
+				return w
+			}
+		}
+	}
+	return nil
+}
+
 // --- Live Migration Orchestration ---
 
 // liveMigrateSandbox performs a full live migration of a sandbox between workers.
@@ -587,17 +635,31 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 
 	t0 := time.Now()
 
+	// Determine if source and target share the same golden snapshot version.
+	// Same version → upload thin overlay, target rebases to local base image (fast, small).
+	// Different version → flatten rootfs before upload, target uses it as-is (slow, large).
+	sourceWorker := s.getWorkerInfo(sourceWorkerID)
+	targetWorker := s.getWorkerInfo(targetWorkerID)
+	sameGolden := sourceWorker != nil && targetWorker != nil &&
+		sourceWorker.GoldenVersion != "" && sourceWorker.GoldenVersion == targetWorker.GoldenVersion
+	flatten := !sameGolden
+
 	// Step 1: Pre-copy drives to S3 (source uploads qcow2s)
 	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer preCopyCancel()
 	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
-		SandboxId: sandboxID,
+		SandboxId:    sandboxID,
+		FlattenRootfs: flatten,
 	})
 	if err != nil {
 		return fmt.Errorf("pre-copy drives: %w", err)
 	}
 
-	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms)", sandboxID, time.Since(t0).Milliseconds())
+	migrationMode := "overlay"
+	if flatten {
+		migrationMode = "flatten"
+	}
+	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, mode=%s)", sandboxID, time.Since(t0).Milliseconds(), migrationMode)
 
 	// Step 2: Prepare target (downloads from S3, starts QEMU -incoming)
 	// Get sandbox config from DB for CPU/memory/port
@@ -638,6 +700,7 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		Template:       template,
 		RootfsS3Key:    preCopyResp.RootfsKey,
 		WorkspaceS3Key: preCopyResp.WorkspaceKey,
+		OverlayMode:    sameGolden,
 	})
 	if err != nil {
 		return fmt.Errorf("prepare target: %w", err)

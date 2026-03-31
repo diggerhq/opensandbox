@@ -45,6 +45,7 @@ const (
 	SandboxWorker_PrepareMigrationIncoming_FullMethodName  = "/worker.SandboxWorker/PrepareMigrationIncoming"
 	SandboxWorker_LiveMigrate_FullMethodName               = "/worker.SandboxWorker/LiveMigrate"
 	SandboxWorker_CompleteMigrationIncoming_FullMethodName = "/worker.SandboxWorker/CompleteMigrationIncoming"
+	SandboxWorker_RebuildGoldenSnapshot_FullMethodName     = "/worker.SandboxWorker/RebuildGoldenSnapshot"
 )
 
 // SandboxWorkerClient is the client API for SandboxWorker service.
@@ -78,6 +79,8 @@ type SandboxWorkerClient interface {
 	PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error)
 	LiveMigrate(ctx context.Context, in *LiveMigrateRequest, opts ...grpc.CallOption) (*LiveMigrateResponse, error)
 	CompleteMigrationIncoming(ctx context.Context, in *CompleteMigrationIncomingRequest, opts ...grpc.CallOption) (*CompleteMigrationIncomingResponse, error)
+	// Golden snapshot management
+	RebuildGoldenSnapshot(ctx context.Context, in *RebuildGoldenSnapshotRequest, opts ...grpc.CallOption) (*RebuildGoldenSnapshotResponse, error)
 }
 
 type sandboxWorkerClient struct {
@@ -360,6 +363,16 @@ func (c *sandboxWorkerClient) CompleteMigrationIncoming(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) RebuildGoldenSnapshot(ctx context.Context, in *RebuildGoldenSnapshotRequest, opts ...grpc.CallOption) (*RebuildGoldenSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RebuildGoldenSnapshotResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_RebuildGoldenSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxWorkerServer is the server API for SandboxWorker service.
 // All implementations must embed UnimplementedSandboxWorkerServer
 // for forward compatibility.
@@ -391,6 +404,8 @@ type SandboxWorkerServer interface {
 	PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error)
 	LiveMigrate(context.Context, *LiveMigrateRequest) (*LiveMigrateResponse, error)
 	CompleteMigrationIncoming(context.Context, *CompleteMigrationIncomingRequest) (*CompleteMigrationIncomingResponse, error)
+	// Golden snapshot management
+	RebuildGoldenSnapshot(context.Context, *RebuildGoldenSnapshotRequest) (*RebuildGoldenSnapshotResponse, error)
 	mustEmbedUnimplementedSandboxWorkerServer()
 }
 
@@ -478,6 +493,9 @@ func (UnimplementedSandboxWorkerServer) LiveMigrate(context.Context, *LiveMigrat
 }
 func (UnimplementedSandboxWorkerServer) CompleteMigrationIncoming(context.Context, *CompleteMigrationIncomingRequest) (*CompleteMigrationIncomingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteMigrationIncoming not implemented")
+}
+func (UnimplementedSandboxWorkerServer) RebuildGoldenSnapshot(context.Context, *RebuildGoldenSnapshotRequest) (*RebuildGoldenSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RebuildGoldenSnapshot not implemented")
 }
 func (UnimplementedSandboxWorkerServer) mustEmbedUnimplementedSandboxWorkerServer() {}
 func (UnimplementedSandboxWorkerServer) testEmbeddedByValue()                       {}
@@ -950,6 +968,24 @@ func _SandboxWorker_CompleteMigrationIncoming_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_RebuildGoldenSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebuildGoldenSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).RebuildGoldenSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_RebuildGoldenSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).RebuildGoldenSnapshot(ctx, req.(*RebuildGoldenSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxWorker_ServiceDesc is the grpc.ServiceDesc for SandboxWorker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1052,6 +1088,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompleteMigrationIncoming",
 			Handler:    _SandboxWorker_CompleteMigrationIncoming_Handler,
+		},
+		{
+			MethodName: "RebuildGoldenSnapshot",
+			Handler:    _SandboxWorker_RebuildGoldenSnapshot_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
