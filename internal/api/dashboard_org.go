@@ -323,27 +323,32 @@ func (s *Server) dashboardSwitchOrg(c echo.Context) error {
 	}
 
 	// Validate the user has access to the target org via WorkOS
-	if s.workos != nil && s.workos.OrgMgr() != nil && user.WorkOSUserID != nil {
-		targetOrg, err := s.store.GetOrg(c.Request().Context(), req.OrgID)
-		if err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "target org not found"})
+	if s.workos == nil || s.workos.OrgMgr() == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "identity provider not configured"})
+	}
+	if user.WorkOSUserID == nil || *user.WorkOSUserID == "" {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "user account not linked to identity provider"})
+	}
+	targetOrg, err := s.store.GetOrg(c.Request().Context(), req.OrgID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "target org not found"})
+	}
+	if targetOrg.WorkOSOrgID == nil || *targetOrg.WorkOSOrgID == "" {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "target org not linked to identity provider"})
+	}
+	memberships, err := s.workos.OrgMgr().ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	found := false
+	for _, m := range memberships {
+		if m.OrganizationID == *targetOrg.WorkOSOrgID {
+			found = true
+			break
 		}
-		if targetOrg.WorkOSOrgID != nil {
-			memberships, err := s.workos.OrgMgr().ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
-			if err != nil {
-				return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			}
-			found := false
-			for _, m := range memberships {
-				if m.OrganizationID == *targetOrg.WorkOSOrgID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return c.JSON(http.StatusForbidden, map[string]string{"error": "not a member of this org"})
-			}
-		}
+	}
+	if !found {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "not a member of this org"})
 	}
 
 	if err := s.store.SetActiveOrg(c.Request().Context(), user.ID, req.OrgID); err != nil {
