@@ -358,21 +358,21 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	}
 	log.Printf("qemu: golden: virtio_mem module loaded")
 
-	// Unmount /workspace and sync before snapshot — the golden migration state
-	// includes virtio-blk device state (ring buffers, pending I/O). If /workspace
+	// Unmount /home/sandbox and sync before snapshot — the golden migration state
+	// includes virtio-blk device state (ring buffers, pending I/O). If the data disk
 	// is mounted when we snapshot, those stale I/O ops will corrupt any fresh
 	// workspace.qcow2 that createFromGolden boots with.
 	umountCtx, umountCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, umountErr := agentClient.Exec(umountCtx, &pb.ExecRequest{
 		Command:   "/bin/sh",
-		Args: []string{"-c", "umount -f /workspace 2>/dev/null; sync; echo 3 > /proc/sys/vm/drop_caches; echo 3 > /proc/sys/vm/drop_caches; blockdev --flushbufs /dev/vdb 2>/dev/null; true"},
+		Args: []string{"-c", "umount -f /home/sandbox 2>/dev/null; sync; echo 3 > /proc/sys/vm/drop_caches; echo 3 > /proc/sys/vm/drop_caches; blockdev --flushbufs /dev/vdb 2>/dev/null; true"},
 		RunAsRoot: true,
 	})
 	umountCancel()
 	if umountErr != nil {
-		log.Printf("qemu: golden: umount /workspace failed (non-fatal): %v", umountErr)
+		log.Printf("qemu: golden: umount /home/sandbox failed (non-fatal): %v", umountErr)
 	} else {
-		log.Printf("qemu: golden: /workspace unmounted and synced")
+		log.Printf("qemu: golden: /home/sandbox unmounted and synced")
 	}
 
 	// Close agent connection before migration. Use a timeout because gRPC's
@@ -667,32 +667,26 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		log.Printf("qemu: golden-create %s: clock sync failed: %v", id, err)
 	}
 
-	// Mount /workspace — the golden snapshot was taken with /workspace unmounted
-	// to keep the vdb device state clean for fresh workspace qcow2 files.
+	// Mount /home/sandbox — the data disk is mounted directly as the user's home.
+	// The golden snapshot was taken with it unmounted to keep vdb device state clean.
 	// Drop caches first: the golden VM's kernel has cached ext4 metadata from the
 	// golden workspace. The new sandbox has a DIFFERENT workspace qcow2 on the same
 	// virtio-blk device. Without dropping caches, the kernel uses stale superblock/
 	// journal data → ext4 checksum errors ("Bad message").
-	// Then bind-mount /home/sandbox onto /workspace/.home so that user home writes
-	// (cargo install, rustup, pip --user, etc.) use the large workspace disk
-	// instead of the small ~1.7GB rootfs.
 	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, mountErr := agentClient.Exec(mountCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
 		Args: []string{"-c", strings.Join([]string{
 			"echo 3 > /proc/sys/vm/drop_caches",
 			"echo 3 > /proc/sys/vm/drop_caches",
-			"mount /dev/vdb /workspace 2>/dev/null || true",
-			"mkdir -p /workspace/.home",
-			"cp -a /home/sandbox/. /workspace/.home/ 2>/dev/null || true",
-			"mount --bind /workspace/.home /home/sandbox",
-			"chown 1000:1000 /workspace /workspace/.home",
+			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
+			"chown 1000:1000 /home/sandbox",
 		}, " && ")},
 		RunAsRoot: true,
 	})
 	mountCancel()
 	if mountErr != nil {
-		log.Printf("qemu: golden-create %s: mount /workspace failed: %v", id, mountErr)
+		log.Printf("qemu: golden-create %s: mount /home/sandbox failed: %v", id, mountErr)
 	}
 	log.Printf("qemu: golden-create %s: network patched (%dms)", id, time.Since(t0).Milliseconds())
 

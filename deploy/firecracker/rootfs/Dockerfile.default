@@ -102,6 +102,9 @@ RUN useradd -m -s /bin/bash -G sudo sandbox \
     && echo "sandbox ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sandbox \
     && chmod 440 /etc/sudoers.d/sandbox
 
+# /workspace is a symlink to ~ for backward compatibility
+RUN ln -s /home/sandbox /workspace
+
 # ── Overlay mount points (data disk backs all writes via overlayfs) ───────────
 RUN mkdir -p /mnt/data /mnt/overlay
 WORKDIR /home/sandbox
