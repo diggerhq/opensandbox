@@ -1,3 +1,18 @@
+// redis_registry.go — Worker discovery and health tracking via Redis.
+//
+// Workers send heartbeats to Redis every 10s (key: worker:{id}, TTL: 30s).
+// The control plane discovers workers through two mechanisms:
+//
+//  1. Pub/sub (fast path): Workers publish heartbeats to "workers:heartbeat".
+//     The registry subscribes and updates its in-memory cache immediately.
+//     This provides sub-second worker discovery.
+//
+//  2. Periodic SCAN (reconciliation): Every 10s, the registry scans all
+//     worker:* keys in Redis. Workers whose keys have expired (TTL elapsed)
+//     are removed. This handles cases where pub/sub messages are lost.
+//
+// For each discovered worker, the registry maintains a gRPC connection pool
+// (see grpc_pool.go) used to dispatch sandbox operations.
 package controlplane
 
 import (
@@ -6,47 +21,41 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/keepalive"
-
-	"github.com/opensandbox/opensandbox/internal/grpctls"
 
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
-// WorkerEntry represents a worker in the Redis-backed registry.
+// WorkerEntry represents a worker's current state as reported via heartbeat.
+// Updated on every heartbeat (every 10s) with the latest load metrics.
 type WorkerEntry struct {
 	ID        string  `json:"worker_id"`
-	MachineID string  `json:"machine_id,omitempty"` // EC2 instance ID
+	MachineID string  `json:"machine_id,omitempty"`
 	Region    string  `json:"region"`
 	GRPCAddr  string  `json:"grpc_addr"`
 	HTTPAddr  string  `json:"http_addr"`
-	Capacity  int     `json:"capacity"`
-	Current   int     `json:"current"`
-	CPUPct    float64 `json:"cpu_pct"`
-	MemPct    float64 `json:"mem_pct"`
+	Capacity  int     `json:"capacity"` // max sandboxes this worker can run
+	Current   int     `json:"current"`  // sandboxes currently running
+	CPUPct    float64 `json:"cpu_pct"`  // current CPU usage percentage
+	MemPct    float64 `json:"mem_pct"`  // current memory usage percentage
 }
 
-// RedisWorkerRegistry maintains an in-memory cache of worker state
-// backed by Redis pub/sub for real-time updates and periodic SCAN for reconciliation.
-// It also maintains a persistent gRPC connection pool to workers.
+// RedisWorkerRegistry maintains an in-memory cache of known workers,
+// backed by Redis for discovery, and a gRPC connection pool per worker
+// for dispatching sandbox operations.
 type RedisWorkerRegistry struct {
 	rdb     *redis.Client
 	mu      sync.RWMutex
-	workers     map[string]*WorkerEntry            // in-memory hot cache
-	conns       map[string]*grpc.ClientConn        // persistent gRPC connections
-	clients     map[string]pb.SandboxWorkerClient  // cached gRPC clients (primary)
-	clientPools map[string][]pb.SandboxWorkerClient // connection pool per worker
-	poolCounter uint64                              // round-robin counter
-	stop        chan struct{}
+	workers map[string]*WorkerEntry // workerID → latest state
+	pools   map[string]*grpcPool    // workerID → gRPC connection pool
+	stop    chan struct{}
 }
 
 // NewRedisWorkerRegistry connects to Redis and returns a new registry.
+// Call Start() to begin worker discovery.
 func NewRedisWorkerRegistry(redisURL string) (*RedisWorkerRegistry, error) {
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
@@ -64,25 +73,21 @@ func NewRedisWorkerRegistry(redisURL string) (*RedisWorkerRegistry, error) {
 
 	return &RedisWorkerRegistry{
 		rdb:     rdb,
-		workers:     make(map[string]*WorkerEntry),
-		conns:       make(map[string]*grpc.ClientConn),
-		clients:     make(map[string]pb.SandboxWorkerClient),
-		clientPools: make(map[string][]pb.SandboxWorkerClient),
-		stop:        make(chan struct{}),
+		workers: make(map[string]*WorkerEntry),
+		pools:   make(map[string]*grpcPool),
+		stop:    make(chan struct{}),
 	}, nil
 }
 
-// Start subscribes to the workers:heartbeat pub/sub channel and runs
-// periodic reconciliation by scanning worker:* keys in Redis.
+// Start begins worker discovery via pub/sub and periodic reconciliation.
 func (r *RedisWorkerRegistry) Start() {
-	// Pub/sub subscriber
 	go r.subscribeLoop()
-
-	// Periodic reconciliation + stale worker cleanup
 	go r.reconcileLoop()
 }
 
-// subscribeLoop listens for heartbeat messages via Redis pub/sub.
+// subscribeLoop listens for worker heartbeats via Redis pub/sub.
+// Provides fast (~millisecond) discovery of new workers and load updates.
+// Automatically reconnects if the pub/sub channel drops.
 func (r *RedisWorkerRegistry) subscribeLoop() {
 	for {
 		select {
@@ -119,15 +124,14 @@ func (r *RedisWorkerRegistry) subscribeLoop() {
 	}
 }
 
-// reconcileLoop periodically scans Redis for worker:* keys.
-// Workers present in Redis are added/updated; workers absent from Redis
-// for 2 consecutive cycles are removed. This is the primary discovery
-// mechanism — pub/sub provides faster first-detection but is not required.
+// reconcileLoop periodically scans Redis for worker:* keys and prunes stale workers.
+// Runs every 10s as a safety net — if a pub/sub heartbeat is missed, the SCAN
+// will still discover/remove workers within one cycle.
 func (r *RedisWorkerRegistry) reconcileLoop() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	// Do an initial scan immediately
+	// Initial scan on startup so workers are available immediately.
 	r.reconcileAndPrune()
 
 	for {
@@ -141,7 +145,7 @@ func (r *RedisWorkerRegistry) reconcileLoop() {
 }
 
 // reconcileAndPrune scans all worker:* keys in Redis, updates the in-memory
-// map, and removes any workers whose keys have expired (TTL elapsed).
+// cache, and removes workers whose heartbeat keys have expired (worker is down).
 func (r *RedisWorkerRegistry) reconcileAndPrune() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -175,30 +179,30 @@ func (r *RedisWorkerRegistry) reconcileAndPrune() {
 		}
 	}
 
-	// Remove workers not found in this scan
+	// Workers not found in Redis have stopped sending heartbeats — remove them.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id := range r.workers {
 		if !seen[id] {
 			log.Printf("redis_registry: worker %s no longer in Redis, removing", id)
 			delete(r.workers, id)
-			if conn, ok := r.conns[id]; ok {
-				conn.Close()
-				delete(r.conns, id)
-				delete(r.clients, id)
+			if pool, ok := r.pools[id]; ok {
+				pool.close()
+				delete(r.pools, id)
 			}
 		}
 	}
 }
 
-// handleHeartbeat updates the in-memory worker map and dials gRPC if this is a new worker.
+// handleHeartbeat processes a worker heartbeat: updates the in-memory cache
+// and ensures a healthy gRPC connection pool exists for this worker.
 func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	existing, ok := r.workers[entry.ID]
 	if ok {
-		// Update existing entry
+		// Update load metrics for existing worker.
 		existing.Current = entry.Current
 		existing.Capacity = entry.Capacity
 		existing.CPUPct = entry.CPUPct
@@ -213,17 +217,19 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 			existing.MachineID = entry.MachineID
 		}
 	} else {
-		// New worker
+		// First time seeing this worker — add to cache.
 		r.workers[entry.ID] = &entry
 		log.Printf("redis_registry: new worker registered: %s (region=%s, grpc=%s)", entry.ID, entry.Region, entry.GRPCAddr)
 	}
 
-	// Ensure gRPC connection exists and is healthy.
-	// Re-dial if address changed OR connection is in a failed state.
+	// Ensure a gRPC connection pool exists and is healthy.
+	// Re-create the pool if the worker's gRPC address changed (e.g. new IP after
+	// restart) or if the primary connection entered a failed state.
 	if entry.GRPCAddr != "" {
-		if conn, hasConn := r.conns[entry.ID]; hasConn {
+		pool, hasPool := r.pools[entry.ID]
+		if hasPool {
 			addrChanged := existing != nil && existing.GRPCAddr != entry.GRPCAddr
-			state := conn.GetState()
+			state := pool.conns[0].GetState()
 			connDead := state == connectivity.TransientFailure || state == connectivity.Shutdown
 			if addrChanged || connDead {
 				if addrChanged {
@@ -231,94 +237,34 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 						entry.ID, existing.GRPCAddr, entry.GRPCAddr)
 				} else {
 					log.Printf("redis_registry: worker %s gRPC connection in %s state, re-dialing",
-						entry.ID, conn.GetState().String())
+						entry.ID, state.String())
 				}
-				conn.Close()
-				delete(r.conns, entry.ID)
-				delete(r.clients, entry.ID)
-				r.dialWorkerLocked(entry.ID, entry.GRPCAddr)
+				pool.close()
+				delete(r.pools, entry.ID)
+				hasPool = false
 			}
-		} else {
-			r.dialWorkerLocked(entry.ID, entry.GRPCAddr)
+		}
+		if !hasPool {
+			capacity := entry.Capacity
+			if w, ok := r.workers[entry.ID]; ok {
+				capacity = w.Capacity
+			}
+			pool, err := dialPool(entry.GRPCAddr, capacity)
+			if err != nil {
+				log.Printf("redis_registry: failed to dial gRPC pool for worker %s at %s: %v", entry.ID, entry.GRPCAddr, err)
+			} else {
+				r.pools[entry.ID] = pool
+			}
 		}
 	}
 }
 
-// dialWorkerLocked dials a gRPC connection to a worker. Must be called with r.mu held.
-func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
-	creds, err := grpctls.ClientCredentials()
-	if err != nil {
-		log.Printf("redis_registry: failed to load TLS credentials for worker %s: %v", workerID, err)
-		return
-	}
-	conn, err := grpc.NewClient(grpcAddr,
-		grpc.WithTransportCredentials(creds),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(256*1024*1024),
-			grpc.MaxCallSendMsgSize(256*1024*1024),
-		),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-	)
-	if err != nil {
-		log.Printf("redis_registry: failed to dial gRPC for worker %s at %s: %v", workerID, grpcAddr, err)
-		return
-	}
-	// Force the lazy connection to start connecting immediately.
-	// Without this, grpc.NewClient stays IDLE until the first RPC,
-	// which means keepalive can't detect a dead connection.
-	conn.Connect()
-	r.conns[workerID] = conn
+// --- Worker selection ---
 
-	// Create a pool of gRPC clients over multiple connections to avoid
-	// HTTP/2 head-of-line blocking under concurrent load. A single HTTP/2
-	// connection with 64KB send window becomes a bottleneck when 100+
-	// concurrent RPCs share it.
-	// Scale pool size by worker capacity: 1 connection per 25 sandboxes, min 8, max 16.
-	poolSize := 8 // default
-	if w, ok := r.workers[workerID]; ok && w.Capacity > 0 {
-		poolSize = w.Capacity / 25
-	}
-	if poolSize < 8 {
-		poolSize = 8
-	}
-	if poolSize > 16 {
-		poolSize = 16
-	}
-	clients := make([]pb.SandboxWorkerClient, poolSize)
-	clients[0] = pb.NewSandboxWorkerClient(conn)
-	for i := 1; i < poolSize; i++ {
-		extraConn, err := grpc.NewClient(grpcAddr,
-			grpc.WithTransportCredentials(creds),
-			grpc.WithDefaultCallOptions(
-				grpc.MaxCallRecvMsgSize(256*1024*1024),
-				grpc.MaxCallSendMsgSize(256*1024*1024),
-			),
-			grpc.WithKeepaliveParams(keepalive.ClientParameters{
-				Time:                30 * time.Second,
-				Timeout:             10 * time.Second,
-				PermitWithoutStream: true,
-			}),
-		)
-		if err != nil {
-			log.Printf("redis_registry: failed to create pool connection %d for worker %s: %v", i, workerID, err)
-			break
-		}
-		extraConn.Connect()
-		clients[i] = pb.NewSandboxWorkerClient(extraConn)
-	}
-	r.clients[workerID] = clients[0] // default client for GetWorkerClient
-	r.clientPools[workerID] = clients
-	log.Printf("redis_registry: gRPC connection pool (%d) initiated to worker %s at %s", len(clients), workerID, grpcAddr)
-}
-
-// GetLeastLoadedWorker returns the worker with the best combination of remaining capacity
-// and resource headroom. Workers under heavy resource pressure (CPU > 90% or mem > 90%)
-// are skipped. If region is non-empty, only workers in that region are considered.
-// If no workers match the region, falls back to all workers.
+// GetLeastLoadedWorker picks the best worker for a new sandbox.
+// Scoring: remaining capacity × resource headroom (CPU + memory).
+// Workers with >90% CPU or memory are excluded.
+// Prefers workers in the requested region, falls back to any region.
 func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry, pb.SandboxWorkerClient, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -326,7 +272,7 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 	var best *WorkerEntry
 	bestScore := -1.0
 
-	// First pass: try workers in the requested region
+	// First pass: workers in the requested region.
 	for _, w := range r.workers {
 		if region != "" && w.Region != region {
 			continue
@@ -335,11 +281,9 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 		if remaining <= 0 {
 			continue
 		}
-		// Skip workers under heavy resource pressure
 		if w.CPUPct > 90 || w.MemPct > 90 {
 			continue
 		}
-		// Score: remaining capacity weighted by resource headroom
 		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0
 		score := float64(remaining) * resourceScore
 		if score > bestScore {
@@ -348,7 +292,7 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 		}
 	}
 
-	// Fallback: try any region
+	// Fallback: any region if no match found.
 	if best == nil && region != "" {
 		for _, w := range r.workers {
 			remaining := w.Capacity - w.Current
@@ -371,34 +315,28 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 		return nil, nil, fmt.Errorf("no workers available")
 	}
 
-	client, ok := r.clients[best.ID]
+	pool, ok := r.pools[best.ID]
 	if !ok {
 		return nil, nil, fmt.Errorf("no gRPC connection to worker %s", best.ID)
 	}
 
-	return best, client, nil
+	return best, pool.get(), nil
 }
 
-// GetWorkerClient returns the gRPC client for a specific worker.
+// GetWorkerClient returns a gRPC client for a specific worker, selected
+// round-robin from the connection pool.
 func (r *RedisWorkerRegistry) GetWorkerClient(workerID string) (pb.SandboxWorkerClient, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Round-robin across connection pool to avoid HTTP/2 head-of-line blocking
-	pool, ok := r.clientPools[workerID]
-	if ok && len(pool) > 0 {
-		idx := atomic.AddUint64(&r.poolCounter, 1) % uint64(len(pool))
-		return pool[idx], nil
-	}
-
-	client, ok := r.clients[workerID]
+	pool, ok := r.pools[workerID]
 	if !ok {
 		return nil, fmt.Errorf("no gRPC connection to worker %s", workerID)
 	}
-	return client, nil
+	return pool.get(), nil
 }
 
-// GetWorker returns the entry for a specific worker.
+// GetWorker returns the cached state for a specific worker, or nil if unknown.
 func (r *RedisWorkerRegistry) GetWorker(workerID string) *WorkerEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -417,24 +355,26 @@ func (r *RedisWorkerRegistry) GetAllWorkers() []*WorkerEntry {
 	return result
 }
 
-// Stop closes the Redis client and all gRPC connections.
+// Stop shuts down the registry: stops discovery loops, closes all gRPC
+// connection pools, and disconnects from Redis.
 func (r *RedisWorkerRegistry) Stop() {
 	close(r.stop)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for id, conn := range r.conns {
-		conn.Close()
-		delete(r.conns, id)
-		delete(r.clients, id)
+	for id, pool := range r.pools {
+		pool.close()
+		delete(r.pools, id)
 	}
 
 	r.rdb.Close()
 	log.Println("redis_registry: stopped")
 }
 
-// Regions returns all known regions (satisfies ScalerRegistry).
+// --- Autoscaler interface (ScalerRegistry) ---
+
+// Regions returns all regions that have at least one registered worker.
 func (r *RedisWorkerRegistry) Regions() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -451,7 +391,7 @@ func (r *RedisWorkerRegistry) Regions() []string {
 	return regions
 }
 
-// GetWorkersByRegion returns workers in a region (satisfies ScalerRegistry).
+// GetWorkersByRegion returns all workers in a specific region.
 func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -475,7 +415,8 @@ func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 	return result
 }
 
-// RegionResourcePressure returns the maximum CPU and memory usage across all workers in a region (satisfies ScalerRegistry).
+// RegionResourcePressure returns the peak CPU and memory usage across all
+// workers in a region. Used by the autoscaler to decide when to scale up.
 func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, maxMem float64) {
 	workers := r.GetWorkersByRegion(region)
 	for _, w := range workers {
@@ -489,7 +430,8 @@ func (r *RedisWorkerRegistry) RegionResourcePressure(region string) (maxCPU, max
 	return maxCPU, maxMem
 }
 
-// RegionUtilization returns the average utilization for a region (satisfies ScalerRegistry).
+// RegionUtilization returns the average sandbox utilization (current/capacity)
+// across all workers in a region. Used by the autoscaler for scale-down decisions.
 func (r *RedisWorkerRegistry) RegionUtilization(region string) float64 {
 	workers := r.GetWorkersByRegion(region)
 	if len(workers) == 0 {

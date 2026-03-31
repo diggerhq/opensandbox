@@ -28,6 +28,8 @@ type BlobClient interface {
 	Head(ctx context.Context, bucket, key string) (int64, error)
 	// Delete removes the object at the given key.
 	Delete(ctx context.Context, bucket, key string) error
+	// BackendName returns a human-readable name for the storage backend (e.g. "S3", "Azure Blob").
+	BackendName() string
 }
 
 // NewBlobClient creates the appropriate blob client based on the endpoint.

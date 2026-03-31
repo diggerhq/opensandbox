@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -48,11 +47,7 @@ func NewCheckpointStore(cfg S3Config) (*CheckpointStore, error) {
 		return nil, fmt.Errorf("failed to create blob client: %w", err)
 	}
 
-	backend := "S3"
-	if strings.Contains(cfg.Endpoint, ".blob.core.windows.net") {
-		backend = "Azure Blob"
-	}
-	log.Printf("storage: using %s backend (endpoint=%s, bucket=%s)", backend, cfg.Endpoint, cfg.Bucket)
+	log.Printf("storage: using %s backend (endpoint=%s, bucket=%s)", blob.BackendName(), cfg.Endpoint, cfg.Bucket)
 
 	return &CheckpointStore{
 		blob:   blob,

@@ -15,6 +15,8 @@ type azureBlobClient struct {
 	connStr string
 }
 
+func (c *azureBlobClient) BackendName() string { return "Azure Blob" }
+
 // normalizeKey strips the container name prefix from the key if present.
 // S3 keys often include the bucket name (e.g., "checkpoints/sb-xxx/...") because
 // S3 treats bucket and key as separate. Azure Blob uses container + blob name,

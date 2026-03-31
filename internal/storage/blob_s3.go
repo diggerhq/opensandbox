@@ -17,6 +17,8 @@ type s3BlobClient struct {
 	client *s3.Client
 }
 
+func (c *s3BlobClient) BackendName() string { return "S3" }
+
 // buildS3Client creates an S3 client from config.
 func buildS3Client(cfg S3Config) (*s3.Client, error) {
 	forcePathStyle := cfg.ForcePathStyle
