@@ -58,15 +58,6 @@
       "pages": ["introduction", "quickstart", "how-it-works"]
     },
     {
-      "group": "Agents",
-      "pages": [
-        "agents/overview",
-        "agents/events",
-        "agents/tools",
-        "agents/multi-turn"
-      ]
-    },
-    {
       "group": "Sandboxes",
       "pages": [
         "sandboxes/overview",
@@ -114,7 +105,6 @@
         "reference/typescript-sdk/overview",
         "reference/typescript-sdk/sandbox",
         "reference/typescript-sdk/exec",
-        "reference/typescript-sdk/agent",
         "reference/typescript-sdk/filesystem",
         "reference/typescript-sdk/pty",
         "reference/typescript-sdk/image",
@@ -128,7 +118,6 @@
         "reference/python-sdk/overview",
         "reference/python-sdk/sandbox",
         "reference/python-sdk/exec",
-        "reference/python-sdk/agent",
         "reference/python-sdk/filesystem",
         "reference/python-sdk/pty",
         "reference/python-sdk/image",
@@ -172,16 +161,6 @@
             "api-reference/exec/create-session",
             "api-reference/exec/list-sessions",
             "api-reference/exec/kill-session"
-          ]
-        },
-        {
-          "group": "Agent Sessions",
-          "pages": [
-            "api-reference/agent/create",
-            "api-reference/agent/list",
-            "api-reference/agent/prompt",
-            "api-reference/agent/interrupt",
-            "api-reference/agent/kill"
           ]
         },
         {
