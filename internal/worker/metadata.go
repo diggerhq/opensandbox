@@ -20,6 +20,7 @@ import (
 type MetadataServer struct {
 	manager sandbox.Manager
 	region  string
+	onScale func(sandboxID string, memoryMB, cpuPercent int) // billing callback
 
 	mu         sync.RWMutex
 	byGuestIP  map[string]sandboxEntry // guestIP → entry
@@ -42,6 +43,11 @@ func NewMetadataServer(manager sandbox.Manager, region string) *MetadataServer {
 		byGuestIP: make(map[string]sandboxEntry),
 		bySandbox: make(map[string]string),
 	}
+}
+
+// SetOnScale registers a callback invoked after a successful in-VM scale operation.
+func (ms *MetadataServer) SetOnScale(fn func(sandboxID string, memoryMB, cpuPercent int)) {
+	ms.onScale = fn
 }
 
 // RegisterSandbox maps a guest IP to a sandbox ID so the metadata handler can identify callers.
@@ -235,6 +241,11 @@ func (ms *MetadataServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	if err := ms.manager.SetResourceLimits(ctx, entry.SandboxID, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec); err != nil {
 		http.Error(w, fmt.Sprintf("failed to set limits: %v", err), http.StatusInternalServerError)
 		return
+	}
+
+	// Notify billing of scale event
+	if ms.onScale != nil && req.MemoryMB > 0 {
+		ms.onScale(entry.SandboxID, req.MemoryMB, req.CPUPercent)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

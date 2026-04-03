@@ -55,6 +55,8 @@ func main() {
 	var autosaverSyncer worker.SyncFSer
 	// Backend-specific graceful shutdown
 	var doGracefulShutdown func(checkpointStore *storage.CheckpointStore, store *db.Store)
+	// Metadata server (set by QEMU backend, wired to store later)
+	var metadataSrv *worker.MetadataServer
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
@@ -110,7 +112,7 @@ func main() {
 		autosaverSyncer = qmMgr
 
 		// Start metadata server (169.254.169.254 equivalent, served on :8888)
-		metadataSrv := worker.NewMetadataServer(qmMgr, cfg.Region)
+		metadataSrv = worker.NewMetadataServer(qmMgr, cfg.Region)
 		metadataSrv.Start(":8888")
 		defer metadataSrv.Close()
 		qmMgr.SetMetadataCallbacks(metadataSrv.RegisterSandbox, metadataSrv.UnregisterSandbox)
@@ -235,6 +237,18 @@ func main() {
 				log.Printf("opensandbox-worker: warning: session reconciliation failed: %v", err)
 			} else if stopped > 0 {
 				log.Printf("opensandbox-worker: reconciled %d unrecoverable sessions as stopped", stopped)
+			}
+
+			// Wire up metadata server billing callback
+			if metadataSrv != nil {
+				st := store // capture for closure
+				metadataSrv.SetOnScale(func(sandboxID string, memoryMB, cpuPercent int) {
+					orgID, err := st.GetSandboxOrgID(context.Background(), sandboxID)
+					if err != nil || orgID == "" {
+						return
+					}
+					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent)
+				})
 			}
 		}
 	}

@@ -57,6 +57,18 @@ func (s *Store) RecordScaleEvent(ctx context.Context, sandboxID, orgID string, m
 	return tx.Commit(ctx)
 }
 
+// GetSandboxOrgID looks up the org ID for a sandbox from the sessions table.
+func (s *Store) GetSandboxOrgID(ctx context.Context, sandboxID string) (string, error) {
+	var orgID uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`SELECT org_id FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`,
+		sandboxID).Scan(&orgID)
+	if err != nil {
+		return "", err
+	}
+	return orgID.String(), nil
+}
+
 // EndScaleEvent marks the current scale event as ended (sandbox stopped/hibernated).
 func (s *Store) EndScaleEvent(ctx context.Context, sandboxID string) error {
 	_, err := s.pool.Exec(ctx,

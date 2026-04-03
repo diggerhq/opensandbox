@@ -211,9 +211,11 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		if cpuPct < 100 {
 			cpuPct = 100
 		}
-		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from session
-		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+			}
 		}
 	}
 
@@ -571,9 +573,11 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	if s.store != nil {
 		memMB := 1024 // TODO: get actual memory from sandbox state
 		cpuPct := 100
-		orgID := "00000000-0000-0000-0000-000000000001"
-		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
+			}
 		}
 	}
 
@@ -827,9 +831,11 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	if s.store != nil && req.MaxMemoryBytes > 0 {
 		memMB := int(req.MaxMemoryBytes / (1024 * 1024))
 		cpuPct := int(req.CpuMaxUsec / 1000) // 100000us → 100%
-		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from sandbox session
-		if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, req.SandboxId)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+			}
 		}
 	}
 
