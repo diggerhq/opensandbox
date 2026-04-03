@@ -31,6 +31,7 @@ type WorkerEntry struct {
 	MemPct    float64 `json:"mem_pct"`
 	DiskPct       float64 `json:"disk_pct"`
 	GoldenVersion string  `json:"golden_version,omitempty"`
+	WorkerVersion string  `json:"worker_version,omitempty"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -205,6 +206,9 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		if entry.GoldenVersion != "" {
 			existing.GoldenVersion = entry.GoldenVersion
 		}
+		if entry.WorkerVersion != "" {
+			existing.WorkerVersion = entry.WorkerVersion
+		}
 		if entry.GRPCAddr != "" {
 			existing.GRPCAddr = entry.GRPCAddr
 		}
@@ -221,26 +225,40 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 	}
 
 	// Ensure gRPC connection exists and is healthy.
-	// Re-dial if address changed OR connection is in a failed state.
+	// Re-dial if address changed, connection is failed/idle, or worker is newly registered.
 	if entry.GRPCAddr != "" {
+		needsDial := false
 		if conn, hasConn := r.conns[entry.ID]; hasConn {
 			addrChanged := existing != nil && existing.GRPCAddr != entry.GRPCAddr
 			state := conn.GetState()
 			connDead := state == connectivity.TransientFailure || state == connectivity.Shutdown
-			if addrChanged || connDead {
+			// Also treat IDLE as potentially stale — the remote may have restarted.
+			// gRPC won't detect a dead peer until an RPC is attempted on an IDLE conn.
+			connIdle := state == connectivity.Idle
+			isNewWorker := existing == nil
+
+			if addrChanged || connDead || (connIdle && isNewWorker) {
 				if addrChanged {
 					log.Printf("redis_registry: worker %s gRPC address changed (%s → %s), re-dialing",
 						entry.ID, existing.GRPCAddr, entry.GRPCAddr)
 				} else {
-					log.Printf("redis_registry: worker %s gRPC connection in %s state, re-dialing",
-						entry.ID, conn.GetState().String())
+					log.Printf("redis_registry: worker %s gRPC connection in %s state (new=%v), re-dialing",
+						entry.ID, state.String(), isNewWorker)
 				}
 				conn.Close()
 				delete(r.conns, entry.ID)
 				delete(r.clients, entry.ID)
-				r.dialWorkerLocked(entry.ID, entry.GRPCAddr)
+				needsDial = true
+			} else if connIdle {
+				// Existing worker with idle connection — force it to reconnect
+				// so stale connections are detected quickly.
+				conn.ResetConnectBackoff()
+				conn.Connect()
 			}
 		} else {
+			needsDial = true
+		}
+		if needsDial {
 			r.dialWorkerLocked(entry.ID, entry.GRPCAddr)
 		}
 	}
@@ -260,8 +278,8 @@ func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
 			grpc.MaxCallSendMsgSize(256*1024*1024),
 		),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
+			Time:                10 * time.Second,
+			Timeout:             5 * time.Second,
 			PermitWithoutStream: true,
 		}),
 	)
@@ -283,28 +301,51 @@ func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
 // are skipped. If region is non-empty, only workers in that region are considered.
 // If no workers match the region, falls back to all workers.
 func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry, pb.SandboxWorkerClient, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	var best *WorkerEntry
 	bestScore := -1.0
+
+	// Bin-pack strategy: fill active workers before touching idle reserves.
+	// This keeps idle workers as headroom for burst absorption and avoids
+	// thrashing between scale-up (headroom) and scale-down (low utilization).
+	//
+	// Priority order:
+	//   1. Most-loaded worker that still has capacity (pack tightly)
+	//   2. Idle worker (dip into reserve only when active workers are full)
+	//   3. Over-capacity worker (absorb overflow while new workers boot)
+	scoreWorker := func(w *WorkerEntry) float64 {
+		if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
+			return -1 // skip
+		}
+		remaining := w.Capacity - w.Current
+		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
+
+		if remaining <= 0 {
+			// Over capacity: last resort
+			return 0.01 * resourceScore
+		}
+		if w.Current == 0 {
+			// Idle/reserve: prefer active workers over idle ones.
+			// Score between 0.1 and 1.0 so it ranks below any active worker.
+			return 0.1 * resourceScore
+		}
+		// Active with capacity: higher current = higher score (bin-pack).
+		// Add remaining as a tiebreaker so we don't overflow a nearly-full worker
+		// when another active worker has more room.
+		return float64(w.Current)*10.0 + float64(remaining)*resourceScore
+	}
 
 	// First pass: try workers in the requested region
 	for _, w := range r.workers {
 		if region != "" && w.Region != region {
 			continue
 		}
-		remaining := w.Capacity - w.Current
-		if remaining <= 0 {
+		score := scoreWorker(w)
+		if score < 0 {
 			continue
 		}
-		// Skip workers under heavy resource pressure
-		if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
-			continue
-		}
-		// Score: remaining capacity weighted by resource headroom
-		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
-		score := float64(remaining) * resourceScore
 		if score > bestScore {
 			best = w
 			bestScore = score
@@ -314,15 +355,10 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 	// Fallback: try any region
 	if best == nil && region != "" {
 		for _, w := range r.workers {
-			remaining := w.Capacity - w.Current
-			if remaining <= 0 {
+			score := scoreWorker(w)
+			if score < 0 {
 				continue
 			}
-			if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
-				continue
-			}
-			resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
-			score := float64(remaining) * resourceScore
 			if score > bestScore {
 				best = w
 				bestScore = score
@@ -338,6 +374,10 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 	if !ok {
 		return nil, nil, fmt.Errorf("no gRPC connection to worker %s", best.ID)
 	}
+
+	// Optimistically increment Current so the next call spreads load.
+	// The heartbeat will correct this within 10s if the create fails.
+	best.Current++
 
 	return best, client, nil
 }
@@ -427,6 +467,7 @@ func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 				MemPct:    w.MemPct,
 				DiskPct:       w.DiskPct,
 				GoldenVersion: w.GoldenVersion,
+				WorkerVersion: w.WorkerVersion,
 			})
 		}
 	}

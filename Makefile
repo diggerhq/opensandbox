@@ -6,7 +6,9 @@ BINARY_WORKER = opensandbox-worker
 BINARY_AGENT = osb-agent
 BUILD_DIR = bin
 VERSION ?= $(shell cat VERSION | tr -d '[:space:]').dev
+GIT_SHA ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "dev")
 LDFLAGS_OC = -s -w -X github.com/opensandbox/opensandbox/cmd/oc/internal/commands.Version=$(VERSION)
+LDFLAGS_WORKER = -X main.WorkerVersion=$(GIT_SHA) -X main.AgentVersion=$(GIT_SHA)
 
 ## help: Show this help message
 help:
@@ -21,11 +23,11 @@ build-server:
 
 ## build-worker: Build the sandbox worker
 build-worker:
-	CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_WORKER) ./cmd/worker
+	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS_WORKER)" -o $(BUILD_DIR)/$(BINARY_WORKER) ./cmd/worker
 
 ## build-worker-arm64: Cross-compile worker for Linux ARM64 (Graviton bare-metal)
 build-worker-arm64:
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BUILD_DIR)/$(BINARY_WORKER)-arm64 ./cmd/worker
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS_WORKER)" -o $(BUILD_DIR)/$(BINARY_WORKER)-arm64 ./cmd/worker
 
 ## build-agent: Build the in-VM agent (static binary for Linux ARM64)
 build-agent:

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"strconv"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -937,13 +939,21 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 	if strings.HasSuffix(workspacePath, ".ext4") {
 		wsFmt = "raw"
 	}
+	// Memory layout: base memory + virtio-mem pool for hotplug scaling.
+	// The virtio-mem backend allocates lazily (only requested-size is committed),
+	// but maxmem must exceed base+pool for QEMU to accept the device.
+	// Pool size = 15GB covers scaling from 1GB base up to 16GB total.
+	// For migrations requesting >16GB, we use the full requested amount as base
+	// (no virtio-mem needed since the source already has the memory hotplugged).
+	virtioMemPoolMB := 15360 // 15GB — enough for 1GB->16GB scaling
+	maxMemMB := memMB + virtioMemPoolMB
+
 	return []string{
 		"-machine", "q35,accel=kvm",
 		"-cpu", "host",
-		"-m", fmt.Sprintf("%dM,maxmem=16G", memMB),
+		"-m", fmt.Sprintf("%dM,slots=1,maxmem=%dM", memMB, maxMemMB),
 		// virtio-mem: pluggable memory pool. Scale via QMP qom-set requested-size.
-		// 15GB max + base gives 16GB ceiling. Block size 128MB for granularity.
-		"-object", "memory-backend-ram,id=vmem0,size=15360M",
+		"-object", fmt.Sprintf("memory-backend-ram,id=vmem0,size=%dM", virtioMemPoolMB),
 		"-device", "virtio-mem-pci,memdev=vmem0,id=vm0,block-size=128M,requested-size=0",
 		"-smp", fmt.Sprintf("%d", cpus),
 		"-kernel", m.cfg.KernelPath,
@@ -1653,12 +1663,28 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		}
 		// Round up to 128MB block size
 		additionalMB = ((additionalMB + 127) / 128) * 128
+
+		// Check committed memory across all VMs before attempting hotplug.
+		// Reserve 20% of host RAM for OS, QEMU overhead, page cache, etc.
+		if additionalMB > vm.virtioMemRequestedMB {
+			deltaMB := additionalMB - vm.virtioMemRequestedMB
+			committedMB := m.totalCommittedMemoryMB()
+			hostTotalMB := m.hostMemoryMB()
+			reserveMB := hostTotalMB / 5 // 20% safety margin
+			availableMB := hostTotalMB - committedMB - reserveMB
+
+			if deltaMB > availableMB {
+				log.Printf("qemu: virtio-mem %s: need %dMB but only %dMB available (committed=%dMB, host=%dMB, reserve=%dMB)",
+					sandboxID, deltaMB, availableMB, committedMB, hostTotalMB, reserveMB)
+				return fmt.Errorf("insufficient_capacity: need %dMB additional but only %dMB available on this worker (committed=%dMB/%dMB)",
+					deltaMB, availableMB, committedMB, hostTotalMB)
+			}
+		}
+
 		if additionalMB != vm.virtioMemRequestedMB {
 			if err := vm.qmp.SetVirtioMemSize(additionalMB); err != nil {
-				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — capping cgroup to current VM memory", sandboxID, additionalMB, err)
-				// Cap cgroup memory limit to actual VM memory so we don't set
-				// cgroup higher than the physical RAM available to the guest.
-				maxMemoryBytes = int64(vm.MemoryMB) * 1024 * 1024
+				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — returning insufficient capacity error", sandboxID, additionalMB, err)
+				return fmt.Errorf("insufficient_capacity: cannot hotplug %dMB on this worker: %w", additionalMB, err)
 			} else {
 				vm.virtioMemRequestedMB = additionalMB
 				vm.MemoryMB = vm.baseMemoryMB + additionalMB
@@ -1668,6 +1694,56 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 	}
 
 	return vm.agent.SetResourceLimits(ctx, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+}
+
+// totalCommittedMemoryMB returns the sum of MemoryMB (base + virtio-mem) across all running VMs.
+// This represents the maximum host memory that could be consumed if all VMs use their full allocation.
+func (m *Manager) totalCommittedMemoryMB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	total := 0
+	for _, vm := range m.vms {
+		total += vm.MemoryMB
+	}
+	return total
+}
+
+// hostMemoryMB returns the host's total physical memory in MB.
+// getWorkerIP returns the worker's VNet-routable IP address for inter-worker communication.
+// Uses OPENSANDBOX_GRPC_ADVERTISE (host:port) if set, otherwise detects from the default route.
+func (m *Manager) getWorkerIP() string {
+	if addr := os.Getenv("OPENSANDBOX_GRPC_ADVERTISE"); addr != "" {
+		// Format: "10.100.1.5:9090" — extract just the IP
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			return host
+		}
+		return addr
+	}
+	// Fallback: detect from default route interface
+	if conn, err := net.Dial("udp", "8.8.8.8:80"); err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			return addr.IP.String()
+		}
+	}
+	return "127.0.0.1"
+}
+
+func (m *Manager) hostMemoryMB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 64 * 1024 // fallback: assume 64GB
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, _ := strconv.Atoi(fields[1])
+				return kb / 1024
+			}
+		}
+	}
+	return 64 * 1024
 }
 
 // Stats returns live resource usage from the VM.

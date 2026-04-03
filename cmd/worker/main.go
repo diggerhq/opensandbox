@@ -29,6 +29,9 @@ import (
 // AgentVersion is the expected agent version, set at build time via -ldflags.
 var AgentVersion = "dev"
 
+// WorkerVersion is the worker binary version (git SHA), set at build time via -ldflags.
+var WorkerVersion = "dev"
+
 func main() {
 	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
 	if err := config.LoadSecretsFromKeyVault(); err != nil {
@@ -40,7 +43,7 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	log.Printf("opensandbox-worker: starting (id=%s, region=%s, backend=qemu)...", cfg.WorkerID, cfg.Region)
+	log.Printf("opensandbox-worker: starting (id=%s, region=%s, version=%s, backend=qemu)...", cfg.WorkerID, cfg.Region, WorkerVersion)
 
 	ctx := context.Background()
 
@@ -327,6 +330,7 @@ func main() {
 		if err != nil {
 			log.Printf("opensandbox-worker: Redis heartbeat not available: %v", err)
 		} else {
+			hb.SetWorkerVersion(WorkerVersion)
 			if qemuMgr != nil {
 				hb.SetGoldenVersion(qemuMgr.GoldenVersion())
 			}
@@ -345,6 +349,31 @@ func main() {
 				cpuPct, memPct, diskPct := worker.SystemStats()
 				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
 			})
+			// On reconnect after outage, reconcile sandbox state with DB
+			if store != nil {
+				hb.OnReconnect(func() {
+					sandboxes, err := mgr.List(context.Background())
+					if err != nil {
+						log.Printf("opensandbox-worker: reconnect reconciliation failed (list): %v", err)
+						return
+					}
+					var runningIDs []string
+					for _, sb := range sandboxes {
+						if sb.Status == "running" {
+							runningIDs = append(runningIDs, sb.ID)
+						}
+					}
+					if len(runningIDs) == 0 {
+						return
+					}
+					fixed, err := store.ReconcileWorkerReconnect(context.Background(), cfg.WorkerID, runningIDs)
+					if err != nil {
+						log.Printf("opensandbox-worker: reconnect reconciliation failed: %v", err)
+					} else if fixed > 0 {
+						log.Printf("opensandbox-worker: reconnect reconciliation: %d sessions restored to running", fixed)
+					}
+				})
+			}
 			defer hb.Stop()
 			log.Println("opensandbox-worker: Redis heartbeat started")
 		}

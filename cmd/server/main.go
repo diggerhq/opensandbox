@@ -160,7 +160,7 @@ func main() {
 		var pool compute.Pool
 		var poolName string
 
-		if cfg.AzureSubscriptionID != "" && cfg.AzureImageID != "" {
+		if cfg.AzureSubscriptionID != "" && (cfg.AzureImageID != "" || cfg.AzureKeyVaultName != "") {
 			// Build worker env template — new VMs get this via cloud-init.
 			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are patched by cloud-init
 			// with the VM's actual private IP and hostname.
@@ -188,7 +188,7 @@ func main() {
 					"OPENSANDBOX_JWT_SECRET=%s\n"+
 					"OPENSANDBOX_WORKER_ID=PLACEHOLDER\n"+
 					"OPENSANDBOX_REGION=%s\n"+
-					"OPENSANDBOX_MAX_CAPACITY=100\n"+
+					"OPENSANDBOX_MAX_CAPACITY=%d\n"+
 					"OPENSANDBOX_PORT=8081\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=%d\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_CPUS=%d\n"+
@@ -201,6 +201,7 @@ func main() {
 					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n",
 				cfg.JWTSecret,
 				cfg.Region,
+				cfg.MaxCapacity,
 				cfg.DefaultSandboxMemoryMB,
 				cfg.DefaultSandboxCPUs,
 				workerDBURL,
@@ -221,15 +222,24 @@ func main() {
 				ImageID:         cfg.AzureImageID,
 				SubnetID:        cfg.AzureSubnetID,
 				SSHPublicKey:    cfg.AzureSSHPublicKey,
+				KeyVaultName:    cfg.AzureKeyVaultName,
 				WorkerEnvBase64: workerEnvB64,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)
 			}
+			// If image not set statically but Key Vault is configured, fetch initial image
+			if cfg.AzureImageID == "" && cfg.AzureKeyVaultName != "" {
+				imgID, version, kvErr := azPool.RefreshAMI(context.Background())
+				if kvErr != nil {
+					log.Fatalf("opensandbox: Azure image not set and Key Vault fetch failed: %v", kvErr)
+				}
+				log.Printf("opensandbox: Azure image from Key Vault: %s (version=%s)", imgID, version)
+			}
 			pool = azPool
-			poolName = fmt.Sprintf("Azure (size=%s, image=%s)", cfg.AzureVMSize, cfg.AzureImageID)
-		} else if cfg.EC2AMI != "" {
-			// AWS EC2 compute pool
+			poolName = fmt.Sprintf("Azure (size=%s, image=%s, keyvault=%s)", cfg.AzureVMSize, cfg.AzureImageID, cfg.AzureKeyVaultName)
+		} else if cfg.EC2AMI != "" || cfg.EC2SSMParameterName != "" {
+			// AWS EC2 compute pool (AMI from config or dynamically from SSM)
 			ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
 				Region:             cfg.S3Region,
 				AccessKeyID:        cfg.S3AccessKeyID,
@@ -241,12 +251,21 @@ func main() {
 				KeyName:            cfg.EC2KeyName,
 				IAMInstanceProfile: cfg.EC2IAMInstanceProfile,
 				SecretsARN:         cfg.SecretsARN,
+				SSMParameterName:   cfg.EC2SSMParameterName,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
 			}
+			// If AMI not set statically but SSM is configured, fetch initial AMI from SSM
+			if cfg.EC2AMI == "" && cfg.EC2SSMParameterName != "" {
+				amiID, version, ssmErr := ec2Pool.RefreshAMI(context.Background())
+				if ssmErr != nil {
+					log.Fatalf("opensandbox: EC2 AMI not set and SSM fetch failed: %v", ssmErr)
+				}
+				log.Printf("opensandbox: EC2 AMI from SSM: %s (version=%s)", amiID, version)
+			}
 			pool = ec2Pool
-			poolName = fmt.Sprintf("EC2 (ami=%s, type=%s)", cfg.EC2AMI, cfg.EC2InstanceType)
+			poolName = fmt.Sprintf("EC2 (ami=%s, type=%s, ssm=%s)", cfg.EC2AMI, cfg.EC2InstanceType, cfg.EC2SSMParameterName)
 		}
 
 		if pool != nil {
@@ -258,11 +277,28 @@ func main() {
 				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
 				MinWorkers:  cfg.MinWorkersPerRegion,
 				MaxWorkers:  cfg.MaxWorkersPerRegion,
+				IdleReserve: cfg.IdleReserveWorkers,
 			})
 			scaler.Start()
 			defer scaler.Stop()
 			log.Printf("opensandbox: autoscaler started (%s)", poolName)
 		}
+	}
+
+	// Stale migration recovery — reset sandboxes stuck in 'migrating' state
+	if opts.Store != nil {
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				recovered, err := opts.Store.RecoverStaleMigrations(context.Background(), 10*time.Minute)
+				if err != nil {
+					log.Printf("stale-migration-recovery: error: %v", err)
+				} else if recovered > 0 {
+					log.Printf("stale-migration-recovery: reverted %d stale migrations", recovered)
+				}
+			}
+		}()
 	}
 
 	// Initialize control plane subdomain proxy (server mode only).

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
 
 const (
@@ -31,11 +34,14 @@ type EC2PoolConfig struct {
 	KeyName         string
 	IAMInstanceProfile string // IAM instance profile name (for Secrets Manager + S3 access)
 	SecretsARN         string // Secrets Manager ARN passed to worker env
+	SSMParameterName   string // SSM parameter for dynamic AMI ID (e.g. /opensandbox/prod/worker-ami-id)
 }
 
 // EC2Pool implements compute.Pool using AWS EC2 instances.
 type EC2Pool struct {
 	client *ec2.Client
+	awsCfg aws.Config
+	mu     sync.RWMutex // protects cfg.AMI
 	cfg    EC2PoolConfig
 }
 
@@ -44,9 +50,11 @@ type EC2Pool struct {
 func NewEC2Pool(cfg EC2PoolConfig) (*EC2Pool, error) {
 	var client *ec2.Client
 
+	var awsCfgVal aws.Config
+
 	if cfg.AccessKeyID != "" {
 		// Static credentials
-		awsCfg := aws.Config{
+		awsCfgVal = aws.Config{
 			Region: cfg.Region,
 			Credentials: credentials.NewStaticCredentialsProvider(
 				cfg.AccessKeyID,
@@ -54,20 +62,22 @@ func NewEC2Pool(cfg EC2PoolConfig) (*EC2Pool, error) {
 				"",
 			),
 		}
-		client = ec2.NewFromConfig(awsCfg)
 	} else {
 		// IAM credential chain
-		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
+		var err error
+		awsCfgVal, err = awsconfig.LoadDefaultConfig(context.Background(),
 			awsconfig.WithRegion(cfg.Region),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("ec2: failed to load AWS config: %w", err)
 		}
-		client = ec2.NewFromConfig(awsCfg)
 	}
+
+	client = ec2.NewFromConfig(awsCfgVal)
 
 	return &EC2Pool{
 		client: client,
+		awsCfg: awsCfgVal,
 		cfg:    cfg,
 	}, nil
 }
@@ -78,10 +88,14 @@ func (p *EC2Pool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machine
 		instanceType = opts.Size
 	}
 
+	p.mu.RLock()
+	ami := p.cfg.AMI
+	p.mu.RUnlock()
+
 	userData := p.buildUserData(opts)
 
 	input := &ec2.RunInstancesInput{
-		ImageId:      aws.String(p.cfg.AMI),
+		ImageId:      aws.String(ami),
 		InstanceType: ec2types.InstanceType(instanceType),
 		MinCount:     aws.Int32(1),
 		MaxCount:     aws.Int32(1),
@@ -258,6 +272,49 @@ func (p *EC2Pool) instanceToMachine(inst *ec2types.Instance) *Machine {
 		Region:   region,
 		Status:   status,
 	}
+}
+
+// RefreshAMI checks SSM Parameter Store for a new AMI ID and updates the pool config.
+// Returns the current AMI ID and the version string (if a version parameter exists alongside).
+// If SSMParameterName is not configured, returns the static AMI with no error.
+func (p *EC2Pool) RefreshAMI(ctx context.Context) (amiID string, version string, err error) {
+	if p.cfg.SSMParameterName == "" {
+		p.mu.RLock()
+		defer p.mu.RUnlock()
+		return p.cfg.AMI, "", nil
+	}
+
+	ssmClient := ssm.NewFromConfig(p.awsCfg)
+
+	// Fetch AMI ID
+	result, err := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
+		Name: aws.String(p.cfg.SSMParameterName),
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("ec2: SSM GetParameter %s: %w", p.cfg.SSMParameterName, err)
+	}
+	newAMI := aws.ToString(result.Parameter.Value)
+	if newAMI == "" {
+		return "", "", fmt.Errorf("ec2: SSM parameter %s is empty", p.cfg.SSMParameterName)
+	}
+
+	// Fetch version (convention: sibling parameter with last segment replaced by "worker-ami-version")
+	// e.g. /opensandbox/prod/worker-ami-id -> /opensandbox/prod/worker-ami-version
+	versionParam := p.cfg.SSMParameterName[:strings.LastIndex(p.cfg.SSMParameterName, "/")+1] + "worker-ami-version"
+	if vResult, vErr := ssmClient.GetParameter(ctx, &ssm.GetParameterInput{
+		Name: aws.String(versionParam),
+	}); vErr == nil {
+		version = aws.ToString(vResult.Parameter.Value)
+	}
+
+	p.mu.Lock()
+	if newAMI != p.cfg.AMI {
+		log.Printf("ec2: AMI updated via SSM: %s -> %s (version=%s)", p.cfg.AMI, newAMI, version)
+		p.cfg.AMI = newAMI
+	}
+	p.mu.Unlock()
+
+	return newAMI, version, nil
 }
 
 func (p *EC2Pool) buildUserData(opts MachineOpts) string {

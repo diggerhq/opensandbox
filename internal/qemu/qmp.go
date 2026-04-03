@@ -47,7 +47,8 @@ type QMPStatus struct {
 
 // QMPMigrateStatus represents the response from query-migrate.
 type QMPMigrateStatus struct {
-	Status string `json:"status"`
+	Status    string `json:"status"`
+	ErrorDesc string `json:"error-desc,omitempty"`
 }
 
 // ConnectQMP connects to the QMP socket and completes the handshake:

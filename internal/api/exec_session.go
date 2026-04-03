@@ -273,6 +273,11 @@ func (s *Server) execRunRemote(c echo.Context, sandboxID string, req types.Proce
 	if session.OrgID != orgID {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
 	}
+	if session.Status == "migrating" {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "sandbox is migrating, retry shortly",
+		})
+	}
 
 	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
 	if err != nil {

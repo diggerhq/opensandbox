@@ -79,6 +79,7 @@ type Config struct {
 	EC2KeyName             string // SSH key pair name (for debugging)
 	EC2WorkerImage         string // Docker image for containerized workers
 	EC2IAMInstanceProfile  string // IAM instance profile for worker instances (Secrets Manager + S3)
+	EC2SSMParameterName    string // SSM parameter name for dynamic AMI ID (e.g. /opensandbox/prod/worker-ami-id)
 
 	// Azure compute pool (server mode — for auto-scaling worker VMs)
 	AzureSubscriptionID string // Azure subscription ID
@@ -87,6 +88,7 @@ type Config struct {
 	AzureImageID        string // Custom image ID or URN
 	AzureSubnetID       string // Full resource ID of the VNet subnet
 	AzureSSHPublicKey   string // SSH public key for worker VMs
+	AzureKeyVaultName   string // Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
 
 	// Cloudflare (custom hostname for org sandbox domains)
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
@@ -94,8 +96,9 @@ type Config struct {
 
 	// Autoscaler
 	ScaleCooldownSec    int // Cooldown between scale-up actions (seconds), default 300
-	MinWorkersPerRegion int // Minimum workers per region (for pre-provisioned capacity), default 1
+	MinWorkersPerRegion int // Minimum total workers per region, default 1
 	MaxWorkersPerRegion int // Maximum workers per region (hard cap), default 10
+	IdleReserveWorkers  int // Target idle workers for burst absorption, default 1
 
 	// Stripe billing
 	StripeSecretKey     string
@@ -174,6 +177,7 @@ func Load() (*Config, error) {
 		EC2KeyName:         os.Getenv("OPENSANDBOX_EC2_KEY_NAME"),
 		EC2WorkerImage:         envOrDefault("OPENSANDBOX_EC2_WORKER_IMAGE", "opensandbox-worker:latest"),
 		EC2IAMInstanceProfile:  os.Getenv("OPENSANDBOX_EC2_IAM_INSTANCE_PROFILE"),
+		EC2SSMParameterName:    os.Getenv("OPENSANDBOX_EC2_SSM_AMI_PARAM"),
 
 		AzureSubscriptionID: os.Getenv("OPENSANDBOX_AZURE_SUBSCRIPTION_ID"),
 		AzureResourceGroup:  os.Getenv("OPENSANDBOX_AZURE_RESOURCE_GROUP"),
@@ -181,6 +185,7 @@ func Load() (*Config, error) {
 		AzureImageID:        os.Getenv("OPENSANDBOX_AZURE_IMAGE_ID"),
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
+		AzureKeyVaultName:   os.Getenv("OPENSANDBOX_AZURE_KEY_VAULT_NAME"),
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
@@ -188,6 +193,7 @@ func Load() (*Config, error) {
 		ScaleCooldownSec:    envOrDefaultInt("OPENSANDBOX_SCALE_COOLDOWN_SEC", 300),
 		MinWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MIN_WORKERS", 1),
 		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
+		IdleReserveWorkers:  envOrDefaultInt("OPENSANDBOX_IDLE_RESERVE", 1),
 
 		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
 		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),

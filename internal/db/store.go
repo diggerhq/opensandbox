@@ -453,6 +453,7 @@ type SandboxSession struct {
 	ErrorMsg             *string         `json:"errorMsg,omitempty"`
 	BasedOnCheckpointID  *uuid.UUID      `json:"basedOnCheckpointId,omitempty"`
 	LastPatchSequence    int             `json:"lastPatchSequence"`
+	MigratingToWorker    string          `json:"migratingToWorker,omitempty"`
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
@@ -490,6 +491,46 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 		return fmt.Errorf("failed to update sandbox session: %w", err)
 	}
 	return nil
+}
+
+// SetMigrating marks a sandbox as migrating to a target worker.
+// Only transitions from running → migrating.
+func (s *Store) SetMigrating(ctx context.Context, sandboxID, targetWorkerID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'migrating', migrating_to_worker = $1
+		 WHERE sandbox_id = $2 AND status = 'running'`,
+		targetWorkerID, sandboxID)
+	return err
+}
+
+// CompleteMigration marks a sandbox as running on the new worker after successful migration.
+func (s *Store) CompleteMigration(ctx context.Context, sandboxID, newWorkerID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', worker_id = $1, migrating_to_worker = ''
+		 WHERE sandbox_id = $2 AND status = 'migrating'`,
+		newWorkerID, sandboxID)
+	return err
+}
+
+// FailMigration reverts a sandbox to running on its original worker after a failed migration.
+func (s *Store) FailMigration(ctx context.Context, sandboxID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', migrating_to_worker = ''
+		 WHERE sandbox_id = $1 AND status = 'migrating'`,
+		sandboxID)
+	return err
+}
+
+// RecoverStaleMigrations resets any sandbox stuck in 'migrating' status for more than the given duration.
+func (s *Store) RecoverStaleMigrations(ctx context.Context, maxAge time.Duration) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', migrating_to_worker = ''
+		 WHERE status = 'migrating' AND started_at < now() - $1::interval`,
+		maxAge.String())
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*SandboxSession, error) {
@@ -893,6 +934,23 @@ func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (h
 	}
 
 	return int(res1.RowsAffected()), int(res2.RowsAffected()), nil
+}
+
+// ReconcileWorkerReconnect fixes sandbox sessions after a worker reconnects from
+// a network outage. Sandboxes that are actually running locally but marked as
+// "error" in the DB are reset to "running". Returns the number of sessions fixed.
+func (s *Store) ReconcileWorkerReconnect(ctx context.Context, workerID string, runningSandboxIDs []string) (fixed int, err error) {
+	if len(runningSandboxIDs) == 0 {
+		return 0, nil
+	}
+	res, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', error_msg = NULL
+		 WHERE worker_id = $1 AND status = 'error'
+		 AND sandbox_id = ANY($2)`, workerID, runningSandboxIDs)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile worker reconnect: %w", err)
+	}
+	return int(res.RowsAffected()), nil
 }
 
 // UpsertWorkspaceBackup creates or updates a workspace-only backup record for a sandbox.

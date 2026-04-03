@@ -265,12 +265,18 @@ func (mc *MigrationCoordinator) LiveMigrate(ctx context.Context, sandboxID, inco
 
 	// Start live migration
 	state.Phase = "migrating"
+	log.Printf("qemu: live migration %s: sending migrate tcp:%s", sandboxID, incomingAddr)
 	if err := vm.qmp.Migrate("tcp:" + incomingAddr); err != nil {
 		return fmt.Errorf("QMP migrate: %w", err)
 	}
 
 	// Wait for migration to complete
 	if err := vm.qmp.WaitMigration(5 * time.Minute); err != nil {
+		// Query detailed status for debugging
+		status, qErr := vm.qmp.QueryMigrate()
+		if qErr == nil {
+			log.Printf("qemu: live migration %s FAILED: status=%s error=%s", sandboxID, status.Status, status.ErrorDesc)
+		}
 		return fmt.Errorf("migration wait: %w", err)
 	}
 
@@ -320,6 +326,29 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
 		return "", 0, fmt.Errorf("mkdir: %w", err)
+	}
+
+	// Resolve rootfs from template if not provided
+	if rootfsPath == "" {
+		if template == "" {
+			template = "default"
+		}
+		baseImage, err := ResolveBaseImage(m.cfg.ImagesDir, template)
+		if err != nil {
+			return "", 0, fmt.Errorf("resolve base image for template %q: %w", template, err)
+		}
+		rootfsPath = filepath.Join(sandboxDir, "rootfs.qcow2")
+		if err := PrepareRootfs(baseImage, rootfsPath); err != nil {
+			return "", 0, fmt.Errorf("prepare rootfs: %w", err)
+		}
+		log.Printf("qemu: migration %s: prepared rootfs from template %q: %s", sandboxID, template, rootfsPath)
+	}
+	// Create workspace if not provided
+	if workspacePath == "" {
+		workspacePath = filepath.Join(sandboxDir, "workspace.ext4")
+		if err := CreateWorkspace(workspacePath, 4096); err != nil {
+			return "", 0, fmt.Errorf("create workspace: %w", err)
+		}
 	}
 
 	netCfg, err := m.subnets.Allocate()
@@ -387,19 +416,38 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 		netCfg.TAPName, guestMAC, agentSockPath, qmpSockPath, bootArgs)
 	args = append(args, "-incoming", fmt.Sprintf("tcp:0:%d", migrationPort))
 
+	// Migration targets must have the exact same device configuration as the source.
+	// Keep -serial stdio but redirect stdout to /dev/null to avoid blocking.
+
+	log.Printf("qemu: migration-prepare %s: starting QEMU (mem=%dMB, cpu=%d, rootfs=%s, workspace=%s, qmp=%s)",
+		sandboxID, memMB, cpus, rootfsPath, workspacePath, qmpSockPath)
+
 	cmd := exec.Command(m.cfg.QEMUBin, args...)
-	cmd.Stdout = logFile
+	// For migration targets: send stderr to log, but stdout to /dev/null.
+	// -serial stdio outputs kernel console to stdout which can block if piped to a file.
+	devNull, _ := os.Open(os.DevNull)
+	cmd.Stdout = devNull
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
+		if devNull != nil { devNull.Close() }
 		m.cleanupVM(netCfg, sandboxDir)
 		return "", 0, fmt.Errorf("start qemu: %w", err)
 	}
 	logFile.Close()
+	if devNull != nil { devNull.Close() }
+	log.Printf("qemu: migration-prepare %s: QEMU started (pid=%d), waiting for QMP", sandboxID, cmd.Process.Pid)
 
-	// Connect QMP
-	qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
+	// Connect QMP — allow up to 60s for large-memory VMs (virtio-mem init takes time)
+	qmpClient, err := waitForQMP(qmpSockPath, 60*time.Second)
 	if err != nil {
+		// Check if QEMU exited
+		var exitErr string
+		if cmd.ProcessState != nil {
+			exitErr = cmd.ProcessState.String()
+		}
+		qemuLog, _ := os.ReadFile(filepath.Join(sandboxDir, "qemu.log"))
+		log.Printf("qemu: migration-prepare %s: QMP failed — exit=%s, log tail: %s", sandboxID, exitErr, string(qemuLog[max(0, len(qemuLog)-500):]))
 		cmd.Process.Kill()
 		cmd.Wait()
 		m.cleanupVM(netCfg, sandboxDir)
@@ -435,9 +483,12 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 	m.vms[sandboxID] = vm
 	m.mu.Unlock()
 
-	// Return the private IP + port for the source to connect
-	// The source will call: migrate tcp:PRIVATE_IP:PORT
-	return fmt.Sprintf("%s:%d", netCfg.HostIP, migrationPort), hp, nil
+	// Return the worker's VNet IP + migration port for the source to connect.
+	// We use the advertise address (from OPENSANDBOX_GRPC_ADVERTISE) which is the
+	// worker's private IP on the VNet — reachable from other workers.
+	// netCfg.HostIP is the TAP host IP (172.16.x.x) which is NOT routable between workers.
+	workerIP := m.getWorkerIP()
+	return fmt.Sprintf("%s:%d", workerIP, migrationPort), hp, nil
 }
 
 // CompleteIncomingMigration is called after QMP migration finishes on the target.
@@ -446,6 +497,15 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
 		return err
+	}
+
+	// Resume the VM — after live migration the target is paused
+	if vm.qmp != nil {
+		if err := vm.qmp.Cont(); err != nil {
+			log.Printf("qemu: migration %s: QMP continue failed: %v", sandboxID, err)
+		} else {
+			log.Printf("qemu: migration %s: VM resumed", sandboxID)
+		}
 	}
 
 	// Wait for agent via virtio-serial

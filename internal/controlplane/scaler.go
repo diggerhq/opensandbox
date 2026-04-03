@@ -15,23 +15,29 @@ import (
 )
 
 const (
-	scaleUpThreshold   = 0.70 // Scale up when utilization > 70%
-	scaleDownThreshold = 0.30 // Scale down when utilization < 30%
+	scaleUpThreshold   = 0.50 // Scale up when utilization > 50% (gives ~3 min runway for new worker to boot)
+	scaleDownThreshold = 0.20 // Scale down when utilization < 20%
 	maxWorkersPerRegion = 10  // Hard cap to prevent runaway launches
 	pendingWorkerTTL    = 10 * time.Minute // How long to wait for a launched worker to register
 
 	// Resource-based scaling thresholds (applied per-worker, trigger on ANY worker exceeding)
-	resourceCPUThreshold  = 80.0 // Scale up if any worker CPU > 80%
-	resourceMemThreshold  = 85.0 // Scale up if any worker memory > 85%
-	resourceDiskThreshold = 75.0 // Scale up if any worker disk > 75%
+	resourceCPUThreshold  = 70.0 // Scale up if any worker CPU > 70%
+	resourceMemThreshold  = 70.0 // Scale up if any worker memory > 70%
+	resourceDiskThreshold = 60.0 // Scale up if any worker disk > 60%
 
 	// Evacuation thresholds (per-worker, triggers live migration of sandboxes OFF the hot worker)
-	evacuationCPUThreshold  = 90.0
-	evacuationMemThreshold  = 90.0
-	evacuationDiskThreshold = 80.0
+	evacuationCPUThreshold  = 80.0
+	evacuationMemThreshold  = 80.0
+	evacuationDiskThreshold = 70.0
+
+	// Emergency thresholds — above these, hibernate sandboxes to free resources immediately
+	// (no migration target needed, just dump to S3 and delete local files)
+	emergencyCPUThreshold  = 95.0
+	emergencyMemThreshold  = 95.0
+	emergencyDiskThreshold = 90.0
 	evacuationBatchSize    = 3                  // sandboxes to migrate per eval cycle per worker
 	evacuationCooldown     = 60 * time.Second   // per-worker cooldown between evacuation batches
-	drainTimeout           = 5 * time.Minute    // max time to drain a worker before force-destroying
+	drainTimeout           = 15 * time.Minute   // max time to drain a worker via live migration
 )
 
 // ScalerRegistry is the interface the Scaler uses to query worker state.
@@ -44,6 +50,12 @@ type ScalerRegistry interface {
 	GetWorkerClient(workerID string) (pb.SandboxWorkerClient, error)
 }
 
+// AMIRefresher is an optional interface a Pool can implement to support dynamic AMI updates.
+// If the pool implements this, the scaler will periodically call RefreshAMI to check for new images.
+type AMIRefresher interface {
+	RefreshAMI(ctx context.Context) (amiID string, version string, err error)
+}
+
 // ScalerConfig configures the autoscaler.
 type ScalerConfig struct {
 	Pool        compute.Pool
@@ -52,8 +64,9 @@ type ScalerConfig struct {
 	WorkerImage string
 	Cooldown    time.Duration // minimum time between scale-up actions per region
 	Interval    time.Duration // how often to evaluate scaling (0 = default 30s)
-	MinWorkers  int           // minimum workers per region (0 = default 1). Set higher to pre-provision capacity.
-	MaxWorkers  int           // maximum workers per region (0 = default 10). Hard cap to prevent runaway launches.
+	MinWorkers     int        // minimum total workers per region (0 = default 1). Always kept running.
+	MaxWorkers     int        // maximum workers per region (0 = default 10). Hard cap to prevent runaway launches.
+	IdleReserve    int        // target idle (0 sandbox) workers for burst absorption (0 = default 1). Separate from MinWorkers.
 }
 
 // pendingLaunch tracks an EC2 instance that was launched but hasn't registered yet.
@@ -78,17 +91,31 @@ type Scaler struct {
 	image       string
 	cooldown    time.Duration
 	interval    time.Duration
-	minWorkers  int
-	maxWorkers  int
-	lastScaleUp map[string]time.Time      // region -> last scale-up time
-	pending     map[string][]pendingLaunch // region -> pending (unregistered) launches
+	minWorkers   int
+	maxWorkers   int
+	idleReserve  int
+
+	// mu protects all mutable maps below (lastScaleUp, pending, draining, lastEvacuation)
+	mu             sync.Mutex
+	lastScaleUp    map[string]time.Time      // region -> last scale-up time
+	pending        map[string][]pendingLaunch // region -> pending (unregistered) launches
+	draining       map[string]*drainState     // machineID -> state (workers being drained for scale-down)
+	lastEvacuation map[string]time.Time       // workerID -> last evacuation time
+
 	stop        chan struct{}
 	wg          sync.WaitGroup
+	migrating   sync.Map               // sandboxID -> struct{} (prevent double-migrate)
 
-	// Drain & evacuation state
-	draining       map[string]*drainState  // machineID -> state (workers being drained for scale-down)
-	lastEvacuation map[string]time.Time    // workerID -> last evacuation time
-	migrating      sync.Map               // sandboxID -> struct{} (prevent double-migrate)
+	// In-flight migration tracking — prevents routing all migrations to the same target
+	inFlightMu     sync.Mutex
+	inFlightTo     map[string]int          // workerID -> number of migrations currently targeting this worker
+
+	// Rolling replacement: version-aware AMI updates
+	targetWorkerVersion string // desired worker version (from SSM); workers not matching this get replaced
+	refreshCount        int    // tick counter for AMI refresh interval
+
+	// Rate-of-change scaling: track sandbox count per region to detect growth bursts
+	lastSandboxCount map[string]int // region -> sandbox count from previous eval tick
 }
 
 // NewScaler creates a new autoscaling controller.
@@ -109,6 +136,10 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 	if maxWorkers <= 0 {
 		maxWorkers = maxWorkersPerRegion
 	}
+	idleReserve := cfg.IdleReserve
+	if idleReserve <= 0 {
+		idleReserve = 1
+	}
 	return &Scaler{
 		pool:           cfg.Pool,
 		registry:       cfg.Registry,
@@ -118,11 +149,14 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 		interval:       interval,
 		minWorkers:     minWorkers,
 		maxWorkers:     maxWorkers,
+		idleReserve:    idleReserve,
 		lastScaleUp:    make(map[string]time.Time),
 		pending:        make(map[string][]pendingLaunch),
 		stop:           make(chan struct{}),
-		draining:       make(map[string]*drainState),
-		lastEvacuation: make(map[string]time.Time),
+		draining:        make(map[string]*drainState),
+		lastEvacuation:  make(map[string]time.Time),
+		inFlightTo:      make(map[string]int),
+		lastSandboxCount: make(map[string]int),
 	}
 }
 
@@ -156,6 +190,19 @@ func (s *Scaler) evaluate() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Refresh AMI from SSM every ~60s (every 2nd tick at 30s interval)
+	s.refreshCount++
+	if s.refreshCount%2 == 0 {
+		if refresher, ok := s.pool.(AMIRefresher); ok {
+			if _, version, err := refresher.RefreshAMI(ctx); err != nil {
+				log.Printf("scaler: AMI refresh failed: %v", err)
+			} else if version != "" && version != s.targetWorkerVersion {
+				log.Printf("scaler: target worker version updated: %q -> %q", s.targetWorkerVersion, version)
+				s.targetWorkerVersion = version
+			}
+		}
+	}
+
 	// Use discovered regions from workers, or fall back to the pool's region
 	regions := s.registry.Regions()
 	log.Printf("scaler: evaluate tick (regions=%v)", regions)
@@ -172,12 +219,18 @@ func (s *Scaler) evaluate() {
 }
 
 func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	workers := s.registry.GetWorkersByRegion(region)
 	utilization := s.registry.RegionUtilization(region)
 	maxCPU, maxMem, maxDisk := s.registry.RegionResourcePressure(region)
 
 	// Expire stale pending launches
 	s.expirePending(region)
+
+	// Phase 0: Emergency hibernate — workers in critical state, no migration needed
+	s.emergencyHibernate(ctx, region, workers)
 
 	// Phase 1: Check progress on workers being drained
 	s.checkDrainingWorkers(ctx, region)
@@ -206,6 +259,34 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		reason = fmt.Sprintf("disk pressure %.1f%% > %.0f%%", maxDisk, resourceDiskThreshold)
 	}
 
+	// Rate-of-change scaling: if sandbox count is growing fast, scale up proactively.
+	// This triggers before utilization thresholds so new workers are booting while
+	// there's still headroom on existing workers.
+	currentSandboxes := 0
+	totalCapacity := 0
+	for _, w := range workers {
+		currentSandboxes += w.Current
+		totalCapacity += w.Capacity
+	}
+	prevSandboxes := s.lastSandboxCount[region]
+	s.lastSandboxCount[region] = currentSandboxes
+	growthRate := currentSandboxes - prevSandboxes // sandboxes added since last tick (30s)
+
+	if !needsScaleUp && growthRate > 0 && totalCapacity > 0 {
+		// Project: at this growth rate, how many ticks until we're full?
+		remaining := totalCapacity - currentSandboxes
+		if growthRate > 0 && remaining > 0 {
+			ticksUntilFull := remaining / growthRate
+			// If we'll be full within 6 ticks (~3 min, roughly how long a new worker takes to boot),
+			// scale up now so the new worker is ready in time.
+			if ticksUntilFull <= 6 {
+				needsScaleUp = true
+				reason = fmt.Sprintf("growth rate %d/tick, full in ~%d ticks (%d/%d used)",
+					growthRate, ticksUntilFull, currentSandboxes, totalCapacity)
+			}
+		}
+	}
+
 	// Ensure minimum workers are running (pre-provisioned capacity).
 	// Ignores cooldowns — if we're below minimum, launch immediately.
 	totalWorkers := len(workers) + len(s.pending[region])
@@ -217,6 +298,30 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 			s.scaleUp(ctx, region)
 		}
 		return
+	}
+
+	// Headroom: maintain a pool of idle workers for burst absorption.
+	// Uses minWorkers as the reserve target — this is separate from the
+	// minimum total workers check above. When bin-packing overflows into
+	// reserve workers, we launch replacements one at a time so there's
+	// always warm capacity without thrashing.
+	idleWorkers := 0
+	for _, w := range workers {
+		if _, isDraining := s.draining[w.MachineID]; isDraining {
+			continue
+		}
+		if w.Current == 0 {
+			idleWorkers++
+		}
+	}
+	pendingCount := len(s.pending[region])
+	reserveTarget := s.idleReserve
+	idleOrPending := idleWorkers + pendingCount
+	if idleOrPending < reserveTarget && totalWorkers+pendingCount < s.maxWorkers {
+		// Launch 1 at a time to avoid over-provisioning
+		log.Printf("scaler: region %s reserve low (%d idle + %d pending < %d target), launching 1",
+			region, idleWorkers, pendingCount, reserveTarget)
+		s.scaleUp(ctx, region)
 	}
 
 	if needsScaleUp {
@@ -255,6 +360,9 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		log.Printf("scaler: region %s utilization %.1f%% < %.0f%%, initiating smart drain", region, utilization*100, scaleDownThreshold*100)
 		s.smartScaleDown(ctx, region, workers)
 	}
+
+	// Phase 5: Rolling replacement of workers running old versions
+	s.rollingReplace(ctx, region, workers)
 }
 
 func (s *Scaler) scaleUp(_ context.Context, region string) {
@@ -322,6 +430,71 @@ func (s *Scaler) expirePending(region string) {
 	s.pending[region] = remaining
 }
 
+// --- Emergency Hibernate ---
+
+// emergencyHibernate hibernates sandboxes on workers that exceed critical thresholds.
+// Unlike evacuation (which live-migrates), this dumps sandboxes to S3 and frees
+// resources immediately. Used when a worker is about to run out of capacity and
+// there may not be a viable migration target.
+func (s *Scaler) emergencyHibernate(_ context.Context, region string, workers []*WorkerInfo) {
+	for _, w := range workers {
+		if w.CPUPct < emergencyCPUThreshold && w.MemPct < emergencyMemThreshold && w.DiskPct < emergencyDiskThreshold {
+			continue
+		}
+		// Cooldown — reuse evacuation cooldown to avoid hammering
+		if last, ok := s.lastEvacuation[w.ID]; ok && time.Since(last) < evacuationCooldown {
+			continue
+		}
+
+		log.Printf("scaler: EMERGENCY worker %s at critical levels (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), hibernating sandboxes",
+			w.ID, w.CPUPct, w.MemPct, w.DiskPct)
+
+		s.lastEvacuation[w.ID] = time.Now()
+		go s.hibernateBatch(w.ID, evacuationBatchSize)
+	}
+}
+
+// hibernateBatch hibernates up to count idle sandboxes on a worker to free resources.
+// Picks sandboxes with the oldest last activity first.
+func (s *Scaler) hibernateBatch(workerID string, count int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	client, err := s.registry.GetWorkerClient(workerID)
+	if err != nil {
+		log.Printf("scaler: emergency: no gRPC client for %s: %v", workerID, err)
+		return
+	}
+
+	listResp, err := client.ListSandboxes(ctx, &pb.ListSandboxesRequest{})
+	if err != nil {
+		log.Printf("scaler: emergency: ListSandboxes failed for %s: %v", workerID, err)
+		return
+	}
+
+	hibernated := 0
+	for _, sb := range listResp.Sandboxes {
+		if hibernated >= count {
+			break
+		}
+		if sb.Status != "running" {
+			continue
+		}
+		_, err := client.HibernateSandbox(ctx, &pb.HibernateSandboxRequest{
+			SandboxId: sb.SandboxId,
+		})
+		if err != nil {
+			log.Printf("scaler: emergency: hibernate %s failed: %v", sb.SandboxId, err)
+			continue
+		}
+		hibernated++
+		log.Printf("scaler: emergency: hibernated %s on worker %s", sb.SandboxId, workerID)
+	}
+
+	log.Printf("scaler: emergency batch complete for %s: %d/%d hibernated",
+		workerID, hibernated, count)
+}
+
 // --- Pressure Evacuation ---
 
 // evacuateHotWorkers live-migrates sandboxes off workers that exceed critical thresholds.
@@ -356,8 +529,17 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 }
 
 // findMigrationTarget returns the best worker to receive migrated sandboxes.
+// Accounts for in-flight migrations so we don't pile onto the same target.
 func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo {
 	workers := s.registry.GetWorkersByRegion(region)
+
+	s.inFlightMu.Lock()
+	inFlight := make(map[string]int, len(s.inFlightTo))
+	for k, v := range s.inFlightTo {
+		inFlight[k] = v
+	}
+	s.inFlightMu.Unlock()
+
 	var best *WorkerInfo
 	bestScore := -1.0
 	for _, w := range workers {
@@ -367,7 +549,9 @@ func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo
 		if _, isDraining := s.draining[w.MachineID]; isDraining {
 			continue
 		}
-		remaining := w.Capacity - w.Current
+		// Subtract in-flight migrations from remaining capacity
+		pending := inFlight[w.ID]
+		remaining := w.Capacity - w.Current - pending
 		if remaining <= 0 || w.CPUPct > 85 || w.MemPct > 85 || w.DiskPct > 85 {
 			continue
 		}
@@ -460,6 +644,69 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 	go s.drainWorker(target.ID, target.MachineID, region)
 }
 
+// rollingReplace drains workers running an old version one at a time,
+// allowing the scaler to replace them with new-AMI workers.
+func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*WorkerInfo) {
+	if s.targetWorkerVersion == "" {
+		return
+	}
+
+	var stale []*WorkerInfo
+	var current int
+	for _, w := range workers {
+		// Skip workers already being drained
+		if _, isDraining := s.draining[w.MachineID]; isDraining {
+			continue
+		}
+		// Skip manually provisioned workers (not autoscaler-managed)
+		if w.MachineID == "" {
+			continue
+		}
+		if !strings.HasPrefix(w.MachineID, "osb-worker-") {
+			continue
+		}
+		if w.MachineID == "osb-worker-1" {
+			continue // static worker, not autoscaled
+		}
+		if w.WorkerVersion == s.targetWorkerVersion {
+			current++
+		} else {
+			stale = append(stale, w)
+		}
+	}
+
+	if len(stale) == 0 {
+		return
+	}
+
+	// Don't drain if no current-version workers exist yet — scale up first
+	if current < 1 {
+		log.Printf("scaler: region %s has %d stale workers but 0 current-version, waiting for new workers to register",
+			region, len(stale))
+		return
+	}
+
+	// Only drain one stale worker at a time (conservative rolling update)
+	target := stale[0]
+	for _, w := range stale[1:] {
+		if w.Current < target.Current {
+			target = w
+		}
+	}
+
+	log.Printf("scaler: rolling replace: draining stale worker %s (version=%q, want=%q, sandboxes=%d)",
+		target.ID, target.WorkerVersion, s.targetWorkerVersion, target.Current)
+
+	s.draining[target.MachineID] = &drainState{
+		workerID:  target.ID,
+		machineID: target.MachineID,
+		region:    region,
+		startedAt: time.Now(),
+	}
+
+	go s.drainWorker(target.ID, target.MachineID, region)
+}
+
 // drainWorker live-migrates all sandboxes off a worker, then signals completion
 // via the draining map (checkDrainingWorkers will destroy the machine).
 func (s *Scaler) drainWorker(workerID, machineID, region string) {
@@ -514,7 +761,8 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 
 		for _, sandboxID := range batch {
 			if err := s.liveMigrateSandbox(ctx, sandboxID, workerID, target.ID); err != nil {
-				log.Printf("scaler: drain: migrate %s failed: %v", sandboxID, err)
+				log.Printf("scaler: drain: migrate %s to %s failed: %v, will retry next cycle", sandboxID, target.ID, err)
+				// Don't abort — try remaining sandboxes and retry failed ones next cycle
 			}
 		}
 
@@ -530,11 +778,12 @@ func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 			continue
 		}
 
-		// Check if drain timed out
+		// Check if drain timed out — do NOT hibernate or destroy.
+		// Sandboxes must be preserved. Cancel the drain and let the worker
+		// keep running. The sandboxes will naturally expire or be manually cleaned up.
 		if time.Since(state.startedAt) > drainTimeout {
-			log.Printf("scaler: drain timeout for worker %s (machine=%s), force-destroying",
-				state.workerID, machineID)
-			s.destroyDrainedMachine(machineID)
+			log.Printf("scaler: drain timeout for worker %s (machine=%s) after %s — cancelling drain, keeping worker alive with %d sandboxes",
+				state.workerID, machineID, drainTimeout, s.getDrainingWorkerSandboxCount(state.workerID))
 			delete(s.draining, machineID)
 			continue
 		}
@@ -551,6 +800,54 @@ func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 			}
 		}
 	}
+}
+
+// getDrainingWorkerSandboxCount returns the current sandbox count for a draining worker.
+func (s *Scaler) getDrainingWorkerSandboxCount(workerID string) int {
+	for _, region := range s.registry.Regions() {
+		for _, w := range s.registry.GetWorkersByRegion(region) {
+			if w.ID == workerID {
+				return w.Current
+			}
+		}
+	}
+	return -1
+}
+
+// hibernateAllOnWorker attempts to hibernate all running sandboxes on a worker.
+// Best-effort — logs failures but doesn't block.
+func (s *Scaler) hibernateAllOnWorker(workerID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	client, err := s.registry.GetWorkerClient(workerID)
+	if err != nil {
+		log.Printf("scaler: hibernate-all: no gRPC client for %s: %v", workerID, err)
+		return
+	}
+
+	listResp, err := client.ListSandboxes(ctx, &pb.ListSandboxesRequest{})
+	if err != nil {
+		log.Printf("scaler: hibernate-all: ListSandboxes failed for %s: %v", workerID, err)
+		return
+	}
+
+	hibernated := 0
+	for _, sb := range listResp.Sandboxes {
+		if sb.Status != "running" {
+			continue
+		}
+		_, err := client.HibernateSandbox(ctx, &pb.HibernateSandboxRequest{
+			SandboxId: sb.SandboxId,
+		})
+		if err != nil {
+			log.Printf("scaler: hibernate-all: hibernate %s failed: %v", sb.SandboxId, err)
+			continue
+		}
+		hibernated++
+	}
+
+	log.Printf("scaler: hibernate-all: %d sandboxes hibernated on worker %s", hibernated, workerID)
 }
 
 // destroyDrainedMachine tags and terminates a machine after drain.
@@ -623,6 +920,32 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		return fmt.Errorf("migration already in progress for %s", sandboxID)
 	}
 	defer s.migrating.Delete(sandboxID)
+
+	// Mark sandbox as migrating in DB — blocks exec routing during migration
+	migrationCompleted := false
+	if s.store != nil {
+		if err := s.store.SetMigrating(ctx, sandboxID, targetWorkerID); err != nil {
+			log.Printf("scaler: failed to set migrating state for %s: %v", sandboxID, err)
+		}
+		defer func() {
+			if !migrationCompleted && s.store != nil {
+				s.store.FailMigration(ctx, sandboxID)
+			}
+		}()
+	}
+
+	// Track in-flight migration to target so other evacuations don't pile on
+	s.inFlightMu.Lock()
+	s.inFlightTo[targetWorkerID]++
+	s.inFlightMu.Unlock()
+	defer func() {
+		s.inFlightMu.Lock()
+		s.inFlightTo[targetWorkerID]--
+		if s.inFlightTo[targetWorkerID] <= 0 {
+			delete(s.inFlightTo, targetWorkerID)
+		}
+		s.inFlightMu.Unlock()
+	}()
 
 	sourceClient, err := s.registry.GetWorkerClient(sourceWorkerID)
 	if err != nil {
@@ -731,10 +1054,11 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		return fmt.Errorf("complete migration: %w", err)
 	}
 
-	// Step 5: Update DB — sandbox now on target worker
+	// Step 5: Complete migration — update DB status and worker_id atomically
 	if s.store != nil {
-		_, _ = s.store.Pool().Exec(ctx, "UPDATE sandbox_sessions SET worker_id = $1 WHERE sandbox_id = $2", targetWorkerID, sandboxID)
+		s.store.CompleteMigration(ctx, sandboxID, targetWorkerID)
 	}
+	migrationCompleted = true
 
 	elapsed := time.Since(t0).Milliseconds()
 	log.Printf("scaler: migrate %s: complete in %dms (source=%s target=%s)", sandboxID, elapsed, sourceWorkerID, targetWorkerID)

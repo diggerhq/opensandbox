@@ -80,6 +80,11 @@ func listenVirtioSerial(path string) (net.Listener, error) {
 		return nil, fmt.Errorf("open virtio-serial %s: %w", path, err)
 	}
 
+	// Mark CLOEXEC so the fd is closed on agent re-exec (upgrade).
+	// Without this, syscall.Exec inherits the fd, the host never sees the
+	// connection drop, and the new agent can't get a clean Accept.
+	unix.CloseOnExec(int(f.Fd()))
+
 	return &virtioSerialListener{
 		f:      f,
 		closed: make(chan struct{}),

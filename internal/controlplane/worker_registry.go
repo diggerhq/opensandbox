@@ -24,6 +24,7 @@ type WorkerInfo struct {
 	MemPct       float64   `json:"mem_pct"`
 	DiskPct       float64   `json:"disk_pct"`
 	GoldenVersion string    `json:"golden_version,omitempty"`
+	WorkerVersion string    `json:"worker_version,omitempty"`
 	LastSeen      time.Time `json:"-"`
 	MissedBeats  int       `json:"-"`
 }
@@ -236,6 +237,9 @@ func (r *WorkerRegistry) handleHeartbeat(msg *nats.Msg) {
 		existing.DiskPct = hb.DiskPct
 		if hb.GoldenVersion != "" {
 			existing.GoldenVersion = hb.GoldenVersion
+		}
+		if hb.WorkerVersion != "" {
+			existing.WorkerVersion = hb.WorkerVersion
 		}
 		existing.LastSeen = time.Now()
 		existing.MissedBeats = 0

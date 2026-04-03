@@ -155,6 +155,13 @@ func (p *SandboxAPIProxy) ProxyHandler(c echo.Context) error {
 		})
 	}
 
+	// If migrating, reject requests until migration completes
+	if session.Status == "migrating" {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": fmt.Sprintf("sandbox %s is migrating, retry shortly", sandboxID),
+		})
+	}
+
 	// If hibernated, wake on demand
 	if session.Status == "hibernated" {
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)

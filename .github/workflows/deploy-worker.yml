@@ -1,19 +1,8 @@
-name: Deploy Worker
+name: Deploy Worker (Hotfix)
 
+# Emergency hotfix: SSH-deploy binaries to running workers without waiting for AMI build.
+# For normal deploys, use build-worker-ami.yml which builds an immutable AMI.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'cmd/worker/**'
-      - 'cmd/agent/**'
-      - 'internal/**'
-      - 'proto/**'
-      - 'deploy/firecracker/rootfs/**'
-      - 'deploy/ec2/build-rootfs-docker.sh'
-      - 'scripts/claude-agent-wrapper/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/deploy-worker.yml'
   workflow_dispatch:
 
 env:

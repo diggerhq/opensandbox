@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
@@ -700,6 +701,20 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox must be running to migrate"})
 	}
 
+	// Mark as migrating — blocks exec/proxy routing until migration completes
+	migrationDone := false
+	if s.store != nil {
+		if err := s.store.SetMigrating(ctx, id, req.TargetWorker); err != nil {
+			log.Printf("migrate %s: failed to set migrating state: %v", id, err)
+		}
+		// Guarantee we revert on failure
+		defer func() {
+			if !migrationDone && s.store != nil {
+				s.store.FailMigration(ctx, id)
+			}
+		}()
+	}
+
 	// Get source and target worker gRPC clients
 	sourceClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
 	if err != nil {
@@ -717,10 +732,23 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 	// memory contents (including filesystem cache) migrate via QMP tcp.
 	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer prepCancel()
+	// Parse sandbox config to get the actual memory/CPU (must match source for migration)
+	var sbCfg struct {
+		MemoryMB int `json:"memoryMB"`
+		CpuCount int `json:"cpuCount"`
+	}
+	_ = json.Unmarshal(session.Config, &sbCfg)
+	if sbCfg.MemoryMB <= 0 {
+		sbCfg.MemoryMB = 256 // default from golden snapshot
+	}
+	if sbCfg.CpuCount <= 0 {
+		sbCfg.CpuCount = 1
+	}
+
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
 		SandboxId: id,
-		CpuCount:  1,
-		MemoryMb:  1024,
+		CpuCount:  int32(sbCfg.CpuCount),
+		MemoryMb:  int32(sbCfg.MemoryMB),
 		GuestPort: 80,
 		Template:  session.Template,
 	})
@@ -753,8 +781,16 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "complete migration: " + err.Error()})
 	}
 
-	// Step 5: Update DB — sandbox now on target worker
-	_, _ = s.store.Pool().Exec(ctx, "UPDATE sandbox_sessions SET worker_id = $1 WHERE sandbox_id = $2", req.TargetWorker, id)
+	// Step 5: Complete migration — update DB status and worker_id atomically
+	if s.store != nil {
+		s.store.CompleteMigration(ctx, id, req.TargetWorker)
+	}
+	migrationDone = true
+
+	// Invalidate proxy route cache so next request routes to the new worker
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(id)
+	}
 
 	elapsed := time.Since(t0).Milliseconds()
 	log.Printf("migrate %s: complete in %dms (source=%s target=%s)", id, elapsed, session.WorkerID, req.TargetWorker)
@@ -888,7 +924,9 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		})
 	}
 
-	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	ctx := c.Request().Context()
+
+	session, err := s.store.GetSandboxSession(ctx, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
 	}
@@ -896,14 +934,21 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox is not running"})
 	}
 
-	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	requestedMemMB := int(maxMemoryBytes / (1024 * 1024))
+	requestedCPUs := int(cpuMaxUsec / 1000 / 100) // cpuPercent / 100
+	if requestedCPUs < 1 {
+		requestedCPUs = 1
+	}
+
+	workerID := session.WorkerID
+
+	// Step 1: Try to apply limits on the current worker.
+	client, err := s.workerRegistry.GetWorkerClient(workerID)
 	if err != nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable"})
 	}
 
-	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 30*time.Second)
-	defer cancel()
-
+	grpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	_, err = client.SetSandboxLimits(grpcCtx, &pb.SetSandboxLimitsRequest{
 		SandboxId:      sandboxID,
 		MaxPids:        maxPids,
@@ -911,16 +956,213 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		CpuMaxUsec:     cpuMaxUsec,
 		CpuPeriodUsec:  cpuPeriodUsec,
 	})
+	cancel()
+
+	// Step 2: If the worker can't fit the memory, migrate and retry.
+	migrated := false
 	if err != nil {
+		log.Printf("scale-limits %s: SetSandboxLimits error: %v", sandboxID, err)
+	}
+	if err != nil && strings.Contains(err.Error(), "insufficient_capacity") {
+		log.Printf("scale-migrate %s: worker %s can't fit %dMB, finding migration target", sandboxID, workerID, requestedMemMB)
+
+		target := s.findScaleMigrationTarget(workerID, requestedMemMB)
+		if target == nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "insufficient capacity on current worker and no migration target available",
+			})
+		}
+
+		// Verify target is reachable before attempting expensive migration
+		targetClient, connErr := s.workerRegistry.GetWorkerClient(target.ID)
+		if connErr != nil {
+			log.Printf("scale-migrate %s: target %s unreachable, skipping", sandboxID, target.ID)
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "migration target unreachable, retry later",
+			})
+		}
+		// Quick health check — ping the target
+		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+		_, pingErr := targetClient.ListSandboxes(pingCtx, &pb.ListSandboxesRequest{})
+		pingCancel()
+		if pingErr != nil {
+			log.Printf("scale-migrate %s: target %s failed health check: %v", sandboxID, target.ID, pingErr)
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "migration target failed health check, retry later",
+			})
+		}
+
+		// Mark as migrating before starting
+		if s.store != nil {
+			s.store.SetMigrating(ctx, sandboxID, target.ID)
+		}
+
+		if migrateErr := s.migrateForScale(ctx, sandboxID, session, target, requestedMemMB, requestedCPUs); migrateErr != nil {
+			if s.store != nil {
+				s.store.FailMigration(ctx, sandboxID)
+			}
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "scale migration failed: " + migrateErr.Error(),
+			})
+		}
+
+		// Migration succeeded — update state
+		if s.store != nil {
+			s.store.CompleteMigration(ctx, sandboxID, target.ID)
+		}
+		if s.sandboxAPIProxy != nil {
+			s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+		}
+		workerID = target.ID
+		migrated = true
+
+		// Retry limits on the new worker
+		newClient, clientErr := s.workerRegistry.GetWorkerClient(workerID)
+		if clientErr != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "new worker unreachable after migration"})
+		}
+
+		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		_, err = newClient.SetSandboxLimits(retryCtx, &pb.SetSandboxLimitsRequest{
+			SandboxId:      sandboxID,
+			MaxPids:        maxPids,
+			MaxMemoryBytes: maxMemoryBytes,
+			CpuMaxUsec:     cpuMaxUsec,
+			CpuPeriodUsec:  cpuPeriodUsec,
+		})
+		retryCancel()
+
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "set limits failed after migration: " + err.Error(),
+			})
+		}
+
+		log.Printf("scale-migrate %s: migrated to %s and scaled to %dMB", sandboxID, workerID, requestedMemMB)
+	} else if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "set limits failed: " + err.Error(),
 		})
 	}
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"sandboxID": sandboxID,
-		"ok":        true,
+		"sandboxID":  sandboxID,
+		"workerID":   workerID,
+		"memoryMB":   requestedMemMB,
+		"cpuPercent": int(cpuMaxUsec / 1000),
+		"migrated":   migrated,
+		"ok":         true,
 	})
+}
+
+// findScaleMigrationTarget finds a worker with enough memory headroom for a scaled-up sandbox.
+// Prefers workers with more free capacity. Skips the source worker.
+func (s *Server) findScaleMigrationTarget(sourceWorkerID string, requestedMemMB int) *controlplane.WorkerEntry {
+	workers := s.workerRegistry.GetAllWorkers()
+	var best *controlplane.WorkerEntry
+	bestScore := -1.0
+
+	for _, w := range workers {
+		if w.ID == sourceWorkerID {
+			continue
+		}
+		if w.CPUPct > 80 || w.MemPct > 60 {
+			continue // need plenty of headroom for a big sandbox
+		}
+		remaining := w.Capacity - w.Current
+		if remaining <= 0 {
+			continue // worker is full, can't take a migrated sandbox
+		}
+		// Score: prefer emptier workers (more room for the big sandbox)
+		score := float64(remaining) * (100.0 - w.MemPct) / 100.0
+		if score > bestScore {
+			best = w
+			bestScore = score
+		}
+	}
+	return best
+}
+
+// migrateForScale performs a live migration to accommodate a resource scale-up.
+func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session *db.SandboxSession, target *controlplane.WorkerEntry, memoryMB, cpuCount int) error {
+	sourceClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return fmt.Errorf("source worker unreachable: %w", err)
+	}
+	targetClient, err := s.workerRegistry.GetWorkerClient(target.ID)
+	if err != nil {
+		return fmt.Errorf("target worker unreachable: %w", err)
+	}
+
+	t0 := time.Now()
+	template := session.Template
+	if template == "" {
+		template = "default"
+	}
+
+	// The target QEMU must use the same base memory as the source for migration
+	// to work (QEMU requires matching RAM sizes). Use the session config to get
+	// the original base memory, not the new requested size. The virtio-mem pool
+	// handles scaling after migration completes.
+	var sbCfg struct {
+		MemoryMB int `json:"memoryMB"`
+		CpuCount int `json:"cpuCount"`
+	}
+	_ = json.Unmarshal(session.Config, &sbCfg)
+	baseMem := sbCfg.MemoryMB
+	if baseMem <= 0 {
+		baseMem = 256 // default from golden snapshot
+	}
+	baseCPU := sbCfg.CpuCount
+	if baseCPU <= 0 {
+		baseCPU = 1
+	}
+
+	log.Printf("scale-migrate %s: migrating to %s (template=%s, baseMem=%dMB, targetMem=%dMB, cpu=%d)", sandboxID, target.ID, template, baseMem, memoryMB, cpuCount)
+
+	// Step 1: Prepare target with the SOURCE's base memory (must match for migration)
+	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer prepCancel()
+	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
+		SandboxId: sandboxID,
+		CpuCount:  int32(baseCPU),
+		MemoryMb:  int32(baseMem),
+		GuestPort: 80,
+		Template:  template,
+	})
+	if err != nil {
+		log.Printf("scale-migrate %s: prepare target failed: %v", sandboxID, err)
+		return fmt.Errorf("prepare target: %w", err)
+	}
+
+	// Step 2: Live migrate
+	migrateCtx, migrateCancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer migrateCancel()
+	_, err = sourceClient.LiveMigrate(migrateCtx, &pb.LiveMigrateRequest{
+		SandboxId:    sandboxID,
+		IncomingAddr: prepResp.IncomingAddr,
+	})
+	if err != nil {
+		return fmt.Errorf("live migrate: %w", err)
+	}
+
+	// Step 3: Complete migration on target
+	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer completeCancel()
+	_, err = targetClient.CompleteMigrationIncoming(completeCtx, &pb.CompleteMigrationIncomingRequest{
+		SandboxId: sandboxID,
+	})
+	if err != nil {
+		return fmt.Errorf("complete migration: %w", err)
+	}
+
+	// Step 4: Update DB
+	// DB update is handled by CompleteMigration in the caller
+
+	log.Printf("scale-migrate %s: complete in %dms (source=%s target=%s, new=%dMB/%dvCPU)",
+		sandboxID, time.Since(t0).Milliseconds(), session.WorkerID, target.ID, memoryMB, cpuCount)
+
+	return nil
 }
 
 func (s *Server) hibernateSandbox(c echo.Context) error {

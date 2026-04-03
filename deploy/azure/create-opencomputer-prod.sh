@@ -388,7 +388,8 @@ cmd_deploy() {
     GOOS=linux GOARCH=amd64 go build -o /tmp/oc-server ./cmd/server/
 
     log "Building worker (amd64)..."
-    GOOS=linux GOARCH=amd64 go build -ldflags="-X main.AgentVersion=$VERSION" -o /tmp/oc-worker ./cmd/worker/
+    GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
+    GOOS=linux GOARCH=amd64 go build -ldflags="-X main.AgentVersion=$VERSION -X main.WorkerVersion=$GIT_SHA" -o /tmp/oc-worker ./cmd/worker/
 
     log "Building agent (amd64)..."
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-X main.Version=$VERSION" -o /tmp/oc-agent ./cmd/agent/

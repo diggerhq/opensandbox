@@ -1,0 +1,124 @@
+name: Build Worker Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/worker/**'
+      - 'cmd/agent/**'
+      - 'internal/**'
+      - 'proto/**'
+      - 'deploy/firecracker/rootfs/**'
+      - 'deploy/azure/**'
+      - 'deploy/ec2/build-rootfs-docker.sh'
+      - 'deploy/packer/**'
+      - 'scripts/claude-agent-wrapper/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/build-worker-ami.yml'
+  workflow_dispatch:
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AZURE_LOCATION: westus2
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  build-image:
+    name: Build Worker Image (Azure)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build binaries (amd64)
+        run: |
+          VERSION=$(git rev-parse --short HEAD)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.WorkerVersion=$VERSION -X main.AgentVersion=$VERSION" \
+            -o bin/opensandbox-worker ./cmd/worker/
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.Version=$VERSION" \
+            -o bin/osb-agent ./cmd/agent/
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@main
+
+      - name: Packer init
+        run: packer init deploy/packer/worker-ami.pkr.hcl
+
+      - name: Build image
+        run: |
+          packer build \
+            -var "worker_version=$VERSION" \
+            -var "agent_version=$VERSION" \
+            -var "subscription_id=$AZURE_SUBSCRIPTION_ID" \
+            -var "resource_group=$AZURE_RESOURCE_GROUP" \
+            -var "location=$AZURE_LOCATION" \
+            deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
+
+          # Extract the managed image resource ID from Packer output
+          IMAGE_ID=$(grep -oP '/subscriptions/[^\s"]+' /tmp/packer-output.txt | tail -1)
+          if [ -z "$IMAGE_ID" ]; then
+            # Construct it from known values
+            IMAGE_NAME="opensandbox-worker-${VERSION}"
+            IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/images/${IMAGE_NAME}"
+          fi
+          echo "IMAGE_ID=$IMAGE_ID" >> $GITHUB_ENV
+          echo "Built image: $IMAGE_ID"
+
+      - name: Store image ID in Key Vault
+        run: |
+          az keyvault secret set \
+            --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
+            --name "worker-image-id" \
+            --value "$IMAGE_ID"
+
+          az keyvault secret set \
+            --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
+            --name "worker-image-version" \
+            --value "$VERSION"
+
+          echo "Published image ID to Key Vault"
+
+      - name: Cleanup old images
+        run: |
+          # List all worker images, keep the 5 most recent
+          IMAGES=$(az image list \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --query "[?tags.\"opensandbox-role\"=='worker'] | sort_by(@, &name) | reverse(@)" \
+            --output json)
+
+          STALE=$(echo "$IMAGES" | jq -r '.[5:] | .[].name')
+          if [ -z "$STALE" ]; then
+            echo "No old images to clean up"
+            exit 0
+          fi
+
+          for name in $STALE; do
+            echo "Deleting old image: $name"
+            az image delete --resource-group "$AZURE_RESOURCE_GROUP" --name "$name" || true
+          done
+
+      - name: Summary
+        run: |
+          echo "## Worker Image Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** $IMAGE_ID" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Location:** $AZURE_LOCATION" >> $GITHUB_STEP_SUMMARY
