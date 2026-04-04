@@ -171,7 +171,7 @@ async function main() {
     failed++;
   } finally {
     if (sandbox) {
-      await sandbox.destroy();
+      await sandbox.kill();
       dim(`Sandbox ${sandbox.sandboxId} destroyed`);
     }
   }
