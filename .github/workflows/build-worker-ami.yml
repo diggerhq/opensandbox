@@ -2,7 +2,7 @@ name: Build Worker Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, autoscaling-etc]
     paths:
       - 'cmd/worker/**'
       - 'cmd/agent/**'

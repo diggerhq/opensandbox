@@ -2,7 +2,7 @@ name: Deploy Control Plane
 
 on:
   push:
-    branches: [main]
+    branches: [main, autoscaling-etc]
     paths:
       - 'cmd/server/**'
       - 'internal/**'
