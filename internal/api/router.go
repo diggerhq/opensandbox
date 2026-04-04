@@ -9,9 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/redis/go-redis/v9"
+
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/billing"
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
@@ -48,6 +52,8 @@ type Server struct {
 	pendingCreates  sync.Map                          // map[sandboxID]*pendingCreate — async sandbox creation tracking
 	sandboxAPIProxy *proxy.SandboxAPIProxy            // nil except in server mode (proxies data-plane to workers)
 	stripeClient    *billing.StripeClient              // nil if Stripe not configured
+	redisClient     *redis.Client                     // nil if Redis not configured (for health checks)
+	ready           int32                             // atomic: 1 = ready, 0 = not ready
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -76,6 +82,7 @@ type ServerOpts struct {
 	CFClient        *cloudflare.Client                 // nil if Cloudflare not configured
 	SandboxAPIProxy *proxy.SandboxAPIProxy             // nil except in server mode (proxies data-plane to workers)
 	StripeClient    *billing.StripeClient              // nil if Stripe not configured
+	RedisClient     *redis.Client                     // nil if Redis not configured (for health checks)
 }
 
 // NewServer creates a new API server with all routes configured.
@@ -106,6 +113,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		s.cfClient = opts.CFClient
 		s.sandboxAPIProxy = opts.SandboxAPIProxy
 		s.stripeClient = opts.StripeClient
+		s.redisClient = opts.RedisClient
 
 		// Wire up readiness waiting so the proxy blocks until async creates finish
 		if s.sandboxAPIProxy != nil {
@@ -140,10 +148,14 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		e.Use(opts.ControlPlaneProxy.Middleware())
 	}
 
-	// Health check (no auth)
+	// Health checks (no auth)
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
+	e.GET("/healthz", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{"status": "alive"})
+	})
+	e.GET("/readyz", s.readinessCheck)
 
 	// Signed URL endpoints (self-authenticated via HMAC, no API key required)
 	e.GET("/api/sandboxes/:id/files/download", s.signedDownload)
@@ -422,11 +434,60 @@ func (s *Server) serveDashboardUI(e *echo.Echo, frontendURL string) {
 }
 
 // Start starts the HTTP server on the given address.
+// SetReady marks the server as ready to accept traffic.
+func (s *Server) SetReady() {
+	atomic.StoreInt32(&s.ready, 1)
+}
+
+// SetNotReady marks the server as not ready (draining).
+func (s *Server) SetNotReady() {
+	atomic.StoreInt32(&s.ready, 0)
+}
+
+// readinessCheck verifies the server can serve requests (DB + Redis reachable).
+func (s *Server) readinessCheck(c echo.Context) error {
+	if atomic.LoadInt32(&s.ready) == 0 {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"status": "not ready",
+			"reason": "server is draining or starting up",
+		})
+	}
+
+	result := map[string]string{"status": "ready"}
+	ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
+	defer cancel()
+
+	if s.store != nil {
+		if err := s.store.Ping(ctx); err != nil {
+			result["status"] = "not ready"
+			result["postgres"] = err.Error()
+			return c.JSON(http.StatusServiceUnavailable, result)
+		}
+		result["postgres"] = "ok"
+	}
+
+	if s.redisClient != nil {
+		if err := s.redisClient.Ping(ctx).Err(); err != nil {
+			result["status"] = "not ready"
+			result["redis"] = err.Error()
+			return c.JSON(http.StatusServiceUnavailable, result)
+		}
+		result["redis"] = "ok"
+	}
+
+	return c.JSON(http.StatusOK, result)
+}
+
 func (s *Server) Start(addr string) error {
 	return s.echo.Start(addr)
 }
 
-// Close gracefully shuts down the server.
+// Shutdown gracefully drains in-flight requests and stops the server.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.echo.Shutdown(ctx)
+}
+
+// Close immediately shuts down the server (no drain).
 func (s *Server) Close() error {
 	return s.echo.Close()
 }

@@ -215,10 +215,14 @@ func TestNoScaleUpBelowThreshold(t *testing.T) {
 	reg := newMockRegistry()
 	pool := newMockPool()
 
-	// One worker at 50% capacity → utilization = 0.50 < 0.70 threshold
+	// One active worker at 50% capacity + one idle (satisfies reserve)
 	reg.addWorker(&WorkerInfo{
 		ID: "w1", MachineID: "osb-worker-w1", Region: "us-east-1",
 		Capacity: 50, Current: 25, CPUPct: 40, MemPct: 40, DiskPct: 30,
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "w2", MachineID: "osb-worker-w2", Region: "us-east-1",
+		Capacity: 50, Current: 0, CPUPct: 0, MemPct: 0, DiskPct: 0,
 	})
 
 	s := newTestScaler(reg, pool)
@@ -328,9 +332,14 @@ func TestScaleUpRespectsCooldown(t *testing.T) {
 		t.Fatal("expected first scale-up")
 	}
 
-	// Register the pending machine so it doesn't block
+	// Register the pending machine as an idle worker so it doesn't block,
+	// and also satisfies the idle reserve check.
 	time.Sleep(10 * time.Millisecond)
-	s.pending["us-east-1"] = nil
+	s.state.SetPendingLaunches("us-east-1", nil)
+	reg.addWorker(&WorkerInfo{
+		ID: "w-idle", MachineID: "osb-worker-1", Region: "us-east-1",
+		Capacity: 50, Current: 0, CPUPct: 0, MemPct: 0, DiskPct: 0,
+	})
 
 	// Second evaluation immediately: should be blocked by cooldown
 	created := atomic.LoadInt32(&pool.created)
@@ -399,7 +408,7 @@ func TestSmartScaleDownTargetsLeastLoaded(t *testing.T) {
 	s.smartScaleDown(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
 
 	// w2 (lowest current=2) should be selected for draining
-	if _, ok := s.draining["osb-worker-w2"]; !ok {
+	if !s.state.IsDraining("osb-worker-w2") {
 		t.Error("expected w2 to be selected for draining (least loaded)")
 	}
 }
@@ -419,7 +428,7 @@ func TestScaleDownSkipsStaticWorker(t *testing.T) {
 
 	s.smartScaleDown(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
 
-	if len(s.draining) != 0 {
+	if len(s.state.AllDraining()) != 0 {
 		t.Error("expected no draining — osb-worker-1 is static and should be skipped")
 	}
 }
@@ -438,13 +447,13 @@ func TestScaleDownSkipsAlreadyDraining(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.draining["osb-worker-w2"] = &drainState{workerID: "w2", machineID: "osb-worker-w2"}
+	s.state.SetDraining("osb-worker-w2", &drainState{workerID: "w2", machineID: "osb-worker-w2"})
 
 	ctx := context.Background()
 	s.smartScaleDown(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
 
 	// w3 should be selected since w2 is already draining
-	if _, ok := s.draining["osb-worker-w3"]; !ok {
+	if !s.state.IsDraining("osb-worker-w3") {
 		t.Error("expected w3 to be selected for draining (w2 already draining)")
 	}
 }
@@ -474,7 +483,7 @@ func TestEvacuationTriggersOnCPU(t *testing.T) {
 	// evacuateHotWorkers should trigger (can't actually migrate without gRPC, but it will try)
 	s.evacuateHotWorkers(context.Background(), "us-east-1", workers)
 
-	if _, ok := s.lastEvacuation["hot"]; !ok {
+	if _, ok := s.state.GetLastEvacuation("hot"); !ok {
 		t.Error("expected evacuation to be triggered for hot worker")
 	}
 }
@@ -493,7 +502,7 @@ func TestEvacuationSkipsBelowThreshold(t *testing.T) {
 
 	s.evacuateHotWorkers(context.Background(), "us-east-1", workers)
 
-	if _, ok := s.lastEvacuation["w1"]; ok {
+	if _, ok := s.state.GetLastEvacuation("w1"); ok {
 		t.Error("expected no evacuation below 80%% CPU / 80%% mem / 70%% disk thresholds")
 	}
 }
@@ -514,13 +523,13 @@ func TestEvacuationRespectsColdown(t *testing.T) {
 	s := newTestScaler(reg, pool)
 
 	// Set recent evacuation
-	s.lastEvacuation["hot"] = time.Now()
+	s.state.SetLastEvacuation("hot", time.Now())
 
 	workers := reg.GetWorkersByRegion("us-east-1")
 	s.evacuateHotWorkers(context.Background(), "us-east-1", workers)
 
 	// lastEvacuation should not be updated (cooldown active)
-	if s.lastEvacuation["hot"].After(time.Now().Add(-1 * time.Second)) {
+	if last, _ := s.state.GetLastEvacuation("hot"); last.After(time.Now().Add(-1 * time.Second)) {
 		// It was just set, which means it was re-triggered. Check more carefully.
 		// Actually, we set it above, so it will be recent regardless. The test is
 		// that evacuateBatch was NOT called (no goroutine launched).
@@ -546,7 +555,7 @@ func TestEvacuationOnDiskPressure(t *testing.T) {
 	workers := reg.GetWorkersByRegion("us-east-1")
 	s.evacuateHotWorkers(context.Background(), "us-east-1", workers)
 
-	if _, ok := s.lastEvacuation["diskfull"]; !ok {
+	if _, ok := s.state.GetLastEvacuation("diskfull"); !ok {
 		t.Error("expected evacuation triggered by disk pressure > 70%%")
 	}
 }
@@ -571,7 +580,7 @@ func TestEmergencyHibernateTriggersAboveCritical(t *testing.T) {
 	s.emergencyHibernate(context.Background(), "us-east-1", workers)
 
 	// Should have triggered (sets lastEvacuation as cooldown marker)
-	if _, ok := s.lastEvacuation["critical"]; !ok {
+	if _, ok := s.state.GetLastEvacuation("critical"); !ok {
 		t.Error("expected emergency hibernate triggered for critical worker (CPU > 95%%)")
 	}
 }
@@ -589,7 +598,7 @@ func TestEmergencyHibernateOnDiskCritical(t *testing.T) {
 	workers := reg.GetWorkersByRegion("us-east-1")
 	s.emergencyHibernate(context.Background(), "us-east-1", workers)
 
-	if _, ok := s.lastEvacuation["diskdead"]; !ok {
+	if _, ok := s.state.GetLastEvacuation("diskdead"); !ok {
 		t.Error("expected emergency hibernate triggered for disk > 90%%")
 	}
 }
@@ -607,7 +616,7 @@ func TestEmergencyHibernateSkipsBelowCritical(t *testing.T) {
 	workers := reg.GetWorkersByRegion("us-east-1")
 	s.emergencyHibernate(context.Background(), "us-east-1", workers)
 
-	if _, ok := s.lastEvacuation["w1"]; ok {
+	if _, ok := s.state.GetLastEvacuation("w1"); ok {
 		t.Error("expected no emergency hibernate below critical thresholds")
 	}
 }
@@ -680,7 +689,7 @@ func TestFindMigrationTargetSkipsDraining(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.draining["osb-worker-draining"] = &drainState{workerID: "draining"}
+	s.state.SetDraining("osb-worker-draining", &drainState{workerID: "draining"})
 
 	target := s.findMigrationTarget("us-east-1", "hot")
 	if target != nil {
@@ -709,9 +718,9 @@ func TestFindMigrationTargetAccountsForInFlight(t *testing.T) {
 	s := newTestScaler(reg, pool)
 
 	// Simulate 5 in-flight migrations to target1 → effective remaining = 0
-	s.inFlightMu.Lock()
-	s.inFlightTo["target1"] = 5
-	s.inFlightMu.Unlock()
+	for i := 0; i < 5; i++ {
+		s.state.IncrInFlight("target1")
+	}
 
 	target := s.findMigrationTarget("us-east-1", "source")
 	if target == nil {
@@ -760,18 +769,18 @@ func TestDrainTimeoutCancelsDrainKeepsWorker(t *testing.T) {
 	s := newTestScaler(reg, pool)
 
 	// Simulate a drain that started long ago (past timeout)
-	s.draining["osb-worker-w2"] = &drainState{
+	s.state.SetDraining("osb-worker-w2", &drainState{
 		workerID:  "w2",
 		machineID: "osb-worker-w2",
 		region:    "us-east-1",
 		startedAt: time.Now().Add(-20 * time.Minute), // well past drainTimeout
-	}
+	})
 
 	ctx := context.Background()
 	s.checkDrainingWorkers(ctx, "us-east-1")
 
 	// Drain should be cancelled (removed from draining map) — worker stays alive
-	if _, ok := s.draining["osb-worker-w2"]; ok {
+	if s.state.IsDraining("osb-worker-w2") {
 		t.Error("expected timed-out drain to be cancelled")
 	}
 
@@ -793,17 +802,17 @@ func TestDrainCompletesWhenEmpty(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.draining["osb-worker-w2"] = &drainState{
+	s.state.SetDraining("osb-worker-w2", &drainState{
 		workerID:  "w2",
 		machineID: "osb-worker-w2",
 		region:    "us-east-1",
 		startedAt: time.Now(),
-	}
+	})
 
 	ctx := context.Background()
 	s.checkDrainingWorkers(ctx, "us-east-1")
 
-	if _, ok := s.draining["osb-worker-w2"]; ok {
+	if s.state.IsDraining("osb-worker-w2") {
 		t.Error("expected drain to complete (worker has 0 sandboxes)")
 	}
 
@@ -1100,7 +1109,7 @@ func TestDiskPressureGrowth200Sandboxes(t *testing.T) {
 				// Simulate evacuation relief: if a worker had sandboxes migrated,
 				// its sandbox count and disk would decrease
 				for _, w := range workers {
-					if _, ok := s.lastEvacuation[w.ID]; ok {
+					if _, ok := s.state.GetLastEvacuation(w.ID); ok {
 						reg.updateWorker(w.ID, func(w *WorkerInfo) {
 							if w.Current > 3 {
 								w.Current -= 3
@@ -1175,13 +1184,13 @@ func TestPendingLaunchExpires(t *testing.T) {
 	s := newTestScaler(reg, pool)
 
 	// Simulate a pending launch from 15 minutes ago
-	s.pending["us-east-1"] = []pendingLaunch{
+	s.state.SetPendingLaunches("us-east-1", []pendingLaunch{
 		{machineID: "osb-worker-stale", launchedAt: time.Now().Add(-15 * time.Minute)},
-	}
+	})
 
 	s.expirePending("us-east-1")
 
-	if len(s.pending["us-east-1"]) != 0 {
+	if len(s.state.GetPendingLaunches("us-east-1")) != 0 {
 		t.Error("expected stale pending launch to be expired")
 	}
 }
@@ -1197,13 +1206,13 @@ func TestPendingLaunchRegistered(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.pending["us-east-1"] = []pendingLaunch{
+	s.state.SetPendingLaunches("us-east-1", []pendingLaunch{
 		{machineID: "osb-worker-new", launchedAt: time.Now()},
-	}
+	})
 
 	s.expirePending("us-east-1")
 
-	if len(s.pending["us-east-1"]) != 0 {
+	if len(s.state.GetPendingLaunches("us-east-1")) != 0 {
 		t.Error("expected registered pending launch to be cleared")
 	}
 }
@@ -1224,9 +1233,9 @@ func TestInFlightTrackingPreventsOverload(t *testing.T) {
 	s := newTestScaler(reg, pool)
 
 	// 3 remaining capacity, but 3 in-flight → effective 0
-	s.inFlightMu.Lock()
-	s.inFlightTo["target"] = 3
-	s.inFlightMu.Unlock()
+	for i := 0; i < 3; i++ {
+		s.state.IncrInFlight("target")
+	}
 
 	target := s.findMigrationTarget("us-east-1", "other")
 	if target != nil {
@@ -1236,37 +1245,24 @@ func TestInFlightTrackingPreventsOverload(t *testing.T) {
 
 func TestInFlightCleanup(t *testing.T) {
 	s := &Scaler{
-		inFlightTo: make(map[string]int),
+		state: NewInMemoryScalerState(),
 	}
 
 	// Simulate increment
-	s.inFlightMu.Lock()
-	s.inFlightTo["w1"]++
-	s.inFlightTo["w1"]++
-	s.inFlightMu.Unlock()
+	s.state.IncrInFlight("w1")
+	s.state.IncrInFlight("w1")
 
 	// Simulate one completion
-	s.inFlightMu.Lock()
-	s.inFlightTo["w1"]--
-	s.inFlightMu.Unlock()
+	s.state.DecrInFlight("w1")
 
-	s.inFlightMu.Lock()
-	if s.inFlightTo["w1"] != 1 {
-		t.Errorf("expected 1 in-flight after decrement, got %d", s.inFlightTo["w1"])
+	if got := s.state.GetInFlight("w1"); got != 1 {
+		t.Errorf("expected 1 in-flight after decrement, got %d", got)
 	}
-	s.inFlightMu.Unlock()
 
 	// Simulate final completion
-	s.inFlightMu.Lock()
-	s.inFlightTo["w1"]--
-	if s.inFlightTo["w1"] <= 0 {
-		delete(s.inFlightTo, "w1")
-	}
-	s.inFlightMu.Unlock()
+	s.state.DecrInFlight("w1")
 
-	s.inFlightMu.Lock()
-	if _, exists := s.inFlightTo["w1"]; exists {
-		t.Error("expected w1 to be cleaned up from inFlightTo map")
+	if got := s.state.GetInFlight("w1"); got != 0 {
+		t.Errorf("expected 0 in-flight after final decrement, got %d", got)
 	}
-	s.inFlightMu.Unlock()
 }

@@ -29,9 +29,11 @@ type WorkerEntry struct {
 	Current   int     `json:"current"`
 	CPUPct    float64 `json:"cpu_pct"`
 	MemPct    float64 `json:"mem_pct"`
-	DiskPct       float64 `json:"disk_pct"`
-	GoldenVersion string  `json:"golden_version,omitempty"`
-	WorkerVersion string  `json:"worker_version,omitempty"`
+	DiskPct           float64 `json:"disk_pct"`
+	TotalMemoryMB     int     `json:"total_memory_mb,omitempty"`
+	CommittedMemoryMB int     `json:"committed_memory_mb,omitempty"`
+	GoldenVersion     string  `json:"golden_version,omitempty"`
+	WorkerVersion     string  `json:"worker_version,omitempty"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -44,6 +46,11 @@ type RedisWorkerRegistry struct {
 	conns   map[string]*grpc.ClientConn   // persistent gRPC connections
 	clients map[string]pb.SandboxWorkerClient // cached gRPC clients
 	stop    chan struct{}
+}
+
+// RedisClient returns the underlying Redis client (for health checks, shared state, etc.).
+func (r *RedisWorkerRegistry) RedisClient() *redis.Client {
+	return r.rdb
 }
 
 // NewRedisWorkerRegistry connects to Redis and returns a new registry.

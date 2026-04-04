@@ -51,6 +51,11 @@ func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	return &Store{pool: pool}, nil
 }
 
+// Ping verifies the database connection is alive.
+func (s *Store) Ping(ctx context.Context) error {
+	return s.pool.Ping(ctx)
+}
+
 // Close closes the connection pool.
 func (s *Store) Close() {
 	s.pool.Close()

@@ -293,9 +293,26 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 
 	worker, grpcClient, err := s.workerRegistry.GetLeastLoadedWorker(region)
 	if err != nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "no workers available: " + err.Error(),
-		})
+		// No worker immediately available — poll for up to 30s
+		// (scaler may be launching a new worker)
+		deadline := time.After(30 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for err != nil {
+			select {
+			case <-deadline:
+				return c.JSON(http.StatusServiceUnavailable, map[string]string{
+					"error": "no workers available in region " + region + " (waited 30s)",
+				})
+			case <-ctx.Done():
+				return c.JSON(http.StatusServiceUnavailable, map[string]string{
+					"error": "request cancelled while waiting for capacity",
+				})
+			case <-ticker.C:
+				worker, grpcClient, err = s.workerRegistry.GetLeastLoadedWorker(region)
+			}
+		}
+		log.Printf("sandbox: worker became available after queuing (region=%s)", region)
 	}
 
 	// Resolve template from DB (org-scoped lookup with public fallback)

@@ -146,6 +146,7 @@ func main() {
 		redisRegistry.Start()
 		defer redisRegistry.Stop()
 		opts.WorkerRegistry = redisRegistry
+		opts.RedisClient = redisRegistry.RedisClient()
 		log.Println("opensandbox: Redis worker registry started")
 
 		// Create sandbox API proxy for routing data-plane requests to workers
@@ -269,19 +270,33 @@ func main() {
 		}
 
 		if pool != nil {
+			scalerState := controlplane.NewRedisScalerState(redisRegistry.RedisClient())
 			scaler := controlplane.NewScaler(controlplane.ScalerConfig{
 				Pool:        pool,
 				Registry:    redisRegistry,
 				Store:       opts.Store,
+				StateStore:  scalerState,
 				WorkerImage: cfg.EC2WorkerImage,
 				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
 				MinWorkers:  cfg.MinWorkersPerRegion,
 				MaxWorkers:  cfg.MaxWorkersPerRegion,
 				IdleReserve: cfg.IdleReserveWorkers,
 			})
-			scaler.Start()
 			defer scaler.Stop()
-			log.Printf("opensandbox: autoscaler started (%s)", poolName)
+
+			// Leader election: only the leader runs the scaler
+			elector := controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
+			elector.OnBecomeLeader(func() {
+				scaler.Start()
+				log.Printf("opensandbox: became leader, autoscaler started (%s)", poolName)
+			})
+			elector.OnLoseLeadership(func() {
+				scaler.Stop()
+				log.Println("opensandbox: lost leadership, autoscaler stopped")
+			})
+			elector.Start()
+			defer elector.Stop()
+			log.Printf("opensandbox: leader election started (instance=%s)", elector.InstanceID())
 		}
 	}
 
@@ -382,9 +397,24 @@ func main() {
 		}
 	}()
 
+	// Mark server as ready to accept traffic
+	server.SetReady()
+	log.Println("opensandbox: server ready")
+
 	<-quit
 	log.Println("opensandbox: shutting down...")
-	if err := server.Close(); err != nil {
-		log.Printf("error closing server: %v", err)
+
+	// Phase 1: Mark not ready so load balancer stops sending traffic
+	server.SetNotReady()
+	log.Println("opensandbox: readiness set to false, waiting 5s for LB to detect...")
+	time.Sleep(5 * time.Second)
+
+	// Phase 2: Drain in-flight HTTP requests (25s timeout)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer drainCancel()
+	if err := server.Shutdown(drainCtx); err != nil {
+		log.Printf("opensandbox: graceful shutdown error: %v, forcing close", err)
+		server.Close()
 	}
+	log.Println("opensandbox: server stopped")
 }

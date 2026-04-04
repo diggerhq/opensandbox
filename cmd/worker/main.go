@@ -349,6 +349,11 @@ func main() {
 				cpuPct, memPct, diskPct := worker.SystemStats()
 				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
 			})
+			if qemuMgr != nil {
+				hb.SetMemoryInfoFunc(func() (int, int) {
+					return qemuMgr.HostMemoryMB(), qemuMgr.TotalCommittedMemoryMB()
+				})
+			}
 			// On reconnect after outage, reconcile sandbox state with DB
 			if store != nil {
 				hb.OnReconnect(func() {

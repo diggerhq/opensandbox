@@ -21,9 +21,11 @@ type redisHeartbeatPayload struct {
 	Current   int     `json:"current"`
 	CPUPct    float64 `json:"cpu_pct"`
 	MemPct    float64 `json:"mem_pct"`
-	DiskPct       float64 `json:"disk_pct"`
-	GoldenVersion string  `json:"golden_version,omitempty"`
-	WorkerVersion string  `json:"worker_version,omitempty"`
+	DiskPct           float64 `json:"disk_pct"`
+	TotalMemoryMB     int     `json:"total_memory_mb,omitempty"`
+	CommittedMemoryMB int     `json:"committed_memory_mb,omitempty"`
+	GoldenVersion     string  `json:"golden_version,omitempty"`
+	WorkerVersion     string  `json:"worker_version,omitempty"`
 }
 
 // RedisHeartbeat publishes periodic heartbeats to Redis for worker discovery.
@@ -38,6 +40,7 @@ type RedisHeartbeat struct {
 	grpcAddr  string
 	httpAddr  string
 	getStats      func() (capacity, current int, cpuPct, memPct, diskPct float64)
+	getMemoryInfo func() (totalMB, committedMB int) // optional: committed memory for dynamic capacity
 	onReconnect   func() // called when heartbeat succeeds after a previous failure
 	goldenVersion string
 	workerVersion string
@@ -86,6 +89,12 @@ func (h *RedisHeartbeat) SetWorkerVersion(v string) {
 	h.workerVersion = v
 }
 
+// SetMemoryInfoFunc sets a callback that returns host total and committed memory in MB.
+// Used for dynamic capacity reporting.
+func (h *RedisHeartbeat) SetMemoryInfoFunc(fn func() (totalMB, committedMB int)) {
+	h.getMemoryInfo = fn
+}
+
 // OnReconnect sets a callback that fires when heartbeat succeeds after a failure.
 // Used to reconcile sandbox state after a network outage.
 func (h *RedisHeartbeat) OnReconnect(fn func()) {
@@ -130,6 +139,13 @@ func (h *RedisHeartbeat) publish() {
 		DiskPct:       diskPct,
 		GoldenVersion: h.goldenVersion,
 		WorkerVersion: h.workerVersion,
+	}
+
+	// Add committed memory info for dynamic capacity
+	if h.getMemoryInfo != nil {
+		totalMB, committedMB := h.getMemoryInfo()
+		payload.TotalMemoryMB = totalMB
+		payload.CommittedMemoryMB = committedMB
 	}
 
 	data, err := json.Marshal(payload)

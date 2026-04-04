@@ -1696,8 +1696,17 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 	return vm.agent.SetResourceLimits(ctx, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
 }
 
-// totalCommittedMemoryMB returns the sum of MemoryMB (base + virtio-mem) across all running VMs.
+// TotalCommittedMemoryMB returns the sum of MemoryMB (base + virtio-mem) across all running VMs.
 // This represents the maximum host memory that could be consumed if all VMs use their full allocation.
+func (m *Manager) TotalCommittedMemoryMB() int {
+	return m.totalCommittedMemoryMB()
+}
+
+// HostMemoryMB returns the host's total physical memory in MB.
+func (m *Manager) HostMemoryMB() int {
+	return m.hostMemoryMB()
+}
+
 func (m *Manager) totalCommittedMemoryMB() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

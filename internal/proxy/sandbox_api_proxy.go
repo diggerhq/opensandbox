@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/redis/go-redis/v9"
+
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -25,51 +28,58 @@ import (
 // termination: clients talk to the control plane through the ALB, and the
 // control plane forwards exec/files/pty/agent requests to workers over the
 // internal VPC network.
-// proxyRouteCache caches the sandbox→worker mapping + JWT to avoid DB/Redis
-// lookups and JWT minting on every proxied request. TTL-based eviction.
+// proxyRouteCache caches the sandbox→worker mapping + JWT in Redis to avoid
+// DB lookups and JWT minting on every proxied request. Shared across HA control planes.
 type proxyRouteCache struct {
-	mu      sync.RWMutex
-	entries map[string]*routeCacheEntry
+	rdb *redis.Client // nil = caching disabled (combined/dev mode)
 }
 
 type routeCacheEntry struct {
-	workerURL string
-	workerID  string
-	token     string
-	expiresAt time.Time
+	WorkerURL string `json:"u"`
+	WorkerID  string `json:"w"`
+	Token     string `json:"t"`
 }
 
 const routeCacheTTL = 3 * time.Second
 
-func newProxyRouteCache() *proxyRouteCache {
-	return &proxyRouteCache{entries: make(map[string]*routeCacheEntry)}
+func newProxyRouteCache(rdb *redis.Client) *proxyRouteCache {
+	return &proxyRouteCache{rdb: rdb}
 }
 
 func (c *proxyRouteCache) get(sandboxID string) (workerURL, workerID, token string, ok bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, exists := c.entries[sandboxID]
-	if !exists || time.Now().After(e.expiresAt) {
+	if c.rdb == nil {
 		return "", "", "", false
 	}
-	return e.workerURL, e.workerID, e.token, true
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	val, err := c.rdb.Get(ctx, "routecache:"+sandboxID).Bytes()
+	if err != nil {
+		return "", "", "", false
+	}
+	var e routeCacheEntry
+	if err := json.Unmarshal(val, &e); err != nil {
+		return "", "", "", false
+	}
+	return e.WorkerURL, e.WorkerID, e.Token, true
 }
 
 func (c *proxyRouteCache) set(sandboxID, workerURL, workerID, token string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[sandboxID] = &routeCacheEntry{
-		workerURL: workerURL,
-		workerID:  workerID,
-		token:     token,
-		expiresAt: time.Now().Add(routeCacheTTL),
+	if c.rdb == nil {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	data, _ := json.Marshal(routeCacheEntry{WorkerURL: workerURL, WorkerID: workerID, Token: token})
+	c.rdb.Set(ctx, "routecache:"+sandboxID, data, routeCacheTTL)
 }
 
 func (c *proxyRouteCache) invalidate(sandboxID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.entries, sandboxID)
+	if c.rdb == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c.rdb.Del(ctx, "routecache:"+sandboxID)
 }
 
 // SandboxAPIProxy proxies data-plane HTTP/WebSocket requests from the control
@@ -89,7 +99,7 @@ func NewSandboxAPIProxy(store *db.Store, registry *controlplane.RedisWorkerRegis
 		store:      store,
 		registry:   registry,
 		jwtIssuer:  jwtIssuer,
-		routeCache: newProxyRouteCache(),
+		routeCache: newProxyRouteCache(registry.RedisClient()),
 		// Shared transport with connection pooling — creating a new Transport per request
 		// exhausts ephemeral ports under load and causes 502s.
 		transport: &http.Transport{

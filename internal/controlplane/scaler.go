@@ -61,6 +61,7 @@ type ScalerConfig struct {
 	Pool        compute.Pool
 	Registry    ScalerRegistry
 	Store       *db.Store     // for updating session worker_id after migration
+	StateStore  ScalerStateStore // optional: persists scaler state to Redis (nil = in-memory)
 	WorkerImage string
 	Cooldown    time.Duration // minimum time between scale-up actions per region
 	Interval    time.Duration // how often to evaluate scaling (0 = default 30s)
@@ -88,6 +89,7 @@ type Scaler struct {
 	pool        compute.Pool
 	registry    ScalerRegistry
 	store       *db.Store
+	state       ScalerStateStore // persisted state (Redis or in-memory)
 	image       string
 	cooldown    time.Duration
 	interval    time.Duration
@@ -95,27 +97,14 @@ type Scaler struct {
 	maxWorkers   int
 	idleReserve  int
 
-	// mu protects all mutable maps below (lastScaleUp, pending, draining, lastEvacuation)
-	mu             sync.Mutex
-	lastScaleUp    map[string]time.Time      // region -> last scale-up time
-	pending        map[string][]pendingLaunch // region -> pending (unregistered) launches
-	draining       map[string]*drainState     // machineID -> state (workers being drained for scale-down)
-	lastEvacuation map[string]time.Time       // workerID -> last evacuation time
-
-	stop        chan struct{}
-	wg          sync.WaitGroup
-	migrating   sync.Map               // sandboxID -> struct{} (prevent double-migrate)
-
-	// In-flight migration tracking — prevents routing all migrations to the same target
-	inFlightMu     sync.Mutex
-	inFlightTo     map[string]int          // workerID -> number of migrations currently targeting this worker
+	mu       sync.Mutex     // protects stop/cancel
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	running  bool
 
 	// Rolling replacement: version-aware AMI updates
 	targetWorkerVersion string // desired worker version (from SSM); workers not matching this get replaced
 	refreshCount        int    // tick counter for AMI refresh interval
-
-	// Rate-of-change scaling: track sandbox count per region to detect growth bursts
-	lastSandboxCount map[string]int // region -> sandbox count from previous eval tick
 }
 
 // NewScaler creates a new autoscaling controller.
@@ -140,28 +129,37 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 	if idleReserve <= 0 {
 		idleReserve = 1
 	}
+	stateStore := cfg.StateStore
+	if stateStore == nil {
+		stateStore = NewInMemoryScalerState()
+	}
+
 	return &Scaler{
-		pool:           cfg.Pool,
-		registry:       cfg.Registry,
-		store:          cfg.Store,
-		image:          cfg.WorkerImage,
-		cooldown:       cooldown,
-		interval:       interval,
-		minWorkers:     minWorkers,
-		maxWorkers:     maxWorkers,
-		idleReserve:    idleReserve,
-		lastScaleUp:    make(map[string]time.Time),
-		pending:        make(map[string][]pendingLaunch),
-		stop:           make(chan struct{}),
-		draining:        make(map[string]*drainState),
-		lastEvacuation:  make(map[string]time.Time),
-		inFlightTo:      make(map[string]int),
-		lastSandboxCount: make(map[string]int),
+		pool:        cfg.Pool,
+		registry:    cfg.Registry,
+		store:       cfg.Store,
+		state:       stateStore,
+		image:       cfg.WorkerImage,
+		cooldown:    cooldown,
+		interval:    interval,
+		minWorkers:  minWorkers,
+		maxWorkers:  maxWorkers,
+		idleReserve: idleReserve,
 	}
 }
 
-// Start begins the autoscaling loop.
+// Start begins the autoscaling loop. Can be called multiple times (idempotent).
+// Call Stop() first if already running.
 func (s *Scaler) Start() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.running = true
+
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -172,7 +170,7 @@ func (s *Scaler) Start() {
 			select {
 			case <-ticker.C:
 				s.evaluate()
-			case <-s.stop:
+			case <-ctx.Done():
 				return
 			}
 		}
@@ -180,9 +178,16 @@ func (s *Scaler) Start() {
 	log.Printf("scaler: autoscaling controller started (interval=%s, cooldown=%s)", s.interval, s.cooldown)
 }
 
-// Stop stops the autoscaling loop.
+// Stop stops the autoscaling loop. Can be called multiple times (idempotent).
 func (s *Scaler) Stop() {
-	close(s.stop)
+	s.mu.Lock()
+	if !s.running {
+		s.mu.Unlock()
+		return
+	}
+	s.cancel()
+	s.running = false
+	s.mu.Unlock()
 	s.wg.Wait()
 }
 
@@ -268,8 +273,8 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		currentSandboxes += w.Current
 		totalCapacity += w.Capacity
 	}
-	prevSandboxes := s.lastSandboxCount[region]
-	s.lastSandboxCount[region] = currentSandboxes
+	prevSandboxes, _ := s.state.GetLastSandboxCount(region)
+	s.state.SetLastSandboxCount(region, currentSandboxes)
 	growthRate := currentSandboxes - prevSandboxes // sandboxes added since last tick (30s)
 
 	if !needsScaleUp && growthRate > 0 && totalCapacity > 0 {
@@ -289,7 +294,7 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 
 	// Ensure minimum workers are running (pre-provisioned capacity).
 	// Ignores cooldowns — if we're below minimum, launch immediately.
-	totalWorkers := len(workers) + len(s.pending[region])
+	totalWorkers := len(workers) + len(s.state.GetPendingLaunches(region))
 	if totalWorkers < s.minWorkers {
 		deficit := s.minWorkers - totalWorkers
 		log.Printf("scaler: region %s below minimum workers (%d/%d), launching %d",
@@ -307,14 +312,14 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	// always warm capacity without thrashing.
 	idleWorkers := 0
 	for _, w := range workers {
-		if _, isDraining := s.draining[w.MachineID]; isDraining {
+		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
 		if w.Current == 0 {
 			idleWorkers++
 		}
 	}
-	pendingCount := len(s.pending[region])
+	pendingCount := len(s.state.GetPendingLaunches(region))
 	reserveTarget := s.idleReserve
 	idleOrPending := idleWorkers + pendingCount
 	if idleOrPending < reserveTarget && totalWorkers+pendingCount < s.maxWorkers {
@@ -326,14 +331,14 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 
 	if needsScaleUp {
 		// Check cooldown before scaling up
-		if last, ok := s.lastScaleUp[region]; ok && time.Since(last) < s.cooldown {
+		if last, ok := s.state.GetLastScaleUp(region); ok && time.Since(last) < s.cooldown {
 			log.Printf("scaler: region %s needs scale-up (%s) but cooldown active (%s remaining)",
 				region, reason, s.cooldown-time.Since(last))
 			return
 		}
 
 		// Don't scale up if there are already pending (unregistered) workers
-		pending := s.pending[region]
+		pending := s.state.GetPendingLaunches(region)
 		if len(pending) > 0 {
 			log.Printf("scaler: region %s needs scale-up (%s) but %d worker(s) still pending registration",
 				region, reason, len(pending))
@@ -343,11 +348,11 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 		// Don't exceed max workers per region (exclude draining workers from capacity)
 		effectiveWorkers := 0
 		for _, w := range workers {
-			if _, isDraining := s.draining[w.MachineID]; !isDraining {
+			if !s.state.IsDraining(w.MachineID) {
 				effectiveWorkers++
 			}
 		}
-		if effectiveWorkers+len(s.pending[region]) >= s.maxWorkers {
+		if effectiveWorkers+len(s.state.GetPendingLaunches(region)) >= s.maxWorkers {
 			log.Printf("scaler: region %s at max workers (%d/%d), skipping scale-up", region, effectiveWorkers, s.maxWorkers)
 			return
 		}
@@ -367,7 +372,7 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 
 func (s *Scaler) scaleUp(_ context.Context, region string) {
 	// Record scale-up intent immediately (prevents duplicate launches)
-	s.lastScaleUp[region] = time.Now()
+	s.state.SetLastScaleUp(region, time.Now(), s.cooldown)
 
 	// Run VM creation in background — Azure/EC2 can take 2-5 minutes.
 	// Uses a 5-minute timeout independent of the evaluation cycle.
@@ -386,7 +391,7 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 			return
 		}
 
-		s.pending[region] = append(s.pending[region], pendingLaunch{
+		s.state.AddPendingLaunch(region, pendingLaunch{
 			machineID:  machine.ID,
 			launchedAt: time.Now(),
 		})
@@ -396,7 +401,7 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 
 // expirePending removes pending launches that have either registered or timed out.
 func (s *Scaler) expirePending(region string) {
-	pending := s.pending[region]
+	pending := s.state.GetPendingLaunches(region)
 	if len(pending) == 0 {
 		return
 	}
@@ -427,7 +432,7 @@ func (s *Scaler) expirePending(region string) {
 		}
 		remaining = append(remaining, p)
 	}
-	s.pending[region] = remaining
+	s.state.SetPendingLaunches(region, remaining)
 }
 
 // --- Emergency Hibernate ---
@@ -442,14 +447,14 @@ func (s *Scaler) emergencyHibernate(_ context.Context, region string, workers []
 			continue
 		}
 		// Cooldown — reuse evacuation cooldown to avoid hammering
-		if last, ok := s.lastEvacuation[w.ID]; ok && time.Since(last) < evacuationCooldown {
+		if last, ok := s.state.GetLastEvacuation(w.ID); ok && time.Since(last) < evacuationCooldown {
 			continue
 		}
 
 		log.Printf("scaler: EMERGENCY worker %s at critical levels (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), hibernating sandboxes",
 			w.ID, w.CPUPct, w.MemPct, w.DiskPct)
 
-		s.lastEvacuation[w.ID] = time.Now()
+		s.state.SetLastEvacuation(w.ID, time.Now())
 		go s.hibernateBatch(w.ID, evacuationBatchSize)
 	}
 }
@@ -504,11 +509,11 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 			continue
 		}
 		// Skip if already being drained for scale-down
-		if _, ok := s.draining[w.MachineID]; ok {
+		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
 		// Cooldown — don't evacuate the same worker every tick
-		if last, ok := s.lastEvacuation[w.ID]; ok && time.Since(last) < evacuationCooldown {
+		if last, ok := s.state.GetLastEvacuation(w.ID); ok && time.Since(last) < evacuationCooldown {
 			continue
 		}
 
@@ -523,7 +528,7 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), evacuating up to %d sandboxes to %s",
 			w.ID, w.CPUPct, w.MemPct, w.DiskPct, evacuationBatchSize, target.ID)
 
-		s.lastEvacuation[w.ID] = time.Now()
+		s.state.SetLastEvacuation(w.ID, time.Now())
 		go s.evacuateBatch(w.ID, target.ID, evacuationBatchSize)
 	}
 }
@@ -533,24 +538,17 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo {
 	workers := s.registry.GetWorkersByRegion(region)
 
-	s.inFlightMu.Lock()
-	inFlight := make(map[string]int, len(s.inFlightTo))
-	for k, v := range s.inFlightTo {
-		inFlight[k] = v
-	}
-	s.inFlightMu.Unlock()
-
 	var best *WorkerInfo
 	bestScore := -1.0
 	for _, w := range workers {
 		if w.ID == excludeWorkerID {
 			continue
 		}
-		if _, isDraining := s.draining[w.MachineID]; isDraining {
+		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
 		// Subtract in-flight migrations from remaining capacity
-		pending := inFlight[w.ID]
+		pending := s.state.GetInFlight(w.ID)
 		remaining := w.Capacity - w.Current - pending
 		if remaining <= 0 || w.CPUPct > 85 || w.MemPct > 85 || w.DiskPct > 85 {
 			continue
@@ -619,7 +617,7 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 			continue // static worker, not autoscaled
 		}
 		// Skip workers already being drained
-		if _, ok := s.draining[w.MachineID]; ok {
+		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
 		if target == nil || w.Current < target.Current {
@@ -634,12 +632,12 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 	log.Printf("scaler: initiating smart drain of worker %s (machine=%s, sandboxes=%d)",
 		target.ID, target.MachineID, target.Current)
 
-	s.draining[target.MachineID] = &drainState{
+	s.state.SetDraining(target.MachineID, &drainState{
 		workerID:  target.ID,
 		machineID: target.MachineID,
 		region:    region,
 		startedAt: time.Now(),
-	}
+	})
 
 	go s.drainWorker(target.ID, target.MachineID, region)
 }
@@ -655,7 +653,7 @@ func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*Wor
 	var current int
 	for _, w := range workers {
 		// Skip workers already being drained
-		if _, isDraining := s.draining[w.MachineID]; isDraining {
+		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
 		// Skip manually provisioned workers (not autoscaler-managed)
@@ -697,12 +695,12 @@ func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*Wor
 	log.Printf("scaler: rolling replace: draining stale worker %s (version=%q, want=%q, sandboxes=%d)",
 		target.ID, target.WorkerVersion, s.targetWorkerVersion, target.Current)
 
-	s.draining[target.MachineID] = &drainState{
+	s.state.SetDraining(target.MachineID, &drainState{
 		workerID:  target.ID,
 		machineID: target.MachineID,
 		region:    region,
 		startedAt: time.Now(),
-	}
+	})
 
 	go s.drainWorker(target.ID, target.MachineID, region)
 }
@@ -773,7 +771,7 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 
 // checkDrainingWorkers checks if draining workers are empty and destroys them.
 func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
-	for machineID, state := range s.draining {
+	for machineID, state := range s.state.AllDraining() {
 		if state.region != region {
 			continue
 		}
@@ -785,12 +783,12 @@ func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 				// Sandboxes expired naturally — safe to destroy
 				log.Printf("scaler: drain timeout for worker %s but 0 sandboxes remain, destroying", state.workerID)
 				s.destroyDrainedMachine(machineID)
-				delete(s.draining, machineID)
+				s.state.RemoveDraining(machineID)
 			} else {
 				// Still has sandboxes — cancel drain, keep worker alive
 				log.Printf("scaler: drain timeout for worker %s (machine=%s) with %d sandboxes — cancelling drain, keeping alive",
 					state.workerID, machineID, sandboxCount)
-				delete(s.draining, machineID)
+				s.state.RemoveDraining(machineID)
 			}
 			continue
 		}
@@ -802,7 +800,7 @@ func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 				log.Printf("scaler: worker %s fully drained (0 sandboxes), destroying machine %s",
 					state.workerID, machineID)
 				s.destroyDrainedMachine(machineID)
-				delete(s.draining, machineID)
+				s.state.RemoveDraining(machineID)
 				break
 			}
 		}
@@ -923,10 +921,10 @@ func (s *Scaler) getWorkerInfo(workerID string) *WorkerInfo {
 // Steps: pre-copy drives to S3 → prepare target → QMP migrate → complete → update DB.
 func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorkerID, targetWorkerID string) error {
 	// Prevent double-migrate
-	if _, loaded := s.migrating.LoadOrStore(sandboxID, struct{}{}); loaded {
+	if !s.state.AcquireMigrationLock(sandboxID) {
 		return fmt.Errorf("migration already in progress for %s", sandboxID)
 	}
-	defer s.migrating.Delete(sandboxID)
+	defer s.state.ReleaseMigrationLock(sandboxID)
 
 	// Mark sandbox as migrating in DB — blocks exec routing during migration
 	migrationCompleted := false
@@ -942,17 +940,8 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	}
 
 	// Track in-flight migration to target so other evacuations don't pile on
-	s.inFlightMu.Lock()
-	s.inFlightTo[targetWorkerID]++
-	s.inFlightMu.Unlock()
-	defer func() {
-		s.inFlightMu.Lock()
-		s.inFlightTo[targetWorkerID]--
-		if s.inFlightTo[targetWorkerID] <= 0 {
-			delete(s.inFlightTo, targetWorkerID)
-		}
-		s.inFlightMu.Unlock()
-	}()
+	s.state.IncrInFlight(targetWorkerID)
+	defer s.state.DecrInFlight(targetWorkerID)
 
 	sourceClient, err := s.registry.GetWorkerClient(sourceWorkerID)
 	if err != nil {
