@@ -18,7 +18,7 @@ env:
 
 jobs:
   deploy:
-    name: Build & Deploy Server
+    name: Blue-Green Deploy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +32,12 @@ jobs:
           node-version: '20'
 
       - name: Build server binary
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build -o bin/opensandbox-server ./cmd/server/
+        run: |
+          VERSION=$(git rev-parse --short HEAD)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build \
+            -ldflags "-X main.Version=$VERSION" \
+            -o bin/opensandbox-server ./cmd/server/
 
       - name: Build web dashboard
         run: cd web && npm ci && npm run build
@@ -45,26 +50,106 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ secrets.CP1_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ secrets.CP2_IP }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Upload artifacts
+      - name: Deploy to CP2 (follower first)
         run: |
-          scp -i ~/.ssh/deploy.pem bin/opensandbox-server ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/opensandbox-server
-          scp -i ~/.ssh/deploy.pem bin/web-dist.tar.gz ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/web-dist.tar.gz
+          echo "=== Deploying to CP2 (${{ secrets.CP2_IP }}) ==="
+          scp -i ~/.ssh/deploy.pem bin/opensandbox-server bin/web-dist.tar.gz \
+            ${{ env.SSH_USER }}@${{ secrets.CP2_IP }}:/tmp/
 
-      - name: Install and restart
-        run: |
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
-            sudo mv /tmp/opensandbox-server /usr/local/bin/opensandbox-server
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.CP2_IP }} '
+            sudo systemctl stop opensandbox-server
+            sleep 1
+            sudo rm -f /usr/local/bin/opensandbox-server
+            sudo cp /tmp/opensandbox-server /usr/local/bin/opensandbox-server
             sudo chmod +x /usr/local/bin/opensandbox-server
             sudo mkdir -p /opt/opensandbox/web
             sudo tar xzf /tmp/web-dist.tar.gz -C /opt/opensandbox/web
-            rm /tmp/web-dist.tar.gz
-            sudo systemctl restart opensandbox-server
+            rm -f /tmp/opensandbox-server /tmp/web-dist.tar.gz
+            sudo systemctl start opensandbox-server
           '
 
-      - name: Verify deployment
+      - name: Wait for CP2 ready
         run: |
+          for i in $(seq 1 15); do
+            STATUS=$(curl -sf --max-time 3 http://${{ secrets.CP2_IP }}:8080/readyz 2>/dev/null | jq -r .status 2>/dev/null)
+            if [ "$STATUS" = "ready" ]; then
+              echo "CP2 ready"
+              break
+            fi
+            echo "Waiting for CP2... ($i)"
+            sleep 2
+          done
+
+      - name: Deploy to CP1 (leader)
+        run: |
+          echo "=== Deploying to CP1 (${{ secrets.CP1_IP }}) ==="
+          scp -i ~/.ssh/deploy.pem bin/opensandbox-server bin/web-dist.tar.gz \
+            ${{ env.SSH_USER }}@${{ secrets.CP1_IP }}:/tmp/
+
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.CP1_IP }} '
+            sudo systemctl stop opensandbox-server
+            sleep 1
+            sudo rm -f /usr/local/bin/opensandbox-server
+            sudo cp /tmp/opensandbox-server /usr/local/bin/opensandbox-server
+            sudo chmod +x /usr/local/bin/opensandbox-server
+            sudo mkdir -p /opt/opensandbox/web
+            sudo tar xzf /tmp/web-dist.tar.gz -C /opt/opensandbox/web
+            rm -f /tmp/opensandbox-server /tmp/web-dist.tar.gz
+            sudo systemctl start opensandbox-server
+          '
+
+      - name: Wait for CP1 ready
+        run: |
+          for i in $(seq 1 15); do
+            STATUS=$(curl -sf --max-time 3 http://${{ secrets.CP1_IP }}:8080/readyz 2>/dev/null | jq -r .status 2>/dev/null)
+            if [ "$STATUS" = "ready" ]; then
+              echo "CP1 ready"
+              break
+            fi
+            echo "Waiting for CP1... ($i)"
+            sleep 2
+          done
+
+      - name: Smoke test
+        run: |
+          # Create sandbox via CP1, exec via CP2, destroy
+          SB=$(curl -sf --max-time 30 \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.API_KEY }}" \
+            -X POST "http://${{ secrets.CP1_IP }}:8080/api/sandboxes" \
+            -d '{"timeout":60}' | jq -r .sandboxID)
+
+          if [ -z "$SB" ] || [ "$SB" = "null" ]; then
+            echo "Smoke test FAILED: could not create sandbox"
+            exit 1
+          fi
+          echo "Created sandbox: $SB"
           sleep 3
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} 'sudo systemctl is-active opensandbox-server'
-          echo "Server deployed successfully!"
+
+          RESULT=$(curl -sf --max-time 15 \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: ${{ secrets.API_KEY }}" \
+            -X POST "http://${{ secrets.CP2_IP }}:8080/api/sandboxes/$SB/exec/run" \
+            -d '{"cmd":"echo","args":["deploy-ok"],"timeout":10}' | jq -r .stdout)
+
+          curl -sf --max-time 10 \
+            -H "X-API-Key: ${{ secrets.API_KEY }}" \
+            -X DELETE "http://${{ secrets.CP1_IP }}:8080/api/sandboxes/$SB" || true
+
+          if echo "$RESULT" | grep -q "deploy-ok"; then
+            echo "Smoke test PASSED"
+          else
+            echo "Smoke test FAILED: exec returned '$RESULT'"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Control Plane Deploy Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **CP1:** ${{ secrets.CP1_IP }} ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **CP2:** ${{ secrets.CP2_IP }} ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Smoke test:** Passed (create CP1 → exec CP2)" >> $GITHUB_STEP_SUMMARY

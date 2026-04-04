@@ -31,7 +31,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          echo "${{ secrets.WORKER_SSH_KEY }}" > ~/.ssh/worker.pem
+          chmod 600 ~/.ssh/worker.pem
+          ssh-keyscan -H ${{ secrets.CP1_IP }} >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Stage SSH key on control plane for worker access
         run: |
