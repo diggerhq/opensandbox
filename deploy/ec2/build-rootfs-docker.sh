@@ -243,26 +243,26 @@ for dir in proc sys dev dev/pts dev/shm tmp run; do
     mkdir -p "$MNT_DIR/$dir"
 done
 
-# Inject host kernel modules (virtio_mem, vsock, overlay) into rootfs.
-# The Docker image has modules for the container kernel, but the guest runs
-# the host kernel — so we need the host's matching .ko files.
-GUEST_MODDIR="/opt/opensandbox/guest-modules"
-if [ -d "$GUEST_MODDIR" ] && ls "$GUEST_MODDIR"/*.ko >/dev/null 2>&1; then
-    # Detect guest kernel version from the kernel binary
-    GUEST_KVER=$(ls -d /lib/modules/*-generic 2>/dev/null | head -1 | xargs basename)
-    if [ -n "$GUEST_KVER" ]; then
-        DEST="$MNT_DIR/lib/modules/$GUEST_KVER/kernel/extra"
-        mkdir -p "$DEST"
-        cp "$GUEST_MODDIR"/*.ko "$DEST/"
-        # Run depmod so modprobe works inside the guest
-        depmod -b "$MNT_DIR" "$GUEST_KVER" 2>/dev/null || log "depmod failed (non-fatal)"
-        log "Injected guest modules into rootfs for kernel $GUEST_KVER:"
-        ls "$DEST/"
-    else
-        log "WARNING: Could not detect guest kernel version — guest modules not injected"
-    fi
+# Inject guest kernel modules into rootfs.
+# Copy the full /lib/modules/<kver> tree so all modules (Docker networking,
+# vsock, overlay, virtio_mem, etc.) are available with correct dependencies.
+GUEST_KVER_FILE="/opt/opensandbox/guest-kernel-version"
+if [ -f "$GUEST_KVER_FILE" ]; then
+    GUEST_KVER=$(cat "$GUEST_KVER_FILE")
+elif ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+    GUEST_KVER=$(ls -d /lib/modules/*-generic | sort -V | tail -1 | xargs basename)
+fi
+
+if [ -n "${GUEST_KVER:-}" ] && [ -d "/lib/modules/$GUEST_KVER" ]; then
+    log "Injecting kernel modules for $GUEST_KVER..."
+    rm -rf "$MNT_DIR/lib/modules"/*
+    mkdir -p "$MNT_DIR/lib/modules"
+    cp -a "/lib/modules/$GUEST_KVER" "$MNT_DIR/lib/modules/"
+    depmod -b "$MNT_DIR" "$GUEST_KVER" 2>/dev/null || log "depmod failed (non-fatal)"
+    MOD_COUNT=$(find "$MNT_DIR/lib/modules/$GUEST_KVER" -name "*.ko*" | wc -l)
+    log "Injected $MOD_COUNT modules for kernel $GUEST_KVER"
 else
-    log "WARNING: No guest modules at $GUEST_MODDIR — virtio_mem may not load"
+    log "WARNING: No guest kernel modules found — Docker networking and virtio_mem will not work"
 fi
 
 sync

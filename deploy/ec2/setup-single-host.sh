@@ -103,23 +103,40 @@ fi
 sudo chmod 666 /dev/kvm 2>/dev/null || true
 
 ###############################################################################
-# 5. Firecracker kernel
+# 5. Guest kernel — Ubuntu generic kernel with full module support
 ###############################################################################
-echo "==> Downloading Firecracker kernel..."
+echo "==> Setting up guest kernel..."
 sudo mkdir -p /opt/opensandbox
-if [ ! -f /opt/opensandbox/vmlinux ]; then
-    # Use the 5.10 "docker" kernel which includes vsock, overlayfs, and other
-    # features needed for sandbox VMs. The plain vmlinux.bin is a minimal 4.14
-    # kernel that lacks CONFIG_VIRTIO_VSOCKETS.
-    case "$ARCH" in
-      x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux-docker-5.10.bin" ;;
-      aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux-docker-5.10.bin" ;;
-    esac
-    sudo curl -fSL -o /opt/opensandbox/vmlinux "$KERNEL_URL"
+
+# Install Ubuntu generic kernel (has virtio built-in, full module ecosystem).
+# This gives us a kernel + matching modules that support Docker networking
+# (bridge, veth, netfilter), vsock, overlay, virtio_mem, etc.
+sudo apt-get install -y -qq linux-image-generic
+
+GENERIC_VMLINUZ=$(ls -t /boot/vmlinuz-*-generic 2>/dev/null | head -1)
+if [ -n "$GENERIC_VMLINUZ" ]; then
+    sudo cp "$GENERIC_VMLINUZ" /opt/opensandbox/vmlinux
     sudo chmod 644 /opt/opensandbox/vmlinux
-    echo "    Kernel downloaded: $(ls -lh /opt/opensandbox/vmlinux)"
+    GENERIC_KVER=$(basename "$GENERIC_VMLINUZ" | sed 's/vmlinuz-//')
+    echo "    Guest kernel: $GENERIC_VMLINUZ ($GENERIC_KVER)"
+
+    # Install full kernel modules for the guest
+    sudo apt-get install -y -qq "linux-modules-$GENERIC_KVER" 2>/dev/null || true
+    sudo apt-get install -y -qq "linux-modules-extra-$GENERIC_KVER" 2>/dev/null || true
+
+    # Store kernel version for the rootfs build
+    echo "$GENERIC_KVER" | sudo tee /opt/opensandbox/guest-kernel-version >/dev/null
+    echo "    Modules installed for $GENERIC_KVER"
 else
-    echo "    Kernel already exists, skipping"
+    echo "    WARNING: No generic kernel found, falling back to Firecracker kernel"
+    if [ ! -f /opt/opensandbox/vmlinux ]; then
+        case "$ARCH" in
+          x86_64)  KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux-docker-5.10.bin" ;;
+          aarch64) KERNEL_URL="https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux-docker-5.10.bin" ;;
+        esac
+        sudo curl -fSL -o /opt/opensandbox/vmlinux "$KERNEL_URL"
+        sudo chmod 644 /opt/opensandbox/vmlinux
+    fi
 fi
 
 ###############################################################################

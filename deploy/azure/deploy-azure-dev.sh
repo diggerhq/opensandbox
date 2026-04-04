@@ -194,39 +194,30 @@ else
     echo "Rootfs image already exists."
 fi
 
-# Patch rootfs with guest kernel modules (vsock, overlay) and insmod symlink
-GUEST_MODDIR="/opt/opensandbox/guest-modules"
-if [ -d "$GUEST_MODDIR" ] && [ -f /data/firecracker/images/default.ext4 ]; then
-    echo "Patching rootfs with guest kernel modules..."
-    MNTDIR=$(mktemp -d)
-    sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
-
-    # Copy modules
-    sudo mkdir -p "$MNTDIR/lib/modules/vsock"
-    sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
-
-    # Create insmod symlink (busybox applet)
-    if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
-        sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+# Patch rootfs with full guest kernel modules — handled by build-rootfs-docker.sh
+# but kept as fallback for manually-built images.
+if [ -f /data/firecracker/images/default.ext4 ]; then
+    GUEST_KVER_FILE="/opt/opensandbox/guest-kernel-version"
+    if [ -f "$GUEST_KVER_FILE" ]; then
+        GUEST_KVER=$(cat "$GUEST_KVER_FILE")
+    elif ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+        GUEST_KVER=$(ls -d /lib/modules/*-generic | sort -V | tail -1 | xargs basename)
     fi
 
-    # Update init script: load modules early (before overlay mount)
-    if ! grep -q 'lib/modules/vsock' "$MNTDIR/sbin/init" 2>/dev/null; then
-        # Insert module loading after the first "mount -t devtmpfs" line
-        sudo sed -i '/^mount -t devtmpfs devtmpfs \/dev$/a\
-\
-# Load kernel modules (needed for QEMU with modular kernel)\
-if [ -d /lib/modules/vsock ]; then\
-    for mod in /lib/modules/vsock/overlay.ko /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do\
-        [ -f "$mod" ] \&\& insmod "$mod" 2>/dev/null || true\
-    done\
-    echo "init: kernel modules loaded"\
-fi' "$MNTDIR/sbin/init"
+    if [ -n "${GUEST_KVER:-}" ] && [ -d "/lib/modules/$GUEST_KVER" ]; then
+        echo "Patching rootfs with full kernel modules for $GUEST_KVER..."
+        MNTDIR=$(mktemp -d)
+        sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
+        sudo rm -rf "$MNTDIR/lib/modules"/*
+        sudo cp -a "/lib/modules/$GUEST_KVER" "$MNTDIR/lib/modules/"
+        sudo depmod -b "$MNTDIR" "$GUEST_KVER" 2>/dev/null || true
+        if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
+            sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+        fi
+        sudo umount "$MNTDIR"
+        rmdir "$MNTDIR"
+        echo "Rootfs patched with modules for $GUEST_KVER"
     fi
-
-    sudo umount "$MNTDIR"
-    rmdir "$MNTDIR"
-    echo "Rootfs patched."
 fi
 ROOTFS
 
