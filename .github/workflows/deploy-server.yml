@@ -62,7 +62,8 @@ jobs:
       - name: Deploy to CP2 (follower first)
         run: |
           echo "=== Deploying to CP2 (${{ secrets.CP2_IP }}) ==="
-          scp -i ~/.ssh/deploy.pem bin/opensandbox-server bin/web-dist.tar.gz \
+          ssh -v -i ~/.ssh/deploy.pem -o StrictHostKeyChecking=no ${{ env.SSH_USER }}@${{ secrets.CP2_IP }} "echo SSH_OK" 2>&1 | grep -E "Offering|Authenticated|debug1.*identity|Permission|publickey" || true
+          scp -i ~/.ssh/deploy.pem -o StrictHostKeyChecking=no bin/opensandbox-server bin/web-dist.tar.gz \
             ${{ env.SSH_USER }}@${{ secrets.CP2_IP }}:/tmp/
 
           ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.CP2_IP }} '
