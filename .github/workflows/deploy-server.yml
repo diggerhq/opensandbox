@@ -47,11 +47,11 @@ jobs:
 
       - name: Configure SSH
         run: |
-          install -m 600 /dev/null ~/.ssh/deploy.pem
+          mkdir -p ~/.ssh
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
-          cat ~/.ssh/deploy.pem | head -1
-          cat ~/.ssh/deploy.pem | wc -l
+          head -1 ~/.ssh/deploy.pem
+          wc -l < ~/.ssh/deploy.pem
           ssh-keyscan -H ${{ secrets.CP1_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           ssh-keyscan -H ${{ secrets.CP2_IP }} >> ~/.ssh/known_hosts 2>/dev/null
           echo "Host *" >> ~/.ssh/config
