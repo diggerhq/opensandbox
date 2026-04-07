@@ -66,6 +66,18 @@ variable "image_name_prefix" {
   default = "opensandbox-worker"
 }
 
+variable "gallery_name" {
+  type        = string
+  default     = "opensandbox_gallery"
+  description = "Azure Compute Gallery name for NVMe-compatible images."
+}
+
+variable "image_version_patch" {
+  type        = string
+  default     = "0"
+  description = "Patch version for gallery image (integer). Set by CI to a unique number."
+}
+
 variable "worker_binary" {
   type        = string
   default     = "bin/opensandbox-worker"
@@ -98,9 +110,19 @@ source "azure-arm" "worker" {
   vm_size         = var.vm_size
   ssh_username    = "packer"
 
-  # Output: Managed Image in the specified resource group
+  # Output: Managed Image (required as intermediate for gallery publish)
   managed_image_name                = "${var.image_name_prefix}-${var.worker_version}"
   managed_image_resource_group_name = var.resource_group
+
+  # Also publish to Azure Compute Gallery for NVMe/v6 VM compatibility
+  shared_image_gallery_destination {
+    subscription   = var.subscription_id
+    resource_group = var.resource_group
+    gallery_name   = var.gallery_name
+    image_name     = "osb-worker"
+    image_version  = "1.0.${var.image_version_patch}"
+    replication_regions = [var.location]
+  }
 
   azure_tags = {
     "opensandbox-role"    = "worker"

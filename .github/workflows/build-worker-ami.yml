@@ -72,23 +72,34 @@ jobs:
 
       - name: Build image
         run: |
+          # Use run number as patch version for gallery (must be integer)
+          PATCH=${{ github.run_number }}
+
           packer build \
             -var "worker_version=$VERSION" \
             -var "agent_version=$VERSION" \
             -var "subscription_id=$AZURE_SUBSCRIPTION_ID" \
             -var "resource_group=$AZURE_RESOURCE_GROUP" \
             -var "location=$AZURE_LOCATION" \
+            -var "image_version_patch=$PATCH" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
-          # Extract the managed image resource ID from Packer output
-          IMAGE_ID=$(grep -oP '/subscriptions/[^\s"]+' /tmp/packer-output.txt | tail -1)
-          if [ -z "$IMAGE_ID" ]; then
-            echo "ERROR: Could not extract image ID from Packer output. Build may have failed."
+          # Use the gallery image ID (NVMe-compatible for v6 VMs)
+          GALLERY_IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/galleries/opensandbox_gallery/images/osb-worker/versions/1.0.${PATCH}"
+
+          # Verify it exists
+          if ! az sig image-version show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --gallery-name opensandbox_gallery \
+            --gallery-image-definition osb-worker \
+            --gallery-image-version "1.0.${PATCH}" -o none 2>/dev/null; then
+            echo "ERROR: Gallery image version 1.0.${PATCH} not found after build"
             cat /tmp/packer-output.txt
             exit 1
           fi
-          echo "IMAGE_ID=$IMAGE_ID" >> $GITHUB_ENV
-          echo "Built image: $IMAGE_ID"
+
+          echo "IMAGE_ID=$GALLERY_IMAGE_ID" >> $GITHUB_ENV
+          echo "Built gallery image: $GALLERY_IMAGE_ID (version=1.0.${PATCH})"
 
       - name: Azure Re-Login
         uses: azure/login@v2
