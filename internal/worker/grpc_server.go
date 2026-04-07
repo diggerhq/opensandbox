@@ -892,3 +892,23 @@ func (s *GRPCServer) GetSandboxStats(ctx context.Context, req *pb.GetSandboxStat
 		Pids:       int32(stats.PIDs),
 	}, nil
 }
+
+func (s *GRPCServer) InjectSecrets(ctx context.Context, req *pb.InjectSecretsRequest) (*pb.InjectSecretsResponse, error) {
+	// Parse per-secret host restrictions (comma-separated → slice)
+	secretHosts := make(map[string][]string, len(req.SecretAllowedHosts))
+	for name, hosts := range req.SecretAllowedHosts {
+		if hosts != "" {
+			secretHosts[name] = strings.Split(hosts, ",")
+		}
+	}
+
+	count, err := s.manager.InjectSecrets(ctx, req.SandboxId, req.EnvVars, secretHosts)
+	if err != nil {
+		return nil, fmt.Errorf("inject secrets: %w", err)
+	}
+
+	return &pb.InjectSecretsResponse{
+		SandboxId:     req.SandboxId,
+		InjectedCount: int32(count),
+	}, nil
+}

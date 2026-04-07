@@ -86,6 +86,8 @@ type SecretsProxyIntegration interface {
 	GetSessionTokenHosts(guestIP string) map[string][]string
 	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
 	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string)
+	// InjectTokens adds new sealed tokens to an existing proxy session and returns the sealed env map.
+	InjectTokens(sandboxID, guestIP string, envVars map[string]string, secretAllowedHosts map[string][]string) map[string]string
 	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
 	CACertPEM() []byte
 }
@@ -1731,6 +1733,45 @@ func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
 		return p
 	}
 	return ""
+}
+
+// InjectSecrets adds new sealed tokens to a running sandbox's secrets proxy session
+// and injects the sealed env vars into the sandbox's environment.
+func (m *Manager) InjectSecrets(ctx context.Context, sandboxID string, envVars map[string]string, secretAllowedHosts map[string][]string) (int, error) {
+	vm, err := m.getVM(sandboxID)
+	if err != nil {
+		return 0, err
+	}
+	if m.secretsProxy == nil {
+		return 0, fmt.Errorf("secrets proxy not configured")
+	}
+	if vm.agent == nil {
+		return 0, fmt.Errorf("agent not connected for %s", sandboxID)
+	}
+
+	guestIP := ""
+	if vm.network != nil {
+		guestIP = vm.network.GuestIP
+	}
+	if guestIP == "" {
+		return 0, fmt.Errorf("no guest IP for %s", sandboxID)
+	}
+
+	// Seal the tokens and add them to the proxy session
+	sealed := m.secretsProxy.InjectTokens(sandboxID, guestIP, envVars, secretAllowedHosts)
+	if len(sealed) == 0 {
+		return 0, nil
+	}
+
+	// Inject the sealed env vars into the running sandbox
+	envCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := vm.agent.SetEnvs(envCtx, sealed); err != nil {
+		return 0, fmt.Errorf("inject envs: %w", err)
+	}
+
+	log.Printf("qemu: InjectSecrets %s: injected %d secrets", sandboxID, len(sealed))
+	return len(sealed), nil
 }
 
 // CreateCheckpoint creates an internal VM snapshot using QEMU's savevm.

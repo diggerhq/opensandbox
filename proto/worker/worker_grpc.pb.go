@@ -41,6 +41,7 @@ const (
 	SandboxWorker_BuildTemplate_FullMethodName             = "/worker.SandboxWorker/BuildTemplate"
 	SandboxWorker_GetSandboxStats_FullMethodName           = "/worker.SandboxWorker/GetSandboxStats"
 	SandboxWorker_SetSandboxLimits_FullMethodName          = "/worker.SandboxWorker/SetSandboxLimits"
+	SandboxWorker_InjectSecrets_FullMethodName             = "/worker.SandboxWorker/InjectSecrets"
 	SandboxWorker_PrepareMigrationIncoming_FullMethodName  = "/worker.SandboxWorker/PrepareMigrationIncoming"
 	SandboxWorker_LiveMigrate_FullMethodName               = "/worker.SandboxWorker/LiveMigrate"
 	SandboxWorker_CompleteMigrationIncoming_FullMethodName = "/worker.SandboxWorker/CompleteMigrationIncoming"
@@ -72,6 +73,8 @@ type SandboxWorkerClient interface {
 	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
 	GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(ctx context.Context, in *SetSandboxLimitsRequest, opts ...grpc.CallOption) (*SetSandboxLimitsResponse, error)
+	// Inject secrets into a running sandbox's proxy session
+	InjectSecrets(ctx context.Context, in *InjectSecretsRequest, opts ...grpc.CallOption) (*InjectSecretsResponse, error)
 	// Live migration between workers
 	PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error)
 	LiveMigrate(ctx context.Context, in *LiveMigrateRequest, opts ...grpc.CallOption) (*LiveMigrateResponse, error)
@@ -318,6 +321,16 @@ func (c *sandboxWorkerClient) SetSandboxLimits(ctx context.Context, in *SetSandb
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) InjectSecrets(ctx context.Context, in *InjectSecretsRequest, opts ...grpc.CallOption) (*InjectSecretsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InjectSecretsResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_InjectSecrets_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxWorkerClient) PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PrepareMigrationIncomingResponse)
@@ -374,6 +387,8 @@ type SandboxWorkerServer interface {
 	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
 	GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error)
+	// Inject secrets into a running sandbox's proxy session
+	InjectSecrets(context.Context, *InjectSecretsRequest) (*InjectSecretsResponse, error)
 	// Live migration between workers
 	PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error)
 	LiveMigrate(context.Context, *LiveMigrateRequest) (*LiveMigrateResponse, error)
@@ -453,6 +468,9 @@ func (UnimplementedSandboxWorkerServer) GetSandboxStats(context.Context, *GetSan
 }
 func (UnimplementedSandboxWorkerServer) SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetSandboxLimits not implemented")
+}
+func (UnimplementedSandboxWorkerServer) InjectSecrets(context.Context, *InjectSecretsRequest) (*InjectSecretsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InjectSecrets not implemented")
 }
 func (UnimplementedSandboxWorkerServer) PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PrepareMigrationIncoming not implemented")
@@ -862,6 +880,24 @@ func _SandboxWorker_SetSandboxLimits_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_InjectSecrets_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InjectSecretsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).InjectSecrets(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_InjectSecrets_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).InjectSecrets(ctx, req.(*InjectSecretsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxWorker_PrepareMigrationIncoming_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PrepareMigrationIncomingRequest)
 	if err := dec(in); err != nil {
@@ -1002,6 +1038,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetSandboxLimits",
 			Handler:    _SandboxWorker_SetSandboxLimits_Handler,
+		},
+		{
+			MethodName: "InjectSecrets",
+			Handler:    _SandboxWorker_InjectSecrets_Handler,
 		},
 		{
 			MethodName: "PrepareMigrationIncoming",

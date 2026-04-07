@@ -256,6 +256,65 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, en
 	return result
 }
 
+// InjectTokens adds new sealed tokens to an existing proxy session.
+// Returns the sealed env map (envVar → token) so the caller can inject
+// the tokens into the running sandbox's environment.
+// If no session exists for this guestIP, creates one.
+func (p *SecretsProxy) InjectTokens(sandboxID, guestIP string, envVars map[string]string, secretAllowedHosts map[string][]string) map[string]string {
+	if len(envVars) == 0 {
+		return nil
+	}
+
+	sealed := make(map[string]string, len(envVars))
+	newTokens := make(map[string]string, len(envVars))
+
+	for envVar, realValue := range envVars {
+		token := "osb_sealed_" + randomHex(16)
+		sealed[envVar] = token
+		newTokens[token] = realValue
+	}
+
+	var newTokenHosts map[string][]string
+	if len(secretAllowedHosts) > 0 {
+		newTokenHosts = make(map[string][]string, len(secretAllowedHosts))
+		for envVar, token := range sealed {
+			if hosts, ok := secretAllowedHosts[envVar]; ok && len(hosts) > 0 {
+				newTokenHosts[token] = hosts
+			}
+		}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	session, exists := p.sessions[guestIP]
+	if !exists {
+		// Create a new session if one doesn't exist
+		p.sessions[guestIP] = &Session{
+			SandboxID:  sandboxID,
+			Secrets:    newTokens,
+			TokenHosts: newTokenHosts,
+		}
+	} else {
+		// Merge into existing session
+		for token, value := range newTokens {
+			session.Secrets[token] = value
+		}
+		if newTokenHosts != nil {
+			if session.TokenHosts == nil {
+				session.TokenHosts = newTokenHosts
+			} else {
+				for token, hosts := range newTokenHosts {
+					session.TokenHosts[token] = hosts
+				}
+			}
+		}
+	}
+
+	log.Printf("secretsproxy: injected %d tokens for %s (%s)", len(newTokens), sandboxID, guestIP)
+	return sealed
+}
+
 // CACertPEM returns the CA certificate PEM for injection into sandboxes.
 func (p *SecretsProxy) CACertPEM() []byte {
 	return p.ca.CertPEM()

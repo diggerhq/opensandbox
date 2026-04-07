@@ -254,6 +254,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		api.DELETE("/sandboxes/:id/pty/:sessionID", s.killPTY)
 
 		api.POST("/sandboxes/:id/timeout", s.setTimeout)
+		api.POST("/sandboxes/:id/inject-secrets", s.injectSecrets)
 	}
 
 	// Snapshots (pre-built declarative images)

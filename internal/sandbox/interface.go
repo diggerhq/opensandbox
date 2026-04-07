@@ -77,4 +77,7 @@ type Manager interface {
 	RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpointID string) error
 	ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error)
 	CheckpointCachePath(checkpointID, filename string) string
+
+	// Secrets
+	InjectSecrets(ctx context.Context, sandboxID string, envVars map[string]string, secretAllowedHosts map[string][]string) (int, error)
 }

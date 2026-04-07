@@ -38,6 +38,9 @@ service SandboxWorker {
 
   rpc SetSandboxLimits(SetSandboxLimitsRequest) returns (SetSandboxLimitsResponse);
 
+  // Inject secrets into a running sandbox's proxy session
+  rpc InjectSecrets(InjectSecretsRequest) returns (InjectSecretsResponse);
+
   // Live migration between workers
   rpc PrepareMigrationIncoming(PrepareMigrationIncomingRequest) returns (PrepareMigrationIncomingResponse);
   rpc LiveMigrate(LiveMigrateRequest) returns (LiveMigrateResponse);
@@ -339,3 +342,15 @@ message CompleteMigrationIncomingRequest {
 }
 
 message CompleteMigrationIncomingResponse {}
+
+message InjectSecretsRequest {
+  string sandbox_id = 1;
+  map<string, string> env_vars = 2;           // name → plaintext value
+  repeated string egress_allowlist = 3;        // additional allowed hosts
+  map<string, string> secret_allowed_hosts = 4; // name → comma-separated hosts
+}
+
+message InjectSecretsResponse {
+  string sandbox_id = 1;
+  int32 injected_count = 2;
+}

@@ -672,6 +672,109 @@ func (s *Server) setTimeout(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// injectSecrets adds new secrets to a running sandbox's proxy session.
+// POST /api/sandboxes/:id/inject-secrets
+func (s *Server) injectSecrets(c echo.Context) error {
+	sandboxID := c.Param("id")
+	ctx := c.Request().Context()
+
+	var req struct {
+		// Direct env vars to inject
+		Envs map[string]string `json:"envs"`
+		// Or a secret store name — all secrets from the store are injected
+		SecretStore string `json:"secretStore"`
+		// Per-secret host restrictions
+		SecretAllowedHosts map[string]string `json:"secretAllowedHosts"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+	}
+
+	envVars := req.Envs
+	if envVars == nil {
+		envVars = make(map[string]string)
+	}
+
+	// If a secret store is specified, decrypt and merge its secrets
+	if req.SecretStore != "" && s.store != nil {
+		orgID, hasOrg := c.Get("orgID").(uuid.UUID)
+		if !hasOrg {
+			return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+		}
+		store, err := s.store.GetSecretStoreByName(ctx, orgID, req.SecretStore)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "secret store not found: " + req.SecretStore})
+		}
+		secrets, err := s.store.DecryptSecretEntries(ctx, store.ID)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to decrypt secrets"})
+		}
+		for _, secret := range secrets {
+			envVars[secret.Name] = secret.Value
+			if len(secret.AllowedHosts) > 0 {
+				if req.SecretAllowedHosts == nil {
+					req.SecretAllowedHosts = make(map[string]string)
+				}
+				req.SecretAllowedHosts[secret.Name] = strings.Join(secret.AllowedHosts, ",")
+			}
+		}
+	}
+
+	if len(envVars) == 0 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "no secrets to inject"})
+	}
+
+	// Route to the correct worker
+	if s.workerRegistry != nil && s.store != nil {
+		session, err := s.store.GetSandboxSession(ctx, sandboxID)
+		if err != nil {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+		}
+		grpcClient, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker not available"})
+		}
+
+		secretHosts := make(map[string]string, len(req.SecretAllowedHosts))
+		for k, v := range req.SecretAllowedHosts {
+			secretHosts[k] = v
+		}
+
+		resp, err := grpcClient.InjectSecrets(ctx, &pb.InjectSecretsRequest{
+			SandboxId:          sandboxID,
+			EnvVars:            envVars,
+			SecretAllowedHosts: secretHosts,
+		})
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "inject failed: " + err.Error()})
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"sandboxId":     sandboxID,
+			"injectedCount": resp.InjectedCount,
+		})
+	}
+
+	// Combined mode: inject locally
+	if s.manager != nil {
+		secretHosts := make(map[string][]string, len(req.SecretAllowedHosts))
+		for k, v := range req.SecretAllowedHosts {
+			if v != "" {
+				secretHosts[k] = strings.Split(v, ",")
+			}
+		}
+		count, err := s.manager.InjectSecrets(ctx, sandboxID, envVars, secretHosts)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "inject failed: " + err.Error()})
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"sandboxId":     sandboxID,
+			"injectedCount": count,
+		})
+	}
+
+	return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+}
+
 // migrateSandbox performs live migration of a sandbox to a different worker.
 // POST /api/sandboxes/:id/migrate {"targetWorker": "w-azure-osb-worker-xxx"}
 func (s *Server) migrateSandbox(c echo.Context) error {
