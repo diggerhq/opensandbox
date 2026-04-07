@@ -155,6 +155,7 @@ func (p *mockPool) DrainMachine(_ context.Context, _ string) error              
 func (p *mockPool) StartMachine(_ context.Context, _ string) error               { return nil }
 func (p *mockPool) StopMachine(_ context.Context, _ string) error                { return nil }
 func (p *mockPool) HealthCheck(_ context.Context, _ string) error                { return nil }
+func (p *mockPool) CleanupOrphanedResources(_ context.Context) (int, error)      { return 0, nil }
 func (p *mockPool) ListMachines(_ context.Context) ([]*compute.Machine, error)   { return nil, nil }
 func (p *mockPool) SupportedRegions(_ context.Context) ([]string, error) {
 	return []string{"us-east-1"}, nil
@@ -1265,4 +1266,351 @@ func TestInFlightCleanup(t *testing.T) {
 	if got := s.state.GetInFlight("w1"); got != 0 {
 		t.Errorf("expected 0 in-flight after final decrement, got %d", got)
 	}
+}
+
+// =============================================
+// InMemoryScalerState unit tests
+// =============================================
+
+func TestInMemoryScalerState_LastScaleUp(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially no value
+	_, ok := m.GetLastScaleUp("us-east-1")
+	if ok {
+		t.Fatal("expected no last scale up initially")
+	}
+
+	now := time.Now()
+	m.SetLastScaleUp("us-east-1", now, 30*time.Second)
+
+	got, ok := m.GetLastScaleUp("us-east-1")
+	if !ok {
+		t.Fatal("expected last scale up to be set")
+	}
+	if !got.Equal(now) {
+		t.Fatalf("expected %v, got %v", now, got)
+	}
+
+	// Different region should be independent
+	_, ok = m.GetLastScaleUp("eu-west-1")
+	if ok {
+		t.Fatal("expected no last scale up for different region")
+	}
+}
+
+func TestInMemoryScalerState_PendingLaunches(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially empty
+	pending := m.GetPendingLaunches("us-east-1")
+	if len(pending) != 0 {
+		t.Fatalf("expected 0 pending launches, got %d", len(pending))
+	}
+
+	p1 := pendingLaunch{MachineID: "m-1", LaunchedAt: time.Now()}
+	p2 := pendingLaunch{MachineID: "m-2", LaunchedAt: time.Now()}
+
+	m.AddPendingLaunch("us-east-1", p1)
+	m.AddPendingLaunch("us-east-1", p2)
+
+	pending = m.GetPendingLaunches("us-east-1")
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending launches, got %d", len(pending))
+	}
+
+	// Remove one
+	m.RemovePendingLaunch("us-east-1", "m-1")
+	pending = m.GetPendingLaunches("us-east-1")
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending launch after removal, got %d", len(pending))
+	}
+	if pending[0].MachineID != "m-2" {
+		t.Fatalf("expected remaining launch to be m-2, got %s", pending[0].MachineID)
+	}
+
+	// Remove non-existent should be no-op
+	m.RemovePendingLaunch("us-east-1", "m-999")
+	pending = m.GetPendingLaunches("us-east-1")
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending launch after removing non-existent, got %d", len(pending))
+	}
+}
+
+func TestInMemoryScalerState_SetPendingLaunches(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	m.AddPendingLaunch("us-east-1", pendingLaunch{MachineID: "old-1", LaunchedAt: time.Now()})
+
+	newLaunches := []pendingLaunch{
+		{MachineID: "new-1", LaunchedAt: time.Now()},
+		{MachineID: "new-2", LaunchedAt: time.Now()},
+	}
+	m.SetPendingLaunches("us-east-1", newLaunches)
+
+	pending := m.GetPendingLaunches("us-east-1")
+	if len(pending) != 2 {
+		t.Fatalf("expected 2 pending launches after set, got %d", len(pending))
+	}
+	if pending[0].MachineID != "new-1" || pending[1].MachineID != "new-2" {
+		t.Fatalf("unexpected pending launches: %+v", pending)
+	}
+}
+
+func TestInMemoryScalerState_GetPendingLaunchesReturnsCopy(t *testing.T) {
+	m := NewInMemoryScalerState()
+	m.AddPendingLaunch("r1", pendingLaunch{MachineID: "m-1", LaunchedAt: time.Now()})
+
+	result := m.GetPendingLaunches("r1")
+	result[0].MachineID = "modified"
+
+	original := m.GetPendingLaunches("r1")
+	if original[0].MachineID != "m-1" {
+		t.Fatal("GetPendingLaunches should return a copy")
+	}
+}
+
+func TestInMemoryScalerState_Draining(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially not draining
+	_, ok := m.GetDraining("m-1")
+	if ok {
+		t.Fatal("expected no drain state initially")
+	}
+	if m.IsDraining("m-1") {
+		t.Fatal("expected IsDraining to be false initially")
+	}
+
+	ds := &drainState{
+		WorkerID:  "w-1",
+		MachineID: "m-1",
+		Region:    "us-east-1",
+		StartedAt: time.Now(),
+	}
+	m.SetDraining("m-1", ds)
+
+	got, ok := m.GetDraining("m-1")
+	if !ok {
+		t.Fatal("expected drain state to be set")
+	}
+	if got.WorkerID != "w-1" {
+		t.Fatalf("expected worker ID 'w-1', got '%s'", got.WorkerID)
+	}
+	if !m.IsDraining("m-1") {
+		t.Fatal("expected IsDraining to be true")
+	}
+
+	// Remove
+	m.RemoveDraining("m-1")
+	_, ok = m.GetDraining("m-1")
+	if ok {
+		t.Fatal("expected drain state to be removed")
+	}
+	if m.IsDraining("m-1") {
+		t.Fatal("expected IsDraining to be false after removal")
+	}
+}
+
+func TestInMemoryScalerState_AllDraining(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	ds1 := &drainState{WorkerID: "w-1", MachineID: "m-1", Region: "us-east-1", StartedAt: time.Now()}
+	ds2 := &drainState{WorkerID: "w-2", MachineID: "m-2", Region: "us-east-1", StartedAt: time.Now()}
+
+	m.SetDraining("m-1", ds1)
+	m.SetDraining("m-2", ds2)
+
+	all := m.AllDraining()
+	if len(all) != 2 {
+		t.Fatalf("expected 2 draining workers, got %d", len(all))
+	}
+	if all["m-1"].WorkerID != "w-1" {
+		t.Errorf("expected w-1, got %s", all["m-1"].WorkerID)
+	}
+	if all["m-2"].WorkerID != "w-2" {
+		t.Errorf("expected w-2, got %s", all["m-2"].WorkerID)
+	}
+
+	// Returned map should be a copy
+	delete(all, "m-1")
+	if len(m.AllDraining()) != 2 {
+		t.Fatal("AllDraining should return a copy")
+	}
+}
+
+func TestInMemoryScalerState_Evacuation(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially no value
+	_, ok := m.GetLastEvacuation("w-1")
+	if ok {
+		t.Fatal("expected no last evacuation initially")
+	}
+
+	now := time.Now()
+	m.SetLastEvacuation("w-1", now)
+
+	got, ok := m.GetLastEvacuation("w-1")
+	if !ok {
+		t.Fatal("expected last evacuation to be set")
+	}
+	if !got.Equal(now) {
+		t.Fatalf("expected %v, got %v", now, got)
+	}
+
+	// Different worker is independent
+	_, ok = m.GetLastEvacuation("w-2")
+	if ok {
+		t.Fatal("expected no last evacuation for different worker")
+	}
+}
+
+func TestInMemoryScalerState_MigrationLock(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// First acquire should succeed
+	if !m.AcquireMigrationLock("sb-1") {
+		t.Fatal("expected first acquire to succeed")
+	}
+
+	// Second acquire for same sandbox should fail
+	if m.AcquireMigrationLock("sb-1") {
+		t.Fatal("expected second acquire for same sandbox to fail")
+	}
+
+	// Different sandbox should succeed
+	if !m.AcquireMigrationLock("sb-2") {
+		t.Fatal("expected acquire for different sandbox to succeed")
+	}
+
+	// Release and re-acquire
+	m.ReleaseMigrationLock("sb-1")
+	if !m.AcquireMigrationLock("sb-1") {
+		t.Fatal("expected acquire after release to succeed")
+	}
+}
+
+func TestInMemoryScalerState_InFlight(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially zero
+	if got := m.GetInFlight("w-1"); got != 0 {
+		t.Fatalf("expected 0 in-flight initially, got %d", got)
+	}
+
+	m.IncrInFlight("w-1")
+	if got := m.GetInFlight("w-1"); got != 1 {
+		t.Fatalf("expected 1 in-flight after incr, got %d", got)
+	}
+
+	m.IncrInFlight("w-1")
+	m.IncrInFlight("w-1")
+	if got := m.GetInFlight("w-1"); got != 3 {
+		t.Fatalf("expected 3 in-flight after 3 incrs, got %d", got)
+	}
+
+	m.DecrInFlight("w-1")
+	if got := m.GetInFlight("w-1"); got != 2 {
+		t.Fatalf("expected 2 in-flight after decr, got %d", got)
+	}
+
+	// Decr to zero should clean up
+	m.DecrInFlight("w-1")
+	m.DecrInFlight("w-1")
+	if got := m.GetInFlight("w-1"); got != 0 {
+		t.Fatalf("expected 0 in-flight after full decr, got %d", got)
+	}
+
+	// Different workers are independent
+	m.IncrInFlight("w-2")
+	if got := m.GetInFlight("w-1"); got != 0 {
+		t.Fatalf("expected 0 for w-1, got %d", got)
+	}
+	if got := m.GetInFlight("w-2"); got != 1 {
+		t.Fatalf("expected 1 for w-2, got %d", got)
+	}
+}
+
+func TestInMemoryScalerState_DecrBelowZero(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Decrement from zero should clean up (go to 0 or negative and delete)
+	m.DecrInFlight("w-1")
+	if got := m.GetInFlight("w-1"); got != 0 {
+		t.Fatalf("expected 0 after decr below zero, got %d", got)
+	}
+}
+
+func TestInMemoryScalerState_SandboxCount(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	// Initially no value
+	_, ok := m.GetLastSandboxCount("us-east-1")
+	if ok {
+		t.Fatal("expected no sandbox count initially")
+	}
+
+	m.SetLastSandboxCount("us-east-1", 42)
+	got, ok := m.GetLastSandboxCount("us-east-1")
+	if !ok {
+		t.Fatal("expected sandbox count to be set")
+	}
+	if got != 42 {
+		t.Fatalf("expected 42, got %d", got)
+	}
+
+	// Update
+	m.SetLastSandboxCount("us-east-1", 100)
+	got, ok = m.GetLastSandboxCount("us-east-1")
+	if !ok {
+		t.Fatal("expected sandbox count to be set")
+	}
+	if got != 100 {
+		t.Fatalf("expected 100, got %d", got)
+	}
+
+	// Different region
+	_, ok = m.GetLastSandboxCount("eu-west-1")
+	if ok {
+		t.Fatal("expected no sandbox count for different region")
+	}
+}
+
+func TestInMemoryScalerState_ConcurrentAccess(t *testing.T) {
+	m := NewInMemoryScalerState()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			region := fmt.Sprintf("region-%d", n%5)
+			workerID := fmt.Sprintf("w-%d", n%10)
+
+			m.SetLastScaleUp(region, time.Now(), time.Second)
+			m.GetLastScaleUp(region)
+
+			m.AddPendingLaunch(region, pendingLaunch{MachineID: fmt.Sprintf("m-%d", n), LaunchedAt: time.Now()})
+			m.GetPendingLaunches(region)
+
+			m.SetDraining(fmt.Sprintf("m-%d", n), &drainState{WorkerID: workerID})
+			m.IsDraining(fmt.Sprintf("m-%d", n))
+			m.AllDraining()
+
+			m.SetLastEvacuation(workerID, time.Now())
+			m.GetLastEvacuation(workerID)
+
+			m.AcquireMigrationLock(fmt.Sprintf("sb-%d", n))
+			m.ReleaseMigrationLock(fmt.Sprintf("sb-%d", n))
+
+			m.IncrInFlight(workerID)
+			m.GetInFlight(workerID)
+			m.DecrInFlight(workerID)
+
+			m.SetLastSandboxCount(region, n)
+			m.GetLastSandboxCount(region)
+		}(i)
+	}
+	wg.Wait()
 }

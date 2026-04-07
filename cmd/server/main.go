@@ -199,7 +199,8 @@ func main() {
 					"OPENSANDBOX_S3_REGION=%s\n"+
 					"OPENSANDBOX_S3_ENDPOINT=%s\n"+
 					"OPENSANDBOX_S3_ACCESS_KEY_ID=%s\n"+
-					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n",
+					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n"+
+					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n",
 				cfg.JWTSecret,
 				cfg.Region,
 				cfg.MaxCapacity,
@@ -212,6 +213,7 @@ func main() {
 				cfg.S3Endpoint,
 				cfg.S3AccessKeyID,
 				cfg.S3SecretAccessKey,
+				cfg.S3ForcePathStyle,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 

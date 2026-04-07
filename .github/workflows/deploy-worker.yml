@@ -13,6 +13,9 @@ jobs:
   deploy:
     name: Build & Deploy Worker
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -26,26 +29,40 @@ jobs:
       - name: Build agent binary
         run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ env.GOARCH }} go build -o bin/osb-agent ./cmd/agent/
 
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Discover control plane
+        run: |
+          CP_IP=$(az vm list --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --show-details \
+            --query "[?contains(name,'controlplane')].publicIps" -o tsv | head -1)
+          echo "CP_IP=$CP_IP" >> $GITHUB_ENV
+          echo "Discovered control plane: $CP_IP"
+
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.pem
+          echo "$SSH_KEY" | base64 -d > ~/.ssh/deploy.pem
           chmod 600 ~/.ssh/deploy.pem
-          echo "${{ secrets.WORKER_SSH_KEY }}" > ~/.ssh/worker.pem
-          chmod 600 ~/.ssh/worker.pem
-          ssh-keyscan -H ${{ secrets.CP1_IP }} >> ~/.ssh/known_hosts 2>/dev/null
+          echo -e "Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null" >> ~/.ssh/config
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY_B64 }}
 
       - name: Stage SSH key on control plane for worker access
         run: |
           scp -i ~/.ssh/deploy.pem ~/.ssh/deploy.pem \
-            ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/deploy.pem
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} 'chmod 600 /tmp/deploy.pem'
+            ${{ env.SSH_USER }}@${{ env.CP_IP }}:/tmp/deploy.pem
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ env.CP_IP }} 'chmod 600 /tmp/deploy.pem'
 
       - name: Upload binaries and rootfs context to control plane
         run: |
           # Upload binaries to control plane as staging area
           scp -i ~/.ssh/deploy.pem bin/opensandbox-worker bin/osb-agent \
-            ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/
+            ${{ env.SSH_USER }}@${{ env.CP_IP }}:/tmp/
 
           # Sync rootfs build context
           rsync -az \
@@ -58,11 +75,11 @@ jobs:
             --include='deploy/firecracker/' \
             --include='scripts/' \
             --exclude='*' \
-            ./ ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }}:/tmp/osb-rootfs-ctx/
+            ./ ${{ env.SSH_USER }}@${{ env.CP_IP }}:/tmp/osb-rootfs-ctx/
 
       - name: Discover workers and deploy
         run: |
-          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ secrets.SERVER_IP }} '
+          ssh -i ~/.ssh/deploy.pem ${{ env.SSH_USER }}@${{ env.CP_IP }} '
             set -euo pipefail
 
             API_KEY=$(grep OPENSANDBOX_API_KEY /etc/opensandbox/server.env | cut -d= -f2-)

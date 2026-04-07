@@ -210,6 +210,8 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		existing.CPUPct = entry.CPUPct
 		existing.MemPct = entry.MemPct
 		existing.DiskPct = entry.DiskPct
+		existing.TotalMemoryMB = entry.TotalMemoryMB
+		existing.CommittedMemoryMB = entry.CommittedMemoryMB
 		if entry.GoldenVersion != "" {
 			existing.GoldenVersion = entry.GoldenVersion
 		}

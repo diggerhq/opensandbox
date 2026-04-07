@@ -56,6 +56,12 @@ type AMIRefresher interface {
 	RefreshAMI(ctx context.Context) (amiID string, version string, err error)
 }
 
+// OrphanCleaner is an optional interface a Pool can implement to clean up orphaned resources
+// (NICs, disks) left by failed VM creates. Called periodically by the scaler.
+type OrphanCleaner interface {
+	CleanupOrphanedResources(ctx context.Context) (int, error)
+}
+
 // ScalerConfig configures the autoscaler.
 type ScalerConfig struct {
 	Pool        compute.Pool
@@ -204,6 +210,17 @@ func (s *Scaler) evaluate() {
 			} else if version != "" && version != s.targetWorkerVersion {
 				log.Printf("scaler: target worker version updated: %q -> %q", s.targetWorkerVersion, version)
 				s.targetWorkerVersion = version
+			}
+		}
+	}
+
+	// Clean up orphaned NICs/disks every ~5 min (every 10th tick)
+	if s.refreshCount%10 == 0 {
+		if cleaner, ok := s.pool.(OrphanCleaner); ok {
+			if cleaned, err := cleaner.CleanupOrphanedResources(ctx); err != nil {
+				log.Printf("scaler: orphan cleanup failed: %v", err)
+			} else if cleaned > 0 {
+				log.Printf("scaler: cleaned %d orphaned resources", cleaned)
 			}
 		}
 	}
@@ -604,6 +621,20 @@ func (s *Scaler) evacuateBatch(sourceWorkerID, targetWorkerID string, count int)
 // smartScaleDown initiates draining of the least-loaded autoscaler-created worker
 // by live-migrating its sandboxes to other workers before destroying the machine.
 func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*WorkerInfo) {
+	// Don't scale down while there are pending launches (workers still booting)
+	if len(s.state.GetPendingLaunches(region)) > 0 {
+		return
+	}
+
+	// Don't scale down while a rolling replace is in progress
+	if s.targetWorkerVersion != "" {
+		for _, w := range workers {
+			if w.WorkerVersion != s.targetWorkerVersion && w.WorkerVersion != "" {
+				return // stale workers still exist, let rolling replace handle it
+			}
+		}
+	}
+
 	// Find the least-loaded worker that was created by the autoscaler.
 	var target *WorkerInfo
 	for _, w := range workers {
@@ -644,7 +675,7 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 
 // rollingReplace drains workers running an old version one at a time,
 // allowing the scaler to replace them with new-AMI workers.
-func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*WorkerInfo) {
+func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*WorkerInfo) {
 	if s.targetWorkerVersion == "" {
 		return
 	}
@@ -677,10 +708,19 @@ func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*Wor
 		return
 	}
 
-	// Don't drain if no current-version workers exist yet — scale up first
+	// If no current-version workers exist, try to launch a replacement first.
+	// If launch fails (e.g., quota), fall back to draining one stale worker
+	// to free capacity — the min-workers check will launch a replacement next tick.
 	if current < 1 {
-		log.Printf("scaler: region %s has %d stale workers but 0 current-version, waiting for new workers to register",
-			region, len(stale))
+		pendingCount := len(s.state.GetPendingLaunches(region))
+		if pendingCount > 0 {
+			log.Printf("scaler: region %s has %d stale workers, waiting for pending replacement to register",
+				region, len(stale))
+			return
+		}
+		log.Printf("scaler: rolling replace: all %d workers stale — launching replacement with new version",
+			len(stale))
+		s.scaleUp(ctx, region)
 		return
 	}
 

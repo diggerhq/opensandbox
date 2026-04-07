@@ -343,6 +343,43 @@ func (p *AzurePool) DrainMachine(ctx context.Context, machineID string) error {
 	return err
 }
 
+// CleanupOrphanedResources finds and deletes NICs not attached to any VM.
+// These accumulate when VM creation fails partway through.
+func (p *AzurePool) CleanupOrphanedResources(ctx context.Context) (int, error) {
+	cleaned := 0
+	pager := p.nicClient.NewListPager(p.cfg.ResourceGroup, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return cleaned, fmt.Errorf("azure: list NICs: %w", err)
+		}
+		for _, nic := range page.Value {
+			if nic.Properties == nil || nic.Properties.VirtualMachine != nil {
+				continue // attached to a VM, skip
+			}
+			name := ""
+			if nic.Name != nil {
+				name = *nic.Name
+			}
+			if !strings.HasPrefix(name, "osb-worker-") {
+				continue // not ours
+			}
+			log.Printf("azure: cleaning orphaned NIC %s", name)
+			poller, err := p.nicClient.BeginDelete(ctx, p.cfg.ResourceGroup, name, nil)
+			if err != nil {
+				log.Printf("azure: failed to delete orphaned NIC %s: %v", name, err)
+				continue
+			}
+			if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+				log.Printf("azure: orphaned NIC %s delete poll failed: %v", name, err)
+			} else {
+				cleaned++
+			}
+		}
+	}
+	return cleaned, nil
+}
+
 // RefreshAMI checks Azure Key Vault for a new worker image ID and version.
 // Satisfies the controlplane.AMIRefresher interface.
 // If Key Vault is not configured, returns the static image ID with no error.
