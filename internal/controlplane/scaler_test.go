@@ -447,7 +447,7 @@ func TestScaleDownSkipsAlreadyDraining(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.state.SetDraining("osb-worker-w2", &drainState{workerID: "w2", machineID: "osb-worker-w2"})
+	s.state.SetDraining("osb-worker-w2", &drainState{WorkerID: "w2", MachineID: "osb-worker-w2"})
 
 	ctx := context.Background()
 	s.smartScaleDown(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
@@ -689,7 +689,7 @@ func TestFindMigrationTargetSkipsDraining(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	s.state.SetDraining("osb-worker-draining", &drainState{workerID: "draining"})
+	s.state.SetDraining("osb-worker-draining", &drainState{WorkerID: "draining"})
 
 	target := s.findMigrationTarget("us-east-1", "hot")
 	if target != nil {
@@ -770,10 +770,10 @@ func TestDrainTimeoutCancelsDrainKeepsWorker(t *testing.T) {
 
 	// Simulate a drain that started long ago (past timeout)
 	s.state.SetDraining("osb-worker-w2", &drainState{
-		workerID:  "w2",
-		machineID: "osb-worker-w2",
-		region:    "us-east-1",
-		startedAt: time.Now().Add(-20 * time.Minute), // well past drainTimeout
+		WorkerID:  "w2",
+		MachineID: "osb-worker-w2",
+		Region:    "us-east-1",
+		StartedAt: time.Now().Add(-20 * time.Minute), // well past drainTimeout
 	})
 
 	ctx := context.Background()
@@ -803,10 +803,10 @@ func TestDrainCompletesWhenEmpty(t *testing.T) {
 
 	s := newTestScaler(reg, pool)
 	s.state.SetDraining("osb-worker-w2", &drainState{
-		workerID:  "w2",
-		machineID: "osb-worker-w2",
-		region:    "us-east-1",
-		startedAt: time.Now(),
+		WorkerID:  "w2",
+		MachineID: "osb-worker-w2",
+		Region:    "us-east-1",
+		StartedAt: time.Now(),
 	})
 
 	ctx := context.Background()
@@ -1185,7 +1185,7 @@ func TestPendingLaunchExpires(t *testing.T) {
 
 	// Simulate a pending launch from 15 minutes ago
 	s.state.SetPendingLaunches("us-east-1", []pendingLaunch{
-		{machineID: "osb-worker-stale", launchedAt: time.Now().Add(-15 * time.Minute)},
+		{MachineID: "osb-worker-stale", LaunchedAt: time.Now().Add(-15 * time.Minute)},
 	})
 
 	s.expirePending("us-east-1")
@@ -1207,7 +1207,7 @@ func TestPendingLaunchRegistered(t *testing.T) {
 
 	s := newTestScaler(reg, pool)
 	s.state.SetPendingLaunches("us-east-1", []pendingLaunch{
-		{machineID: "osb-worker-new", launchedAt: time.Now()},
+		{MachineID: "osb-worker-new", LaunchedAt: time.Now()},
 	})
 
 	s.expirePending("us-east-1")

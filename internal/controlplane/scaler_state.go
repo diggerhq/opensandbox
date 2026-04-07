@@ -108,7 +108,7 @@ func (r *RedisScalerState) AddPendingLaunch(region string, p pendingLaunch) {
 	ctx, cancel := r.ctx()
 	defer cancel()
 	data, _ := json.Marshal(p)
-	r.rdb.HSet(ctx, "scaler:pending:"+region, p.machineID, data)
+	r.rdb.HSet(ctx, "scaler:pending:"+region, p.MachineID, data)
 	r.rdb.Expire(ctx, "scaler:pending:"+region, pendingWorkerTTL+time.Minute)
 }
 
@@ -125,7 +125,7 @@ func (r *RedisScalerState) SetPendingLaunches(region string, launches []pendingL
 	r.rdb.Del(ctx, key)
 	for _, p := range launches {
 		data, _ := json.Marshal(p)
-		r.rdb.HSet(ctx, key, p.machineID, data)
+		r.rdb.HSet(ctx, key, p.MachineID, data)
 	}
 	if len(launches) > 0 {
 		r.rdb.Expire(ctx, key, pendingWorkerTTL+time.Minute)
@@ -332,7 +332,7 @@ func (m *InMemoryScalerState) RemovePendingLaunch(region, machineID string) {
 	defer m.mu.Unlock()
 	var remaining []pendingLaunch
 	for _, p := range m.pending[region] {
-		if p.machineID != machineID {
+		if p.MachineID != machineID {
 			remaining = append(remaining, p)
 		}
 	}

@@ -72,16 +72,16 @@ type ScalerConfig struct {
 
 // pendingLaunch tracks an EC2 instance that was launched but hasn't registered yet.
 type pendingLaunch struct {
-	machineID string
-	launchedAt time.Time
+	MachineID  string    `json:"machine_id"`
+	LaunchedAt time.Time `json:"launched_at"`
 }
 
 // drainState tracks a worker being drained for scale-down.
 type drainState struct {
-	workerID  string
-	machineID string
-	region    string
-	startedAt time.Time
+	WorkerID  string    `json:"worker_id"`
+	MachineID string    `json:"machine_id"`
+	Region    string    `json:"region"`
+	StartedAt time.Time `json:"started_at"`
 }
 
 // Scaler manages autoscaling of workers via the compute Pool.
@@ -392,8 +392,8 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 		}
 
 		s.state.AddPendingLaunch(region, pendingLaunch{
-			machineID:  machine.ID,
-			launchedAt: time.Now(),
+			MachineID:  machine.ID,
+			LaunchedAt: time.Now(),
 		})
 		log.Printf("scaler: created machine %s in %s (addr=%s), pending registration", machine.ID, region, machine.Addr)
 	}()
@@ -416,16 +416,16 @@ func (s *Scaler) expirePending(region string) {
 
 	var remaining []pendingLaunch
 	for _, p := range pending {
-		if registered[p.machineID] {
-			log.Printf("scaler: pending machine %s in %s has registered", p.machineID, region)
+		if registered[p.MachineID] {
+			log.Printf("scaler: pending machine %s in %s has registered", p.MachineID, region)
 			continue
 		}
-		if time.Since(p.launchedAt) > pendingWorkerTTL {
+		if time.Since(p.LaunchedAt) > pendingWorkerTTL {
 			log.Printf("scaler: pending machine %s in %s timed out after %s, terminating",
-				p.machineID, region, pendingWorkerTTL)
+				p.MachineID, region, pendingWorkerTTL)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := s.pool.DestroyMachine(ctx, p.machineID); err != nil {
-				log.Printf("scaler: failed to terminate stale machine %s: %v", p.machineID, err)
+			if err := s.pool.DestroyMachine(ctx, p.MachineID); err != nil {
+				log.Printf("scaler: failed to terminate stale machine %s: %v", p.MachineID, err)
 			}
 			cancel()
 			continue
@@ -633,10 +633,10 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 		target.ID, target.MachineID, target.Current)
 
 	s.state.SetDraining(target.MachineID, &drainState{
-		workerID:  target.ID,
-		machineID: target.MachineID,
-		region:    region,
-		startedAt: time.Now(),
+		WorkerID:  target.ID,
+		MachineID: target.MachineID,
+		Region:    region,
+		StartedAt: time.Now(),
 	})
 
 	go s.drainWorker(target.ID, target.MachineID, region)
@@ -696,10 +696,10 @@ func (s *Scaler) rollingReplace(_ context.Context, region string, workers []*Wor
 		target.ID, target.WorkerVersion, s.targetWorkerVersion, target.Current)
 
 	s.state.SetDraining(target.MachineID, &drainState{
-		workerID:  target.ID,
-		machineID: target.MachineID,
-		region:    region,
-		startedAt: time.Now(),
+		WorkerID:  target.ID,
+		MachineID: target.MachineID,
+		Region:    region,
+		StartedAt: time.Now(),
 	})
 
 	go s.drainWorker(target.ID, target.MachineID, region)
@@ -772,22 +772,22 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 // checkDrainingWorkers checks if draining workers are empty and destroys them.
 func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 	for machineID, state := range s.state.AllDraining() {
-		if state.region != region {
+		if state.Region != region {
 			continue
 		}
 
 		// Check if drain timed out
-		if time.Since(state.startedAt) > drainTimeout {
-			sandboxCount := s.getDrainingWorkerSandboxCount(state.workerID)
+		if time.Since(state.StartedAt) > drainTimeout {
+			sandboxCount := s.getDrainingWorkerSandboxCount(state.WorkerID)
 			if sandboxCount == 0 {
 				// Sandboxes expired naturally — safe to destroy
-				log.Printf("scaler: drain timeout for worker %s but 0 sandboxes remain, destroying", state.workerID)
+				log.Printf("scaler: drain timeout for worker %s but 0 sandboxes remain, destroying", state.WorkerID)
 				s.destroyDrainedMachine(machineID)
 				s.state.RemoveDraining(machineID)
 			} else {
 				// Still has sandboxes — cancel drain, keep worker alive
 				log.Printf("scaler: drain timeout for worker %s (machine=%s) with %d sandboxes — cancelling drain, keeping alive",
-					state.workerID, machineID, sandboxCount)
+					state.WorkerID, machineID, sandboxCount)
 				s.state.RemoveDraining(machineID)
 			}
 			continue
@@ -798,7 +798,7 @@ func (s *Scaler) checkDrainingWorkers(ctx context.Context, region string) {
 		for _, w := range workers {
 			if w.MachineID == machineID && w.Current == 0 {
 				log.Printf("scaler: worker %s fully drained (0 sandboxes), destroying machine %s",
-					state.workerID, machineID)
+					state.WorkerID, machineID)
 				s.destroyDrainedMachine(machineID)
 				s.state.RemoveDraining(machineID)
 				break
