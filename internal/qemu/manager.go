@@ -1919,6 +1919,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		GuestPort:    vm.GuestPort,
 		SnapshotedAt: time.Now(),
 	}
+	// Persist secrets proxy state so RestoreFromCheckpoint can re-register the session.
+	if m.secretsProxy != nil && vm.network != nil {
+		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
+		meta.TokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
+	}
 	metaJSON, _ := json.Marshal(meta)
 	_ = os.WriteFile(filepath.Join(stagingDir, "snapshot", "snapshot-meta.json"), metaJSON, 0644)
 
@@ -1995,18 +2001,27 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return fmt.Errorf("checkpoint %s: qcow2 files not found in cache", checkpointID)
 	}
 
-	snapshotName := "cp-" + checkpointID
-	if data, err := os.ReadFile(filepath.Join(cacheDir, "snapshot-name")); err == nil {
-		snapshotName = strings.TrimSpace(string(data))
-	}
-
-	// Read checkpoint metadata for base topology. loadvm requires the same CPU/memory
-	// topology as when the snapshot was taken. If the sandbox was scaled after checkpoint,
-	// vm.MemoryMB reflects the scaled value — but we must boot with the base value
-	// and re-scale after loadvm.
+	// Read checkpoint metadata for base topology.
 	var cpMeta SnapshotMeta
 	if metaData, err := os.ReadFile(filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")); err == nil {
 		json.Unmarshal(metaData, &cpMeta)
+	}
+
+	// Determine restore mode: prefer migration-based (-incoming) over savevm (loadvm).
+	// CreateCheckpoint uses QEMU migrate which produces a standalone mem dump file.
+	// loadvm only works with savevm-based internal snapshots in the qcow2.
+	memZst := filepath.Join(cacheDir, "mem.zst")
+	memRaw := filepath.Join(cacheDir, "mem")
+	var incomingURI string
+	if fileExists(memZst) {
+		incomingURI = fmt.Sprintf("exec:zstdcat %s", memZst)
+	} else if fileExists(memRaw) {
+		incomingURI = fmt.Sprintf("exec:cat %s", memRaw)
+	}
+
+	snapshotName := "cp-" + checkpointID
+	if data, err := os.ReadFile(filepath.Join(cacheDir, "snapshot-name")); err == nil {
+		snapshotName = strings.TrimSpace(string(data))
 	}
 
 	sandboxDir := vm.sandboxDir
@@ -2052,7 +2067,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		log.Printf("qemu: RestoreFromCheckpoint %s: metadata DNAT failed: %v", sandboxID, err)
 	}
 
-	// Step 5: Start fresh QEMU paused
+	// Step 5: Start fresh QEMU
 	guestMAC := generateMAC(sandboxID)
 	bootArgs := fmt.Sprintf(
 		"console=ttyS0 reboot=k panic=1 root=/dev/vda rw ip=%s::%s:%s::eth0:off init=/sbin/init osb.gateway=%s",
@@ -2064,8 +2079,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	os.Remove(qmpSockPath)
 	os.Remove(agentSockPath)
 
-	// Boot with checkpoint's base topology so loadvm succeeds.
-	// After loadvm, re-scale to the user's desired size if different.
+	// Boot with checkpoint's base topology so restore succeeds.
 	bootCpus := cpMeta.CpuCount
 	if bootCpus <= 0 {
 		bootCpus = vm.CpuCount
@@ -2077,13 +2091,20 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	if bootMemMB <= 0 {
 		bootMemMB = m.cfg.DefaultMemoryMB
 	}
-	// Remember what the user had so we can re-scale after loadvm
+	// Remember what the user had so we can re-scale after restore
 	desiredMemMB := vm.MemoryMB
 
 	logFile, _ := os.Create(filepath.Join(sandboxDir, "qemu.log"))
 	args := m.buildQEMUArgs(bootCpus, bootMemMB, rootfsPath, workspacePath,
 		netCfg.TAPName, guestMAC, agentSockPath, qmpSockPath, bootArgs)
-	args = append(args, "-S")
+
+	if incomingURI != "" {
+		// Migration-based restore: QEMU loads state from the mem dump file.
+		args = append(args, "-incoming", incomingURI)
+	} else {
+		// Savevm-based fallback: start paused, then loadvm.
+		args = append(args, "-S")
+	}
 
 	cmd := exec.Command(m.cfg.QEMUBin, args...)
 	cmd.Stdout = logFile
@@ -2099,7 +2120,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		logFile.Close()
 	}
 
-	// Step 6: QMP connect + loadvm + cont
+	// Step 6: QMP connect + restore + cont
 	qmpClient, err := waitForQMP(qmpSockPath, 30*time.Second)
 	if err != nil {
 		cmd.Process.Kill()
@@ -2108,12 +2129,24 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return fmt.Errorf("QMP connect: %w", err)
 	}
 
-	if err := qmpClient.LoadVM(snapshotName); err != nil {
-		qmpClient.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-		m.cleanupVM(netCfg, "")
-		return fmt.Errorf("loadvm: %w", err)
+	if incomingURI != "" {
+		// Migration-based: wait for incoming migration to finish loading, then resume.
+		if err := m.waitForMigrationReady(qmpClient, 30*time.Second); err != nil {
+			qmpClient.Close()
+			cmd.Process.Kill()
+			cmd.Wait()
+			m.cleanupVM(netCfg, "")
+			return fmt.Errorf("migration load: %w", err)
+		}
+	} else {
+		// Savevm fallback: load the internal snapshot.
+		if err := qmpClient.LoadVM(snapshotName); err != nil {
+			qmpClient.Close()
+			cmd.Process.Kill()
+			cmd.Wait()
+			m.cleanupVM(netCfg, "")
+			return fmt.Errorf("loadvm: %w", err)
+		}
 	}
 
 	// Re-scale virtio-mem BEFORE cont — the VM is paused, so the kernel sees full
@@ -2154,6 +2187,12 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	}
 	if err := syncGuestClock(context.Background(), agentClient); err != nil {
 		log.Printf("qemu: RestoreFromCheckpoint %s: clock sync failed: %v", sandboxID, err)
+	}
+
+	// Re-register secrets proxy session from checkpoint metadata.
+	if m.secretsProxy != nil && len(cpMeta.SealedTokens) > 0 {
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, cpMeta.SealedTokens, cpMeta.EgressAllowlist, cpMeta.TokenHosts)
+		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(cpMeta.SealedTokens))
 	}
 
 	// Step 8: Update VM instance
