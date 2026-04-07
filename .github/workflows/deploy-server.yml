@@ -134,13 +134,19 @@ jobs:
             exit 1
           fi
           echo "Created sandbox: $SB"
-          sleep 3
 
-          RESULT=$(curl -sf --max-time 15 \
-            -H "Content-Type: application/json" \
-            -H "X-API-Key: ${{ secrets.API_KEY }}" \
-            -X POST "http://${{ secrets.CP2_IP }}:8080/api/sandboxes/$SB/exec/run" \
-            -d '{"cmd":"echo","args":["deploy-ok"],"timeout":10}' | jq -r .stdout)
+          # Wait for sandbox to be ready, then exec with retry
+          RESULT=""
+          for attempt in 1 2 3; do
+            sleep 5
+            RESULT=$(curl -sf --max-time 15 \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: ${{ secrets.API_KEY }}" \
+              -X POST "http://${{ secrets.CP2_IP }}:8080/api/sandboxes/$SB/exec/run" \
+              -d '{"cmd":"echo","args":["deploy-ok"],"timeout":10}' | jq -r .stdout 2>/dev/null || echo "")
+            echo "Attempt $attempt: '$RESULT'"
+            echo "$RESULT" | grep -q "deploy-ok" && break
+          done
 
           curl -sf --max-time 10 \
             -H "X-API-Key: ${{ secrets.API_KEY }}" \
