@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/analytics"
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -378,9 +379,16 @@ func main() {
 	autosaver := worker.NewWorkspaceAutosaver(mgr, autosaverSyncer, 5*time.Minute)
 	autosaver.Start()
 
+	// Segment analytics — ships per-org GB-seconds memory usage. nil if SEGMENT_WRITE_KEY unset.
+	segmentClient := analytics.New(cfg.SegmentWriteKey)
+	if segmentClient != nil {
+		log.Println("opensandbox-worker: Segment analytics enabled")
+		defer segmentClient.Close()
+	}
+
 	// Usage collector for billing (samples cgroup stats every 60s, flushes to DB every 5 min)
 	if store != nil {
-		usageCollector := worker.NewUsageCollector(mgr, store)
+		usageCollector := worker.NewUsageCollector(mgr, store, segmentClient)
 		usageCollector.Start()
 		defer usageCollector.Stop()
 	}
