@@ -190,7 +190,7 @@ for round in $(seq 1 $CHAOS_ROUNDS); do
 done
 
 # ============================================================
-h "Phase 3b: Migration pressure — scale sandboxes on one worker to 8GB until migration triggers"
+h "Phase 3b: Migration pressure — overload one worker until migrations trigger"
 
 # Pick the most-loaded worker
 TARGET_WORKER=$(get_workers | python3 -c "
@@ -198,37 +198,60 @@ import sys,json
 w = sorted(json.load(sys.stdin), key=lambda x: -x['current'])
 print(w[0]['worker_id'] if w else '')
 " 2>/dev/null)
-echo "  Target worker: ${TARGET_WORKER##*-}"
+TARGET_SHORT=${TARGET_WORKER##*-}
+echo "  Target worker: $TARGET_SHORT"
+echo "  Strategy: scale ALL its sandboxes to 8GB, then 16GB until migration triggers"
+echo ""
 
-# Get sandboxes on that worker and scale them to 8GB one by one
-MIGRATED=0
-for sb in $(sort -R < "$SANDBOX_FILE" | head -20); do
+# Get ALL sandboxes on that worker
+TARGET_SBS=""
+while read -r sb; do
     [ -z "$sb" ] && continue
-    # Check if this sandbox is on the target worker
     SB_WORKER=$(api "$API_URL/api/sandboxes/$sb" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('workerID',''))" 2>/dev/null)
-    [ "$SB_WORKER" != "$TARGET_WORKER" ] && continue
+    [ "$SB_WORKER" = "$TARGET_WORKER" ] && TARGET_SBS="$TARGET_SBS $sb"
+done < "$SANDBOX_FILE"
+SB_ON_TARGET=$(echo $TARGET_SBS | wc -w | tr -d ' ')
+echo "  Found $SB_ON_TARGET sandboxes on $TARGET_SHORT"
 
-    result=$(TIMEOUT=180 api -X PUT "$API_URL/api/sandboxes/$sb/limits" -d '{"memoryMB":8192,"cpuPercent":200}' 2>/dev/null)
-    migrated=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('migrated',False))" 2>/dev/null)
-    ok=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null)
-    mem=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('memoryMB','?'))" 2>/dev/null)
+MIGRATED=0
+
+do_scale() {
+    local sb="$1" size="$2"
+    local result=$(TIMEOUT=180 api -X PUT "$API_URL/api/sandboxes/$sb/limits" -d "{\"memoryMB\":$size,\"cpuPercent\":200}" 2>/dev/null)
+    local migrated=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('migrated',False))" 2>/dev/null)
+    local ok=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null)
 
     if [ "$migrated" = "True" ]; then
-        new_worker=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workerID','?'))" 2>/dev/null)
-        echo "  ${sb##*-}: scaled to ${mem}MB → MIGRATED to ${new_worker##*-}"
-        MIGRATED=$((MIGRATED + 1))
-        SCALES_OK=$((SCALES_OK + 1))
+        local new_w=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workerID','')[-8:])" 2>/dev/null)
+        printf "  \033[32m✓ %s → %dMB MIGRATED to %s\033[0m\n" "${sb##*-}" "$size" "$new_w"
+        return 0
     elif [ "$ok" = "True" ]; then
-        echo "  ${sb##*-}: scaled to ${mem}MB (fit on current worker)"
-        SCALES_OK=$((SCALES_OK + 1))
+        printf "  %s → %dMB (fit)\n" "${sb##*-}" "$size"
+        return 1
     else
-        err=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','?')[:60])" 2>/dev/null)
-        echo "  ${sb##*-}: FAILED — $err"
-        SCALES_FAIL=$((SCALES_FAIL + 1))
+        local err=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','?')[:50])" 2>/dev/null)
+        printf "  \033[31m%s → %dMB FAILED: %s\033[0m\n" "${sb##*-}" "$size" "$err"
+        return 1
     fi
+}
+
+# Phase A: Scale all sandboxes on target to 8GB
+echo "  --- Scaling to 8GB ---"
+for sb in $TARGET_SBS; do
+    do_scale "$sb" 8192 && MIGRATED=$((MIGRATED + 1))
+    SCALES_OK=$((SCALES_OK + 1))
 done
 
-[ "$MIGRATED" -gt 0 ] && pass "$MIGRATED migration(s) triggered by memory pressure" || skip "No migrations triggered (workers had room)"
+# Phase B: Now scale them to 16GB — this should force migrations
+echo ""
+echo "  --- Scaling to 16GB (should trigger migrations) ---"
+for sb in $TARGET_SBS; do
+    do_scale "$sb" 16384 && MIGRATED=$((MIGRATED + 1))
+    SCALES_OK=$((SCALES_OK + 1))
+done
+
+echo ""
+[ "$MIGRATED" -gt 0 ] && pass "$MIGRATED migration(s) triggered by memory pressure on $TARGET_SHORT" || skip "No migrations triggered"
 
 echo ""
 [ "$CHECKS_FAIL" -le $((CHECKS_OK / 10)) ] && pass "Chaos checks: $CHECKS_OK ok, $CHECKS_FAIL failed (≤10% failure)" || fail "Too many failures: $CHECKS_FAIL/$((CHECKS_OK + CHECKS_FAIL))"
