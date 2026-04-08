@@ -793,6 +793,10 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		IncomingAddr: prepResp.IncomingAddr,
 	})
 	if err != nil {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		targetClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: id})
+		cleanCancel()
+		log.Printf("migrate %s: live migrate failed, cleaned up target on %s: %v", id, req.TargetWorker, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "live migrate: " + err.Error()})
 	}
 
@@ -805,6 +809,10 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		SandboxId: id,
 	})
 	if err != nil {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		targetClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: id})
+		cleanCancel()
+		log.Printf("migrate %s: complete failed, cleaned up target on %s: %v", id, req.TargetWorker, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "complete migration: " + err.Error()})
 	}
 
@@ -1061,6 +1069,7 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		retryCancel()
 
 		if err != nil {
+			log.Printf("scale-migrate %s: post-migration SetLimits failed on %s: %v", sandboxID, workerID, err)
 			return c.JSON(http.StatusInternalServerError, map[string]string{
 				"error": "set limits failed after migration: " + err.Error(),
 			})
@@ -1138,23 +1147,11 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		template = "default"
 	}
 
-	// The target QEMU must use the same base memory as the source for migration
-	// to work (QEMU requires matching RAM sizes). Use the session config to get
-	// the original base memory, not the new requested size. The virtio-mem pool
-	// handles scaling after migration completes.
-	var sbCfg struct {
-		MemoryMB int `json:"memoryMB"`
-		CpuCount int `json:"cpuCount"`
-	}
-	_ = json.Unmarshal(session.Config, &sbCfg)
-	baseMem := sbCfg.MemoryMB
-	if baseMem <= 0 {
-		baseMem = 256 // default from golden snapshot
-	}
-	baseCPU := sbCfg.CpuCount
-	if baseCPU <= 0 {
-		baseCPU = 1
-	}
+	// IMPORTANT: Use the QEMU base memory (from golden snapshot), not the API-requested total.
+	// Virtio-mem hotplug state transfers during migration — the target QEMU must start
+	// with the same base memory as the source for the memory layout to match.
+	baseMem := 256
+	baseCPU := 1
 
 	log.Printf("scale-migrate %s: migrating to %s (template=%s, baseMem=%dMB, targetMem=%dMB, cpu=%d)", sandboxID, target.ID, template, baseMem, memoryMB, cpuCount)
 
@@ -1181,6 +1178,11 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		IncomingAddr: prepResp.IncomingAddr,
 	})
 	if err != nil {
+		// Clean up orphaned target QEMU — prep succeeded but migration failed
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		targetClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: sandboxID})
+		cleanCancel()
+		log.Printf("scale-migrate %s: live migrate failed, cleaned up target on %s: %v", sandboxID, target.ID, err)
 		return fmt.Errorf("live migrate: %w", err)
 	}
 
@@ -1191,6 +1193,11 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		SandboxId: sandboxID,
 	})
 	if err != nil {
+		// Clean up orphaned target QEMU — migration transferred but completion failed
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		targetClient.DestroySandbox(cleanCtx, &pb.DestroySandboxRequest{SandboxId: sandboxID})
+		cleanCancel()
+		log.Printf("scale-migrate %s: complete failed, cleaned up target on %s: %v", sandboxID, target.ID, err)
 		return fmt.Errorf("complete migration: %w", err)
 	}
 

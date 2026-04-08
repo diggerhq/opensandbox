@@ -524,6 +524,19 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 		log.Printf("qemu: migration %s: clock sync failed: %v", sandboxID, err)
 	}
 
+	// Sync VM memory tracking with actual QEMU state.
+	// After migration, the QEMU process has the source's virtio-mem hotplugged memory,
+	// but the Go struct still has the prep values (virtioMemRequestedMB=0, MemoryMB=baseMem).
+	// This causes totalCommittedMemoryMB() to underreport, leading to overcommit.
+	if vm.qmp != nil {
+		if actualVirtioMB := vm.qmp.GetVirtioMemSize(); actualVirtioMB > 0 {
+			vm.virtioMemRequestedMB = actualVirtioMB
+			vm.MemoryMB = vm.baseMemoryMB + actualVirtioMB
+			log.Printf("qemu: migration %s: synced memory tracking: virtio-mem=%dMB, total=%dMB",
+				sandboxID, actualVirtioMB, vm.MemoryMB)
+		}
+	}
+
 	// Notify metadata server
 	if m.onSandboxReady != nil {
 		m.onSandboxReady(sandboxID, vm.network.GuestIP, vm.Template, vm.StartedAt)

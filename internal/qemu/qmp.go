@@ -268,6 +268,27 @@ func (q *QMPClient) SetVirtioMemSize(sizeMB int) error {
 	})
 }
 
+// GetVirtioMemSize returns the current requested-size of the virtio-mem device in MB.
+// Returns 0 if the device doesn't exist or the query fails.
+func (q *QMPClient) GetVirtioMemSize() int {
+	cmd := qmpCommand{
+		Execute: "qom-get",
+		Arguments: map[string]interface{}{
+			"path":     "/machine/peripheral/vm0",
+			"property": "requested-size",
+		},
+	}
+	resp, err := q.execute(cmd, 5*time.Second)
+	if err != nil || resp == nil || resp.Return == nil {
+		return 0
+	}
+	var sizeBytes int64
+	if err := json.Unmarshal(resp.Return, &sizeBytes); err != nil {
+		return 0
+	}
+	return int(sizeBytes / (1024 * 1024))
+}
+
 // SendFd passes an open file descriptor to QEMU via the QMP getfd command.
 // QEMU receives the fd via SCM_RIGHTS and registers it under the given name.
 func (q *QMPClient) SendFd(name string, f *os.File) error {
