@@ -75,6 +75,12 @@ type SandboxConfig struct {
 	// CheckpointID is the source checkpoint for template/snapshot creates.
 	// Used by the worker to key per-template golden snapshots.
 	CheckpointID string `json:"-"`
+	// SealedEnvKeys lists the env var names that originated from a SecretStore
+	// and must be tokenized by the secrets proxy before injection into the VM.
+	// All other entries in Envs are passed through as plaintext. Populated by
+	// the API layer from resolveSecretStoreInto and forwarded to the worker —
+	// the SDK never sets this directly.
+	SealedEnvKeys []string `json:"-"`
 }
 
 // ResourceTier defines an allowed memory/CPU combination.

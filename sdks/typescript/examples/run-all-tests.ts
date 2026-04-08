@@ -53,6 +53,7 @@ const SUITES: TestSuite[] = [
   { name: "Concurrent", file: "test-concurrent.ts", description: "5 sandboxes in parallel, isolation, parallel ops" },
   { name: "Hibernation", file: "test-hibernation-stress.ts", description: "Multi-cycle hibernate/wake, large state, auto-wake" },
   { name: "Checkpoints", file: "test-checkpoints.ts", description: "Create, list, restore, fork, delete checkpoints, limits" },
+  { name: "Snapshot Envs", file: "test-snapshot-envs.ts", description: "User envs survive snapshot fork as plaintext; secret-store envs stay sealed" },
   { name: "Timeout", file: "test-timeout.ts", slow: true, description: "30s timeout, setTimeout(), rolling timeout (takes ~2min)" },
 ];
 

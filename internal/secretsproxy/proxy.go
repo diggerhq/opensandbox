@@ -202,15 +202,23 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 //
 // allowlist controls which hosts the sandbox can reach (nil = all).
 // secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
-func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
+func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, sealedKeys map[string]struct{}, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
 	if len(envVars) == 0 {
 		return nil
 	}
 
-	sealed := make(map[string]string, len(envVars))   // envVar → token
-	tokenMap := make(map[string]string, len(envVars)) // token → real value
-
-	for envVar, realValue := range envVars {
+	// Tokenize only the env vars that came from a SecretStore. Everything else
+	// is forwarded to the guest as plaintext — those values were supplied by
+	// the user directly to the API, so sealing them would silently break
+	// non-HTTP usage (echo $VAR, file writes, subprocess env) without adding
+	// any protection.
+	sealed := make(map[string]string, len(sealedKeys)) // envVar → token (sealed only)
+	tokenMap := make(map[string]string, len(sealedKeys)) // token → real value
+	for envVar := range sealedKeys {
+		realValue, ok := envVars[envVar]
+		if !ok {
+			continue
+		}
 		token := "osb_sealed_" + randomHex(16)
 		sealed[envVar] = token
 		tokenMap[token] = realValue
@@ -227,22 +235,30 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, en
 		}
 	}
 
-	p.RegisterSession(guestIP, &Session{
-		SandboxID:  sandboxID,
-		Secrets:    tokenMap,
-		TokenHosts: tokenHosts,
-		Allowlist:  allowlist,
-	})
+	// Only register a proxy session if there's actually something to substitute.
+	if len(tokenMap) > 0 {
+		p.RegisterSession(guestIP, &Session{
+			SandboxID:  sandboxID,
+			Secrets:    tokenMap,
+			TokenHosts: tokenHosts,
+			Allowlist:  allowlist,
+		})
+	}
 
-	// Build the complete env map for the VM
+	// Build the complete env map for the VM: sealed values replace the original
+	// entry under the same name; non-sealed entries pass through as plaintext.
 	proxyURL := fmt.Sprintf("http://%s:3128", gatewayIP)
 	caCertPath := "/usr/local/share/ca-certificates/opensandbox-proxy.crt"
 
 	noProxy := "localhost,127.0.0.1,::1"
 
-	result := make(map[string]string, len(sealed)+9)
-	for k, v := range sealed {
-		result[k] = v
+	result := make(map[string]string, len(envVars)+9)
+	for k, v := range envVars {
+		if token, isSealed := sealed[k]; isSealed {
+			result[k] = token
+		} else {
+			result[k] = v
+		}
 	}
 	result["HTTP_PROXY"] = proxyURL
 	result["HTTPS_PROXY"] = proxyURL

@@ -64,6 +64,10 @@ message CreateSandboxRequest {
   repeated string egress_allowlist = 13;
   // Per-secret host restrictions for secrets proxy.
   map<string, string> secret_allowed_hosts = 14;
+  // Names of env vars that originated from a SecretStore and must be tokenized
+  // by the secrets proxy. Envs not in this list reach the guest as plaintext.
+  // Empty = no envs are sealed.
+  repeated string sealed_env_keys = 15;
 }
 
 message CreateSandboxResponse {

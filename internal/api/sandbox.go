@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,21 @@ import (
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
+
+// sortedKeys returns the keys of m in stable order. Used to convert the
+// secret-store-derived env-name set into the slice form carried by SandboxConfig
+// (and over the worker gRPC), so equal inputs produce equal outputs.
+func sortedKeys(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
 
 func (s *Server) createSandbox(c echo.Context) error {
 	var cfg types.SandboxConfig
@@ -77,6 +93,10 @@ func (s *Server) createSandbox(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
 	}
+	// Mark the secret-store-derived env names as the only ones that should be
+	// tokenized by the secrets proxy on the worker. User-supplied envs in
+	// cfg.Envs (and any keys not in this set) reach the guest as plaintext.
+	cfg.SealedEnvKeys = sortedKeys(secretEnvKeys)
 
 	// Declarative image or named snapshot → resolve to checkpoint and use createFromCheckpoint flow
 	if len(cfg.ImageManifest) > 0 || cfg.Snapshot != "" {
@@ -106,7 +126,15 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 		c.SetParamNames("checkpointId")
 		c.SetParamValues(checkpointID.String())
-		return s.createFromCheckpoint(c)
+		// Forward user-supplied envs so they override the checkpoint's stored
+		// envs on a fork. Without this, Sandbox.create({snapshot, envs}) silently
+		// drops the envs because the core path uses originalCfg.Envs from
+		// cp.SandboxConfig (the envs the snapshot was originally built with).
+		result, status, cpErr := s.createFromCheckpointCore(c, cfg.Envs)
+		if cpErr != nil {
+			return c.JSON(status, map[string]string{"error": cpErr.Error()})
+		}
+		return c.JSON(status, result)
 	}
 
 	// Server mode with worker registry: dispatch to remote worker via gRPC
@@ -246,7 +274,7 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 
 	c.SetParamNames("checkpointId")
 	c.SetParamValues(checkpointID.String())
-	result, _, cpErr := s.createFromCheckpointCore(c)
+	result, _, cpErr := s.createFromCheckpointCore(c, cfg.Envs)
 	if cpErr != nil {
 		emit("error", map[string]string{"error": cpErr.Error()})
 		return nil
@@ -429,6 +457,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		TemplateWorkspaceKey: templateWorkspaceKey,
 		EgressAllowlist:      cfg.EgressAllowlist,
 		SecretAllowedHosts:   flattenSecretAllowedHosts(cfg.SecretAllowedHosts),
+		SealedEnvKeys:        cfg.SealedEnvKeys,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -1533,7 +1562,14 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 
 // createFromCheckpoint creates a new sandbox from an existing checkpoint (fork).
 func (s *Server) createFromCheckpoint(c echo.Context) error {
-	result, httpStatus, err := s.createFromCheckpointCore(c)
+	// Direct route (POST /sandboxes/from-checkpoint/:checkpointId): only the
+	// envs override is currently supported on the fork path; everything else
+	// is inherited from the checkpoint's stored config.
+	var body struct {
+		Envs map[string]string `json:"envs"`
+	}
+	_ = c.Bind(&body)
+	result, httpStatus, err := s.createFromCheckpointCore(c, body.Envs)
 	if err != nil {
 		return c.JSON(httpStatus, map[string]string{"error": err.Error()})
 	}
@@ -1548,7 +1584,10 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 // re-resolves it fresh against the DB at this point. So if the user updated a
 // secret in the store between snapshot and fork, the fork sees the new value.
 // The fork itself does NOT support overriding the secret store — it inherits.
-func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{}, int, error) {
+// userEnvs (may be nil) overrides the envs from the checkpoint's stored config.
+// User keys win over keys re-resolved from the inherited secret store, matching
+// the precedence used on the fresh-create path in resolveSecretStoreInto.
+func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]string) (map[string]interface{}, int, error) {
 	checkpointIDStr := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
@@ -1624,6 +1663,22 @@ func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{
 		secretEnvKeys, err = s.resolveSecretStoreInto(ctx, orgID, &originalCfg)
 		if err != nil {
 			return nil, http.StatusBadRequest, err
+		}
+	}
+	// Compute the seal-set BEFORE merging user envs so user-supplied keys are
+	// never tokenized by the secrets proxy on the worker.
+	originalCfg.SealedEnvKeys = sortedKeys(secretEnvKeys)
+
+	// Merge user-supplied envs over the checkpoint's envs (and over any
+	// secret-store re-resolved values). User keys win — same precedence as the
+	// fresh-create path. Without this merge, Sandbox.create({snapshot, envs})
+	// silently drops user envs because only originalCfg flows down to the worker.
+	if len(userEnvs) > 0 {
+		if originalCfg.Envs == nil {
+			originalCfg.Envs = make(map[string]string, len(userEnvs))
+		}
+		for k, v := range userEnvs {
+			originalCfg.Envs[k] = v
 		}
 	}
 
@@ -1718,6 +1773,7 @@ func (s *Server) createFromCheckpointCore(c echo.Context) (map[string]interface{
 				SandboxId:            sandboxID,
 				EgressAllowlist:      originalCfg.EgressAllowlist,
 				SecretAllowedHosts:   flattenSecretAllowedHosts(originalCfg.SecretAllowedHosts),
+				SealedEnvKeys:        originalCfg.SealedEnvKeys,
 			})
 		} else {
 			// Combined mode: create locally — no external timeout, same reasoning as above

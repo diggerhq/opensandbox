@@ -134,6 +134,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		CheckpointID:       req.CheckpointId, // for per-template golden snapshots
 		EgressAllowlist:    req.EgressAllowlist,
 		SecretAllowedHosts: parseSecretAllowedHosts(req.SecretAllowedHosts),
+		SealedEnvKeys:      req.SealedEnvKeys,
 	}
 
 	// Warm fork: if checkpoint_id is set, fork from the local checkpoint cache.

@@ -73,9 +73,15 @@ type SandboxMeta struct {
 // SecretsProxyIntegration provides the interface for the secrets proxy to integrate
 // with VM lifecycle.
 type SecretsProxyIntegration interface {
-	// CreateSealedEnvs generates sealed tokens for env vars, registers a proxy session,
-	// and returns the full env map (sealed tokens + proxy config vars) to inject into the VM.
-	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
+	// CreateSealedEnvs generates sealed tokens for env vars whose names appear
+	// in sealedKeys (typically only those sourced from a SecretStore), registers
+	// a proxy session for those tokens, and returns the full env map to inject
+	// into the VM: sealed entries replaced with tokens + non-sealed entries
+	// passed through as plaintext + proxy config vars (HTTP_PROXY, CA cert).
+	// If sealedKeys is empty, no entries are tokenized and no proxy session is
+	// registered, but the proxy config vars are still added so the worker's
+	// egress allowlist is enforced consistently.
+	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, sealedKeys map[string]struct{}, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
 	// UnregisterSession removes the proxy session for the given guest IP.
 	UnregisterSession(guestIP string)
 	// GetSessionTokens returns the sealed token → real value map for persisting during hibernate.
@@ -218,7 +224,16 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 	if m.secretsProxy == nil || len(cfg.Envs) == 0 {
 		return cfg.Envs
 	}
-	sealed := m.secretsProxy.CreateSealedEnvs(sandboxID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
+	// Build the seal-set: only env vars whose names came from a SecretStore
+	// are tokenized. User-supplied envs (from Sandbox.create({envs: ...}))
+	// must reach the guest as plaintext — sealing them would break every
+	// non-HTTP use of the variable (echo, file write, subprocess) and gives
+	// no protection since the user already handed the value to the API.
+	sealedKeys := make(map[string]struct{}, len(cfg.SealedEnvKeys))
+	for _, k := range cfg.SealedEnvKeys {
+		sealedKeys[k] = struct{}{}
+	}
+	sealed := m.secretsProxy.CreateSealedEnvs(sandboxID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, sealedKeys, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
 	if sealed == nil {
 		return cfg.Envs
 	}

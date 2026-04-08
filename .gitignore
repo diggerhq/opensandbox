@@ -59,4 +59,6 @@ deploy/ec2/*.pem
 *.log
 delme
 deploy/azure/.dev-env-state-*
+deploy/azure/.dev-env-secrets*
+!deploy/azure/.dev-env-secrets.example
 /server

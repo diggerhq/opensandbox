@@ -150,6 +150,32 @@ cmd_deploy() {
 
     log "Deploying to $VM_PUBLIC_IP..."
 
+    # Load checkpoint-store secrets from a gitignored per-location file. Without
+    # these the worker logs "checkpoint store not configured" and every
+    # snapshot/fork RPC fails with no obvious cause, so the deploy fails fast.
+    #
+    # File format (deploy/azure/.dev-env-secrets-<location>):
+    #   CHECKPOINT_STORAGE_ACCOUNT=deveuwest1
+    #   CHECKPOINT_STORAGE_CONTAINER=checkpoints
+    #   CHECKPOINT_STORAGE_KEY=...
+    # See deploy/azure/.dev-env-secrets.example. The file is gitignored.
+    SECRETS_FILE="$STATE_DIR/.dev-env-secrets-${AZURE_LOCATION}"
+    if [ -f "$SECRETS_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$SECRETS_FILE"
+        log "Loaded secrets from $(basename "$SECRETS_FILE")"
+    fi
+    if [ -z "${CHECKPOINT_STORAGE_ACCOUNT:-}" ] || [ -z "${CHECKPOINT_STORAGE_KEY:-}" ] || [ -z "${CHECKPOINT_STORAGE_CONTAINER:-}" ]; then
+        log "ERROR: checkpoint storage not configured for ${AZURE_LOCATION}."
+        log "       Create $SECRETS_FILE with CHECKPOINT_STORAGE_ACCOUNT,"
+        log "       CHECKPOINT_STORAGE_CONTAINER, and CHECKPOINT_STORAGE_KEY."
+        log "       See deploy/azure/.dev-env-secrets.example."
+        log "       To fetch the key:"
+        log "         az storage account keys list -n <account> -g <rg> --query '[0].value' -o tsv"
+        exit 1
+    fi
+    log "Checkpoint store: https://${CHECKPOINT_STORAGE_ACCOUNT}.blob.core.windows.net/${CHECKPOINT_STORAGE_CONTAINER}"
+
     # Persist a stable secret-store encryption key per environment.
     # Without this, OPENSANDBOX_SECRET_ENCRYPTION_KEY is unset and SecretStore.setSecret
     # fails with HTTP 500 ("encryption not configured"). Reuse across redeploys so
@@ -256,6 +282,15 @@ OPENSANDBOX_PORT=8081
 OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=1024
 OPENSANDBOX_DEFAULT_SANDBOX_CPUS=2
 OPENSANDBOX_SECRET_ENCRYPTION_KEY=${OPENSANDBOX_SECRET_ENCRYPTION_KEY}
+# Checkpoint store — Azure Blob Storage. The worker switches backends when
+# OPENSANDBOX_S3_ENDPOINT contains .blob.core.windows.net (see
+# internal/storage/blob.go:39). Without these, snapshot/fork RPCs fail with
+# "checkpoint store not configured on this worker".
+OPENSANDBOX_S3_ENDPOINT=https://${CHECKPOINT_STORAGE_ACCOUNT}.blob.core.windows.net
+OPENSANDBOX_S3_ACCESS_KEY_ID=${CHECKPOINT_STORAGE_ACCOUNT}
+OPENSANDBOX_S3_SECRET_ACCESS_KEY=${CHECKPOINT_STORAGE_KEY}
+OPENSANDBOX_S3_BUCKET=${CHECKPOINT_STORAGE_CONTAINER}
+OPENSANDBOX_S3_REGION=${AZURE_LOCATION}
 EOF
 
 # Server env
