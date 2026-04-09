@@ -1607,18 +1607,37 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	var originalCfg types.SandboxConfig
 	_ = json.Unmarshal(cp.SandboxConfig, &originalCfg)
 
-	// Secret store resolution:
-	// 1. Checkpoint already has a store → re-resolve fresh (picks up updated secrets).
-	//    User cannot override it (reject if they try).
-	// 2. Checkpoint has no store + user supplies one → attach it (fresh secrets on a clean fork).
-	// 3. Neither → no secrets.
-	if originalCfg.SecretStore != "" && userSecretStore != "" && originalCfg.SecretStore != userSecretStore {
-		return nil, http.StatusBadRequest, fmt.Errorf("cannot override inherited secret store %q — fork inherits the snapshot's store", originalCfg.SecretStore)
+	// Secret store resolution — supports layering:
+	// Resolve the checkpoint's store first (base), then the user's store on top (child).
+	// Child secrets win on name collision. Egress allowlists aggregate (union).
+	// On a fork-of-fork, the checkpoint's SecretStore already represents its
+	// full merged ancestry — just treat it as the base.
+	baseStore := originalCfg.SecretStore
+	if baseStore != "" {
+		if err := s.resolveSecretStoreInto(ctx, orgID, &originalCfg); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
 	}
-	if userSecretStore != "" && originalCfg.SecretStore == "" {
+	if userSecretStore != "" && userSecretStore != baseStore {
+		baseEgress := originalCfg.EgressAllowlist
 		originalCfg.SecretStore = userSecretStore
-	}
-	if originalCfg.SecretStore != "" {
+		if err := s.resolveSecretStoreInto(ctx, orgID, &originalCfg); err != nil {
+			return nil, http.StatusBadRequest, err
+		}
+		// Aggregate egress: union of base + child
+		seen := make(map[string]bool, len(originalCfg.EgressAllowlist))
+		for _, h := range originalCfg.EgressAllowlist {
+			seen[h] = true
+		}
+		for _, h := range baseEgress {
+			if !seen[h] {
+				originalCfg.EgressAllowlist = append(originalCfg.EgressAllowlist, h)
+			}
+		}
+		// Persist: child becomes SecretStore, base recorded for lineage
+		originalCfg.BaseSecretStore = baseStore
+	} else if userSecretStore != "" {
+		// Same store — just re-resolve fresh
 		if err := s.resolveSecretStoreInto(ctx, orgID, &originalCfg); err != nil {
 			return nil, http.StatusBadRequest, err
 		}

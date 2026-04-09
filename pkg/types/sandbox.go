@@ -54,7 +54,13 @@ type SandboxConfig struct {
 	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
 	// SecretStore name — resolves secrets from the named secret store.
+	// When layered (base snapshot had a store + fork supplies another),
+	// this holds the child (fork-supplied) store. BaseSecretStore holds the parent.
 	SecretStore string `json:"secretStore,omitempty"`
+	// BaseSecretStore records the parent snapshot's store when a fork layers
+	// a different child store on top. On fork-of-fork, the checkpoint's
+	// SecretStore already represents its full merged ancestry.
+	BaseSecretStore string `json:"baseSecretStore,omitempty"`
 	// EgressAllowlist restricts outbound HTTPS from the sandbox to these hosts.
 	// Supports exact matches ("api.anthropic.com") and wildcards ("*.openai.com").
 	// Empty = all hosts allowed (no restriction).
