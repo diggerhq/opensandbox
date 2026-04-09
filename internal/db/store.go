@@ -378,23 +378,25 @@ func (s *Store) CreateAPIKey(ctx context.Context, orgID uuid.UUID, createdBy *uu
 	return apiKey, nil
 }
 
-// ValidateAPIKey looks up an API key by hash and returns the associated org ID.
-func (s *Store) ValidateAPIKey(ctx context.Context, keyPlaintext string) (uuid.UUID, error) {
+// ValidateAPIKey looks up an API key by hash and returns the associated org ID
+// and the user ID of the key's creator (nil for keys with no creator).
+func (s *Store) ValidateAPIKey(ctx context.Context, keyPlaintext string) (uuid.UUID, *uuid.UUID, error) {
 	hash := HashAPIKey(keyPlaintext)
 	var orgID uuid.UUID
+	var createdBy *uuid.UUID
 	var expiresAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT org_id, expires_at FROM api_keys WHERE key_hash = $1`, hash,
-	).Scan(&orgID, &expiresAt)
+		`SELECT org_id, created_by, expires_at FROM api_keys WHERE key_hash = $1`, hash,
+	).Scan(&orgID, &createdBy, &expiresAt)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("invalid API key")
+		return uuid.Nil, nil, fmt.Errorf("invalid API key")
 	}
 	if expiresAt != nil && expiresAt.Before(time.Now()) {
-		return uuid.Nil, fmt.Errorf("API key expired")
+		return uuid.Nil, nil, fmt.Errorf("API key expired")
 	}
 	// Update last_used
 	_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used = now() WHERE key_hash = $1`, hash)
-	return orgID, nil
+	return orgID, createdBy, nil
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context, orgID uuid.UUID) ([]APIKey, error) {

@@ -183,7 +183,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		if template == "" {
 			template = "default"
 		}
-		_, _ = s.store.CreateSandboxSession(ctx, sb.ID, orgID, nil, template, region, workerID, cfgJSON, metadataJSON)
+		_, _ = s.store.CreateSandboxSession(ctx, sb.ID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
 	}
 
 	return c.JSON(http.StatusCreated, sb)
@@ -476,7 +476,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		}
 		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
 		metadataJSON, _ := json.Marshal(cfg.Metadata)
-		_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, nil, template, region, worker.ID, cfgJSON, metadataJSON)
+		_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
 		if templateID != nil {
 			_ = s.store.UpdateSandboxSessionTemplate(ctx, grpcResp.SandboxId, *templateID)
 		}
@@ -1700,7 +1700,7 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
 		metadataJSON, _ := json.Marshal(originalCfg.Metadata)
-		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, nil, template, region, workerID, cfgJSON, metadataJSON)
+		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
 		// Track checkpoint lineage for patch system
 		_ = s.store.SetSandboxCheckpointID(ctx, sandboxID, checkpointID)
 	}
