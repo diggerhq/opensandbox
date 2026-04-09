@@ -209,7 +209,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 	}
 	cfgJSON, _ := json.Marshal(req)
 	metadataJSON, _ := json.Marshal(req.Metadata)
-	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, nil, template, region, worker.ID, cfgJSON, metadataJSON)
+	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
 
 	// Issue sandbox-scoped JWT (24h TTL — independent of sandbox idle timeout)
 	token, err := s.jwtIssuer.IssueSandboxToken(orgID, grpcResp.SandboxId, worker.ID, 24*time.Hour)

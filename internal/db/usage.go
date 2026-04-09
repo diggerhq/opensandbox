@@ -69,26 +69,47 @@ func (s *Store) GetSandboxOrgID(ctx context.Context, sandboxID string) (string, 
 	return orgID.String(), nil
 }
 
-// GetSandboxOwner returns the org_id and user_email for a sandbox. user_email
+// SandboxOwner holds the org and user details for a sandbox session.
+type SandboxOwner struct {
+	OrgID        string
+	UserID       string
+	UserEmail    string
+	WorkosUserID string
+	WorkosOrgID  string
+}
+
+// GetSandboxOwner returns the org and user details for a sandbox. User fields
 // may be empty if the session has no associated user (e.g. created with an
 // org-level API key that isn't tied to a user).
-func (s *Store) GetSandboxOwner(ctx context.Context, sandboxID string) (orgID, userEmail string, err error) {
+func (s *Store) GetSandboxOwner(ctx context.Context, sandboxID string) (SandboxOwner, error) {
 	var orgUUID uuid.UUID
-	var email *string
-	err = s.pool.QueryRow(ctx,
-		`SELECT s.org_id, u.email
+	var userUUID *uuid.UUID
+	var email, workosUserID, workosOrgID *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT s.org_id, s.user_id, u.email, u.workos_user_id, o.workos_org_id
 		   FROM sandbox_sessions s
 		   LEFT JOIN users u ON u.id = s.user_id
+		   LEFT JOIN orgs  o ON o.id = s.org_id
 		  WHERE s.sandbox_id = $1
 		  ORDER BY s.started_at DESC LIMIT 1`,
-		sandboxID).Scan(&orgUUID, &email)
+		sandboxID).Scan(&orgUUID, &userUUID, &email, &workosUserID, &workosOrgID)
 	if err != nil {
-		return "", "", err
+		return SandboxOwner{}, err
+	}
+	owner := SandboxOwner{OrgID: orgUUID.String()}
+	if userUUID != nil {
+		owner.UserID = userUUID.String()
 	}
 	if email != nil {
-		userEmail = *email
+		owner.UserEmail = *email
 	}
-	return orgUUID.String(), userEmail, nil
+	if workosUserID != nil {
+		owner.WorkosUserID = *workosUserID
+	}
+	if workosOrgID != nil {
+		owner.WorkosOrgID = *workosOrgID
+	}
+	return owner, nil
 }
 
 // EndScaleEvent marks the current scale event as ended (sandbox stopped/hibernated).

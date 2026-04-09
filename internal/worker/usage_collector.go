@@ -90,14 +90,14 @@ func (c *UsageCollector) sample() {
 			continue // sandbox might be shutting down
 		}
 
-		orgID, userEmail, err := c.store.GetSandboxOwner(ctx, sb.ID)
-		if err != nil || orgID == "" {
+		owner, err := c.store.GetSandboxOwner(ctx, sb.ID)
+		if err != nil || owner.OrgID == "" {
 			continue // no billable owner, skip
 		}
 
 		samples = append(samples, db.UsageSample{
 			SandboxID:   sb.ID,
-			OrgID:       orgID,
+			OrgID:       owner.OrgID,
 			SampledAt:   now,
 			MemoryMB:    sb.MemoryMB,
 			CPUUsec:     0, // TODO: parse from cgroup cpu.stat
@@ -109,7 +109,15 @@ func (c *UsageCollector) sample() {
 		// customer reserved), not actual RSS. Reservation is what we bill for —
 		// actual usage is gameable and punishes well-behaved tenants.
 		gbSeconds := (float64(sb.MemoryMB) / 1024.0) * intervalSec
-		c.segment.TrackGBSeconds(orgID, userEmail, sb.ID, gbSeconds)
+		c.segment.TrackGBSeconds(analytics.UsageEvent{
+			OrgID:        owner.OrgID,
+			UserID:       owner.UserID,
+			UserEmail:    owner.UserEmail,
+			WorkosUserID: owner.WorkosUserID,
+			WorkosOrgID:  owner.WorkosOrgID,
+			SandboxID:    sb.ID,
+			GBSeconds:    gbSeconds,
+		})
 	}
 
 	if len(samples) == 0 {

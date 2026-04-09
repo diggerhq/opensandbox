@@ -25,21 +25,39 @@ func New(writeKey string) *Client {
 	return &Client{c: analytics.New(writeKey)}
 }
 
+// UsageEvent holds the identity fields shipped alongside a usage metric.
+type UsageEvent struct {
+	OrgID        string
+	UserID       string
+	UserEmail    string
+	WorkosUserID string
+	WorkosOrgID  string
+	SandboxID    string
+	GBSeconds    float64
+}
+
 // TrackGBSeconds enqueues a "Sandbox Memory Usage" event with GB-seconds for
-// the given org. sandboxID and userEmail are included as properties for
-// downstream filtering; the metric of record is gb_seconds bucketed by org.
-// userEmail may be empty (sandboxes created with org-level API keys have no
-// associated user).
-func (c *Client) TrackGBSeconds(orgID, userEmail, sandboxID string, gbSeconds float64) {
-	if c == nil || c.c == nil || orgID == "" || gbSeconds <= 0 {
+// the given org. User fields are included as properties for downstream
+// filtering; the metric of record is gb_seconds bucketed by org.
+func (c *Client) TrackGBSeconds(evt UsageEvent) {
+	if c == nil || c.c == nil || evt.OrgID == "" || evt.GBSeconds <= 0 {
 		return
 	}
 	props := analytics.NewProperties().
-		Set("gb_seconds", gbSeconds).
-		Set("sandbox_id", sandboxID).
-		Set("org_id", orgID)
-	if userEmail != "" {
-		props = props.Set("user_email", userEmail)
+		Set("gb_seconds", evt.GBSeconds).
+		Set("sandbox_id", evt.SandboxID).
+		Set("org_id", evt.OrgID)
+	if evt.UserID != "" {
+		props = props.Set("user_id", evt.UserID)
+	}
+	if evt.UserEmail != "" {
+		props = props.Set("user_email", evt.UserEmail)
+	}
+	if evt.WorkosUserID != "" {
+		props = props.Set("workos_user_id", evt.WorkosUserID)
+	}
+	if evt.WorkosOrgID != "" {
+		props = props.Set("workos_org_id", evt.WorkosOrgID)
 	}
 	// Use email as the Segment identity when available, fall back to org ID.
 	segmentUserID := orgID
