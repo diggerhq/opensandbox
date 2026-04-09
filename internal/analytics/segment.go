@@ -59,8 +59,13 @@ func (c *Client) TrackGBSeconds(evt UsageEvent) {
 	if evt.WorkosOrgID != "" {
 		props = props.Set("workos_org_id", evt.WorkosOrgID)
 	}
+	// Use email as the Segment identity when available, fall back to org ID.
+	segmentUserID := evt.OrgID
+	if evt.UserEmail != "" {
+		segmentUserID = evt.UserEmail
+	}
 	if err := c.c.Enqueue(analytics.Track{
-		UserId:     evt.OrgID,
+		UserId:     segmentUserID,
 		Event:      "Sandbox Memory Usage",
 		Properties: props,
 	}); err != nil {
