@@ -170,19 +170,20 @@ jobs:
                 echo \"Rootfs patched with kernel modules for \$GUEST_KVER\"
 
                 # Update guest kernel binary to match modules version.
-                # Without this, the VM boots with an old kernel that can't load
-                # the modules (e.g., virtio_mem won't load).
-                CURRENT_KVER=\"\"
+                # Without this, the VM boots with an old kernel that cant load
+                # the modules (e.g. virtio_mem wont load).
                 if [ -f /opt/opensandbox/vmlinux ]; then
-                    CURRENT_KVER=\$(file /opt/opensandbox/vmlinux 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+-[0-9]+-generic' || true)
+                    CURRENT_KVER=\$(file /opt/opensandbox/vmlinux 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9]+-[0-9]+-generic' || true)
+                else
+                    CURRENT_KVER=none
                 fi
                 if [ \"\$CURRENT_KVER\" != \"\$GUEST_KVER\" ]; then
                     if [ -f \"/boot/vmlinuz-\$GUEST_KVER\" ]; then
-                        echo \"Updating guest kernel: \$CURRENT_KVER → \$GUEST_KVER\"
+                        echo \"Updating guest kernel from \$CURRENT_KVER to \$GUEST_KVER\"
                         sudo cp /opt/opensandbox/vmlinux /opt/opensandbox/vmlinux.bak 2>/dev/null || true
                         sudo cp \"/boot/vmlinuz-\$GUEST_KVER\" /opt/opensandbox/vmlinux
                     else
-                        echo \"ERROR: /boot/vmlinuz-\$GUEST_KVER not found — kernel/module mismatch will break virtio-mem\"
+                        echo \"ERROR: /boot/vmlinuz-\$GUEST_KVER not found\"
                         exit 1
                     fi
                 else
