@@ -6,11 +6,12 @@ import {
 } from '../api/client'
 
 const PRICING_TIERS = [
-  { memory: '4 GB', vcpus: 1, perSec: 0.00003240740741 },
-  { memory: '8 GB', vcpus: 2, perSec: 0.000150462963 },
-  { memory: '16 GB', vcpus: 4, perSec: 0.0008101851852 },
-  { memory: '32 GB', vcpus: 8, perSec: 0.005787037037 },
-  { memory: '64 GB', vcpus: 16, perSec: 0.0162037037 },
+  { memory: '1 GB', vcpus: 1, bestEffort: true, perSec: 0.000001080246914 },
+  { memory: '4 GB', vcpus: 1, perSec: 0.000005787037037 },
+  { memory: '8 GB', vcpus: 2, perSec: 0.000005015432099 },
+  { memory: '16 GB', vcpus: 4, perSec: 0.00002700617284 },
+  { memory: '32 GB', vcpus: 8, perSec: 0.0001929012346 },
+  { memory: '64 GB', vcpus: 16, perSec: 0.0005401234568 },
 ]
 
 export default function Billing() {
@@ -69,7 +70,7 @@ export default function Billing() {
                 <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                   {isPro
                     ? `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, all tiers`
-                    : `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, 4GB / 1 vCPU`}
+                    : `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, up to 4GB / 1 vCPU`}
                 </span>
               </div>
 
@@ -195,7 +196,7 @@ export default function Billing() {
                       <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
                         {t.memory}{locked && ' — Pro'}
                       </td>
-                      <td>{t.vcpus}</td>
+                      <td>{t.vcpus}{('bestEffort' in t) && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 4 }}>best-effort</span>}</td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: locked ? 'var(--text-tertiary)' : 'var(--accent-cyan)' }}>
                         ${t.perSec.toFixed(11)}
                       </td>

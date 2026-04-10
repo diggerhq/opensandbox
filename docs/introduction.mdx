@@ -1,13 +1,13 @@
 ---
 title: "Introduction"
-description: "Cloud sandboxes for AI agents"
+description: "Cloud sandboxes for AI apps"
 ---
 
-OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is an isolated virtual machine with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Run Claude inside a sandbox and it can write files, install packages, run commands, and build complete projects autonomously.
+OpenComputer gives you a full Linux VM in the cloud. Each sandbox is an isolated virtual machine with its own filesystem, network, and process space — persistent, long-running, and capable of hibernating when idle. Write files, install packages, run commands, and build complete projects inside secure, isolated environments.
 
 <CardGroup cols={2}>
-  <Card title="Claude Agent SDK built in" icon="robot">
-    Claude runs inside the VM with full filesystem and shell access. Think → act → observe loop, streaming events back to your code.
+  <Card title="Full Linux VM" icon="server">
+    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via KVM.
   </Card>
   <Card title="Long-running" icon="clock">
     Hours or days, not minutes. Install packages, build projects, run test suites, iterate — no cold starts between steps.
@@ -15,8 +15,8 @@ OpenComputer gives your AI agents a full Linux VM in the cloud. Each sandbox is 
   <Card title="Checkpoint & fork" icon="code-branch">
     Named snapshots you can fork from. Try five approaches in parallel from the same starting point — like git branches for VMs.
   </Card>
-  <Card title="Full Linux VM" icon="server">
-    Not a container. Real VM with its own kernel, memory, and disk. Hardware-level isolation via KVM.
+  <Card title="Elastic compute" icon="gauge-high">
+    Scale memory and CPU at runtime. Request more resources for heavy tasks and release them after.
   </Card>
 </CardGroup>
 
@@ -53,29 +53,22 @@ export OPENCOMPUTER_API_KEY=your-api-key
 import { Sandbox } from "@opencomputer/sdk";
 
 const sandbox = await Sandbox.create();
-const session = await sandbox.agent.start({
-  prompt: "Create a hello world Express app and test it",
-  onEvent: (event) => {
-    if (event.type === "assistant") console.log(event.message);
-  },
-});
-
-await session.done;
+const result = await sandbox.commands.run("echo 'Hello World from OpenSandbox!'");
+console.log(result.stdout);
 await sandbox.kill();
 ```
 
 ```python Python
+import asyncio
 from opencomputer import Sandbox
 
-sandbox = await Sandbox.create()
-session = await sandbox.agent.start(
-    prompt="Create a hello world Express app and test it",
-    on_event=lambda event: print(event.data.get("message", ""))
-    if event.type == "assistant" else None,
-)
+async def main():
+    sandbox = await Sandbox.create()
+    result = await sandbox.commands.run("echo 'Hello World from OpenSandbox!'")
+    print(result.stdout)
+    await sandbox.kill()
 
-await session.wait()
-await sandbox.kill()
+asyncio.run(main())
 ```
 
 </CodeGroup>
@@ -84,15 +77,15 @@ await sandbox.kill()
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">
-    Working agent in 2 minutes
+    Create your first sandbox in 2 minutes
   </Card>
   <Card title="How It Works" icon="microchip" href="/how-it-works">
     Architecture: VMs, hibernation, checkpoints
   </Card>
-  <Card title="Agents" icon="robot" href="/agents/overview">
-    Run Claude inside sandboxes
-  </Card>
   <Card title="Sandboxes" icon="box" href="/sandboxes/overview">
     The compute primitive
+  </Card>
+  <Card title="Working with Files" icon="file" href="/sandboxes/working-with-files">
+    Upload, download, and manage files
   </Card>
 </CardGroup>

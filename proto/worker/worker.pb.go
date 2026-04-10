@@ -88,8 +88,11 @@ type CreateSandboxRequest struct {
 	EgressAllowlist []string `protobuf:"bytes,13,rep,name=egress_allowlist,json=egressAllowlist,proto3" json:"egress_allowlist,omitempty"`
 	// Per-secret host restrictions for secrets proxy.
 	SecretAllowedHosts map[string]string `protobuf:"bytes,14,rep,name=secret_allowed_hosts,json=secretAllowedHosts,proto3" json:"secret_allowed_hosts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Env vars resolved from a SecretStore. Sealed by the worker's secrets proxy
+	// before injection into the VM. Disjoint from `envs` (which is plaintext).
+	SecretEnvs    map[string]string `protobuf:"bytes,15,rep,name=secret_envs,json=secretEnvs,proto3" json:"secret_envs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateSandboxRequest) Reset() {
@@ -216,6 +219,13 @@ func (x *CreateSandboxRequest) GetEgressAllowlist() []string {
 func (x *CreateSandboxRequest) GetSecretAllowedHosts() map[string]string {
 	if x != nil {
 		return x.SecretAllowedHosts
+	}
+	return nil
+}
+
+func (x *CreateSandboxRequest) GetSecretEnvs() map[string]string {
+	if x != nil {
+		return x.SecretEnvs
 	}
 	return nil
 }
@@ -3260,7 +3270,7 @@ var File_proto_worker_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/worker/worker.proto\x12\x06worker\"\xd9\x05\n" +
+	"\x19proto/worker/worker.proto\x12\x06worker\"\xe7\x06\n" +
 	"\x14CreateSandboxRequest\x12\x1a\n" +
 	"\btemplate\x18\x01 \x01(\tR\btemplate\x12\x18\n" +
 	"\atimeout\x18\x02 \x01(\x05R\atimeout\x12:\n" +
@@ -3277,11 +3287,16 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\f \x01(\tR\tsandboxId\x12)\n" +
 	"\x10egress_allowlist\x18\r \x03(\tR\x0fegressAllowlist\x12f\n" +
-	"\x14secret_allowed_hosts\x18\x0e \x03(\v24.worker.CreateSandboxRequest.SecretAllowedHostsEntryR\x12secretAllowedHosts\x1a7\n" +
+	"\x14secret_allowed_hosts\x18\x0e \x03(\v24.worker.CreateSandboxRequest.SecretAllowedHostsEntryR\x12secretAllowedHosts\x12M\n" +
+	"\vsecret_envs\x18\x0f \x03(\v2,.worker.CreateSandboxRequest.SecretEnvsEntryR\n" +
+	"secretEnvs\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +
 	"\x17SecretAllowedHostsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a=\n" +
+	"\x0fSecretEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"N\n" +
 	"\x15CreateSandboxResponse\x12\x1d\n" +
@@ -3568,7 +3583,7 @@ func file_proto_worker_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_worker_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 60)
+var file_proto_worker_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 61)
 var file_proto_worker_worker_proto_goTypes = []any{
 	(ExecOutputChunk_Stream)(0),               // 0: worker.ExecOutputChunk.Stream
 	(*CreateSandboxRequest)(nil),              // 1: worker.CreateSandboxRequest
@@ -3629,78 +3644,80 @@ var file_proto_worker_worker_proto_goTypes = []any{
 	(*RebuildGoldenSnapshotResponse)(nil),     // 56: worker.RebuildGoldenSnapshotResponse
 	nil,                                       // 57: worker.CreateSandboxRequest.EnvsEntry
 	nil,                                       // 58: worker.CreateSandboxRequest.SecretAllowedHostsEntry
-	nil,                                       // 59: worker.ExecCommandRequest.EnvsEntry
-	nil,                                       // 60: worker.ExecSessionCreateRequest.EnvsEntry
+	nil,                                       // 59: worker.CreateSandboxRequest.SecretEnvsEntry
+	nil,                                       // 60: worker.ExecCommandRequest.EnvsEntry
+	nil,                                       // 61: worker.ExecSessionCreateRequest.EnvsEntry
 }
 var file_proto_worker_worker_proto_depIdxs = []int32{
 	57, // 0: worker.CreateSandboxRequest.envs:type_name -> worker.CreateSandboxRequest.EnvsEntry
 	58, // 1: worker.CreateSandboxRequest.secret_allowed_hosts:type_name -> worker.CreateSandboxRequest.SecretAllowedHostsEntry
-	6,  // 2: worker.ListSandboxesResponse.sandboxes:type_name -> worker.GetSandboxResponse
-	59, // 3: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
-	0,  // 4: worker.ExecOutputChunk.stream:type_name -> worker.ExecOutputChunk.Stream
-	17, // 5: worker.ListDirResponse.entries:type_name -> worker.DirEntry
-	22, // 6: worker.PTYInput.resize:type_name -> worker.PTYResize
-	60, // 7: worker.ExecSessionCreateRequest.envs:type_name -> worker.ExecSessionCreateRequest.EnvsEntry
-	36, // 8: worker.ExecSessionListResponse.sessions:type_name -> worker.ExecSessionInfoEntry
-	1,  // 9: worker.SandboxWorker.CreateSandbox:input_type -> worker.CreateSandboxRequest
-	3,  // 10: worker.SandboxWorker.DestroySandbox:input_type -> worker.DestroySandboxRequest
-	5,  // 11: worker.SandboxWorker.GetSandbox:input_type -> worker.GetSandboxRequest
-	7,  // 12: worker.SandboxWorker.ListSandboxes:input_type -> worker.ListSandboxesRequest
-	9,  // 13: worker.SandboxWorker.ExecCommand:input_type -> worker.ExecCommandRequest
-	9,  // 14: worker.SandboxWorker.ExecCommandStream:input_type -> worker.ExecCommandRequest
-	12, // 15: worker.SandboxWorker.ReadFile:input_type -> worker.ReadFileRequest
-	14, // 16: worker.SandboxWorker.WriteFile:input_type -> worker.WriteFileRequest
-	16, // 17: worker.SandboxWorker.ListDir:input_type -> worker.ListDirRequest
-	19, // 18: worker.SandboxWorker.CreatePTY:input_type -> worker.CreatePTYRequest
-	21, // 19: worker.SandboxWorker.PTYStream:input_type -> worker.PTYInput
-	32, // 20: worker.SandboxWorker.ExecSessionCreate:input_type -> worker.ExecSessionCreateRequest
-	34, // 21: worker.SandboxWorker.ExecSessionList:input_type -> worker.ExecSessionListRequest
-	37, // 22: worker.SandboxWorker.ExecSessionKill:input_type -> worker.ExecSessionKillRequest
-	24, // 23: worker.SandboxWorker.HibernateSandbox:input_type -> worker.HibernateSandboxRequest
-	26, // 24: worker.SandboxWorker.WakeSandbox:input_type -> worker.WakeSandboxRequest
-	28, // 25: worker.SandboxWorker.SaveAsTemplate:input_type -> worker.SaveAsTemplateRequest
-	41, // 26: worker.SandboxWorker.CreateCheckpoint:input_type -> worker.CreateCheckpointRequest
-	43, // 27: worker.SandboxWorker.RestoreCheckpoint:input_type -> worker.RestoreCheckpointRequest
-	30, // 28: worker.SandboxWorker.BuildTemplate:input_type -> worker.BuildTemplateRequest
-	39, // 29: worker.SandboxWorker.GetSandboxStats:input_type -> worker.GetSandboxStatsRequest
-	45, // 30: worker.SandboxWorker.SetSandboxLimits:input_type -> worker.SetSandboxLimitsRequest
-	47, // 31: worker.SandboxWorker.PreCopyDrives:input_type -> worker.PreCopyDrivesRequest
-	49, // 32: worker.SandboxWorker.PrepareMigrationIncoming:input_type -> worker.PrepareMigrationIncomingRequest
-	51, // 33: worker.SandboxWorker.LiveMigrate:input_type -> worker.LiveMigrateRequest
-	53, // 34: worker.SandboxWorker.CompleteMigrationIncoming:input_type -> worker.CompleteMigrationIncomingRequest
-	55, // 35: worker.SandboxWorker.RebuildGoldenSnapshot:input_type -> worker.RebuildGoldenSnapshotRequest
-	2,  // 36: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
-	4,  // 37: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
-	6,  // 38: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
-	8,  // 39: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
-	10, // 40: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
-	11, // 41: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
-	13, // 42: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
-	15, // 43: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
-	18, // 44: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
-	20, // 45: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
-	23, // 46: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
-	33, // 47: worker.SandboxWorker.ExecSessionCreate:output_type -> worker.ExecSessionCreateResponse
-	35, // 48: worker.SandboxWorker.ExecSessionList:output_type -> worker.ExecSessionListResponse
-	38, // 49: worker.SandboxWorker.ExecSessionKill:output_type -> worker.ExecSessionKillResponse
-	25, // 50: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
-	27, // 51: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
-	29, // 52: worker.SandboxWorker.SaveAsTemplate:output_type -> worker.SaveAsTemplateResponse
-	42, // 53: worker.SandboxWorker.CreateCheckpoint:output_type -> worker.CreateCheckpointResponse
-	44, // 54: worker.SandboxWorker.RestoreCheckpoint:output_type -> worker.RestoreCheckpointResponse
-	31, // 55: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
-	40, // 56: worker.SandboxWorker.GetSandboxStats:output_type -> worker.GetSandboxStatsResponse
-	46, // 57: worker.SandboxWorker.SetSandboxLimits:output_type -> worker.SetSandboxLimitsResponse
-	48, // 58: worker.SandboxWorker.PreCopyDrives:output_type -> worker.PreCopyDrivesResponse
-	50, // 59: worker.SandboxWorker.PrepareMigrationIncoming:output_type -> worker.PrepareMigrationIncomingResponse
-	52, // 60: worker.SandboxWorker.LiveMigrate:output_type -> worker.LiveMigrateResponse
-	54, // 61: worker.SandboxWorker.CompleteMigrationIncoming:output_type -> worker.CompleteMigrationIncomingResponse
-	56, // 62: worker.SandboxWorker.RebuildGoldenSnapshot:output_type -> worker.RebuildGoldenSnapshotResponse
-	36, // [36:63] is the sub-list for method output_type
-	9,  // [9:36] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	59, // 2: worker.CreateSandboxRequest.secret_envs:type_name -> worker.CreateSandboxRequest.SecretEnvsEntry
+	6,  // 3: worker.ListSandboxesResponse.sandboxes:type_name -> worker.GetSandboxResponse
+	60, // 4: worker.ExecCommandRequest.envs:type_name -> worker.ExecCommandRequest.EnvsEntry
+	0,  // 5: worker.ExecOutputChunk.stream:type_name -> worker.ExecOutputChunk.Stream
+	17, // 6: worker.ListDirResponse.entries:type_name -> worker.DirEntry
+	22, // 7: worker.PTYInput.resize:type_name -> worker.PTYResize
+	61, // 8: worker.ExecSessionCreateRequest.envs:type_name -> worker.ExecSessionCreateRequest.EnvsEntry
+	36, // 9: worker.ExecSessionListResponse.sessions:type_name -> worker.ExecSessionInfoEntry
+	1,  // 10: worker.SandboxWorker.CreateSandbox:input_type -> worker.CreateSandboxRequest
+	3,  // 11: worker.SandboxWorker.DestroySandbox:input_type -> worker.DestroySandboxRequest
+	5,  // 12: worker.SandboxWorker.GetSandbox:input_type -> worker.GetSandboxRequest
+	7,  // 13: worker.SandboxWorker.ListSandboxes:input_type -> worker.ListSandboxesRequest
+	9,  // 14: worker.SandboxWorker.ExecCommand:input_type -> worker.ExecCommandRequest
+	9,  // 15: worker.SandboxWorker.ExecCommandStream:input_type -> worker.ExecCommandRequest
+	12, // 16: worker.SandboxWorker.ReadFile:input_type -> worker.ReadFileRequest
+	14, // 17: worker.SandboxWorker.WriteFile:input_type -> worker.WriteFileRequest
+	16, // 18: worker.SandboxWorker.ListDir:input_type -> worker.ListDirRequest
+	19, // 19: worker.SandboxWorker.CreatePTY:input_type -> worker.CreatePTYRequest
+	21, // 20: worker.SandboxWorker.PTYStream:input_type -> worker.PTYInput
+	32, // 21: worker.SandboxWorker.ExecSessionCreate:input_type -> worker.ExecSessionCreateRequest
+	34, // 22: worker.SandboxWorker.ExecSessionList:input_type -> worker.ExecSessionListRequest
+	37, // 23: worker.SandboxWorker.ExecSessionKill:input_type -> worker.ExecSessionKillRequest
+	24, // 24: worker.SandboxWorker.HibernateSandbox:input_type -> worker.HibernateSandboxRequest
+	26, // 25: worker.SandboxWorker.WakeSandbox:input_type -> worker.WakeSandboxRequest
+	28, // 26: worker.SandboxWorker.SaveAsTemplate:input_type -> worker.SaveAsTemplateRequest
+	41, // 27: worker.SandboxWorker.CreateCheckpoint:input_type -> worker.CreateCheckpointRequest
+	43, // 28: worker.SandboxWorker.RestoreCheckpoint:input_type -> worker.RestoreCheckpointRequest
+	30, // 29: worker.SandboxWorker.BuildTemplate:input_type -> worker.BuildTemplateRequest
+	39, // 30: worker.SandboxWorker.GetSandboxStats:input_type -> worker.GetSandboxStatsRequest
+	45, // 31: worker.SandboxWorker.SetSandboxLimits:input_type -> worker.SetSandboxLimitsRequest
+	47, // 32: worker.SandboxWorker.PreCopyDrives:input_type -> worker.PreCopyDrivesRequest
+	49, // 33: worker.SandboxWorker.PrepareMigrationIncoming:input_type -> worker.PrepareMigrationIncomingRequest
+	51, // 34: worker.SandboxWorker.LiveMigrate:input_type -> worker.LiveMigrateRequest
+	53, // 35: worker.SandboxWorker.CompleteMigrationIncoming:input_type -> worker.CompleteMigrationIncomingRequest
+	55, // 36: worker.SandboxWorker.RebuildGoldenSnapshot:input_type -> worker.RebuildGoldenSnapshotRequest
+	2,  // 37: worker.SandboxWorker.CreateSandbox:output_type -> worker.CreateSandboxResponse
+	4,  // 38: worker.SandboxWorker.DestroySandbox:output_type -> worker.DestroySandboxResponse
+	6,  // 39: worker.SandboxWorker.GetSandbox:output_type -> worker.GetSandboxResponse
+	8,  // 40: worker.SandboxWorker.ListSandboxes:output_type -> worker.ListSandboxesResponse
+	10, // 41: worker.SandboxWorker.ExecCommand:output_type -> worker.ExecCommandResponse
+	11, // 42: worker.SandboxWorker.ExecCommandStream:output_type -> worker.ExecOutputChunk
+	13, // 43: worker.SandboxWorker.ReadFile:output_type -> worker.ReadFileResponse
+	15, // 44: worker.SandboxWorker.WriteFile:output_type -> worker.WriteFileResponse
+	18, // 45: worker.SandboxWorker.ListDir:output_type -> worker.ListDirResponse
+	20, // 46: worker.SandboxWorker.CreatePTY:output_type -> worker.CreatePTYResponse
+	23, // 47: worker.SandboxWorker.PTYStream:output_type -> worker.PTYOutput
+	33, // 48: worker.SandboxWorker.ExecSessionCreate:output_type -> worker.ExecSessionCreateResponse
+	35, // 49: worker.SandboxWorker.ExecSessionList:output_type -> worker.ExecSessionListResponse
+	38, // 50: worker.SandboxWorker.ExecSessionKill:output_type -> worker.ExecSessionKillResponse
+	25, // 51: worker.SandboxWorker.HibernateSandbox:output_type -> worker.HibernateSandboxResponse
+	27, // 52: worker.SandboxWorker.WakeSandbox:output_type -> worker.WakeSandboxResponse
+	29, // 53: worker.SandboxWorker.SaveAsTemplate:output_type -> worker.SaveAsTemplateResponse
+	42, // 54: worker.SandboxWorker.CreateCheckpoint:output_type -> worker.CreateCheckpointResponse
+	44, // 55: worker.SandboxWorker.RestoreCheckpoint:output_type -> worker.RestoreCheckpointResponse
+	31, // 56: worker.SandboxWorker.BuildTemplate:output_type -> worker.BuildTemplateResponse
+	40, // 57: worker.SandboxWorker.GetSandboxStats:output_type -> worker.GetSandboxStatsResponse
+	46, // 58: worker.SandboxWorker.SetSandboxLimits:output_type -> worker.SetSandboxLimitsResponse
+	48, // 59: worker.SandboxWorker.PreCopyDrives:output_type -> worker.PreCopyDrivesResponse
+	50, // 60: worker.SandboxWorker.PrepareMigrationIncoming:output_type -> worker.PrepareMigrationIncomingResponse
+	52, // 61: worker.SandboxWorker.LiveMigrate:output_type -> worker.LiveMigrateResponse
+	54, // 62: worker.SandboxWorker.CompleteMigrationIncoming:output_type -> worker.CompleteMigrationIncomingResponse
+	56, // 63: worker.SandboxWorker.RebuildGoldenSnapshot:output_type -> worker.RebuildGoldenSnapshotResponse
+	37, // [37:64] is the sub-list for method output_type
+	10, // [10:37] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_proto_worker_worker_proto_init() }
@@ -3718,7 +3735,7 @@ func file_proto_worker_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_worker_worker_proto_rawDesc), len(file_proto_worker_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   60,
+			NumMessages:   61,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

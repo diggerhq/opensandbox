@@ -121,6 +121,27 @@ func CreateWorkspace(path string, sizeMB int, uuid ...string) error {
 	return nil
 }
 
+// getWorkspaceUUID extracts the ext4 filesystem UUID from a qcow2 workspace image.
+// Converts to raw, runs tune2fs, and parses the UUID line.
+func getWorkspaceUUID(qcow2Path string) (string, error) {
+	rawPath := qcow2Path + ".uuid-check.raw"
+	defer os.Remove(rawPath)
+	cmd := exec.Command("qemu-img", "convert", "-f", "qcow2", "-O", "raw", qcow2Path, rawPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("convert to raw: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	out, err := exec.Command("tune2fs", "-l", rawPath).Output()
+	if err != nil {
+		return "", fmt.Errorf("tune2fs: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "Filesystem UUID:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "Filesystem UUID:")), nil
+		}
+	}
+	return "", fmt.Errorf("UUID not found in tune2fs output")
+}
+
 // detectDrivePath returns the actual path for a drive file (rootfs or workspace),
 // preferring qcow2 if it exists, falling back to ext4.
 func detectDrivePath(sandboxDir, prefix string) string {

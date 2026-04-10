@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/analytics"
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -58,6 +59,8 @@ func main() {
 	var autosaverSyncer worker.SyncFSer
 	// Backend-specific graceful shutdown
 	var doGracefulShutdown func(checkpointStore *storage.CheckpointStore, store *db.Store)
+	// Metadata server (set by QEMU backend, wired to store later)
+	var metadataSrv *worker.MetadataServer
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
@@ -113,7 +116,7 @@ func main() {
 		autosaverSyncer = qmMgr
 
 		// Start metadata server (169.254.169.254 equivalent, served on :8888)
-		metadataSrv := worker.NewMetadataServer(qmMgr, cfg.Region)
+		metadataSrv = worker.NewMetadataServer(qmMgr, cfg.Region)
 		metadataSrv.Start(":8888")
 		defer metadataSrv.Close()
 		qmMgr.SetMetadataCallbacks(metadataSrv.RegisterSandbox, metadataSrv.UnregisterSandbox)
@@ -238,6 +241,18 @@ func main() {
 				log.Printf("opensandbox-worker: warning: session reconciliation failed: %v", err)
 			} else if stopped > 0 {
 				log.Printf("opensandbox-worker: reconciled %d unrecoverable sessions as stopped", stopped)
+			}
+
+			// Wire up metadata server billing callback
+			if metadataSrv != nil {
+				st := store // capture for closure
+				metadataSrv.SetOnScale(func(sandboxID string, memoryMB, cpuPercent int) {
+					orgID, err := st.GetSandboxOrgID(context.Background(), sandboxID)
+					if err != nil || orgID == "" {
+						return
+					}
+					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent)
+				})
 			}
 		}
 	}
@@ -408,9 +423,16 @@ func main() {
 	autosaver := worker.NewWorkspaceAutosaver(mgr, autosaverSyncer, 5*time.Minute)
 	autosaver.Start()
 
+	// Segment analytics — ships per-org GB-seconds memory usage. nil if SEGMENT_WRITE_KEY unset.
+	segmentClient := analytics.New(cfg.SegmentWriteKey)
+	if segmentClient != nil {
+		log.Println("opensandbox-worker: Segment analytics enabled")
+		defer segmentClient.Close()
+	}
+
 	// Usage collector for billing (samples cgroup stats every 60s, flushes to DB every 5 min)
 	if store != nil {
-		usageCollector := worker.NewUsageCollector(mgr, store)
+		usageCollector := worker.NewUsageCollector(mgr, store, segmentClient)
 		usageCollector.Start()
 		defer usageCollector.Stop()
 	}

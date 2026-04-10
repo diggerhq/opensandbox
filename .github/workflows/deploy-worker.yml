@@ -84,9 +84,20 @@ jobs:
 
             API_KEY=$(grep OPENSANDBOX_API_KEY /etc/opensandbox/server.env | cut -d= -f2-)
 
-            # Get all worker private IPs from the control plane API
-            WORKER_IPS=$(curl -sf -H "X-API-Key: $API_KEY" http://localhost:8080/api/workers \
-              | jq -r ".[].http_addr" | sed "s|http://||;s|:.*||")
+            # Get all worker private IPs from the control plane API (retry if server is briefly unavailable)
+            WORKER_IPS=""
+            set +e
+            for attempt in 1 2 3 4 5; do
+              WORKER_IPS=$(curl -sf -H "X-API-Key: $API_KEY" http://localhost:8080/api/workers \
+                | jq -r ".[].http_addr" | sed "s|http://||;s|:.*||")
+              if [ $? -eq 0 ] && [ -n "$WORKER_IPS" ]; then
+                break
+              fi
+              echo "Control plane not ready (attempt $attempt/5), retrying in 5s..."
+              sudo systemctl status opensandbox-server --no-pager -l 2>/dev/null | tail -5 || true
+              sleep 5
+            done
+            set -e
 
             if [ -z "$WORKER_IPS" ]; then
               echo "ERROR: No workers found"
@@ -126,6 +137,66 @@ jobs:
                 cd /tmp/osb-rootfs-ctx
                 sudo rm -f \"\$IMAGES_DIR/default.ext4\"
                 sudo bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent \"\$IMAGES_DIR\" default
+
+                # Ensure generic kernel + modules are installed for virtio-mem.
+                # Azure VMs ship with the azure kernel which lacks virtio_mem.
+                # The generic kernel provides it.
+                if ! ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+                    echo \"No generic kernel found — installing for virtio-mem support...\"
+                    sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+                    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-image-generic 2>&1 | tail -3
+                fi
+
+                # Determine guest kernel version
+                GUEST_KVER=\"\"
+                if [ -f /opt/opensandbox/guest-kernel-version ]; then
+                    GUEST_KVER=\$(cat /opt/opensandbox/guest-kernel-version)
+                elif ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+                    GUEST_KVER=\$(ls -d /lib/modules/*-generic | sort -V | tail -1 | xargs basename)
+                fi
+
+                if [ -z \"\$GUEST_KVER\" ]; then
+                    echo \"ERROR: Failed to find generic kernel — virtio-mem will not work\"
+                    exit 1
+                fi
+
+                # Patch rootfs with kernel modules
+                echo \"Patching rootfs with kernel modules for \$GUEST_KVER...\"
+                MNTDIR=\$(mktemp -d)
+                sudo mount -o loop \"\$IMAGES_DIR/default.ext4\" \"\$MNTDIR\"
+                sudo rm -rf \"\$MNTDIR/lib/modules\"/*
+                sudo cp -a \"/lib/modules/\$GUEST_KVER\" \"\$MNTDIR/lib/modules/\"
+                sudo depmod -b \"\$MNTDIR\" \"\$GUEST_KVER\" 2>/dev/null || true
+                if [ -f \"\$MNTDIR/bin/busybox\" ] && [ ! -e \"\$MNTDIR/sbin/insmod\" ]; then
+                    sudo ln -sf /bin/busybox \"\$MNTDIR/sbin/insmod\"
+                fi
+                if [ -f \"\$MNTDIR/bin/busybox\" ] && [ ! -e \"\$MNTDIR/sbin/modprobe\" ]; then
+                    sudo ln -sf /bin/busybox \"\$MNTDIR/sbin/modprobe\"
+                fi
+                sudo umount \"\$MNTDIR\"
+                rmdir \"\$MNTDIR\"
+                echo \"Rootfs patched with kernel modules for \$GUEST_KVER\"
+
+                # Update guest kernel binary to match modules version.
+                # Without this, the VM boots with an old kernel that cant load
+                # the modules (e.g. virtio_mem wont load).
+                if [ -f /opt/opensandbox/vmlinux ]; then
+                    CURRENT_KVER=\$(file /opt/opensandbox/vmlinux 2>/dev/null | grep -oE '[0-9]+[.][0-9]+[.][0-9]+-[0-9]+-generic' || true)
+                else
+                    CURRENT_KVER=none
+                fi
+                if [ \"\$CURRENT_KVER\" != \"\$GUEST_KVER\" ]; then
+                    if [ -f \"/boot/vmlinuz-\$GUEST_KVER\" ]; then
+                        echo \"Updating guest kernel from \$CURRENT_KVER to \$GUEST_KVER\"
+                        sudo cp /opt/opensandbox/vmlinux /opt/opensandbox/vmlinux.bak 2>/dev/null || true
+                        sudo cp \"/boot/vmlinuz-\$GUEST_KVER\" /opt/opensandbox/vmlinux
+                    else
+                        echo \"ERROR: /boot/vmlinuz-\$GUEST_KVER not found\"
+                        exit 1
+                    fi
+                else
+                    echo \"Guest kernel already at \$GUEST_KVER\"
+                fi
 
                 # Delete golden snapshot so it rebuilds with new agent
                 DATA_DIR=\$(grep OPENSANDBOX_DATA_DIR /etc/opensandbox/worker.env 2>/dev/null | cut -d= -f2- || echo '/data/sandboxes')

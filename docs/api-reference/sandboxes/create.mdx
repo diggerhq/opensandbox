@@ -18,18 +18,21 @@ Create a new sandbox.
 </ParamField>
 
 <ParamField body="memoryMB" type="integer">
-  Memory in MB. Must match an allowed tier: `4096`, `8192`, `16384`, `32768`, or `65536`. If omitted but `cpuCount` is set, inferred automatically.
+  Memory in MB. Must match an allowed tier: `1024`, `4096`, `8192`, `16384`, `32768`, or `65536`. If omitted but `cpuCount` is set, inferred automatically.
 </ParamField>
 
 The allowed CPU/memory combinations are:
 
 | Memory | vCPU |
 | --- | --- |
+| 1024 MB (1 GB) | 1 |
 | 4096 MB (4 GB) | 1 |
 | 8192 MB (8 GB) | 2 |
 | 16384 MB (16 GB) | 4 |
 | 32768 MB (32 GB) | 8 |
 | 65536 MB (64 GB) | 16 |
+
+The 1 GB tier provides 1 vCPU on a best-effort basis. For guaranteed CPU allocation, use the 4 GB tier or above.
 
 If both `cpuCount` and `memoryMB` are provided, they must match one of these tiers.
 

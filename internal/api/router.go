@@ -363,7 +363,6 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.POST("/billing/redeem", s.billingRedeem)
 
 		// Admin endpoints
-		dash.POST("/admin/backfill-workos-orgs", s.dashboardBackfillWorkOSOrgs)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)

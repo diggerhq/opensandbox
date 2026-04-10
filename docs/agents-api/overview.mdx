@@ -1,0 +1,37 @@
+---
+title: "Agents API"
+description: "Define agents, run persistent instances or ephemeral sessions on OpenComputer sandboxes"
+---
+
+The Agents API is a higher-level interface for running AI agents on OpenComputer. Instead of managing sandboxes directly, you define an **Agent** (configuration) and then create **Instances** (persistent) or **Sessions** (ephemeral) from it.
+
+| Concept | What it is | Lifecycle | Use case |
+|---------|-----------|-----------|----------|
+| **Agent** | Configuration — snapshot, entrypoint, secrets, elasticity | Indefinite | Define once, reuse |
+| **Instance** | Persistent sandbox, hibernates/wakes, multiplexes conversations | Long-lived | AI coworkers (Slack, Teams) |
+| **Session** | Ephemeral sandbox, runs to completion | Bounded | Batch jobs, webhook handlers |
+
+## Base URL
+
+```
+https://api.opencomputer.dev
+```
+
+## Authentication
+
+All requests require an OpenComputer API key via `X-API-Key`. The key is passed through to the OC SDK for sandbox operations.
+
+```
+X-API-Key: osb_your_api_key
+```
+
+## Errors
+
+```json
+{
+  "error": {
+    "type": "invalid_request | not_found | conflict | internal_error",
+    "message": "Human-readable description"
+  }
+}
+```

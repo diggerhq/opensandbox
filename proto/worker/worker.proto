@@ -68,6 +68,9 @@ message CreateSandboxRequest {
   repeated string egress_allowlist = 13;
   // Per-secret host restrictions for secrets proxy.
   map<string, string> secret_allowed_hosts = 14;
+  // Env vars resolved from a SecretStore. Sealed by the worker's secrets proxy
+  // before injection into the VM. Disjoint from `envs` (which is plaintext).
+  map<string, string> secret_envs = 15;
 }
 
 message CreateSandboxResponse {

@@ -57,6 +57,61 @@ func (s *Store) RecordScaleEvent(ctx context.Context, sandboxID, orgID string, m
 	return tx.Commit(ctx)
 }
 
+// GetSandboxOrgID looks up the org ID for a sandbox from the sessions table.
+func (s *Store) GetSandboxOrgID(ctx context.Context, sandboxID string) (string, error) {
+	var orgID uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`SELECT org_id FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`,
+		sandboxID).Scan(&orgID)
+	if err != nil {
+		return "", err
+	}
+	return orgID.String(), nil
+}
+
+// SandboxOwner holds the org and user details for a sandbox session.
+type SandboxOwner struct {
+	OrgID        string
+	UserID       string
+	UserEmail    string
+	WorkosUserID string
+	WorkosOrgID  string
+}
+
+// GetSandboxOwner returns the org and user details for a sandbox. User fields
+// may be empty if the session has no associated user (e.g. created with an
+// org-level API key that isn't tied to a user).
+func (s *Store) GetSandboxOwner(ctx context.Context, sandboxID string) (SandboxOwner, error) {
+	var orgUUID uuid.UUID
+	var userUUID *uuid.UUID
+	var email, workosUserID, workosOrgID *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT s.org_id, s.user_id, u.email, u.workos_user_id, o.workos_org_id
+		   FROM sandbox_sessions s
+		   LEFT JOIN users u ON u.id = s.user_id
+		   LEFT JOIN orgs  o ON o.id = s.org_id
+		  WHERE s.sandbox_id = $1
+		  ORDER BY s.started_at DESC LIMIT 1`,
+		sandboxID).Scan(&orgUUID, &userUUID, &email, &workosUserID, &workosOrgID)
+	if err != nil {
+		return SandboxOwner{}, err
+	}
+	owner := SandboxOwner{OrgID: orgUUID.String()}
+	if userUUID != nil {
+		owner.UserID = userUUID.String()
+	}
+	if email != nil {
+		owner.UserEmail = *email
+	}
+	if workosUserID != nil {
+		owner.WorkosUserID = *workosUserID
+	}
+	if workosOrgID != nil {
+		owner.WorkosOrgID = *workosOrgID
+	}
+	return owner, nil
+}
+
 // EndScaleEvent marks the current scale event as ended (sandbox stopped/hibernated).
 func (s *Store) EndScaleEvent(ctx context.Context, sandboxID string) error {
 	_, err := s.pool.Exec(ctx,

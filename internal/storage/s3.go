@@ -12,10 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"golang.org/x/sys/unix"
 )
 
@@ -37,52 +33,24 @@ type S3Config struct {
 // On wake: check NVMe first, fall back to S3 download.
 // Eviction: LRU based on real filesystem pressure (keep 20% free for active sandboxes).
 type CheckpointStore struct {
-	client   *s3.Client
+	blob     BlobClient
 	bucket   string
 	cacheDir string // local NVMe cache for CRIU checkpoints (empty = disabled)
 	cacheMu  sync.Mutex
 }
 
-// NewCheckpointStore creates a new S3 checkpoint store.
-// If AccessKeyID is empty, uses the default AWS credential chain (IAM instance profile on EC2).
+// NewCheckpointStore creates a new checkpoint store.
+// Automatically selects Azure Blob or AWS S3 based on the endpoint URL.
 func NewCheckpointStore(cfg S3Config) (*CheckpointStore, error) {
-	var client *s3.Client
-
-	if cfg.AccessKeyID != "" {
-		opts := []func(*s3.Options){
-			func(o *s3.Options) {
-				o.Region = cfg.Region
-				o.Credentials = credentials.NewStaticCredentialsProvider(
-					cfg.AccessKeyID, cfg.SecretAccessKey, "",
-				)
-				if cfg.ForcePathStyle {
-					o.UsePathStyle = true
-				}
-				if cfg.Endpoint != "" {
-					o.BaseEndpoint = aws.String(cfg.Endpoint)
-				}
-			},
-		}
-		client = s3.New(s3.Options{}, opts...)
-	} else {
-		awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(),
-			awsconfig.WithRegion(cfg.Region),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load AWS config for S3: %w", err)
-		}
-		var s3Opts []func(*s3.Options)
-		if cfg.ForcePathStyle {
-			s3Opts = append(s3Opts, func(o *s3.Options) { o.UsePathStyle = true })
-		}
-		if cfg.Endpoint != "" {
-			s3Opts = append(s3Opts, func(o *s3.Options) { o.BaseEndpoint = aws.String(cfg.Endpoint) })
-		}
-		client = s3.NewFromConfig(awsCfg, s3Opts...)
+	blob, err := NewBlobClient(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create blob client: %w", err)
 	}
 
+	log.Printf("storage: using %s backend (endpoint=%s, bucket=%s)", blob.BackendName(), cfg.Endpoint, cfg.Bucket)
+
 	return &CheckpointStore{
-		client: client,
+		blob:   blob,
 		bucket: cfg.Bucket,
 	}, nil
 }
@@ -129,6 +97,15 @@ func (s *CheckpointStore) CacheHit(key string) bool {
 
 // Upload uploads a checkpoint archive from a local file to S3.
 // If caching is enabled, the file is also copied into the local NVMe cache.
+// Exists checks whether an object exists in S3/blob storage.
+func (s *CheckpointStore) Exists(ctx context.Context, key string) (bool, error) {
+	_, err := s.blob.Head(ctx, s.bucket, key)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *CheckpointStore) Upload(ctx context.Context, key, localPath string) (int64, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
@@ -141,14 +118,8 @@ func (s *CheckpointStore) Upload(ctx context.Context, key, localPath string) (in
 		return 0, fmt.Errorf("failed to stat checkpoint file: %w", err)
 	}
 
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(s.bucket),
-		Key:           aws.String(key),
-		Body:          f,
-		ContentLength: aws.Int64(stat.Size()),
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to upload checkpoint to S3: %w", err)
+	if err := s.blob.Upload(ctx, s.bucket, key, f, stat.Size()); err != nil {
+		return 0, fmt.Errorf("failed to upload checkpoint: %w", err)
 	}
 
 	// Cache locally for fast same-machine wake
@@ -247,18 +218,13 @@ func (s *CheckpointStore) downloadAndCache(ctx context.Context, key string) (io.
 	}
 	tmpPath := tmpFile.Name()
 
-	// Get object size via HeadObject
-	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
+	// Get object size
+	totalSize, err := s.blob.Head(ctx, s.bucket, key)
 	if err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		return nil, fmt.Errorf("failed to head checkpoint in S3: %w", err)
+		return nil, fmt.Errorf("failed to head checkpoint: %w", err)
 	}
-
-	totalSize := aws.ToInt64(head.ContentLength)
 	if totalSize <= 0 {
 		tmpFile.Close()
 		os.Remove(tmpPath)
@@ -297,20 +263,16 @@ func (s *CheckpointStore) downloadAndCache(ctx context.Context, key string) (io.
 			if end >= totalSize {
 				end = totalSize - 1
 			}
-			rangeHeader := fmt.Sprintf("bytes=%d-%d", start, end)
+			chunkLen := end - start + 1
 
-			resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-				Bucket: aws.String(s.bucket),
-				Key:    aws.String(key),
-				Range:  aws.String(rangeHeader),
-			})
+			body, err := s.blob.DownloadRange(ctx, s.bucket, key, start, chunkLen)
 			if err != nil {
 				errs[idx] = fmt.Errorf("chunk %d: %w", idx, err)
 				return
 			}
-			defer resp.Body.Close()
+			defer body.Close()
 
-			buf, err := io.ReadAll(resp.Body)
+			buf, err := io.ReadAll(body)
 			if err != nil {
 				errs[idx] = fmt.Errorf("chunk %d read: %w", idx, err)
 				return
@@ -354,14 +316,11 @@ func (s *CheckpointStore) downloadAndCache(ctx context.Context, key string) (io.
 
 // downloadFromS3 streams directly from S3 (no caching).
 func (s *CheckpointStore) downloadFromS3(ctx context.Context, key string) (io.ReadCloser, error) {
-	resp, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
+	body, err := s.blob.Download(ctx, s.bucket, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download checkpoint from S3: %w", err)
+		return nil, fmt.Errorf("failed to download checkpoint: %w", err)
 	}
-	return resp.Body, nil
+	return body, nil
 }
 
 // evictIfNeeded removes the oldest cached checkpoints when the filesystem
@@ -438,12 +397,8 @@ func (s *CheckpointStore) evictIfNeeded() {
 
 // Delete removes a checkpoint from S3 and from the local cache.
 func (s *CheckpointStore) Delete(ctx context.Context, key string) error {
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to delete checkpoint from S3: %w", err)
+	if err := s.blob.Delete(ctx, s.bucket, key); err != nil {
+		return fmt.Errorf("failed to delete checkpoint: %w", err)
 	}
 
 	if s.cacheDir != "" {

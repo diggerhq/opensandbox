@@ -19,9 +19,10 @@ pnpm add @opencomputer/sdk
 
 ```typescript
 import { Sandbox } from "@opencomputer/sdk";
-import { Image } from "@opencomputer/sdk/dist/image.js";
-import { Snapshots } from "@opencomputer/sdk/dist/snapshot.js";
+import { Image, Snapshots } from "@opencomputer/sdk/node";
 ```
+
+> Note: The SDK is ESM-only. Use Node 18+ with `"type": "module"` (or `.mjs/.mts`) and top-level `await`, or use `const { Sandbox } = await import("@opencomputer/sdk"); const { Image, Snapshots } = await import("@opencomputer/sdk/node");` in CommonJS.
 
 ## Modules
 

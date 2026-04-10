@@ -100,7 +100,6 @@ func (s *Server) GracefulStop() {
 		gs.GracefulStop()
 	}
 }
-
 // GetVersion returns the agent's build version.
 func (s *Server) GetVersion(ctx context.Context, req *pb.GetVersionRequest) (*pb.GetVersionResponse, error) {
 	return &pb.GetVersionResponse{Version: s.version}, nil

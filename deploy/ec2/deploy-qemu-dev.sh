@@ -288,42 +288,37 @@ else
     echo "Rootfs image already exists (delete /data/firecracker/images/default.ext4 to rebuild)."
 fi
 
-# Patch rootfs with guest kernel modules (vsock, virtio_mem) and insmod symlink
+# Patch rootfs with guest kernel modules — full /lib/modules/<kver> tree.
+# This is now handled by build-rootfs-docker.sh during the rootfs build,
+# but we keep this as a fallback for manually-built rootfs images.
 if [ -f /data/firecracker/images/default.ext4 ]; then
-    echo "Patching rootfs with guest kernel modules..."
-    MNTDIR=$(mktemp -d)
-    sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
-
-    # Detect guest kernel version from the vmlinux binary
-    GUEST_KVER=$(grep -aoP '\d+\.\d+\.\d+-\d+-generic' /opt/opensandbox/vmlinux | head -1)
-    echo "Guest kernel version: $GUEST_KVER"
-
-    # Copy vsock modules from host
-    GUEST_MODDIR="/opt/opensandbox/guest-modules"
-    sudo mkdir -p "$MNTDIR/lib/modules/vsock"
-    if [ -d "$GUEST_MODDIR" ]; then
-        sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
-    fi
-
-    # Copy virtio_mem module from host kernel modules, decompress for busybox insmod
-    HOST_VIRTIO_MEM="/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko.zst"
-    if [ -f "$HOST_VIRTIO_MEM" ]; then
-        sudo zstd -d "$HOST_VIRTIO_MEM" -o "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" --force
-        sudo mkdir -p "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio"
-        sudo mv "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" "$MNTDIR/lib/modules/${GUEST_KVER}/kernel/drivers/virtio/virtio_mem.ko" 2>/dev/null || true
-        echo "Copied virtio_mem.ko for guest kernel $GUEST_KVER"
+    GUEST_KVER_FILE="/opt/opensandbox/guest-kernel-version"
+    if [ -f "$GUEST_KVER_FILE" ]; then
+        GUEST_KVER=$(cat "$GUEST_KVER_FILE")
     else
-        echo "Warning: virtio_mem.ko.zst not found at $HOST_VIRTIO_MEM"
+        GUEST_KVER=$(grep -aoP '\d+\.\d+\.\d+-\d+-generic' /opt/opensandbox/vmlinux | head -1)
     fi
 
-    # Create insmod symlink (busybox applet)
-    if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
-        sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
-    fi
+    if [ -n "$GUEST_KVER" ] && [ -d "/lib/modules/$GUEST_KVER" ]; then
+        echo "Patching rootfs with full kernel modules for $GUEST_KVER..."
+        MNTDIR=$(mktemp -d)
+        sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
+        sudo rm -rf "$MNTDIR/lib/modules"/*
+        sudo cp -a "/lib/modules/$GUEST_KVER" "$MNTDIR/lib/modules/"
+        sudo depmod -b "$MNTDIR" "$GUEST_KVER" 2>/dev/null || true
 
-    sudo umount "$MNTDIR"
-    rmdir "$MNTDIR"
-    echo "Rootfs patched with kernel modules."
+        # Create insmod symlink (busybox applet)
+        if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
+            sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+        fi
+
+        sudo umount "$MNTDIR"
+        rmdir "$MNTDIR"
+        MOD_COUNT=$(find "/lib/modules/$GUEST_KVER" -name "*.ko*" | wc -l)
+        echo "Rootfs patched with $MOD_COUNT modules for $GUEST_KVER"
+    else
+        echo "Warning: Guest kernel modules not found for $GUEST_KVER"
+    fi
 fi
 ROOTFS
 

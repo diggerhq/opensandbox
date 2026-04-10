@@ -33,8 +33,8 @@ Create a new sandbox.
 | `apiUrl` | string | env var | API URL |
 | `envs` | Record\<string, string\> | — | Environment variables |
 | `metadata` | Record\<string, string\> | — | Arbitrary metadata |
-| `cpuCount` | number | — | CPU cores (max 4) |
-| `memoryMB` | number | — | Memory in MB (max 2048) |
+| `cpuCount` | number | — | CPU cores (1, 2, 4, 8, or 16) |
+| `memoryMB` | number | — | Memory in MB (1024, 4096, 8192, 16384, 32768, or 65536) |
 | `image` | Image | — | Declarative image definition (see [Image](#image)) |
 | `snapshot` | string | — | Name of a pre-built snapshot |
 | `onBuildLog` | `(log: string) => void` | — | Build log callback (when using `image`) |

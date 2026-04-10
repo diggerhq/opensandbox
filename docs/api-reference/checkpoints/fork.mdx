@@ -13,6 +13,14 @@ Create a new sandbox from a checkpoint.
   Idle timeout for the new sandbox (default: `300`)
 </ParamField>
 
+<ParamField body="envs" type="object">
+  Environment variables to override on the fork. Keys that match the checkpoint's stored envs are replaced; new keys are added.
+</ParamField>
+
+<ParamField body="secretStore" type="string">
+  Name of a secret store to attach. If the checkpoint already has a store, secrets are merged — the new store's values win on collision and egress allowlists are aggregated.
+</ParamField>
+
 <ResponseExample>
 ```json 201
 {

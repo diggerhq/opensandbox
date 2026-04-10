@@ -17,7 +17,8 @@ Build images on-the-fly when creating sandboxes. Ideal for iterating quickly wit
 Declarative images are **cached by content hash** — identical manifests produce the same image. Subsequent runs reuse the cached image instantly.
 
 ```typescript
-import { Sandbox, Image } from '@opencomputer/sdk';
+import { Sandbox } from '@opencomputer/sdk';
+import { Image } from '@opencomputer/sdk/node';
 
 // Define an image with packages, env vars, and files
 const image = Image.base()
@@ -57,7 +58,7 @@ When you pass an `image` to `Sandbox.create()`, the server:
 Create named snapshots that persist permanently and can be shared across sandboxes. Snapshots are visible in the dashboard and don't need to be rebuilt.
 
 ```typescript
-import { Image, Snapshots } from '@opencomputer/sdk';
+import { Image, Snapshots } from '@opencomputer/sdk/node';
 
 const snapshots = new Snapshots();
 

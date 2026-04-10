@@ -32,9 +32,12 @@ type SnapshotMeta struct {
 	MemoryMB      int            `json:"memoryMB"`
 	BaseMemoryMB  int            `json:"baseMemoryMB,omitempty"`
 	Template      string         `json:"template"`
-	GuestPort     int            `json:"guestPort"`
-	GoldenVersion string         `json:"goldenVersion,omitempty"`
-	SnapshotedAt  time.Time      `json:"snapshotedAt,omitempty"`
+	GuestPort        int                 `json:"guestPort"`
+	GoldenVersion    string              `json:"goldenVersion,omitempty"`
+	SnapshotedAt     time.Time           `json:"snapshotedAt,omitempty"`
+	SealedTokens     map[string]string   `json:"sealedTokens,omitempty"`
+	EgressAllowlist  []string            `json:"egressAllowlist,omitempty"`
+	TokenHosts       map[string][]string `json:"tokenHosts,omitempty"`
 }
 
 // doHibernate pauses a running VM, saves VM state via QMP migrate, and kicks off
@@ -131,6 +134,13 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		GuestPort:     vm.GuestPort,
 		GoldenVersion: vm.goldenVersion,
 		SnapshotedAt:  time.Now(),
+	}
+
+	// Persist secrets proxy state so wake can re-register the session.
+	if m.secretsProxy != nil && vm.network != nil {
+		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
+		meta.TokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -467,15 +477,13 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("agent not ready: %w", err)
 	}
 
-	// Mount workspace (was unmounted before savevm) + bind-mount /home/sandbox onto workspace
+	// Mount /home/sandbox (data disk, was unmounted before savevm)
 	postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, _ = agentClient.Exec(postCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
 		Args: []string{"-c", strings.Join([]string{
-			"mount /dev/vdb /workspace 2>/dev/null || true",
-			"mkdir -p /workspace/.home",
-			"mount --bind /workspace/.home /home/sandbox 2>/dev/null || true",
-			"chown 1000:1000 /workspace /workspace/.home",
+			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
+			"chown 1000:1000 /home/sandbox",
 		}, " && ")},
 		RunAsRoot: true,
 	})
@@ -487,6 +495,12 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 
 	if err := syncGuestClock(context.Background(), agentClient); err != nil {
 		log.Printf("qemu: wake %s: clock sync failed: %v", sandboxID, err)
+	}
+
+	// Re-register secrets proxy session from persisted tokens.
+	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts)
+		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(meta.SealedTokens))
 	}
 
 	log.Printf("qemu: wake %s: golden restore complete (port=%d, tap=%s)",

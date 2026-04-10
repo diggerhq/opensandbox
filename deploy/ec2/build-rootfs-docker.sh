@@ -94,12 +94,14 @@ else
     done
 fi
 
-# ── Mount workspace: data disk at /workspace (persistent user data) ──
-mkdir -p /workspace
-if mount /dev/vdb /workspace 2>/dev/null || mount /dev/vdb1 /workspace 2>/dev/null; then
-    echo "init: workspace mounted (/dev/vdb -> /workspace)"
+# ── Mount workspace: data disk at /home/sandbox (persistent user data) ──
+# /workspace is a symlink to /home/sandbox, so mount the real path.
+mkdir -p /home/sandbox
+if mount /dev/vdb /home/sandbox 2>/dev/null || mount /dev/vdb1 /home/sandbox 2>/dev/null; then
+    chown sandbox:sandbox /home/sandbox 2>/dev/null
+    echo "init: workspace mounted (/dev/vdb -> /home/sandbox)"
 else
-    echo "init: warning: no data disk found, /workspace is ephemeral"
+    echo "init: warning: no data disk found, /home/sandbox is ephemeral"
 fi
 
 # ── Mount virtual filesystems (in the final root) ──
@@ -236,39 +238,41 @@ mount -o loop "$EXT4_PATH" "$MNT_DIR"
 
 tar xf "$TMPDIR/rootfs.tar" -C "$MNT_DIR"
 
-# Ensure key directories exist
-for dir in proc sys dev dev/pts dev/shm tmp workspace run; do
+# Ensure key directories exist (workspace is created by Dockerfile)
+for dir in proc sys dev dev/pts dev/shm tmp run; do
     mkdir -p "$MNT_DIR/$dir"
 done
 
-# Inject host kernel modules (virtio_mem, vsock, overlay) into rootfs.
-# The Docker image has modules for the container kernel, but the guest runs
-# the host kernel — so we need the host's matching .ko files.
-GUEST_MODDIR="/opt/opensandbox/guest-modules"
-if [ -d "$GUEST_MODDIR" ] && ls "$GUEST_MODDIR"/*.ko >/dev/null 2>&1; then
-    # Detect guest kernel version from the kernel binary
-    GUEST_KVER=$(ls -d /lib/modules/*-generic 2>/dev/null | head -1 | xargs basename)
-    if [ -n "$GUEST_KVER" ]; then
-        DEST="$MNT_DIR/lib/modules/$GUEST_KVER/kernel/extra"
-        mkdir -p "$DEST"
-        cp "$GUEST_MODDIR"/*.ko "$DEST/"
-        # Run depmod so modprobe works inside the guest
-        depmod -b "$MNT_DIR" "$GUEST_KVER" 2>/dev/null || log "depmod failed (non-fatal)"
-        log "Injected guest modules into rootfs for kernel $GUEST_KVER:"
-        ls "$DEST/"
-    else
-        log "WARNING: Could not detect guest kernel version — guest modules not injected"
-    fi
+# Inject guest kernel modules into rootfs.
+# Copy the full /lib/modules/<kver> tree so all modules (Docker networking,
+# vsock, overlay, virtio_mem, etc.) are available with correct dependencies.
+GUEST_KVER_FILE="/opt/opensandbox/guest-kernel-version"
+if [ -f "$GUEST_KVER_FILE" ]; then
+    GUEST_KVER=$(cat "$GUEST_KVER_FILE")
+elif ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+    GUEST_KVER=$(ls -d /lib/modules/*-generic | sort -V | tail -1 | xargs basename)
+fi
+
+if [ -n "${GUEST_KVER:-}" ] && [ -d "/lib/modules/$GUEST_KVER" ]; then
+    log "Injecting kernel modules for $GUEST_KVER..."
+    rm -rf "$MNT_DIR/lib/modules"/*
+    mkdir -p "$MNT_DIR/lib/modules"
+    cp -a "/lib/modules/$GUEST_KVER" "$MNT_DIR/lib/modules/"
+    depmod -b "$MNT_DIR" "$GUEST_KVER" 2>/dev/null || log "depmod failed (non-fatal)"
+    MOD_COUNT=$(find "$MNT_DIR/lib/modules/$GUEST_KVER" -name "*.ko*" | wc -l)
+    log "Injected $MOD_COUNT modules for kernel $GUEST_KVER"
 else
-    log "WARNING: No guest modules at $GUEST_MODDIR — virtio_mem may not load"
+    log "WARNING: No guest kernel modules found — Docker networking and virtio_mem will not work"
 fi
 
 sync
 umount "$MNT_DIR"
 
-# Shrink to minimum size
-log "Shrinking ext4 image..."
-resize2fs -M "$EXT4_PATH" 2>/dev/null || log "resize2fs -M failed (non-fatal)"
+# Shrink to a usable floor — leave room for apt install, Docker, kernel modules etc.
+# The ext4 is inside a qcow2 COW overlay, so unused space costs nothing on disk.
+ROOTFS_MIN_MB="${ROOTFS_MIN_MB:-4096}"
+log "Resizing ext4 to ${ROOTFS_MIN_MB}MB floor (sparse — actual disk usage stays low)..."
+resize2fs "$EXT4_PATH" "${ROOTFS_MIN_MB}M" 2>/dev/null || log "resize2fs failed (non-fatal)"
 
 # Place in output directory
 mkdir -p "$IMAGES_DIR"

@@ -246,16 +246,18 @@ INJECT_EOF
     tar xf "$tmpdir/rootfs.tar" -C "$mnt_dir"
 
     # Ensure key directories
-    for dir in proc sys dev dev/pts dev/shm tmp workspace run; do
+    for dir in proc sys dev dev/pts dev/shm tmp run; do
         mkdir -p "$mnt_dir/$dir"
     done
 
     sync
     umount "$mnt_dir"
 
-    # Shrink to minimum
-    log "  shrinking ext4 image..."
-    resize2fs -M "$ext4_path" 2>/dev/null || warn "  resize2fs -M failed (non-fatal)"
+    # Shrink to a usable floor — leave room for apt install, Docker, kernel modules etc.
+    # The ext4 is inside a qcow2 COW overlay, so unused space costs nothing on disk.
+    local rootfs_min_mb="${ROOTFS_MIN_MB:-4096}"
+    log "  resizing ext4 to ${rootfs_min_mb}MB floor (sparse — actual disk usage stays low)..."
+    resize2fs "$ext4_path" "${rootfs_min_mb}M" 2>/dev/null || warn "  resize2fs failed (non-fatal)"
 
     # Get final size
     local final_size

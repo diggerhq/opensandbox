@@ -1,7 +1,6 @@
 package api
 
 import (
-	"log"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -141,7 +140,7 @@ func (s *Server) dashboardSendInvitation(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "org not found"})
 	}
 	if org.WorkOSOrgID == nil {
-		return c.JSON(http.StatusBadRequest, map[string]string{"error": "org not linked to WorkOS — run backfill first"})
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "org not linked to WorkOS"})
 	}
 
 	// Get inviter's WorkOS user ID
@@ -323,27 +322,32 @@ func (s *Server) dashboardSwitchOrg(c echo.Context) error {
 	}
 
 	// Validate the user has access to the target org via WorkOS
-	if s.workos != nil && s.workos.OrgMgr() != nil && user.WorkOSUserID != nil {
-		targetOrg, err := s.store.GetOrg(c.Request().Context(), req.OrgID)
-		if err != nil {
-			return c.JSON(http.StatusNotFound, map[string]string{"error": "target org not found"})
+	if s.workos == nil || s.workos.OrgMgr() == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "identity provider not configured"})
+	}
+	if user.WorkOSUserID == nil || *user.WorkOSUserID == "" {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "user account not linked to identity provider"})
+	}
+	targetOrg, err := s.store.GetOrg(c.Request().Context(), req.OrgID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "target org not found"})
+	}
+	if targetOrg.WorkOSOrgID == nil || *targetOrg.WorkOSOrgID == "" {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "target org not linked to identity provider"})
+	}
+	memberships, err := s.workos.OrgMgr().ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	found := false
+	for _, m := range memberships {
+		if m.OrganizationID == *targetOrg.WorkOSOrgID {
+			found = true
+			break
 		}
-		if targetOrg.WorkOSOrgID != nil {
-			memberships, err := s.workos.OrgMgr().ListUserMemberships(c.Request().Context(), *user.WorkOSUserID)
-			if err != nil {
-				return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			}
-			found := false
-			for _, m := range memberships {
-				if m.OrganizationID == *targetOrg.WorkOSOrgID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return c.JSON(http.StatusForbidden, map[string]string{"error": "not a member of this org"})
-			}
-		}
+	}
+	if !found {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "not a member of this org"})
 	}
 
 	if err := s.store.SetActiveOrg(c.Request().Context(), user.ID, req.OrgID); err != nil {
@@ -380,60 +384,3 @@ func (s *Server) dashboardGetCredits(c echo.Context) error {
 	})
 }
 
-// dashboardBackfillWorkOSOrgs is a one-time admin endpoint to create WorkOS orgs
-// for existing orgs that predate the WorkOS integration.
-func (s *Server) dashboardBackfillWorkOSOrgs(c echo.Context) error {
-	if s.store == nil || s.workos == nil || s.workos.OrgMgr() == nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "not configured"})
-	}
-
-	ctx := c.Request().Context()
-	orgs, err := s.store.ListOrgsWithoutWorkOS(ctx)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-
-	type result struct {
-		OrgID      uuid.UUID `json:"orgId"`
-		OrgName    string    `json:"orgName"`
-		WorkOSOrgID string   `json:"workosOrgId,omitempty"`
-		Error      string    `json:"error,omitempty"`
-	}
-
-	var results []result
-	for _, org := range orgs {
-		workosOrgID, err := s.workos.OrgMgr().CreateOrganization(ctx, org.Name)
-		if err != nil {
-			log.Printf("backfill: failed to create WorkOS org for %s: %v", org.Name, err)
-			results = append(results, result{OrgID: org.ID, OrgName: org.Name, Error: err.Error()})
-			continue
-		}
-
-		if err := s.store.UpdateOrgWorkOSID(ctx, org.ID, workosOrgID); err != nil {
-			log.Printf("backfill: failed to update org %s with WorkOS ID: %v", org.Name, err)
-			results = append(results, result{OrgID: org.ID, OrgName: org.Name, Error: err.Error()})
-			continue
-		}
-
-		// Create WorkOS memberships for all users in this org
-		users, err := s.store.ListUsersByOrgID(ctx, org.ID)
-		if err == nil {
-			for _, user := range users {
-				if user.WorkOSUserID != nil {
-					_, err := s.workos.OrgMgr().CreateMembership(ctx, workosOrgID, *user.WorkOSUserID, "admin")
-					if err != nil {
-						log.Printf("backfill: failed to create membership for user %s in org %s: %v", user.Email, org.Name, err)
-					}
-				}
-			}
-		}
-
-		log.Printf("backfill: created WorkOS org %s for %s", workosOrgID, org.Name)
-		results = append(results, result{OrgID: org.ID, OrgName: org.Name, WorkOSOrgID: workosOrgID})
-	}
-
-	return c.JSON(http.StatusOK, map[string]interface{}{
-		"processed": len(results),
-		"results":   results,
-	})
-}

@@ -54,7 +54,13 @@ type SandboxConfig struct {
 	TemplateRootfsKey    string `json:"templateRootfsKey,omitempty"`
 	TemplateWorkspaceKey string `json:"templateWorkspaceKey,omitempty"`
 	// SecretStore name — resolves secrets from the named secret store.
+	// When layered (base snapshot had a store + fork supplies another),
+	// this holds the child (fork-supplied) store. BaseSecretStore holds the parent.
 	SecretStore string `json:"secretStore,omitempty"`
+	// BaseSecretStore records the parent snapshot's store when a fork layers
+	// a different child store on top. On fork-of-fork, the checkpoint's
+	// SecretStore already represents its full merged ancestry.
+	BaseSecretStore string `json:"baseSecretStore,omitempty"`
 	// EgressAllowlist restricts outbound HTTPS from the sandbox to these hosts.
 	// Supports exact matches ("api.anthropic.com") and wildcards ("*.openai.com").
 	// Empty = all hosts allowed (no restriction).
@@ -75,6 +81,13 @@ type SandboxConfig struct {
 	// CheckpointID is the source checkpoint for template/snapshot creates.
 	// Used by the worker to key per-template golden snapshots.
 	CheckpointID string `json:"-"`
+	// SecretEnvs holds env vars resolved from a SecretStore. Carrying them in
+	// a separate field (rather than mixing them into Envs) preserves their
+	// provenance end-to-end: the worker's secrets proxy seals exactly these
+	// entries and passes everything in Envs through as plaintext. Never
+	// persisted (json:"-") and never set directly by the SDK — populated by
+	// the API layer in resolveSecretStoreInto and re-derived on every fork.
+	SecretEnvs map[string]string `json:"-"`
 }
 
 // ResourceTier defines an allowed memory/CPU combination.
@@ -85,6 +98,7 @@ type ResourceTier struct {
 
 // AllowedResourceTiers lists the valid memory→vCPU combinations.
 var AllowedResourceTiers = []ResourceTier{
+	{MemoryMB: 1024, VCPUs: 1},
 	{MemoryMB: 4096, VCPUs: 1},
 	{MemoryMB: 8192, VCPUs: 2},
 	{MemoryMB: 16384, VCPUs: 4},
@@ -103,7 +117,7 @@ func ValidateMemoryMB(memoryMB int) (vcpus int, err error) {
 			return t.VCPUs, nil
 		}
 	}
-	return 0, fmt.Errorf("memoryMB must be one of: 4096, 8192, 16384, 32768, 65536 (got %d)", memoryMB)
+	return 0, fmt.Errorf("memoryMB must be one of: 1024, 4096, 8192, 16384, 32768, 65536 (got %d)", memoryMB)
 }
 
 // ValidateCPUCount checks that cpuCount matches an allowed tier and returns the corresponding memoryMB.
@@ -148,7 +162,7 @@ func ValidateResourceTier(cfg *SandboxConfig) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("cpuCount %d and memoryMB %d do not match an allowed tier; valid combinations: 1/4096, 2/8192, 4/16384, 8/32768, 16/65536", cfg.CpuCount, cfg.MemoryMB)
+	return fmt.Errorf("cpuCount %d and memoryMB %d do not match an allowed tier; valid combinations: 1/1024, 1/4096, 2/8192, 4/16384, 8/32768, 16/65536", cfg.CpuCount, cfg.MemoryMB)
 }
 
 // SandboxListResponse is the response for listing sandboxes.
