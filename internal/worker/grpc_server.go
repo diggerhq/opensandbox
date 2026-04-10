@@ -681,8 +681,15 @@ func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, works
 	// Try checkpoint key format first: checkpoints/{sandboxID}/{checkpointID}/rootfs.tar.zst
 	if checkpointID := extractCheckpointID(rootfsKey); checkpointID != "" {
 		// Fast path: check local checkpoint cache
-		cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
-		cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+		// Check for both .qcow2 (from CreateCheckpoint) and .ext4 (from hibernate/legacy)
+		cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.qcow2")
+		if cachedRootfs == "" {
+			cachedRootfs = s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
+		}
+		cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.qcow2")
+		if cachedWorkspace == "" {
+			cachedWorkspace = s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+		}
 		if cachedRootfs != "" && cachedWorkspace != "" {
 			log.Printf("grpc: create from checkpoint %s: using local cache", checkpointID)
 			return cachedRootfs, cachedWorkspace, nil
@@ -699,9 +706,15 @@ func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, works
 		return "", "", fmt.Errorf("cannot extract template/checkpoint ID from key: %s", rootfsKey)
 	}
 
-	// Fast path: check local template cache
-	cachedRootfs := s.manager.TemplateCachePath(templateID, "rootfs.ext4")
-	cachedWorkspace := s.manager.TemplateCachePath(templateID, "workspace.ext4")
+	// Fast path: check local template cache (.qcow2 from CreateCheckpoint, .ext4 from legacy)
+	cachedRootfs := s.manager.TemplateCachePath(templateID, "rootfs.qcow2")
+	if cachedRootfs == "" {
+		cachedRootfs = s.manager.TemplateCachePath(templateID, "rootfs.ext4")
+	}
+	cachedWorkspace := s.manager.TemplateCachePath(templateID, "workspace.qcow2")
+	if cachedWorkspace == "" {
+		cachedWorkspace = s.manager.TemplateCachePath(templateID, "workspace.ext4")
+	}
 	if cachedRootfs != "" && cachedWorkspace != "" {
 		log.Printf("grpc: create from template %s: using local cache", templateID)
 		return cachedRootfs, cachedWorkspace, nil
@@ -731,7 +744,7 @@ func extractCheckpointID(s3Key string) string {
 }
 
 // downloadAndCacheTemplateDrives downloads template archives from S3, extracts them,
-// and caches the ext4 drives locally for future use.
+// and caches the drives locally for future use.
 func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templateID, rootfsKey, workspaceKey string) (string, string, error) {
 	if s.checkpointStore == nil {
 		return "", "", fmt.Errorf("checkpoint store not configured")
@@ -742,8 +755,8 @@ func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templat
 		return "", "", fmt.Errorf("create template cache dir: %w", err)
 	}
 
-	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
-	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.qcow2")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.qcow2")
 
 	// Download and extract rootfs (tar.zst)
 	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
@@ -762,7 +775,7 @@ func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templat
 }
 
 // downloadAndCacheCheckpointDrives downloads checkpoint archives from S3, extracts them,
-// and caches the ext4 drives locally for future use.
+// and caches the drives locally for cross-worker fork.
 func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, checkpointID, rootfsKey, workspaceKey string) (string, string, error) {
 	if s.checkpointStore == nil {
 		return "", "", fmt.Errorf("checkpoint store not configured")
@@ -773,8 +786,10 @@ func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, check
 		return "", "", fmt.Errorf("create checkpoint cache dir: %w", err)
 	}
 
-	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
-	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+	// Archives from CreateCheckpoint contain .qcow2 files.
+	// Legacy hibernate archives may contain .ext4 files.
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.qcow2")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.qcow2")
 
 	// Download and extract rootfs (tar.zst)
 	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {

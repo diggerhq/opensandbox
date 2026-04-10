@@ -1969,7 +1969,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			defer m.uploadWg.Done()
 			t1 := time.Now()
 
-			// Rootfs → tar.zst
+			// Rootfs → tar.zst (archive contains rootfs.qcow2)
 			rootfsArchive := filepath.Join(cacheDir, "rootfs.tar.zst")
 			if err := createArchive(rootfsArchive, cacheDir, []string{"rootfs.qcow2"}); err != nil {
 				log.Printf("qemu: checkpoint %s: rootfs archive failed: %v", checkpointID, err)
@@ -1982,7 +1982,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 				os.Remove(rootfsArchive)
 			}
 
-			// Workspace → sparse.zst (OSBSPAR1 format)
+			// Workspace → sparse.zst (OSBSPAR1 format, download path restores to workspace.ext4)
 			workspaceSrc := filepath.Join(cacheDir, "workspace.qcow2")
 			workspaceArchive := filepath.Join(cacheDir, "workspace.sparse.zst")
 			if _, err := sparse.Create(workspaceSrc, workspaceArchive); err != nil {
