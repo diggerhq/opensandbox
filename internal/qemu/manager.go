@@ -1973,28 +1973,21 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			archiveFiles = append(archiveFiles, filepath.Join("snapshot", "snapshot-meta.json"))
 		}
 
-		m.uploadWg.Add(1)
-		go func() {
-			defer m.uploadWg.Done()
-			t1 := time.Now()
-
-			archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
-			if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
-				log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
-				return
-			}
-			defer os.Remove(archivePath)
-
+		t1 := time.Now()
+		archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
+		if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
+			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
+		} else {
 			uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			if _, err := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); err != nil {
-				log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, err)
-				return
+			if _, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); uerr != nil {
+				log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+			} else {
+				log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v)",
+					checkpointID, time.Since(t1).Milliseconds(), archiveFiles)
 			}
-
-			log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v)",
-				checkpointID, time.Since(t1).Milliseconds(), archiveFiles)
-		}()
+			cancel()
+			os.Remove(archivePath)
+		}
 	}
 
 	if onReady != nil {

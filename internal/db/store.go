@@ -910,6 +910,14 @@ func (s *Store) SetCheckpointReady(ctx context.Context, checkpointID uuid.UUID, 
 	return err
 }
 
+// UpdateCheckpointS3Keys sets the S3 keys without changing the checkpoint status.
+func (s *Store) UpdateCheckpointS3Keys(ctx context.Context, checkpointID uuid.UUID, rootfsKey, workspaceKey string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET rootfs_s3_key = $2, workspace_s3_key = $3 WHERE id = $1`,
+		checkpointID, rootfsKey, workspaceKey)
+	return err
+}
+
 // SetCheckpointFailed marks a checkpoint as failed.
 func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID, reason string) error {
 	_, err := s.pool.Exec(ctx,

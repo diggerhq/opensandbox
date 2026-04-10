@@ -657,23 +657,14 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 		}
 	}
 
-	// Don't fire onReady until S3 upload completes. Otherwise the CP sees
-	// "ready" and dispatches a fork before the upload finishes — cross-worker
-	// forks fail because S3 doesn't have the data yet.
-	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, nil)
+	// onReady is called by CreateCheckpoint AFTER S3 upload completes (inside
+	// the upload goroutine). This ensures the checkpoint data is in S3 before
+	// it's marked "ready" — forks poll for "ready" before downloading.
+	// The gRPC call returns immediately with the S3 keys — the CP's fork path
+	// polls for checkpoint readiness and blocks until onReady fires.
+	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, onReady)
 	if err != nil {
 		return nil, fmt.Errorf("create checkpoint failed: %w", err)
-	}
-
-	// Wait for S3 upload to complete, THEN signal ready.
-	type uploader interface {
-		WaitUploads(timeout time.Duration)
-	}
-	if u, ok := s.manager.(uploader); ok {
-		u.WaitUploads(5 * time.Minute)
-	}
-	if onReady != nil {
-		onReady()
 	}
 
 	return &pb.CreateCheckpointResponse{
