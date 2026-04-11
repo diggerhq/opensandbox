@@ -190,7 +190,7 @@ func (w *WorkOSMiddleware) ProvisionOrgAndUser(ctx context.Context, email, name,
 		wid, err := w.orgManager.CreateOrganization(ctx, personalOrgName)
 		if err != nil {
 			log.Printf("workos: failed to create WorkOS org for %s: %v", email, err)
-			// Continue without WorkOS org — can be backfilled later
+			// Continue without WorkOS org
 		} else {
 			workosPersonalOrgID = wid
 		}

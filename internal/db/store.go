@@ -379,23 +379,25 @@ func (s *Store) CreateAPIKey(ctx context.Context, orgID uuid.UUID, createdBy *uu
 	return apiKey, nil
 }
 
-// ValidateAPIKey looks up an API key by hash and returns the associated org ID.
-func (s *Store) ValidateAPIKey(ctx context.Context, keyPlaintext string) (uuid.UUID, error) {
+// ValidateAPIKey looks up an API key by hash and returns the associated org ID
+// and the user ID of the key's creator (nil for keys with no creator).
+func (s *Store) ValidateAPIKey(ctx context.Context, keyPlaintext string) (uuid.UUID, *uuid.UUID, error) {
 	hash := HashAPIKey(keyPlaintext)
 	var orgID uuid.UUID
+	var createdBy *uuid.UUID
 	var expiresAt *time.Time
 	err := s.pool.QueryRow(ctx,
-		`SELECT org_id, expires_at FROM api_keys WHERE key_hash = $1`, hash,
-	).Scan(&orgID, &expiresAt)
+		`SELECT org_id, created_by, expires_at FROM api_keys WHERE key_hash = $1`, hash,
+	).Scan(&orgID, &createdBy, &expiresAt)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("invalid API key")
+		return uuid.Nil, nil, fmt.Errorf("invalid API key")
 	}
 	if expiresAt != nil && expiresAt.Before(time.Now()) {
-		return uuid.Nil, fmt.Errorf("API key expired")
+		return uuid.Nil, nil, fmt.Errorf("API key expired")
 	}
 	// Update last_used
 	_, _ = s.pool.Exec(ctx, `UPDATE api_keys SET last_used = now() WHERE key_hash = $1`, hash)
-	return orgID, nil
+	return orgID, createdBy, nil
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context, orgID uuid.UUID) ([]APIKey, error) {
@@ -720,49 +722,6 @@ func (s *Store) SetOrgOwner(ctx context.Context, orgID, userID uuid.UUID) error 
 		`UPDATE orgs SET owner_user_id = $1, updated_at = now() WHERE id = $2`,
 		userID, orgID)
 	return err
-}
-
-// UpdateOrgWorkOSID sets the WorkOS org ID on an existing org (used for backfill).
-func (s *Store) UpdateOrgWorkOSID(ctx context.Context, orgID uuid.UUID, workosOrgID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE orgs SET workos_org_id = $1, updated_at = now() WHERE id = $2`,
-		workosOrgID, orgID)
-	return err
-}
-
-// UpdateUserWorkOSID sets the WorkOS user ID on an existing user (used for backfill).
-func (s *Store) UpdateUserWorkOSID(ctx context.Context, userID uuid.UUID, workosUserID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE users SET workos_user_id = $1 WHERE id = $2`,
-		workosUserID, userID)
-	return err
-}
-
-// ListOrgsWithoutWorkOS returns orgs that have no WorkOS org ID (for backfill).
-func (s *Store) ListOrgsWithoutWorkOS(ctx context.Context) ([]*Org, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT `+orgColumns+` FROM orgs WHERE workos_org_id IS NULL ORDER BY created_at`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var orgs []*Org
-	for rows.Next() {
-		org := &Org{}
-		err := rows.Scan(
-			&org.ID, &org.Name, &org.Slug, &org.Plan, &org.MaxConcurrentSandboxes,
-			&org.MaxSandboxTimeoutSec, &org.CreatedAt, &org.UpdatedAt,
-			&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
-			&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
-			&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
-		)
-		if err != nil {
-			return nil, err
-		}
-		orgs = append(orgs, org)
-	}
-	return orgs, nil
 }
 
 // GetUserByWorkOSID looks up a user by their WorkOS user ID.

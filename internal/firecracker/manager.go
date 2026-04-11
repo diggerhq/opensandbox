@@ -72,7 +72,7 @@ type SecretsProxyIntegration interface {
 	// CreateSealedEnvs generates sealed tokens for env vars, registers a proxy session,
 	// and returns the full env map (sealed tokens + proxy config vars) to inject into the VM.
 	// secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
-	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
+	CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, plaintextEnvs, secretEnvs map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string
 	// UnregisterSession removes the proxy session for the given guest IP.
 	UnregisterSession(guestIP string)
 	// GetSessionTokens returns the sealed token → real value map for persisting during hibernate.
@@ -447,8 +447,11 @@ func (m *Manager) createWithID(ctx context.Context, id string, cfg types.Sandbox
 	// Sealed tokens replace real values inside the VM — the MITM proxy swaps
 	// them back to real values on outbound HTTPS requests.
 	envsToInject := cfg.Envs
-	if m.secretsProxy != nil && len(cfg.Envs) > 0 {
-		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
+	if m.secretsProxy != nil && (len(cfg.Envs) > 0 || len(cfg.SecretEnvs) > 0) {
+		// Envs are user-supplied plaintext; SecretEnvs originated from a
+		// SecretStore and are sealed by the proxy. See the QEMU-side
+		// equivalent in internal/qemu/manager.go:sealSandboxEnvs.
+		sealedEnvs := m.secretsProxy.CreateSealedEnvs(id, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.SecretEnvs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
 		if sealedEnvs != nil {
 			envsToInject = sealedEnvs
 			// Redirect VM HTTPS traffic through the proxy

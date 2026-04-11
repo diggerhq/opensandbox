@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -134,21 +135,14 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		CheckpointID:       req.CheckpointId, // for per-template golden snapshots
 		EgressAllowlist:    req.EgressAllowlist,
 		SecretAllowedHosts: parseSecretAllowedHosts(req.SecretAllowedHosts),
+		SecretEnvs:         req.SecretEnvs,
 	}
 
-	// Warm fork: if checkpoint_id is set, try snapshot-based fork first.
-	// ForkFromCheckpoint handles warm fork with cold boot fallback internally.
+	// Warm fork: if checkpoint_id is set, fork from the local checkpoint cache.
+	// ForkFromCheckpoint uses the local cache directly — no S3 needed.
 	if req.CheckpointId != "" {
-		// Ensure checkpoint drives are cached locally (download from S3 if needed)
-		if req.TemplateRootfsKey != "" && req.TemplateWorkspaceKey != "" {
-			if _, _, err := s.resolveTemplateDrives(ctx, req.TemplateRootfsKey, req.TemplateWorkspaceKey); err != nil {
-				log.Printf("grpc: warm fork %s: resolve drives failed: %v, continuing with ForkFromCheckpoint", req.CheckpointId, err)
-			}
-		}
-
 		sb, err := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 		if err == nil {
-			// Register with sandbox router for rolling timeout tracking
 			if s.router != nil {
 				timeout := cfg.Timeout
 				if timeout <= 0 {
@@ -161,7 +155,33 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				Status:    string(sb.Status),
 			}, nil
 		}
-		log.Printf("grpc: ForkFromCheckpoint %s failed: %v, falling back to standard Create", req.CheckpointId, err)
+		// If not in local cache, download the full checkpoint from S3 and retry.
+		// The archive includes drives + memory dump — everything needed for restore.
+		if strings.Contains(err.Error(), "not found in cache") && req.TemplateRootfsKey != "" && s.checkpointStore != nil {
+			log.Printf("grpc: warm fork %s: not in local cache, downloading from S3", req.CheckpointId)
+			if dlErr := s.downloadFullCheckpoint(ctx, req.CheckpointId, req.TemplateRootfsKey); dlErr != nil {
+				log.Printf("grpc: warm fork %s: S3 download failed: %v, falling back to template create", req.CheckpointId, dlErr)
+			} else {
+				sb, err = s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
+				if err == nil {
+					if s.router != nil {
+						timeout := cfg.Timeout
+						if timeout <= 0 {
+							timeout = 300
+						}
+						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
+					}
+					return &pb.CreateSandboxResponse{
+						SandboxId: sb.ID,
+						Status:    string(sb.Status),
+					}, nil
+				}
+				log.Printf("grpc: warm fork %s: retry after S3 download failed: %v, falling back to template create", req.CheckpointId, err)
+			}
+		} else if !strings.Contains(err.Error(), "not found in cache") {
+			return nil, fmt.Errorf("fork from checkpoint %s: %w", req.CheckpointId, err)
+		}
+		log.Printf("grpc: warm fork %s: resolve drives failed: %v, continuing with ForkFromCheckpoint", req.CheckpointId, err)
 	}
 
 	// Handle sandbox snapshot template: resolve S3 keys to local paths.
@@ -209,9 +229,11 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		if cpuPct < 100 {
 			cpuPct = 100
 		}
-		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from session
-		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
+			}
 		}
 	}
 
@@ -569,9 +591,11 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	if s.store != nil {
 		memMB := 1024 // TODO: get actual memory from sandbox state
 		cpuPct := 100
-		orgID := "00000000-0000-0000-0000-000000000001"
-		if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record scale event on wake for %s: %v", sb.ID, err)
+			}
 		}
 	}
 
@@ -633,9 +657,23 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 		}
 	}
 
-	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, onReady)
+	// Don't fire onReady until S3 upload completes. Otherwise the CP sees
+	// "ready" and dispatches a fork before the upload finishes — cross-worker
+	// forks fail because S3 doesn't have the data yet.
+	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create checkpoint failed: %w", err)
+	}
+
+	// Wait for S3 upload to complete, THEN signal ready.
+	type uploader interface {
+		WaitUploads(timeout time.Duration)
+	}
+	if u, ok := s.manager.(uploader); ok {
+		u.WaitUploads(5 * time.Minute)
+	}
+	if onReady != nil {
+		onReady()
 	}
 
 	return &pb.CreateCheckpointResponse{
@@ -660,8 +698,15 @@ func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, works
 	// Try checkpoint key format first: checkpoints/{sandboxID}/{checkpointID}/rootfs.tar.zst
 	if checkpointID := extractCheckpointID(rootfsKey); checkpointID != "" {
 		// Fast path: check local checkpoint cache
-		cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
-		cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+		// Check for both .qcow2 (from CreateCheckpoint) and .ext4 (from hibernate/legacy)
+		cachedRootfs := s.manager.CheckpointCachePath(checkpointID, "rootfs.qcow2")
+		if cachedRootfs == "" {
+			cachedRootfs = s.manager.CheckpointCachePath(checkpointID, "rootfs.ext4")
+		}
+		cachedWorkspace := s.manager.CheckpointCachePath(checkpointID, "workspace.qcow2")
+		if cachedWorkspace == "" {
+			cachedWorkspace = s.manager.CheckpointCachePath(checkpointID, "workspace.ext4")
+		}
 		if cachedRootfs != "" && cachedWorkspace != "" {
 			log.Printf("grpc: create from checkpoint %s: using local cache", checkpointID)
 			return cachedRootfs, cachedWorkspace, nil
@@ -678,9 +723,15 @@ func (s *GRPCServer) resolveTemplateDrives(ctx context.Context, rootfsKey, works
 		return "", "", fmt.Errorf("cannot extract template/checkpoint ID from key: %s", rootfsKey)
 	}
 
-	// Fast path: check local template cache
-	cachedRootfs := s.manager.TemplateCachePath(templateID, "rootfs.ext4")
-	cachedWorkspace := s.manager.TemplateCachePath(templateID, "workspace.ext4")
+	// Fast path: check local template cache (.qcow2 from CreateCheckpoint, .ext4 from legacy)
+	cachedRootfs := s.manager.TemplateCachePath(templateID, "rootfs.qcow2")
+	if cachedRootfs == "" {
+		cachedRootfs = s.manager.TemplateCachePath(templateID, "rootfs.ext4")
+	}
+	cachedWorkspace := s.manager.TemplateCachePath(templateID, "workspace.qcow2")
+	if cachedWorkspace == "" {
+		cachedWorkspace = s.manager.TemplateCachePath(templateID, "workspace.ext4")
+	}
 	if cachedRootfs != "" && cachedWorkspace != "" {
 		log.Printf("grpc: create from template %s: using local cache", templateID)
 		return cachedRootfs, cachedWorkspace, nil
@@ -710,7 +761,7 @@ func extractCheckpointID(s3Key string) string {
 }
 
 // downloadAndCacheTemplateDrives downloads template archives from S3, extracts them,
-// and caches the ext4 drives locally for future use.
+// and caches the drives locally for future use.
 func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templateID, rootfsKey, workspaceKey string) (string, string, error) {
 	if s.checkpointStore == nil {
 		return "", "", fmt.Errorf("checkpoint store not configured")
@@ -721,8 +772,8 @@ func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templat
 		return "", "", fmt.Errorf("create template cache dir: %w", err)
 	}
 
-	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
-	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.qcow2")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.qcow2")
 
 	// Download and extract rootfs (tar.zst)
 	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
@@ -741,7 +792,7 @@ func (s *GRPCServer) downloadAndCacheTemplateDrives(ctx context.Context, templat
 }
 
 // downloadAndCacheCheckpointDrives downloads checkpoint archives from S3, extracts them,
-// and caches the ext4 drives locally for future use.
+// and caches the drives locally for cross-worker fork.
 func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, checkpointID, rootfsKey, workspaceKey string) (string, string, error) {
 	if s.checkpointStore == nil {
 		return "", "", fmt.Errorf("checkpoint store not configured")
@@ -752,8 +803,10 @@ func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, check
 		return "", "", fmt.Errorf("create checkpoint cache dir: %w", err)
 	}
 
-	cachedRootfs := filepath.Join(cacheDir, "rootfs.ext4")
-	cachedWorkspace := filepath.Join(cacheDir, "workspace.ext4")
+	// Archives from CreateCheckpoint contain .qcow2 files.
+	// Legacy hibernate archives may contain .ext4 files.
+	cachedRootfs := filepath.Join(cacheDir, "rootfs.qcow2")
+	cachedWorkspace := filepath.Join(cacheDir, "workspace.qcow2")
 
 	// Download and extract rootfs (tar.zst)
 	if err := downloadAndExtract(ctx, s.checkpointStore, rootfsKey, cacheDir, extractArchiveCmd); err != nil {
@@ -775,6 +828,49 @@ func (s *GRPCServer) downloadAndCacheCheckpointDrives(ctx context.Context, check
 type extractFunc func(archivePath, destPath string) error
 
 // extractArchiveCmd extracts a tar.zst archive to a directory.
+// downloadFullCheckpoint downloads a full checkpoint archive (drives + memory + metadata)
+// from S3 and extracts it into the checkpoint cache directory for ForkFromCheckpoint.
+func (s *GRPCServer) downloadFullCheckpoint(ctx context.Context, checkpointID, s3Key string) error {
+	if s.checkpointStore == nil {
+		return fmt.Errorf("checkpoint store not configured")
+	}
+
+	cacheDir := filepath.Join(s.manager.DataDir(), "checkpoint-snapshots", checkpointID)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return fmt.Errorf("create cache dir: %w", err)
+	}
+
+	// Download archive
+	archivePath := filepath.Join(cacheDir, "checkpoint-download.tar.zst")
+	rc, err := s.checkpointStore.Download(ctx, s3Key)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", s3Key, err)
+	}
+	f, err := os.Create(archivePath)
+	if err != nil {
+		rc.Close()
+		return fmt.Errorf("create archive file: %w", err)
+	}
+	if _, err := io.Copy(f, rc); err != nil {
+		f.Close()
+		rc.Close()
+		os.Remove(archivePath)
+		return fmt.Errorf("write archive: %w", err)
+	}
+	f.Close()
+	rc.Close()
+
+	// Extract (tar.zst)
+	if err := extractArchiveCmd(archivePath, cacheDir); err != nil {
+		os.Remove(archivePath)
+		return fmt.Errorf("extract archive: %w", err)
+	}
+	os.Remove(archivePath)
+
+	log.Printf("grpc: checkpoint %s: downloaded and cached from S3", checkpointID)
+	return nil
+}
+
 func extractArchiveCmd(archivePath, destDir string) error {
 	cmd := exec.Command("tar", "--zstd", "-xf", archivePath, "-C", destDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -825,9 +921,11 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	if s.store != nil && req.MaxMemoryBytes > 0 {
 		memMB := int(req.MaxMemoryBytes / (1024 * 1024))
 		cpuPct := int(req.CpuMaxUsec / 1000) // 100000us → 100%
-		orgID := "00000000-0000-0000-0000-000000000001" // TODO: resolve from sandbox session
-		if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
-			log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+		orgID, _ := s.store.GetSandboxOrgID(ctx, req.SandboxId)
+		if orgID != "" {
+			if err := s.store.RecordScaleEvent(ctx, req.SandboxId, orgID, memMB, cpuPct); err != nil {
+				log.Printf("grpc: failed to record scale event for %s: %v", req.SandboxId, err)
+			}
 		}
 	}
 

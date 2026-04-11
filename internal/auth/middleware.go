@@ -14,6 +14,8 @@ type contextKey string
 const (
 	// ContextKeyOrgID is the echo context key for the authenticated org ID.
 	ContextKeyOrgID contextKey = "org_id"
+	// ContextKeyUserID is the echo context key for the authenticated user ID.
+	ContextKeyUserID contextKey = "user_id"
 )
 
 // SetOrgID stores the org ID in the echo context.
@@ -29,6 +31,24 @@ func GetOrgID(c echo.Context) (uuid.UUID, bool) {
 	}
 	id, ok := v.(uuid.UUID)
 	return id, ok
+}
+
+// SetUserID stores the user ID in the echo context.
+func SetUserID(c echo.Context, userID uuid.UUID) {
+	c.Set(string(ContextKeyUserID), userID)
+}
+
+// GetUserID retrieves the user ID from the echo context. Returns nil if not set.
+func GetUserID(c echo.Context) *uuid.UUID {
+	v := c.Get(string(ContextKeyUserID))
+	if v == nil {
+		return nil
+	}
+	id, ok := v.(uuid.UUID)
+	if !ok {
+		return nil
+	}
+	return &id
 }
 
 // PGAPIKeyMiddleware validates API keys against PostgreSQL.
@@ -60,13 +80,16 @@ func PGAPIKeyMiddleware(store *db.Store, staticKey string) echo.MiddlewareFunc {
 
 			// Validate against PG if store is available
 			if store != nil {
-				orgID, err := store.ValidateAPIKey(c.Request().Context(), key)
+				orgID, userID, err := store.ValidateAPIKey(c.Request().Context(), key)
 				if err != nil {
 					return c.JSON(http.StatusForbidden, map[string]string{
 						"error": "invalid API key",
 					})
 				}
 				SetOrgID(c, orgID)
+				if userID != nil {
+					SetUserID(c, *userID)
+				}
 				return next(c)
 			}
 

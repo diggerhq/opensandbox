@@ -89,6 +89,10 @@ RUN cd /tmp/claude-agent-wrapper \
     && chmod +x /usr/local/bin/claude-agent-wrapper \
     && rm -rf /tmp/claude-agent-wrapper
 
+# ── Docker config: store images/containers on the data disk ──────────────────
+RUN mkdir -p /etc/docker && \
+    echo '{"data-root": "/home/sandbox/.docker", "storage-driver": "vfs"}' > /etc/docker/daemon.json
+
 # ── Locale ───────────────────────────────────────────────────────────────────
 RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
@@ -101,6 +105,9 @@ ENV LC_ALL=en_US.UTF-8
 RUN useradd -m -s /bin/bash -G sudo sandbox \
     && echo "sandbox ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sandbox \
     && chmod 440 /etc/sudoers.d/sandbox
+
+# /workspace is a symlink to ~ for backward compatibility
+RUN ln -s /home/sandbox /workspace
 
 # ── Overlay mount points (data disk backs all writes via overlayfs) ───────────
 RUN mkdir -p /mnt/data /mnt/overlay

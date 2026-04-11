@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/analytics"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 )
@@ -15,8 +16,9 @@ import (
 type UsageCollector struct {
 	manager  sandbox.Manager
 	store    *db.Store
-	interval time.Duration // how often to sample (default 60s)
-	flushN   int           // flush to DB every N samples (default 5 = every 5 min)
+	segment  *analytics.Client // optional; nil = no Segment shipping
+	interval time.Duration     // how often to sample (default 60s)
+	flushN   int               // flush to DB every N samples (default 5 = every 5 min)
 
 	mu       sync.Mutex
 	buffer   []db.UsageSample
@@ -26,10 +28,12 @@ type UsageCollector struct {
 }
 
 // NewUsageCollector creates a collector that samples every interval.
-func NewUsageCollector(manager sandbox.Manager, store *db.Store) *UsageCollector {
+// segment may be nil to disable analytics shipping.
+func NewUsageCollector(manager sandbox.Manager, store *db.Store, segment *analytics.Client) *UsageCollector {
 	return &UsageCollector{
 		manager:  manager,
 		store:    store,
+		segment:  segment,
 		interval: 60 * time.Second,
 		flushN:   5,
 		stopCh:   make(chan struct{}),
@@ -77,6 +81,7 @@ func (c *UsageCollector) sample() {
 	}
 
 	now := time.Now()
+	intervalSec := c.interval.Seconds()
 	var samples []db.UsageSample
 
 	for _, sb := range sandboxes {
@@ -85,14 +90,33 @@ func (c *UsageCollector) sample() {
 			continue // sandbox might be shutting down
 		}
 
+		owner, err := c.store.GetSandboxOwner(ctx, sb.ID)
+		if err != nil || owner.OrgID == "" {
+			continue // no billable owner, skip
+		}
+
 		samples = append(samples, db.UsageSample{
 			SandboxID:   sb.ID,
-			OrgID:       "00000000-0000-0000-0000-000000000001", // TODO: get from sandbox session
+			OrgID:       owner.OrgID,
 			SampledAt:   now,
 			MemoryMB:    sb.MemoryMB,
 			CPUUsec:     0, // TODO: parse from cgroup cpu.stat
 			MemoryBytes: int64(stats.MemUsage),
 			PIDs:        int(stats.PIDs),
+		})
+
+		// Ship to Segment: GB-seconds based on PROVISIONED memory (the tier the
+		// customer reserved), not actual RSS. Reservation is what we bill for —
+		// actual usage is gameable and punishes well-behaved tenants.
+		gbSeconds := (float64(sb.MemoryMB) / 1024.0) * intervalSec
+		c.segment.TrackGBSeconds(analytics.UsageEvent{
+			OrgID:        owner.OrgID,
+			UserID:       owner.UserID,
+			UserEmail:    owner.UserEmail,
+			WorkosUserID: owner.WorkosUserID,
+			WorkosOrgID:  owner.WorkosOrgID,
+			SandboxID:    sb.ID,
+			GBSeconds:    gbSeconds,
 		})
 	}
 

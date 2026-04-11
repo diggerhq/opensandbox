@@ -19,7 +19,8 @@ Declarative images are **cached by content hash** — identical manifests produc
 <CodeGroup>
 
 ```typescript TypeScript
-import { Sandbox, Image } from '@opencomputer/sdk';
+import { Sandbox } from '@opencomputer/sdk';
+import { Image } from '@opencomputer/sdk/node';
 
 // Define an image with packages, env vars, and files
 const image = Image.base()
@@ -94,7 +95,7 @@ Create named snapshots that persist permanently and can be shared across sandbox
 <CodeGroup>
 
 ```typescript TypeScript
-import { Image, Snapshots } from '@opencomputer/sdk';
+import { Image, Snapshots } from '@opencomputer/sdk/node';
 
 const snapshots = new Snapshots();
 

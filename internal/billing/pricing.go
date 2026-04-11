@@ -6,15 +6,17 @@ import (
 
 // TierPricePerSecond maps memory_mb → USD per second.
 var TierPricePerSecond = map[int]float64{
-	4096:  0.00003240740741, // 4GB / 1 vCPU
-	8192:  0.000150462963,   // 8GB / 2 vCPU
-	16384: 0.0008101851852,  // 16GB / 4 vCPU
-	32768: 0.005787037037,   // 32GB / 8 vCPU
-	65536: 0.0162037037,     // 64GB / 16 vCPU
+	1024:  0.000001080246914, // 1GB / 1 vCPU
+	4096:  0.000005787037037, // 4GB / 1 vCPU
+	8192:  0.000005015432099, // 8GB / 2 vCPU
+	16384: 0.00002700617284,  // 16GB / 4 vCPU
+	32768: 0.0001929012346,   // 32GB / 8 vCPU
+	65536: 0.0005401234568,   // 64GB / 16 vCPU
 }
 
 // TierMetadataKey maps memory_mb → Stripe metadata key for price lookup.
 var TierMetadataKey = map[int]string{
+	1024:  "sandbox_1gb",
 	4096:  "sandbox_4gb",
 	8192:  "sandbox_8gb",
 	16384: "sandbox_16gb",

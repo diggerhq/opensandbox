@@ -62,34 +62,25 @@ if [ -n "$GENERIC_VMLINUZ" ]; then
     GENERIC_KVER=$(basename "$GENERIC_VMLINUZ" | sed 's/vmlinuz-//')
     echo "Guest kernel: $GENERIC_VMLINUZ ($GENERIC_KVER)"
 
-    # Extract vsock, overlay, and virtio_mem modules for the guest rootfs
+    # Install full kernel modules for the guest rootfs.
+    # The guest needs modules for Docker networking (bridge, veth, netfilter),
+    # vsock, overlay, and virtio_mem. Instead of cherry-picking individual .ko
+    # files, install the matching linux-modules package so all dependencies
+    # are satisfied and depmod works correctly inside the guest.
+    echo "Installing guest kernel modules ($GENERIC_KVER)..."
+    apt-get install -y -qq "linux-modules-$GENERIC_KVER" "linux-modules-extra-$GENERIC_KVER" 2>/dev/null || \
+        apt-get install -y -qq "linux-modules-$GENERIC_KVER" 2>/dev/null || true
+
+    # Store kernel version for the rootfs build to use
+    echo "$GENERIC_KVER" > "$KERNEL_DIR/guest-kernel-version"
+
+    # Validate critical modules exist
     MODDIR="/lib/modules/$GENERIC_KVER"
-    GUEST_MODDIR="$KERNEL_DIR/guest-modules"
-    mkdir -p "$GUEST_MODDIR"
-    for mod in \
-        "$MODDIR/kernel/fs/overlayfs/overlay.ko"* \
-        "$MODDIR/kernel/net/vmw_vsock/vsock.ko"* \
-        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport_common.ko"* \
-        "$MODDIR/kernel/net/vmw_vsock/vmw_vsock_virtio_transport.ko"* \
-        "$MODDIR/kernel/drivers/virtio/virtio_mem.ko"*; do
-        [ -f "$mod" ] || continue
-        base=$(basename "$mod")
-        if [[ "$base" == *.zst ]]; then
-            zstd -d "$mod" -o "$GUEST_MODDIR/${base%.zst}" 2>/dev/null
-        else
-            cp "$mod" "$GUEST_MODDIR/"
+    for mod in virtio_mem bridge veth; do
+        if ! find "$MODDIR" -name "${mod}.ko*" | grep -q .; then
+            echo "WARNING: ${mod}.ko not found for kernel $GENERIC_KVER"
         fi
     done
-    echo "Guest modules extracted to $GUEST_MODDIR:"
-    ls "$GUEST_MODDIR/"
-
-    # Validate virtio_mem.ko was extracted — fail fast if missing
-    if ! ls "$GUEST_MODDIR"/virtio_mem.ko* >/dev/null 2>&1; then
-        echo "FATAL: virtio_mem.ko not found for kernel $GENERIC_KVER"
-        echo "  Looked in: $MODDIR/kernel/drivers/virtio/virtio_mem.ko*"
-        echo "  Memory scaling will not work. Check that linux-image-generic includes virtio_mem."
-        exit 1
-    fi
 else
     echo "WARNING: No generic kernel found. Guest VMs may not boot correctly."
 fi

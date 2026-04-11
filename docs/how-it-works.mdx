@@ -3,7 +3,7 @@ title: "How It Works"
 description: "Architecture and key technical decisions"
 ---
 
-Your code talks to a **control plane** API, which provisions a virtual machine on a worker node. Commands, file operations, and agent sessions run inside that VM — events and I/O stream back over WebSocket. The control plane transparently proxies data-plane requests to the correct worker.
+Your code talks to a **control plane** API, which provisions a virtual machine on a worker node. Commands and file operations run inside that VM — I/O streams back over WebSocket. The control plane transparently proxies data-plane requests to the correct worker.
 
 SDK users only need an API key. The SDK handles routing automatically.
 
@@ -12,7 +12,7 @@ SDK users only need an API key. The SDK handles routing automatically.
     Your code calls the control plane (`X-API-Key` auth). A VM boots from a golden snapshot in ~300ms.
   </Step>
   <Step title="Operate">
-    Run commands, read/write files, start agent sessions. All execution happens inside the VM. The control plane routes requests to the correct worker automatically.
+    Run commands, read/write files — all execution happens inside the VM. The control plane routes requests to the correct worker automatically.
   </Step>
 </Steps>
 
@@ -78,20 +78,6 @@ oc preview create sb-abc --port 3000
 ```
 
 See [Preview URLs](/sandboxes/preview-urls) for custom domains and auth.
-
-## Agent Sessions
-
-An agent session runs the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-code-sdk-overview) inside the VM as a regular process. The SDK gives Claude bash and file tools, then manages the think → act → observe loop. Events stream to your code over WebSocket as JSON lines.
-
-```typescript
-const session = await sandbox.agent.start({
-  prompt: "Set up a Next.js app with Tailwind CSS",
-  onEvent: (event) => console.log(event.type),
-});
-await session.done;
-```
-
-See [Agents](/agents/overview) for the full guide.
 
 <Tip>
   API details: [HTTP API Reference](/reference/api#base-url--authentication).

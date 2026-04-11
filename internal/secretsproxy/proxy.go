@@ -202,15 +202,25 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 //
 // allowlist controls which hosts the sandbox can reach (nil = all).
 // secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
-func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, envVars map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
-	if len(envVars) == 0 {
+func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, plaintextEnvs, secretEnvs map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
+	if len(plaintextEnvs) == 0 && len(secretEnvs) == 0 {
 		return nil
 	}
 
-	sealed := make(map[string]string, len(envVars))   // envVar → token
-	tokenMap := make(map[string]string, len(envVars)) // token → real value
-
-	for envVar, realValue := range envVars {
+	// Tokenize every entry in secretEnvs. plaintextEnvs entries are forwarded
+	// as-is — they were either supplied by the user directly to the API or
+	// originated outside any SecretStore, so sealing them would silently break
+	// non-HTTP usage (echo $VAR, file writes, subprocess env) without adding
+	// any protection.
+	sealed := make(map[string]string, len(secretEnvs))   // envVar → token
+	tokenMap := make(map[string]string, len(secretEnvs)) // token → real value
+	for envVar, realValue := range secretEnvs {
+		// User-supplied envs win on collision: if the same name appears in
+		// both maps the plaintext value is the one the caller asked for, so
+		// don't seal it. The merge below will copy the plaintext through.
+		if _, userSet := plaintextEnvs[envVar]; userSet {
+			continue
+		}
 		token := "osb_sealed_" + randomHex(16)
 		sealed[envVar] = token
 		tokenMap[token] = realValue
@@ -227,21 +237,27 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, en
 		}
 	}
 
-	p.RegisterSession(guestIP, &Session{
-		SandboxID:  sandboxID,
-		Secrets:    tokenMap,
-		TokenHosts: tokenHosts,
-		Allowlist:  allowlist,
-	})
+	// Only register a proxy session if there's actually something to substitute.
+	if len(tokenMap) > 0 {
+		p.RegisterSession(guestIP, &Session{
+			SandboxID:  sandboxID,
+			Secrets:    tokenMap,
+			TokenHosts: tokenHosts,
+			Allowlist:  allowlist,
+		})
+	}
 
-	// Build the complete env map for the VM
+	// Merge into the env map for the VM. plaintextEnvs win on collision.
 	proxyURL := fmt.Sprintf("http://%s:3128", gatewayIP)
 	caCertPath := "/usr/local/share/ca-certificates/opensandbox-proxy.crt"
 
 	noProxy := "localhost,127.0.0.1,::1"
 
-	result := make(map[string]string, len(sealed)+9)
-	for k, v := range sealed {
+	result := make(map[string]string, len(plaintextEnvs)+len(sealed)+9)
+	for k, token := range sealed {
+		result[k] = token
+	}
+	for k, v := range plaintextEnvs {
 		result[k] = v
 	}
 	result["HTTP_PROXY"] = proxyURL

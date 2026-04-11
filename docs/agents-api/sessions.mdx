@@ -1,0 +1,74 @@
+---
+title: "Sessions"
+description: "Ephemeral sandboxes for fire-and-forget agent tasks with input/result"
+---
+
+A Session is an ephemeral sandbox bound to an Agent. One session = one task = one sandbox. The sandbox is created, the agent runs to completion, and the sandbox is destroyed. For process-mode agents that take input and produce a result.
+
+**Typical mapping:** one Session per webhook, API call, or batch job.
+
+## Create session
+
+```
+POST /v1/agents/:agentId/sessions
+```
+
+```json
+{
+  "input": {
+    "repo": "acme/backend",
+    "issue_number": 42,
+    "webhook_payload": { "..." }
+  },
+  "metadata": { "trigger": "github_webhook" }
+}
+```
+
+The platform creates a sandbox, writes `input` to `/tmp/agent_input.json`, sets `AGENT_INPUT_PATH` as an env var, and runs the agent's entrypoint. The agent reads input, does work, writes its result to `/tmp/agent_result.json`, and exits.
+
+Returns `201` with `status: "creating"`.
+
+## Get / Delete
+
+```
+GET    /v1/agents/:agentId/sessions/:id    Get session
+DELETE /v1/agents/:agentId/sessions/:id    End session (kills sandbox)
+```
+
+## Get result
+
+```
+GET /v1/agents/:agentId/sessions/:id/result
+```
+
+Returns the agent's output after completion. The platform reads `/tmp/agent_result.json` from the sandbox.
+
+```
+-- While running:         409 { "error": { "type": "conflict", "message": "Session still running" } }
+-- When complete:         200 { "data": { "pr_url": "https://..." }, "completed_at": "2026-04-09T..." }
+-- If no result written:  200 { "data": null, "completed_at": "2026-04-09T..." }
+```
+
+## Session object
+
+```json
+{
+  "id": "sess_98adcc7e...",
+  "agent_id": "issue-resolver",
+  "status": "creating | running | completed | failed",
+  "input": { "..." },
+  "result": null,
+  "preview_url": null,
+  "metadata": {},
+  "created_at": "2026-04-09T...",
+  "updated_at": "2026-04-09T..."
+}
+```
+
+## Lifecycle
+
+```
+creating → running → completed (exit 0) | failed (non-zero exit)
+```
+
+Terminal states are final. The sandbox is destroyed when the session ends.

@@ -219,21 +219,50 @@ func (s *Server) resolveImageManifest(ctx context.Context, orgID uuid.UUID, mani
 	if s.store != nil {
 		cached, err := s.store.GetImageCacheByHash(ctx, orgID, contentHash)
 		if err == nil && cached.Status == "ready" && cached.CheckpointID != nil {
-			// Cache hit — update last_used_at and return
-			_ = s.store.TouchImageCacheUsage(ctx, cached.ID)
-			// If manifest includes a name, assign it to the cached entry (makes it addressable as a snapshot)
-			if manifest.Name != "" && (cached.Name == nil || *cached.Name != manifest.Name) {
-				if err := s.store.SetImageCacheName(ctx, cached.ID, orgID, manifest.Name); err != nil {
-					log.Printf("image-builder: failed to set name %q on cache entry: %v", manifest.Name, err)
+			// Cache hit — verify the checkpoint's S3 data still exists.
+			// Stale entries (from dead workers or failed uploads) would cause
+			// every fork to fail until the cache entry is cleared.
+			cp, cpErr := s.store.GetCheckpoint(ctx, *cached.CheckpointID)
+			if cpErr != nil || cp.RootfsS3Key == nil {
+				log.Printf("image-builder: cache hit for hash %s but checkpoint %s is invalid, rebuilding",
+					contentHash[:12], cached.CheckpointID)
+				_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
+			} else if s.checkpointStore != nil {
+				if exists, _ := s.checkpointStore.Exists(ctx, *cp.RootfsS3Key); !exists {
+					log.Printf("image-builder: cache hit for hash %s but S3 object missing for checkpoint %s, rebuilding",
+						contentHash[:12], cached.CheckpointID)
+					_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
 				} else {
-					log.Printf("image-builder: named cache entry %s as %q", cached.ID, manifest.Name)
+					// Cache hit is valid
+					_ = s.store.TouchImageCacheUsage(ctx, cached.ID)
+					// If manifest includes a name, assign it to the cached entry (makes it addressable as a snapshot)
+					if manifest.Name != "" && (cached.Name == nil || *cached.Name != manifest.Name) {
+						if err := s.store.SetImageCacheName(ctx, cached.ID, orgID, manifest.Name); err != nil {
+							log.Printf("image-builder: failed to set name %q on cache entry: %v", manifest.Name, err)
+						} else {
+							log.Printf("image-builder: named cache entry %s as %q", cached.ID, manifest.Name)
+						}
+					}
+					log.Printf("image-builder: cache hit for hash %s (checkpoint=%s)", contentHash[:12], cached.CheckpointID)
+					if logFn != nil {
+						logFn(0, "cache_hit", fmt.Sprintf("Image found in cache (hash=%s)", contentHash[:12]))
+					}
+					return *cached.CheckpointID, nil
 				}
+			} else {
+				// No checkpoint store — trust the cache
+				_ = s.store.TouchImageCacheUsage(ctx, cached.ID)
+				if manifest.Name != "" && (cached.Name == nil || *cached.Name != manifest.Name) {
+					if err := s.store.SetImageCacheName(ctx, cached.ID, orgID, manifest.Name); err != nil {
+						log.Printf("image-builder: failed to set name %q on cache entry: %v", manifest.Name, err)
+					}
+				}
+				log.Printf("image-builder: cache hit for hash %s (checkpoint=%s)", contentHash[:12], cached.CheckpointID)
+				if logFn != nil {
+					logFn(0, "cache_hit", fmt.Sprintf("Image found in cache (hash=%s)", contentHash[:12]))
+				}
+				return *cached.CheckpointID, nil
 			}
-			log.Printf("image-builder: cache hit for hash %s (checkpoint=%s)", contentHash[:12], cached.CheckpointID)
-			if logFn != nil {
-				logFn(0, "cache_hit", fmt.Sprintf("Image found in cache (hash=%s)", contentHash[:12]))
-			}
-			return *cached.CheckpointID, nil
 		}
 		if err == nil && cached.Status == "building" {
 			// Another request is building this same image — wait for it
@@ -511,6 +540,14 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		rootfsKey, workspaceKey, err := cpMgr.CreateCheckpoint(ctx, buildSandboxID, checkpointID.String(), s.checkpointStore, func() {})
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to checkpoint build sandbox: %w", err)
+		}
+
+		// Wait for S3 upload to complete before the fork (which may land on another worker)
+		type uploader interface {
+			WaitUploads(timeout time.Duration)
+		}
+		if u, ok := s.manager.(uploader); ok {
+			u.WaitUploads(5 * time.Minute)
 		}
 
 		if s.store != nil {

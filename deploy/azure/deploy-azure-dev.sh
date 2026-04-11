@@ -15,6 +15,7 @@ AZURE_IMAGE="${AZURE_IMAGE:-Canonical:ubuntu-24_04-lts:server:latest}"
 AZURE_ADMIN_USER="${AZURE_ADMIN_USER:-ubuntu}"
 AZURE_DATA_DISK_GB="${AZURE_DATA_DISK_GB:-500}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-opensandbox-dev}"
+OPENSANDBOX_SECRET_ENCRYPTION_KEY="${OPENSANDBOX_SECRET_ENCRYPTION_KEY:-}"
 SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/id_rsa}"
 
 STATE_DIR="$SCRIPT_DIR"
@@ -149,6 +150,42 @@ cmd_deploy() {
 
     log "Deploying to $VM_PUBLIC_IP..."
 
+    # Load checkpoint-store secrets from a gitignored per-location file. Without
+    # these the worker logs "checkpoint store not configured" and every
+    # snapshot/fork RPC fails with no obvious cause, so the deploy fails fast.
+    #
+    # File format (deploy/azure/.dev-env-secrets-<location>):
+    #   CHECKPOINT_STORAGE_ACCOUNT=deveuwest1
+    #   CHECKPOINT_STORAGE_CONTAINER=checkpoints
+    #   CHECKPOINT_STORAGE_KEY=...
+    # See deploy/azure/.dev-env-secrets.example. The file is gitignored.
+    SECRETS_FILE="$STATE_DIR/.dev-env-secrets-${AZURE_LOCATION}"
+    if [ -f "$SECRETS_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$SECRETS_FILE"
+        log "Loaded secrets from $(basename "$SECRETS_FILE")"
+    fi
+    if [ -z "${CHECKPOINT_STORAGE_ACCOUNT:-}" ] || [ -z "${CHECKPOINT_STORAGE_KEY:-}" ] || [ -z "${CHECKPOINT_STORAGE_CONTAINER:-}" ]; then
+        log "ERROR: checkpoint storage not configured for ${AZURE_LOCATION}."
+        log "       Create $SECRETS_FILE with CHECKPOINT_STORAGE_ACCOUNT,"
+        log "       CHECKPOINT_STORAGE_CONTAINER, and CHECKPOINT_STORAGE_KEY."
+        log "       See deploy/azure/.dev-env-secrets.example."
+        log "       To fetch the key:"
+        log "         az storage account keys list -n <account> -g <rg> --query '[0].value' -o tsv"
+        exit 1
+    fi
+    log "Checkpoint store: https://${CHECKPOINT_STORAGE_ACCOUNT}.blob.core.windows.net/${CHECKPOINT_STORAGE_CONTAINER}"
+
+    # Persist a stable secret-store encryption key per environment.
+    # Without this, OPENSANDBOX_SECRET_ENCRYPTION_KEY is unset and SecretStore.setSecret
+    # fails with HTTP 500 ("encryption not configured"). Reuse across redeploys so
+    # secrets stored before a redeploy remain decryptable.
+    if [ -z "${OPENSANDBOX_SECRET_ENCRYPTION_KEY:-}" ]; then
+        OPENSANDBOX_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32)
+        save_state "OPENSANDBOX_SECRET_ENCRYPTION_KEY" "$OPENSANDBOX_SECRET_ENCRYPTION_KEY"
+        log "Generated new secret encryption key (persisted to state file)"
+    fi
+
     # Sync code
     log "Syncing code..."
     rsync -az --progress \
@@ -194,39 +231,30 @@ else
     echo "Rootfs image already exists."
 fi
 
-# Patch rootfs with guest kernel modules (vsock, overlay) and insmod symlink
-GUEST_MODDIR="/opt/opensandbox/guest-modules"
-if [ -d "$GUEST_MODDIR" ] && [ -f /data/firecracker/images/default.ext4 ]; then
-    echo "Patching rootfs with guest kernel modules..."
-    MNTDIR=$(mktemp -d)
-    sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
-
-    # Copy modules
-    sudo mkdir -p "$MNTDIR/lib/modules/vsock"
-    sudo cp "$GUEST_MODDIR"/*.ko "$MNTDIR/lib/modules/vsock/" 2>/dev/null || true
-
-    # Create insmod symlink (busybox applet)
-    if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
-        sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+# Patch rootfs with full guest kernel modules — handled by build-rootfs-docker.sh
+# but kept as fallback for manually-built images.
+if [ -f /data/firecracker/images/default.ext4 ]; then
+    GUEST_KVER_FILE="/opt/opensandbox/guest-kernel-version"
+    if [ -f "$GUEST_KVER_FILE" ]; then
+        GUEST_KVER=$(cat "$GUEST_KVER_FILE")
+    elif ls -d /lib/modules/*-generic >/dev/null 2>&1; then
+        GUEST_KVER=$(ls -d /lib/modules/*-generic | sort -V | tail -1 | xargs basename)
     fi
 
-    # Update init script: load modules early (before overlay mount)
-    if ! grep -q 'lib/modules/vsock' "$MNTDIR/sbin/init" 2>/dev/null; then
-        # Insert module loading after the first "mount -t devtmpfs" line
-        sudo sed -i '/^mount -t devtmpfs devtmpfs \/dev$/a\
-\
-# Load kernel modules (needed for QEMU with modular kernel)\
-if [ -d /lib/modules/vsock ]; then\
-    for mod in /lib/modules/vsock/overlay.ko /lib/modules/vsock/vsock.ko /lib/modules/vsock/vmw_vsock_virtio_transport_common.ko /lib/modules/vsock/vmw_vsock_virtio_transport.ko; do\
-        [ -f "$mod" ] \&\& insmod "$mod" 2>/dev/null || true\
-    done\
-    echo "init: kernel modules loaded"\
-fi' "$MNTDIR/sbin/init"
+    if [ -n "${GUEST_KVER:-}" ] && [ -d "/lib/modules/$GUEST_KVER" ]; then
+        echo "Patching rootfs with full kernel modules for $GUEST_KVER..."
+        MNTDIR=$(mktemp -d)
+        sudo mount -o loop /data/firecracker/images/default.ext4 "$MNTDIR"
+        sudo rm -rf "$MNTDIR/lib/modules"/*
+        sudo cp -a "/lib/modules/$GUEST_KVER" "$MNTDIR/lib/modules/"
+        sudo depmod -b "$MNTDIR" "$GUEST_KVER" 2>/dev/null || true
+        if [ -f "$MNTDIR/bin/busybox" ] && [ ! -e "$MNTDIR/sbin/insmod" ]; then
+            sudo ln -sf /bin/busybox "$MNTDIR/sbin/insmod"
+        fi
+        sudo umount "$MNTDIR"
+        rmdir "$MNTDIR"
+        echo "Rootfs patched with modules for $GUEST_KVER"
     fi
-
-    sudo umount "$MNTDIR"
-    rmdir "$MNTDIR"
-    echo "Rootfs patched."
 fi
 ROOTFS
 
@@ -253,6 +281,16 @@ OPENSANDBOX_NATS_URL=
 OPENSANDBOX_PORT=8081
 OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=1024
 OPENSANDBOX_DEFAULT_SANDBOX_CPUS=2
+OPENSANDBOX_SECRET_ENCRYPTION_KEY=${OPENSANDBOX_SECRET_ENCRYPTION_KEY}
+# Checkpoint store — Azure Blob Storage. The worker switches backends when
+# OPENSANDBOX_S3_ENDPOINT contains .blob.core.windows.net (see
+# internal/storage/blob.go:39). Without these, snapshot/fork RPCs fail with
+# "checkpoint store not configured on this worker".
+OPENSANDBOX_S3_ENDPOINT=https://${CHECKPOINT_STORAGE_ACCOUNT}.blob.core.windows.net
+OPENSANDBOX_S3_ACCESS_KEY_ID=${CHECKPOINT_STORAGE_ACCOUNT}
+OPENSANDBOX_S3_SECRET_ACCESS_KEY=${CHECKPOINT_STORAGE_KEY}
+OPENSANDBOX_S3_BUCKET=${CHECKPOINT_STORAGE_CONTAINER}
+OPENSANDBOX_S3_REGION=${AZURE_LOCATION}
 EOF
 
 # Server env
@@ -265,6 +303,7 @@ OPENSANDBOX_REDIS_URL=redis://localhost:6379
 OPENSANDBOX_SANDBOX_DOMAIN=${SANDBOX_DOMAIN}
 OPENSANDBOX_PORT=8080
 OPENSANDBOX_REGION=azure-${AZURE_LOCATION}
+OPENSANDBOX_SECRET_ENCRYPTION_KEY=${OPENSANDBOX_SECRET_ENCRYPTION_KEY}
 EOF
 ENVSETUP
 

@@ -1,0 +1,67 @@
+---
+title: "Instances"
+description: "Persistent sandboxes that multiplex conversations, hibernate when idle, and wake on demand"
+---
+
+An Instance is a persistent sandbox bound to an Agent. It stays alive across conversations, accumulates state (filesystem, installed tools, running processes), and hibernates when idle. Multiple conversations are multiplexed onto one instance via `conversation_id`.
+
+**Typical mapping:** one Instance per user or team. The caller owns conversation identity (e.g., Slack thread timestamp).
+
+## Create instance
+
+```
+POST /v1/agents/:agentId/instances
+```
+
+```json
+{ "metadata": { "slack_user": "U123", "team": "engineering" } }
+```
+
+Returns `201` with `status: "creating"`. The platform provisions a sandbox from the agent's snapshot in the background. Status becomes `"running"` once ready.
+
+## List / Get / Delete
+
+```
+GET    /v1/agents/:agentId/instances        List instances for an agent
+GET    /v1/agents/:agentId/instances/:id    Get instance
+DELETE /v1/agents/:agentId/instances/:id    Destroy (kills sandbox)
+```
+
+## Instance object
+
+```json
+{
+  "id": "inst_98adcc7e...",
+  "agent_id": "slack-coworker",
+  "status": "creating | running | error",
+  "metadata": { "slack_user": "U123" },
+  "created_at": "2026-04-09T...",
+  "updated_at": "2026-04-09T..."
+}
+```
+
+## Send message
+
+```
+POST /v1/agents/:agentId/instances/:id/messages
+```
+
+```json
+{ "content": "analyze the auth service repo", "conversation_id": "1712345678.123456" }
+```
+
+Returns `200` with `Content-Type: text/event-stream`. If the instance is still `creating`, waits up to 30s for it to become ready.
+
+**SSE events:**
+
+```
+data: {"type":"text","content":"Cloning the repo now...","conversation_id":"1712345678.123456"}
+data: {"type":"text","content":"Found 3 issues...","conversation_id":"1712345678.123456"}
+data: {"type":"done"}
+```
+
+The stream closes after the agent completes one turn. The caller collects `text` events and concatenates their `content` for the full response.
+
+## Recovery
+
+If the caller process restarts, rebuild instance mappings from `GET /v1/agents/:agentId/instances` using `metadata` to match external identities (e.g., Slack user IDs) back to instance IDs.

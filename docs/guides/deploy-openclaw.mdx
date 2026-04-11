@@ -1,0 +1,165 @@
+---
+title: "Deploy OpenClaw"
+description: "Run managed, per-user OpenClaw AI agent instances inside OpenComputer sandboxes"
+---
+
+In this guide you'll deploy [OpenClaw](https://openclaw.ai) — a multi-platform AI agent gateway — as a managed, per-user service running inside OpenComputer sandboxes. Each user gets their own isolated OpenClaw instance with a web chat UI and optional Telegram integration.
+
+<Card title="GitHub Repository" icon="github" href="https://github.com/diggerhq/oc-openclaw-template">
+  Source code and provisioning scripts.
+</Card>
+
+---
+
+## Prerequisites
+
+- **Node.js 20+** installed locally
+- An **Anthropic API key** (for Claude, used by the OpenClaw agent)
+- An **OpenComputer API key**
+
+---
+
+## Step 1: Sign Up for OpenComputer
+
+Go to [app.opencomputer.dev](https://app.opencomputer.dev) and create an account.
+
+## Step 2: Generate an API Token
+
+From the OpenComputer dashboard, generate an API token. You'll use this to authenticate SDK calls that create and manage sandboxes.
+
+## Step 3: Set Up the Project
+
+Clone the template repository and install dependencies:
+
+```bash
+git clone https://github.com/diggerhq/oc-openclaw-template.git
+cd oc-openclaw-template
+npm install
+```
+
+Set your OpenComputer API key:
+
+```bash
+export OPENCOMPUTER_API_KEY="your-opencomputer-token"
+```
+
+## Step 4: Build the Snapshot
+
+The snapshot is a reusable base image with Node.js and OpenClaw pre-installed. Building it takes a few minutes but only needs to happen once.
+
+```bash
+npx tsx src/build-snapshot.ts
+```
+
+This installs Node.js 22, OpenClaw, and Telegram dependencies into a snapshot called `openclaw-ready`. All future sandboxes boot from this snapshot in seconds.
+
+## Step 5: Provision an Agent
+
+Provision an OpenClaw instance for a user:
+
+```bash
+npx tsx src/provision-claw.ts \
+  --employee-id emp-001 \
+  --anthropic-api-key "sk-ant-..."
+```
+
+This creates a sandbox from the snapshot, writes the OpenClaw config with a unique gateway token, and starts the gateway. The gateway binds to loopback only — no ports are exposed externally.
+
+Optional parameters:
+
+```bash
+--model "anthropic/claude-sonnet-4-6"  # LLM model (default)
+--timeout 600                           # idle timeout in seconds
+--memory 4096                           # sandbox memory in MB
+```
+
+## Step 6: Start the Chat Server
+
+The chat server is a lightweight proxy that serves a web UI per user and routes messages to their sandbox via the OpenComputer SDK. No gateway URLs or tokens are exposed to the browser.
+
+```bash
+npx tsx src/chat-server.ts
+```
+
+Open `http://localhost:3000/emp-001` in your browser to start chatting with the agent.
+
+The landing page at `http://localhost:3000` lists all running agents.
+
+## Step 7: (Optional) Add Telegram
+
+Each agent can be connected to its own Telegram bot. First, create a bot via [@BotFather](https://t.me/BotFather) on Telegram, then configure it:
+
+```bash
+npx tsx src/configure-telegram.ts \
+  --employee-id emp-001 \
+  --tg-bot-token "123456:ABC..." \
+  --tg-user-id "987654321"
+```
+
+To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+---
+
+## How It Works
+
+### Provisioning Flow
+
+1. **Sandbox is created** from the pre-built snapshot using `Sandbox.create()` — this takes seconds, not minutes.
+2. **OpenClaw config** is written with a unique gateway auth token, the selected model, and security settings (exec auto-approval, loopback-only binding).
+3. **API key** is written to an env file sourced by the gateway process.
+4. **Gateway starts** via a startup script that launches OpenClaw in the background and waits for it to become ready.
+5. **Device pairings** are auto-approved so internal connections (cron jobs, Telegram) work without manual intervention.
+
+### Chat Proxy Architecture
+
+The chat server uses the OpenComputer SDK to execute commands inside each sandbox. When a user sends a message:
+
+1. The browser sends a `POST /api/chat/:employeeId` to the chat server.
+2. The server looks up the sandbox ID from the fleet registry.
+3. It connects to the sandbox via `Sandbox.connect()` and reads the gateway token from the config file.
+4. It writes the message payload to a temp file inside the sandbox and runs `curl` against the gateway's `/v1/chat/completions` endpoint on `127.0.0.1`.
+5. The SSE response is streamed back to the browser.
+
+The gateway URL and auth token never leave the server. The browser only knows the employee ID.
+
+### Security Model
+
+- **Loopback-only gateway** — the OpenClaw gateway binds to `127.0.0.1`, not accessible from outside the sandbox.
+- **No preview URLs** — unlike other OpenComputer use cases, no ports are exposed. All access is proxied through the OC SDK.
+- **Per-sandbox tokens** — each sandbox gets a unique gateway auth token generated at provision time using `crypto.randomBytes()`.
+- **Exec auto-approval** — since agents run in fully isolated sandboxes, tool execution is auto-approved (`tools.exec.security: "full"`).
+
+### Fleet Management
+
+The template includes scripts for managing multiple agents:
+
+```bash
+# Check health of all running agents
+npx tsx src/fleet-health.ts
+
+# Rolling update across the fleet
+npx tsx src/fleet-update.ts --version latest
+```
+
+All agent metadata is stored in `fleet-registry.json` (swap for a database in production).
+
+---
+
+## Customization
+
+### Changing the Model
+
+Pass `--model` when provisioning, or update an existing agent's config:
+
+```bash
+oc exec <sandbox-id> --wait -- openclaw config set agents.defaults.model.primary "anthropic/claude-sonnet-4-6"
+```
+
+### Adding More Channels
+
+OpenClaw supports WhatsApp, Discord, Slack, and more. Configure them via `openclaw config set` inside the sandbox:
+
+```bash
+oc exec <sandbox-id> --wait -- openclaw config set channels.discord.enabled true
+```
+

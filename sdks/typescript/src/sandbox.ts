@@ -104,16 +104,12 @@ export class Sandbox {
     this.token = data.token || "";
     this._sandboxDomain = data.sandboxDomain || "";
 
-    // Use direct worker URL for data operations if available
-    const opsUrl = this.connectUrl || apiUrl;
-    const opsKey = this.connectUrl ? "" : apiKey;
-    const opsToken = this.connectUrl ? this.token : "";
-
-    this.agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
-    this.files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    this.exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
+    // Always route through the CP — it handles readiness waiting and proxies to workers.
+    this.agent = new Agent(apiUrl, apiKey, this.sandboxId, "");
+    this.files = new Filesystem(apiUrl, apiKey, this.sandboxId, "");
+    this.exec = new Exec(apiUrl, apiKey, this.sandboxId, "");
     this.commands = this.exec; // backwards-compatible alias
-    this.pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
+    this.pty = new Pty(apiUrl, apiKey, this.sandboxId, "");
   }
 
   get status(): string {
@@ -148,7 +144,9 @@ export class Sandbox {
     if (opts.image) body.image = opts.image.toJSON();
     if (opts.snapshot) body.snapshot = opts.snapshot;
 
-    const useSSE = opts.onBuildLog && (opts.image || opts.snapshot);
+    // Always use SSE for image/snapshot creation to keep the connection alive
+    // through proxies (Cloudflare has a 100s idle timeout).
+    const useSSE = !!(opts.image || opts.snapshot);
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -170,7 +168,8 @@ export class Sandbox {
     }
 
     if (useSSE && resp.headers.get("content-type")?.includes("text/event-stream")) {
-      const data = await parseSSEStream<SandboxData>(resp, opts.onBuildLog!);
+      const onLog = opts.onBuildLog ?? (() => {});
+      const data = await parseSSEStream<SandboxData>(resp, onLog);
       return new Sandbox(data, apiUrl, apiKey);
     }
 
@@ -256,29 +255,20 @@ export class Sandbox {
     this.connectUrl = data.connectURL || "";
     this.token = data.token || "";
 
-    // Rebuild ops clients with new worker connection
-    const opsUrl = this.connectUrl || this.apiUrl;
-    const opsKey = this.connectUrl ? "" : this.apiKey;
-    const opsToken = this.connectUrl ? this.token : "";
-
-    (this as any).agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
+    // Always route through the CP
+    (this as any).agent = new Agent(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).files = new Filesystem(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).exec = new Exec(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).pty = new Pty(this.apiUrl, this.apiKey, this.sandboxId, "");
   }
 
   async setTimeout(timeout: number): Promise<void> {
-    // Route to worker directly (like commands/files/pty) — the control plane
-    // rejects this call in server mode.
-    const url = this.connectUrl || this.apiUrl;
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (this.connectUrl && this.token) {
-      headers["Authorization"] = `Bearer ${this.token}`;
-    } else if (this.apiKey) {
+    if (this.apiKey) {
       headers["X-API-Key"] = this.apiKey;
     }
 
-    const resp = await fetch(`${url}/sandboxes/${this.sandboxId}/timeout`, {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/timeout`, {
       method: "POST",
       headers,
       body: JSON.stringify({ timeout }),
@@ -340,13 +330,12 @@ export class Sandbox {
 
     this.connectUrl = data.connectURL || "";
     this.token = data.token || "";
-    const opsUrl = this.connectUrl || this.apiUrl;
-    const opsKey = this.connectUrl ? "" : this.apiKey;
-    const opsToken = this.connectUrl ? this.token : "";
-    (this as any).agent = new Agent(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).files = new Filesystem(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).exec = new Exec(opsUrl, opsKey, this.sandboxId, opsToken);
-    (this as any).pty = new Pty(opsUrl, opsKey, this.sandboxId, opsToken);
+
+    // Always route through the CP
+    (this as any).agent = new Agent(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).files = new Filesystem(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).exec = new Exec(this.apiUrl, this.apiKey, this.sandboxId, "");
+    (this as any).pty = new Pty(this.apiUrl, this.apiKey, this.sandboxId, "");
   }
 
   static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout"> = {}): Promise<Sandbox> {

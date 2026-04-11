@@ -70,7 +70,9 @@ class Sandbox:
         if key:
             headers["X-API-Key"] = key
 
-        use_sse = on_build_log is not None and (image is not None or snapshot is not None)
+        # Always use SSE for image/snapshot creation to keep the connection alive
+        # through proxies (Cloudflare has a 100s idle timeout).
+        use_sse = image is not None or snapshot is not None
         if use_sse:
             headers["Accept"] = "text/event-stream"
 
@@ -185,9 +187,8 @@ class Sandbox:
 
     @property
     def _ops_client(self) -> httpx.AsyncClient:
-        """Return the client for data operations (direct worker if available, else CP)."""
-        if self._data_client is not None:
-            return self._data_client
+        """Return the client for data operations. Always goes through the CP,
+        which handles readiness waiting and proxies to workers."""
         return self._client
 
     async def kill(self) -> None:
