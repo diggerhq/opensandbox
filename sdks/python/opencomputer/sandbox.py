@@ -335,6 +335,8 @@ class Sandbox:
         timeout: int = 300,
         api_key: str | None = None,
         api_url: str | None = None,
+        envs: dict[str, str] | None = None,
+        secret_store: str | None = None,
     ) -> Sandbox:
         """Create a new sandbox from an existing checkpoint (fork).
 
@@ -343,6 +345,10 @@ class Sandbox:
             timeout: Sandbox timeout in seconds (default 300).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
+            envs: Environment variables to override on the fork.
+            secret_store: Secret store name to attach. If the checkpoint
+                already has a store, secrets are merged (new store wins
+                on collision, egress allowlists aggregate).
         """
         url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
@@ -356,9 +362,15 @@ class Sandbox:
 
         client = httpx.AsyncClient(base_url=api_base, headers=headers, timeout=120.0)
 
+        body: dict[str, Any] = {"timeout": timeout}
+        if envs:
+            body["envs"] = envs
+        if secret_store:
+            body["secretStore"] = secret_store
+
         resp = await client.post(
             f"/sandboxes/from-checkpoint/{checkpoint_id}",
-            json={"timeout": timeout},
+            json=body,
         )
         resp.raise_for_status()
         data = resp.json()
