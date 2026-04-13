@@ -338,12 +338,14 @@ export class Sandbox {
     (this as any).pty = new Pty(this.apiUrl, this.apiKey, this.sandboxId, "");
   }
 
-  static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout"> = {}): Promise<Sandbox> {
+  static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout" | "envs" | "secretStore"> = {}): Promise<Sandbox> {
     const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENCOMPUTER_API_URL ?? "https://app.opencomputer.dev");
     const apiKey = opts.apiKey ?? process.env.OPENCOMPUTER_API_KEY ?? "";
 
     const body: Record<string, unknown> = {};
     if (opts.timeout != null) body.timeout = opts.timeout;
+    if (opts.envs) body.envs = opts.envs;
+    if (opts.secretStore) body.secretStore = opts.secretStore;
 
     const resp = await fetch(`${apiUrl}/sandboxes/from-checkpoint/${checkpointId}`, {
       method: "POST",
