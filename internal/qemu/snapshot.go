@@ -200,7 +200,24 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 			return nil, fmt.Errorf("copy %s for archive staging: %w", driveFile, err)
 		}
 	}
-	log.Printf("qemu: hibernate %s: archive staging ready (reflink copies)", sandboxID)
+	// Flatten rootfs before archiving: the cached rootfs.qcow2 is a thin overlay
+	// on top of /data/firecracker/images/default.ext4. That base file's byte
+	// content differs per worker (random ext4 UUID at build time), so if the
+	// archive is downloaded on another worker the overlay resolves unchanged
+	// clusters through a DIFFERENT base and the restored guest's ext4 metadata
+	// fails checksum verification → EBADMSG on every file read. `qemu-img rebase
+	// -b ""` merges the base into the overlay so the qcow2 is self-contained.
+	// Unlike `qemu-img convert`, rebase preserves internal savevm snapshots
+	// which loadvm on the destination needs to restore VM state.
+	stagedRootfs := filepath.Join(archiveDir, rootfsFile)
+	if fileExists(stagedRootfs) {
+		rebaseCmd := exec.Command("qemu-img", "rebase", "-b", "", stagedRootfs)
+		if out, err := rebaseCmd.CombinedOutput(); err != nil {
+			log.Printf("qemu: hibernate %s: rootfs rebase failed — archive may not be cross-worker portable: %v (%s)",
+				sandboxID, err, strings.TrimSpace(string(out)))
+		}
+	}
+	log.Printf("qemu: hibernate %s: archive staging ready (reflink + flatten)", sandboxID)
 
 	// Signal channel so destroyVM can wait for archive completion before deleting files.
 	archiveDone := make(chan struct{})

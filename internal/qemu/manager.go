@@ -1981,20 +1981,70 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		}
 
 		t1 := time.Now()
-		archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
-		if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
-			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
-		} else {
-			uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			if _, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); uerr != nil {
-				log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
-			} else {
-				log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v)",
-					checkpointID, time.Since(t1).Milliseconds(), archiveFiles)
-			}
-			cancel()
-			os.Remove(archivePath)
+		// Stage a self-contained copy of the rootfs for upload. The cached
+		// rootfs.qcow2 is a thin overlay on top of /data/firecracker/images/default.ext4
+		// — that backing file's exact byte content differs per worker (ext4 UUID is
+		// random on each build), so the overlay is non-portable across workers. On
+		// a cross-worker fork, the target worker resolves unchanged clusters through
+		// a DIFFERENT default.ext4 and the guest's restored ext4 metadata fails
+		// checksum verification → EBADMSG ("Bad message") on every file read.
+		//
+		// `qemu-img rebase -b ""` merges the backing file into the overlay so the
+		// qcow2 is fully self-contained. Unlike `qemu-img convert`, rebase preserves
+		// internal savevm snapshots — critical because loadvm on the destination
+		// needs the "cp-<id>" snapshot intact.
+		archiveStaging := filepath.Join(cacheDir, "archive-upload")
+		_ = os.RemoveAll(archiveStaging)
+		if err := os.MkdirAll(archiveStaging, 0755); err != nil {
+			log.Printf("qemu: checkpoint %s: mkdir archive staging: %v", checkpointID, err)
 		}
+		// Reflink-copy each archive member into staging. For rootfs.qcow2, flatten
+		// after copying; others go as-is.
+		var stagedFiles []string
+		archiveOk := true
+		for _, f := range archiveFiles {
+			src := filepath.Join(cacheDir, f)
+			dst := filepath.Join(archiveStaging, f)
+			if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+				log.Printf("qemu: checkpoint %s: stage mkdir: %v", checkpointID, err)
+				archiveOk = false
+				break
+			}
+			if err := copyFileReflink(src, dst); err != nil {
+				log.Printf("qemu: checkpoint %s: stage %s: %v", checkpointID, f, err)
+				archiveOk = false
+				break
+			}
+			stagedFiles = append(stagedFiles, f)
+		}
+		if archiveOk {
+			stagedRootfs := filepath.Join(archiveStaging, "rootfs.qcow2")
+			if fileExists(stagedRootfs) {
+				rebase := exec.Command("qemu-img", "rebase", "-b", "", stagedRootfs)
+				if out, err := rebase.CombinedOutput(); err != nil {
+					log.Printf("qemu: checkpoint %s: rootfs rebase failed: %v (%s)",
+						checkpointID, err, strings.TrimSpace(string(out)))
+					archiveOk = false
+				}
+			}
+		}
+		archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
+		if archiveOk {
+			if err := createArchive(archivePath, archiveStaging, stagedFiles); err != nil {
+				log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
+			} else {
+				uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+				if _, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); uerr != nil {
+					log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+				} else {
+					log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v, flattened=true)",
+						checkpointID, time.Since(t1).Milliseconds(), stagedFiles)
+				}
+				cancel()
+				os.Remove(archivePath)
+			}
+		}
+		os.RemoveAll(archiveStaging)
 	}
 
 	if onReady != nil {
