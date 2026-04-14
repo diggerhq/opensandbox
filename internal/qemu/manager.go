@@ -1839,7 +1839,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		// resets the virtio-serial listener so forks start with a clean Accept state.
 		vm.agent.Close()
 		vm.agent = nil
-		time.Sleep(500 * time.Millisecond) // let guest process SIGUSR1
+		// Give the guest time to fully quiesce virtio-serial state. 500ms was
+		// observed to leave a small residual rate of "agent not ready" failures
+		// on fork after loadvm (post-loadvm virtio-serial comes up but Accept
+		// doesn't land cleanly). 1s should give the guest enough time without
+		// noticeably adding to checkpoint latency.
+		time.Sleep(1 * time.Second)
 	}
 
 	// Savevm-based checkpoint: pack memory + device state + disk deltas into
@@ -2404,96 +2409,108 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 		incomingURI = ""
 	}
 
-	os.Remove(qmpSockPath)
-	os.Remove(agentSockPath)
+	// Boot QEMU, load the checkpoint (migration or loadvm), and connect the
+	// agent inside. Post-loadvm virtio-serial occasionally comes up with the
+	// Accept side not ready (the guest resumes, the kernel brings up the
+	// virtio-serial port, but the agent's accept() doesn't land in time).
+	// That's a transient flake — retrying a fresh boot from the same checkpoint
+	// usually recovers. Wrap boot-to-agent-connect in one retry.
+	bootAndRestore := func() (*exec.Cmd, *QMPClient, *AgentClient, error) {
+		os.Remove(qmpSockPath)
+		os.Remove(agentSockPath)
 
-	logPath := filepath.Join(sandboxDir, "qemu.log")
-	logFile, err := os.Create(logPath)
-	if err != nil {
-		m.cleanupVM(netCfg, sandboxDir)
-		return nil, fmt.Errorf("create log file: %w", err)
-	}
+		logPath := filepath.Join(sandboxDir, "qemu.log")
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("create log file: %w", err)
+		}
 
-	args := m.buildQEMUArgs(cpus, memMB, rootfsPath, workspacePath,
-		netCfg.TAPName, guestMAC, agentSockPath, qmpSockPath, bootArgs)
+		args := m.buildQEMUArgs(cpus, memMB, rootfsPath, workspacePath,
+			netCfg.TAPName, guestMAC, agentSockPath, qmpSockPath, bootArgs)
+		if incomingURI != "" {
+			args = append(args, "-incoming", incomingURI)
+		} else {
+			args = append(args, "-S")
+		}
 
-	if incomingURI != "" {
-		// Migration-based restore: QEMU loads state from the mem dump file.
-		args = append(args, "-incoming", incomingURI)
-	} else {
-		// Savevm-based fallback: start paused, then loadvm.
-		args = append(args, "-S")
-	}
-
-	cmd := exec.Command(m.cfg.QEMUBin, args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
+		cmd := exec.Command(m.cfg.QEMUBin, args...)
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		if err := cmd.Start(); err != nil {
+			logFile.Close()
+			return nil, nil, nil, fmt.Errorf("start qemu for fork: %w", err)
+		}
 		logFile.Close()
-		m.cleanupVM(netCfg, sandboxDir)
-		return nil, fmt.Errorf("start qemu for fork: %w", err)
-	}
-	logFile.Close()
 
-	log.Printf("qemu: ForkFromCheckpoint %s → %s: QEMU started (pid=%d, migration=%v)",
-		checkpointID, id, cmd.Process.Pid, incomingURI != "")
+		log.Printf("qemu: ForkFromCheckpoint %s → %s: QEMU started (pid=%d, migration=%v)",
+			checkpointID, id, cmd.Process.Pid, incomingURI != "")
 
-	qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
-	if err != nil {
-		cmd.Process.Kill()
-		cmd.Wait()
-		m.cleanupVM(netCfg, sandboxDir)
-		return nil, fmt.Errorf("QMP connect: %w", err)
-	}
+		qmpClient, err := waitForQMP(qmpSockPath, 10*time.Second)
+		if err != nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+			return nil, nil, nil, fmt.Errorf("QMP connect: %w", err)
+		}
 
-	if incomingURI != "" {
-		// Migration-based: wait for incoming migration to finish loading, then resume.
-		if err := m.waitForMigrationReady(qmpClient, 30*time.Second); err != nil {
+		if incomingURI != "" {
+			if err := m.waitForMigrationReady(qmpClient, 30*time.Second); err != nil {
+				qmpClient.Close()
+				cmd.Process.Kill()
+				cmd.Wait()
+				return nil, nil, nil, fmt.Errorf("migration load: %w", err)
+			}
+		} else {
+			snapshotName := "cp-" + checkpointID
+			if data, readErr := os.ReadFile(filepath.Join(cacheDir, "snapshot-name")); readErr == nil {
+				snapshotName = strings.TrimSpace(string(data))
+			}
+			if err := qmpClient.LoadVM(snapshotName); err != nil {
+				qmpClient.Close()
+				cmd.Process.Kill()
+				cmd.Wait()
+				return nil, nil, nil, fmt.Errorf("loadvm: %w", err)
+			}
+		}
+
+		if err := qmpClient.Cont(); err != nil {
 			qmpClient.Close()
 			cmd.Process.Kill()
 			cmd.Wait()
-			m.cleanupVM(netCfg, sandboxDir)
-			return nil, fmt.Errorf("migration load: %w", err)
+			return nil, nil, nil, fmt.Errorf("QMP cont: %w", err)
 		}
-	} else {
-		// Savevm fallback: load the internal snapshot.
-		snapshotName := "cp-" + checkpointID
-		if data, readErr := os.ReadFile(filepath.Join(cacheDir, "snapshot-name")); readErr == nil {
-			snapshotName = strings.TrimSpace(string(data))
+		log.Printf("qemu: ForkFromCheckpoint %s → %s: VM resumed (%dms), connecting agent...",
+			checkpointID, id, time.Since(t0).Milliseconds())
+
+		agentTimeout := 30 * time.Second
+		if incomingURI != "" {
+			agentTimeout = 10 * time.Second
 		}
-		if err := qmpClient.LoadVM(snapshotName); err != nil {
+		agent, err := m.waitForAgentSocket(context.Background(), agentSockPath, agentTimeout)
+		if err != nil {
 			qmpClient.Close()
 			cmd.Process.Kill()
 			cmd.Wait()
-			m.cleanupVM(netCfg, sandboxDir)
-			return nil, fmt.Errorf("loadvm: %w", err)
+			return nil, nil, nil, fmt.Errorf("agent connect: %w", err)
 		}
+		return cmd, qmpClient, agent, nil
 	}
 
-	if err := qmpClient.Cont(); err != nil {
-		qmpClient.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-		m.cleanupVM(netCfg, sandboxDir)
-		return nil, fmt.Errorf("QMP cont: %w", err)
-	}
-	log.Printf("qemu: ForkFromCheckpoint %s → %s: VM resumed (%dms), connecting agent...",
-		checkpointID, id, time.Since(t0).Milliseconds())
-
-	// Connect agent — migration-based restores are reliable (no virtio-serial
-	// state issues), so use a shorter timeout.
-	agentTimeout := 30 * time.Second
-	if incomingURI != "" {
-		agentTimeout = 10 * time.Second
-	}
+	var cmd *exec.Cmd
+	var qmpClient *QMPClient
 	var agent *AgentClient
-	agent, err = m.waitForAgentSocket(context.Background(), agentSockPath, agentTimeout)
-	if err != nil {
-		qmpClient.Close()
-		cmd.Process.Kill()
-		cmd.Wait()
-		m.cleanupVM(netCfg, sandboxDir)
-		return nil, fmt.Errorf("agent connect: %w", err)
+	for attempt := 1; attempt <= 2; attempt++ {
+		c, q, a, bErr := bootAndRestore()
+		if bErr == nil {
+			cmd, qmpClient, agent = c, q, a
+			break
+		}
+		retriable := attempt == 1 && strings.Contains(bErr.Error(), "agent connect")
+		if !retriable {
+			m.cleanupVM(netCfg, sandboxDir)
+			return nil, bErr
+		}
+		log.Printf("qemu: ForkFromCheckpoint %s → %s: transient virtio-serial flake on attempt %d, retrying: %v",
+			checkpointID, id, attempt, bErr)
 	}
 
 	log.Printf("qemu: ForkFromCheckpoint %s → %s: agent connected, patching network...", checkpointID, id)
