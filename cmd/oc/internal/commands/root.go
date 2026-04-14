@@ -31,11 +31,9 @@ var rootCmd = &cobra.Command{
 		c := client.New(cfg.APIURL, cfg.APIKey)
 		ctx := client.WithClient(cmd.Context(), c)
 
-		// Set up sessions-api client if configured
-		if cfg.SessionsAPIURL != "" {
-			sc := client.NewSessionsAPI(cfg.SessionsAPIURL, cfg.APIKey)
-			ctx = client.WithSessionsClient(ctx, sc)
-		}
+		// Set up sessions-api client (defaults to api.opencomputer.dev)
+		sc := client.NewSessionsAPI(cfg.SessionsAPIURL, cfg.APIKey)
+		ctx = client.WithSessionsClient(ctx, sc)
 
 		cmd.SetContext(ctx)
 		printer = output.New(jsonOutput)
