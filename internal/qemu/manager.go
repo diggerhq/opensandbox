@@ -547,6 +547,19 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		os.RemoveAll(sandboxDir)
 		return nil, fmt.Errorf("create workspace: %w", err)
 	}
+
+	// Resize workspace if requested size exceeds default (golden geometry)
+	requestedDiskMB := cfg.DiskMB
+	if requestedDiskMB <= 0 {
+		requestedDiskMB = m.cfg.DefaultDiskMB
+	}
+	if requestedDiskMB > diskMB {
+		if err := ResizeWorkspace(workspacePath, requestedDiskMB); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("resize workspace: %w", err)
+		}
+	}
+
 	log.Printf("qemu: golden-create %s: rootfs+workspace ready (%dms)", id, time.Since(t0).Milliseconds())
 
 	// Allocate network
@@ -721,6 +734,33 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	vm.agent = agentClient
 	log.Printf("qemu: golden-create %s: agent connected (%dms)", id, time.Since(t0).Milliseconds())
 
+	// If we resized the workspace qcow2 before launch, notify QEMU via QMP
+	// block_resize so virtio-blk fires a capacity-change event to the guest.
+	// Without this, the guest kernel still sees the golden-snapshot-captured
+	// 20GB geometry even though the backing file is larger.
+	if requestedDiskMB > diskMB {
+		newSizeBytes := int64(requestedDiskMB) * 1024 * 1024
+		devs, qbErr := qmpClient.QueryBlock()
+		if qbErr != nil {
+			log.Printf("qemu: golden-create %s: query-block failed: %v", id, qbErr)
+		} else {
+			var devID string
+			for _, d := range devs {
+				if d.Inserted.File == workspacePath {
+					devID = d.Device
+					break
+				}
+			}
+			if devID == "" {
+				log.Printf("qemu: golden-create %s: workspace device not found in query-block", id)
+			} else if err := qmpClient.BlockResize(devID, newSizeBytes); err != nil {
+				log.Printf("qemu: golden-create %s: block_resize failed: %v", id, err)
+			} else {
+				log.Printf("qemu: golden-create %s: block_resize %s → %dMB", id, devID, requestedDiskMB)
+			}
+		}
+	}
+
 	// Patch network inside the guest — the snapshot had the golden VM's IP
 	if err := patchGuestNetwork(context.Background(), agentClient, netCfg); err != nil {
 		log.Printf("qemu: golden-create %s: network patch failed: %v", id, err)
@@ -744,6 +784,7 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 			"echo 3 > /proc/sys/vm/drop_caches",
 			"echo 3 > /proc/sys/vm/drop_caches",
 			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
+			"resize2fs /dev/vdb 2>/dev/null || true",
 			"chown 1000:1000 /home/sandbox",
 		}, " && ")},
 		RunAsRoot: true,
@@ -994,7 +1035,10 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 			return nil, fmt.Errorf("prepare rootfs: %w", err)
 		}
 
-		diskMB := m.cfg.DefaultDiskMB
+		diskMB := cfg.DiskMB
+		if diskMB <= 0 {
+			diskMB = m.cfg.DefaultDiskMB
+		}
 		if err := CreateWorkspace(workspacePath, diskMB); err != nil {
 			os.RemoveAll(sandboxDir)
 			return nil, fmt.Errorf("create workspace: %w", err)
