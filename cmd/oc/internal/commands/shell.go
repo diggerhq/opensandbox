@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 
 	"github.com/gorilla/websocket"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 var shellCmd = &cobra.Command{
 	Use:   "shell <sandbox-id>",
@@ -27,6 +30,21 @@ Examples:
 		c := client.FromContext(cmd.Context())
 		sandboxID := args[0]
 		shellPath, _ := cmd.Flags().GetString("shell")
+
+		// If the argument doesn't look like a UUID, try to resolve it as an
+		// agent name through sessions-api → agent → instance → sandbox_id.
+		if !uuidPattern.MatchString(sandboxID) {
+			sc := client.SessionsFromContext(cmd.Context())
+			if sc != nil {
+				resolved, err := resolveAgentSandbox(cmd, sc, sandboxID)
+				if err != nil {
+					return fmt.Errorf("failed to resolve agent %q: %w", sandboxID, err)
+				}
+				sandboxID = resolved
+			} else {
+				return fmt.Errorf("%q does not look like a sandbox ID. Set SESSIONS_API_URL to resolve agent names.", sandboxID)
+			}
+		}
 
 		// Get sandbox info to resolve connectURL for direct worker access
 		var sandbox struct {
@@ -130,6 +148,27 @@ Examples:
 
 		return nil
 	},
+}
+
+// resolveAgentSandbox looks up an agent by name through sessions-api and returns
+// the sandbox ID of its first running instance.
+func resolveAgentSandbox(cmd *cobra.Command, sc *client.Client, agentName string) (string, error) {
+	var instResp struct {
+		Instances []struct {
+			ID        string  `json:"id"`
+			Status    string  `json:"status"`
+			SandboxID *string `json:"sandbox_id"`
+		} `json:"instances"`
+	}
+	if err := sc.Get(cmd.Context(), "/v1/agents/"+agentName+"/instances", &instResp); err != nil {
+		return "", err
+	}
+	for _, inst := range instResp.Instances {
+		if inst.Status == "running" && inst.SandboxID != nil {
+			return *inst.SandboxID, nil
+		}
+	}
+	return "", fmt.Errorf("no running instance found for agent %q", agentName)
 }
 
 func init() {
