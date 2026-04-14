@@ -57,8 +57,8 @@ variable "location" {
 
 variable "vm_size" {
   type        = string
-  default     = "Standard_D4s_v6"
-  description = "Builder VM size. Must be v6 family to match autoscaled worker disk controller."
+  default     = "Standard_D4ads_v7"
+  description = "Builder VM size. Must match the autoscaled worker VM family for disk controller compatibility."
 }
 
 variable "image_name_prefix" {
