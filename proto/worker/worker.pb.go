@@ -91,6 +91,7 @@ type CreateSandboxRequest struct {
 	// Env vars resolved from a SecretStore. Sealed by the worker's secrets proxy
 	// before injection into the VM. Disjoint from `envs` (which is plaintext).
 	SecretEnvs    map[string]string `protobuf:"bytes,15,rep,name=secret_envs,json=secretEnvs,proto3" json:"secret_envs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	DiskMb        int32             `protobuf:"varint,16,opt,name=disk_mb,json=diskMb,proto3" json:"disk_mb,omitempty"` // workspace disk size in MB (0 = default 20GB)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -228,6 +229,13 @@ func (x *CreateSandboxRequest) GetSecretEnvs() map[string]string {
 		return x.SecretEnvs
 	}
 	return nil
+}
+
+func (x *CreateSandboxRequest) GetDiskMb() int32 {
+	if x != nil {
+		return x.DiskMb
+	}
+	return 0
 }
 
 type CreateSandboxResponse struct {
@@ -3037,7 +3045,7 @@ var File_proto_worker_worker_proto protoreflect.FileDescriptor
 
 const file_proto_worker_worker_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/worker/worker.proto\x12\x06worker\"\xe7\x06\n" +
+	"\x19proto/worker/worker.proto\x12\x06worker\"\x80\a\n" +
 	"\x14CreateSandboxRequest\x12\x1a\n" +
 	"\btemplate\x18\x01 \x01(\tR\btemplate\x12\x18\n" +
 	"\atimeout\x18\x02 \x01(\x05R\atimeout\x12:\n" +
@@ -3056,7 +3064,8 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\x10egress_allowlist\x18\r \x03(\tR\x0fegressAllowlist\x12f\n" +
 	"\x14secret_allowed_hosts\x18\x0e \x03(\v24.worker.CreateSandboxRequest.SecretAllowedHostsEntryR\x12secretAllowedHosts\x12M\n" +
 	"\vsecret_envs\x18\x0f \x03(\v2,.worker.CreateSandboxRequest.SecretEnvsEntryR\n" +
-	"secretEnvs\x1a7\n" +
+	"secretEnvs\x12\x17\n" +
+	"\adisk_mb\x18\x10 \x01(\x05R\x06diskMb\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aE\n" +

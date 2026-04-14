@@ -547,6 +547,19 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 		os.RemoveAll(sandboxDir)
 		return nil, fmt.Errorf("create workspace: %w", err)
 	}
+
+	// Resize workspace if requested size exceeds default (golden geometry)
+	requestedDiskMB := cfg.DiskMB
+	if requestedDiskMB <= 0 {
+		requestedDiskMB = m.cfg.DefaultDiskMB
+	}
+	if requestedDiskMB > diskMB {
+		if err := ResizeWorkspace(workspacePath, requestedDiskMB); err != nil {
+			os.RemoveAll(sandboxDir)
+			return nil, fmt.Errorf("resize workspace: %w", err)
+		}
+	}
+
 	log.Printf("qemu: golden-create %s: rootfs+workspace ready (%dms)", id, time.Since(t0).Milliseconds())
 
 	// Allocate network
@@ -744,6 +757,7 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 			"echo 3 > /proc/sys/vm/drop_caches",
 			"echo 3 > /proc/sys/vm/drop_caches",
 			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
+			"resize2fs /dev/vdb 2>/dev/null || true",
 			"chown 1000:1000 /home/sandbox",
 		}, " && ")},
 		RunAsRoot: true,
@@ -994,7 +1008,10 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 			return nil, fmt.Errorf("prepare rootfs: %w", err)
 		}
 
-		diskMB := m.cfg.DefaultDiskMB
+		diskMB := cfg.DiskMB
+		if diskMB <= 0 {
+			diskMB = m.cfg.DefaultDiskMB
+		}
 		if err := CreateWorkspace(workspacePath, diskMB); err != nil {
 			os.RemoveAll(sandboxDir)
 			return nil, fmt.Errorf("create workspace: %w", err)

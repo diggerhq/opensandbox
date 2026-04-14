@@ -38,8 +38,10 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	// Check org quota and plan enforcement
 	orgID, hasOrg := auth.GetOrgID(c)
+	var org *db.Org
 	if hasOrg && s.store != nil {
-		org, err := s.store.GetOrg(ctx, orgID)
+		var err error
+		org, err = s.store.GetOrg(ctx, orgID)
 		if err == nil {
 			// Concurrent sandbox limit
 			count, err := s.store.CountActiveSandboxes(ctx, orgID)
@@ -62,6 +64,37 @@ func (s *Server) createSandbox(c echo.Context) error {
 					cfg.CpuCount = 1
 				}
 			}
+		}
+	}
+
+	// Disk size validation
+	if cfg.DiskMB == 0 {
+		cfg.DiskMB = 20480 // default 20GB
+	}
+	if cfg.DiskMB < 20480 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "diskMB must be at least 20480 (20GB)",
+		})
+	}
+	if cfg.DiskMB > 262144 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "diskMB cannot exceed 262144 (256GB)",
+		})
+	}
+	if org != nil {
+		if org.Plan == "free" && cfg.DiskMB > 20480 {
+			return c.JSON(http.StatusPaymentRequired, map[string]string{
+				"error": "upgrade to pro for larger disk sizes",
+			})
+		}
+		maxDisk := org.MaxDiskMB
+		if maxDisk == 0 {
+			maxDisk = 20480
+		}
+		if cfg.DiskMB > maxDisk {
+			return c.JSON(http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("disk size %dMB exceeds org limit of %dMB", cfg.DiskMB, maxDisk),
+			})
 		}
 	}
 
@@ -410,6 +443,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		EgressAllowlist:      cfg.EgressAllowlist,
 		SecretAllowedHosts:   flattenSecretAllowedHosts(cfg.SecretAllowedHosts),
 		SecretEnvs:           cfg.SecretEnvs,
+		DiskMb:               int32(cfg.DiskMB),
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
