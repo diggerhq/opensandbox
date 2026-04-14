@@ -114,12 +114,12 @@ source "azure-arm" "worker" {
   managed_image_name                = "${var.image_name_prefix}-${var.worker_version}"
   managed_image_resource_group_name = var.resource_group
 
-  # Also publish to Azure Compute Gallery for NVMe/v6 VM compatibility
+  # Also publish to Azure Compute Gallery for NVMe/v7 VM compatibility
   shared_image_gallery_destination {
     subscription   = var.subscription_id
     resource_group = var.resource_group
     gallery_name   = var.gallery_name
-    image_name     = "osb-worker"
+    image_name     = "osb-worker-v7"
     image_version  = "1.0.${var.image_version_patch}"
     replication_regions = [var.location]
   }
