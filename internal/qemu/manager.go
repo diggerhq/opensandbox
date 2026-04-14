@@ -734,6 +734,33 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	vm.agent = agentClient
 	log.Printf("qemu: golden-create %s: agent connected (%dms)", id, time.Since(t0).Milliseconds())
 
+	// If we resized the workspace qcow2 before launch, notify QEMU via QMP
+	// block_resize so virtio-blk fires a capacity-change event to the guest.
+	// Without this, the guest kernel still sees the golden-snapshot-captured
+	// 20GB geometry even though the backing file is larger.
+	if requestedDiskMB > diskMB {
+		newSizeBytes := int64(requestedDiskMB) * 1024 * 1024
+		devs, qbErr := qmpClient.QueryBlock()
+		if qbErr != nil {
+			log.Printf("qemu: golden-create %s: query-block failed: %v", id, qbErr)
+		} else {
+			var devID string
+			for _, d := range devs {
+				if d.Inserted.File == workspacePath {
+					devID = d.Device
+					break
+				}
+			}
+			if devID == "" {
+				log.Printf("qemu: golden-create %s: workspace device not found in query-block", id)
+			} else if err := qmpClient.BlockResize(devID, newSizeBytes); err != nil {
+				log.Printf("qemu: golden-create %s: block_resize failed: %v", id, err)
+			} else {
+				log.Printf("qemu: golden-create %s: block_resize %s → %dMB", id, devID, requestedDiskMB)
+			}
+		}
+	}
+
 	// Patch network inside the guest — the snapshot had the golden VM's IP
 	if err := patchGuestNetwork(context.Background(), agentClient, netCfg); err != nil {
 		log.Printf("qemu: golden-create %s: network patch failed: %v", id, err)
