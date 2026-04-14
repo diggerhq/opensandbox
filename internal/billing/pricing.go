@@ -5,13 +5,17 @@ import (
 )
 
 // TierPricePerSecond maps memory_mb → USD per second.
+// Rates were 10×-ed on 2026-04-15 on top of the per-second correction that
+// landed earlier the same day. Existing paying orgs are grandfathered via
+// orgs.price_locked (see migration 022); cmd/migrate-prices skips locked orgs
+// by default so only new signups see these rates.
 var TierPricePerSecond = map[int]float64{
-	1024:  0.000001080246914, // 1GB / 1 vCPU
-	4096:  0.000005787037037, // 4GB / 1 vCPU
-	8192:  0.00001350308642,  // 8GB / 2 vCPU
-	16384: 0.00002700617284,  // 16GB / 4 vCPU
-	32768: 0.0001929012346,   // 32GB / 8 vCPU
-	65536: 0.0005401234568,   // 64GB / 16 vCPU
+	1024:  0.00001080246914, // 1GB / 1 vCPU
+	4096:  0.00005787037037, // 4GB / 1 vCPU
+	8192:  0.0001350308642,  // 8GB / 2 vCPU
+	16384: 0.0002700617284,  // 16GB / 4 vCPU
+	32768: 0.001929012346,   // 32GB / 8 vCPU
+	65536: 0.005401234568,   // 64GB / 16 vCPU
 }
 
 // TierMeterKey maps memory_mb → stable key used to derive the Stripe meter
@@ -30,23 +34,21 @@ var TierMeterKey = map[int]string{
 // Bump the suffix (e.g. sandbox_8gb → sandbox_8gb_v2) whenever TierPricePerSecond
 // changes for that tier: Stripe Prices are immutable, so a new key forces
 // EnsureProducts to create a fresh Price at the new rate. Existing subscriptions
-// must then be migrated to the new Price via cmd/migrate-prices.
+// must then be migrated to the new Price via cmd/migrate-prices — unless the
+// org is marked price_locked=TRUE, in which case they are grandfathered.
 //
-// The suffixes were bumped one step (1gb→_v2, 4gb→_v2, 8gb_v2→_v3, 16gb→_v2,
-// 32gb→_v2, 64gb→_v2) to force EnsureProducts to recreate every memory-tier
-// Stripe Price at the documented per-second rate. The previously-deployed
-// Prices were calibrated off a stale rate map and were under-billing
-// subscribers by 60× (per-minute economics instead of per-second). Run
-// `migrate-prices --tier=<X> --live` for every tier after deploy to move all
-// existing subscriptions onto the corrected Prices — this is a correction,
-// not a price change, so no grandfathering.
+// The suffixes here are bumped one step above the per-second-correction set
+// (which established _v2 for most tiers and _v3 for 8GB). This forces
+// EnsureProducts to create fresh Prices at the 10×-higher rates below. Every
+// org currently paying is locked via migration 022, so migrate-prices skips
+// them by default — only new signups subscribe at the 10× rate.
 var TierPriceKey = map[int]string{
-	1024:  "sandbox_1gb_v2",
-	4096:  "sandbox_4gb_v2",
-	8192:  "sandbox_8gb_v3",
-	16384: "sandbox_16gb_v2",
-	32768: "sandbox_32gb_v2",
-	65536: "sandbox_64gb_v2",
+	1024:  "sandbox_1gb_v3",
+	4096:  "sandbox_4gb_v3",
+	8192:  "sandbox_8gb_v4",
+	16384: "sandbox_16gb_v3",
+	32768: "sandbox_32gb_v3",
+	65536: "sandbox_64gb_v3",
 }
 
 // Disk overage billing — every GB above DiskFreeAllowanceMB is metered for the
