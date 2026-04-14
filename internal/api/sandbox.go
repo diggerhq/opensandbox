@@ -1093,6 +1093,13 @@ func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error 
 		session.Region, session.Template, session.Config)
 	_ = s.store.UpdateSandboxSessionStatus(c.Request().Context(), sandboxID, "hibernated", nil)
 
+	// Invalidate the proxy route cache: wake may land the sandbox on a
+	// different worker, so subsequent data-plane requests must re-resolve
+	// the routing from the DB instead of hitting the old worker.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
+
 	resp := map[string]interface{}{
 		"sandboxID":      sandboxID,
 		"status":         "hibernated",
@@ -1216,6 +1223,13 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	// Mark hibernation as restored, update session
 	_ = s.store.MarkHibernationRestored(c.Request().Context(), sandboxID)
 	_ = s.store.UpdateSandboxSessionForWake(c.Request().Context(), sandboxID, worker.ID)
+
+	// Refresh the proxy route cache with the new worker — wake may have moved
+	// the sandbox to a different worker than where it was hibernated, and any
+	// stale cache entry would route data-plane requests to the wrong worker.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
 
 	// Apply pending checkpoint patches in background
 	go s.applyPendingPatches(sandboxID, worker.ID)
