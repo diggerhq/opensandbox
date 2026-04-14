@@ -13,7 +13,6 @@ import (
 )
 
 type contextKey struct{}
-type sessionsContextKey struct{}
 
 // Client is an HTTP client for the OpenComputer API.
 type Client struct {
@@ -54,31 +53,6 @@ func WithClient(ctx context.Context, c *Client) context.Context {
 // FromContext retrieves the client from the context.
 func FromContext(ctx context.Context) *Client {
 	return ctx.Value(contextKey{}).(*Client)
-}
-
-// WithSessionsClient stores the sessions-api client in the context.
-func WithSessionsClient(ctx context.Context, c *Client) context.Context {
-	return context.WithValue(ctx, sessionsContextKey{}, c)
-}
-
-// SessionsFromContext retrieves the sessions-api client from the context.
-func SessionsFromContext(ctx context.Context) *Client {
-	v := ctx.Value(sessionsContextKey{})
-	if v == nil {
-		return nil
-	}
-	return v.(*Client)
-}
-
-// NewSessionsAPI creates a client for the sessions-api service.
-// Uses X-API-Key auth but no /api prefix (sessions-api routes are /v1/...).
-func NewSessionsAPI(baseURL, apiKey string) *Client {
-	baseURL = strings.TrimRight(baseURL, "/")
-	return &Client{
-		baseURL:    baseURL,
-		apiKey:     apiKey,
-		httpClient: &http.Client{},
-	}
 }
 
 // NewWorker creates a client that authenticates with a Bearer token directly to a worker.
