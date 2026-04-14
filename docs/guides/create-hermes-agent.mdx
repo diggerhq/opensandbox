@@ -13,13 +13,10 @@ This guide walks through creating a managed Hermes agent on OpenComputer, connec
 
 ### Install the CLI
 
-```bash
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-```
-
-Set your API key:
+See [CLI installation](/cli/overview#installation) for all platforms, or quick-install on macOS:
 
 ```bash
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
 oc config set api-key YOUR_API_KEY
 ```
 
