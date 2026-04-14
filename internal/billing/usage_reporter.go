@@ -86,16 +86,26 @@ func (r *UsageReporter) reportOrg(ctx context.Context, orgID uuid.UUID) error {
 	}
 
 	reported := 0
+	var totalDiskGBSeconds float64
 	for _, u := range usage {
 		seconds := int64(math.Ceil(u.TotalSeconds))
-		if seconds < 1 {
-			continue
+		if seconds >= 1 {
+			if err := r.stripe.ReportUsage(*org.StripeCustomerID, u.MemoryMB, seconds, now.Unix()); err != nil {
+				log.Printf("usage-reporter: org %s tier %dMB: %v", orgID, u.MemoryMB, err)
+			} else {
+				reported++
+			}
 		}
-		if err := r.stripe.ReportUsage(*org.StripeCustomerID, u.MemoryMB, seconds, now.Unix()); err != nil {
-			log.Printf("usage-reporter: org %s tier %dMB: %v", orgID, u.MemoryMB, err)
-			continue
+		totalDiskGBSeconds += DiskOverageGBSeconds(u)
+	}
+
+	// Report disk overage as a single aggregated meter event for the window.
+	if diskGBSec := int64(math.Ceil(totalDiskGBSeconds)); diskGBSec >= 1 {
+		if err := r.stripe.ReportDiskOverageUsage(*org.StripeCustomerID, diskGBSec, now.Unix()); err != nil {
+			log.Printf("usage-reporter: org %s disk overage: %v", orgID, err)
+		} else {
+			reported++
 		}
-		reported++
 	}
 
 	if err := r.store.UpdateLastUsageReportedAt(ctx, orgID, to); err != nil {

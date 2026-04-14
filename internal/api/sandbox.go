@@ -39,8 +39,10 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	// Check org quota and plan enforcement
 	orgID, hasOrg := auth.GetOrgID(c)
+	var org *db.Org
 	if hasOrg && s.store != nil {
-		org, err := s.store.GetOrg(ctx, orgID)
+		var err error
+		org, err = s.store.GetOrg(ctx, orgID)
 		if err == nil {
 			// Concurrent sandbox limit
 			count, err := s.store.CountActiveSandboxes(ctx, orgID)
@@ -64,6 +66,37 @@ func (s *Server) createSandbox(c echo.Context) error {
 				cfg.MemoryMB = 4096
 				cfg.CpuCount = 1
 			}
+		}
+	}
+
+	// Disk size validation
+	if cfg.DiskMB == 0 {
+		cfg.DiskMB = 20480 // default 20GB
+	}
+	if cfg.DiskMB < 20480 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "diskMB must be at least 20480 (20GB)",
+		})
+	}
+	if cfg.DiskMB > 262144 {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "diskMB cannot exceed 262144 (256GB)",
+		})
+	}
+	if org != nil {
+		if org.Plan == "free" && cfg.DiskMB > 20480 {
+			return c.JSON(http.StatusPaymentRequired, map[string]string{
+				"error": "upgrade to pro for larger disk sizes",
+			})
+		}
+		maxDisk := org.MaxDiskMB
+		if maxDisk == 0 {
+			maxDisk = 20480
+		}
+		if cfg.DiskMB > maxDisk {
+			return c.JSON(http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("disk size %dMB exceeds org limit of %dMB", cfg.DiskMB, maxDisk),
+			})
 		}
 	}
 
@@ -132,11 +165,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 		})
 	}
 
-	// Register with sandbox router for rolling timeout tracking
+	// Register with sandbox router for rolling timeout tracking.
+	// timeout == 0 means "persistent" (no auto-hibernate). Negative values are
+	// normalized to 0 for safety.
 	if s.router != nil {
 		timeout := cfg.Timeout
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 	}
@@ -429,6 +464,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		EgressAllowlist:      cfg.EgressAllowlist,
 		SecretAllowedHosts:   flattenSecretAllowedHosts(cfg.SecretAllowedHosts),
 		SecretEnvs:           cfg.SecretEnvs,
+		DiskMb:               int32(cfg.DiskMB),
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
@@ -765,9 +801,11 @@ func (s *Server) setTimeout(c echo.Context) error {
 		})
 	}
 
-	if req.Timeout <= 0 {
+	// timeout == 0 means "persistent" (disable auto-hibernate). Negative values
+	// are invalid.
+	if req.Timeout < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "timeout must be positive",
+			"error": "timeout must be non-negative (0 disables auto-hibernate)",
 		})
 	}
 
@@ -1397,6 +1435,9 @@ func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error 
 		session.Region, session.Template, session.Config)
 	_ = s.store.UpdateSandboxSessionStatus(c.Request().Context(), sandboxID, "hibernated", nil)
 
+	// Invalidate the proxy route cache: wake may land the sandbox on a
+	// different worker, so subsequent data-plane requests must re-resolve
+	// the routing from the DB instead of hitting the old worker.
 	if s.sandboxAPIProxy != nil {
 		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
 	}
@@ -1449,11 +1490,12 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 		})
 	}
 
-	// Register with sandbox router after explicit wake
+	// Register with sandbox router after explicit wake.
+	// timeout == 0 means "persistent" (no auto-hibernate).
 	if s.router != nil {
 		timeout := req.Timeout
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(id, time.Duration(timeout)*time.Second)
 	}
@@ -1525,15 +1567,18 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	_ = s.store.MarkHibernationRestored(c.Request().Context(), sandboxID)
 	_ = s.store.UpdateSandboxSessionForWake(c.Request().Context(), sandboxID, worker.ID)
 
+	// Refresh the proxy route cache with the new worker — wake may have moved
+	// the sandbox to a different worker than where it was hibernated, and any
+	// stale cache entry would route data-plane requests to the wrong worker.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
+
 	// Apply pending checkpoint patches in background
 	go s.applyPendingPatches(sandboxID, worker.ID)
 
 	// Issue fresh JWT
 	orgID, _ := auth.GetOrgID(c)
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = 300
-	}
 	var token string
 	if s.jwtIssuer != nil {
 		t, err := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, worker.ID, 24*time.Hour)
@@ -1980,12 +2025,17 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 	}
 
+	// Resolve timeout. With int-valued JSON fields we can't distinguish "not sent"
+	// from "explicitly zero", so treat req.Timeout as authoritative. Fall back to
+	// the checkpoint's original timeout only when req.Timeout is negative (which is
+	// itself invalid, but could occur historically). timeout == 0 is valid and means
+	// "persistent / never auto-hibernate".
 	timeout := req.Timeout
-	if timeout <= 0 {
+	if timeout < 0 {
 		timeout = originalCfg.Timeout
 	}
-	if timeout <= 0 {
-		timeout = 300
+	if timeout < 0 {
+		timeout = 0
 	}
 
 	// Unified async fork: return immediately, boot VM in background.
@@ -2035,7 +2085,67 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 	}
 
-	// Record session immediately
+	// Boot VM synchronously so the worker's in-memory sandbox map is populated
+	// before we respond or record the session. Previously this ran in a goroutine
+	// with the session row written first as status=running, which allowed
+	// immediate hibernate/restore/etc. to route to a worker whose m.vms[id] was
+	// not yet populated and 500 with "sandbox not found".
+	var createErr error
+	if grpcClient != nil {
+		// Use background context — the fork has its own internal timeouts
+		// (30s agent connect, 10s QMP, 5s network patch). An external deadline
+		// here causes orphaned VMs: the gRPC layer returns DeadlineExceeded
+		// while the worker finishes creating the VM, leaving it untracked.
+		_, createErr = grpcClient.CreateSandbox(context.Background(), &pb.CreateSandboxRequest{
+			Template:             originalCfg.Template,
+			Timeout:              int32(timeout),
+			Envs:                 originalCfg.Envs,
+			MemoryMb:             int32(originalCfg.MemoryMB),
+			CpuCount:             int32(originalCfg.CpuCount),
+			NetworkEnabled:       originalCfg.NetworkEnabled,
+			Port:                 int32(originalCfg.Port),
+			TemplateRootfsKey:    *cp.RootfsS3Key,
+			TemplateWorkspaceKey: *cp.WorkspaceS3Key,
+			CheckpointId:         checkpointID.String(),
+			SandboxId:            sandboxID,
+			EgressAllowlist:      originalCfg.EgressAllowlist,
+			SecretAllowedHosts:   flattenSecretAllowedHosts(originalCfg.SecretAllowedHosts),
+			SecretEnvs:           originalCfg.SecretEnvs,
+		})
+	} else {
+		// Combined mode: create locally — no external timeout, same reasoning as above
+		cfg := originalCfg
+		cfg.Timeout = timeout
+		cfg.TemplateRootfsKey = *cp.RootfsS3Key
+		cfg.TemplateWorkspaceKey = *cp.WorkspaceS3Key
+		cfg.SandboxID = sandboxID
+		cfg.CheckpointID = checkpointID.String()
+
+		forkMgr, hasFork := s.manager.(interface {
+			ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error)
+		})
+		if hasFork {
+			_, createErr = forkMgr.ForkFromCheckpoint(context.Background(), checkpointID.String(), cfg)
+		} else {
+			_, createErr = s.manager.Create(context.Background(), cfg)
+		}
+	}
+
+	// Unblock any callers waiting on this pendingCreate entry with the outcome.
+	pending.err = createErr
+	close(pending.ready)
+	if s.router != nil {
+		s.router.MarkCreated(sandboxID, createErr)
+	}
+
+	if createErr != nil {
+		s.pendingCreates.Delete(sandboxID)
+		log.Printf("api: fork %s failed: %v", sandboxID, createErr)
+		return nil, http.StatusInternalServerError, fmt.Errorf("fork from checkpoint: %w", createErr)
+	}
+
+	// Record session only after the worker has the VM registered so the session
+	// row never points at a worker that does not yet own the VM.
 	if s.store != nil {
 		template := originalCfg.Template
 		if template == "" {
@@ -2048,72 +2158,11 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		_ = s.store.SetSandboxCheckpointID(ctx, sandboxID, checkpointID)
 	}
 
-	// Boot VM in background
-	go func() {
-		var createErr error
-
-		if grpcClient != nil {
-			// Use background context — the fork has its own internal timeouts
-			// (30s agent connect, 10s QMP, 5s network patch). An external deadline
-			// here causes orphaned VMs: the gRPC layer returns DeadlineExceeded
-			// while the worker finishes creating the VM, leaving it untracked.
-			_, createErr = grpcClient.CreateSandbox(context.Background(), &pb.CreateSandboxRequest{
-				Template:             originalCfg.Template,
-				Timeout:              int32(timeout),
-				Envs:                 originalCfg.Envs,
-				MemoryMb:             int32(originalCfg.MemoryMB),
-				CpuCount:             int32(originalCfg.CpuCount),
-				NetworkEnabled:       originalCfg.NetworkEnabled,
-				Port:                 int32(originalCfg.Port),
-				TemplateRootfsKey:    *cp.RootfsS3Key,
-				TemplateWorkspaceKey: *cp.WorkspaceS3Key,
-				CheckpointId:         checkpointID.String(),
-				SandboxId:            sandboxID,
-				EgressAllowlist:      originalCfg.EgressAllowlist,
-				SecretAllowedHosts:   flattenSecretAllowedHosts(originalCfg.SecretAllowedHosts),
-				SecretEnvs:           originalCfg.SecretEnvs,
-			})
-		} else {
-			// Combined mode: create locally — no external timeout, same reasoning as above
-			cfg := originalCfg
-			cfg.Timeout = timeout
-			cfg.TemplateRootfsKey = *cp.RootfsS3Key
-			cfg.TemplateWorkspaceKey = *cp.WorkspaceS3Key
-			cfg.SandboxID = sandboxID
-			cfg.CheckpointID = checkpointID.String()
-
-			forkMgr, hasFork := s.manager.(interface {
-				ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error)
-			})
-			if hasFork {
-				_, createErr = forkMgr.ForkFromCheckpoint(context.Background(), checkpointID.String(), cfg)
-			} else {
-				_, createErr = s.manager.Create(context.Background(), cfg)
-			}
-		}
-
-		if createErr != nil {
-			log.Printf("api: async fork %s failed: %v", sandboxID, createErr)
-		}
-
-		// Signal completion
-		pending.err = createErr
-		close(pending.ready)
-
-		// Also signal router if available (combined mode)
-		if s.router != nil {
-			s.router.MarkCreated(sandboxID, createErr)
-		}
-
-		// Apply any existing patches for this checkpoint after boot
-		if createErr == nil {
-			s.applyPendingPatches(sandboxID, workerID)
-		}
-	}()
+	s.applyPendingPatches(sandboxID, workerID)
 
 	result := map[string]interface{}{
 		"sandboxID":        sandboxID,
-		"status":           "creating",
+		"status":           "running",
 		"token":            token,
 		"region":           region,
 		"workerID":         workerID,

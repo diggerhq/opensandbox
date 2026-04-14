@@ -144,6 +144,7 @@ type Org struct {
 	Plan                   string    `json:"plan"`
 	MaxConcurrentSandboxes int       `json:"maxConcurrentSandboxes"`
 	MaxSandboxTimeoutSec   int       `json:"maxSandboxTimeoutSec"`
+	MaxDiskMB              int       `json:"maxDiskMB"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 
@@ -170,7 +171,7 @@ type Org struct {
 }
 
 // orgColumns is the list of columns returned by all Org queries.
-const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, created_at, updated_at,
+const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, max_disk_mb, created_at, updated_at,
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
@@ -181,7 +182,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 	org := &Org{}
 	err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.Plan, &org.MaxConcurrentSandboxes,
-		&org.MaxSandboxTimeoutSec, &org.CreatedAt, &org.UpdatedAt,
+		&org.MaxSandboxTimeoutSec, &org.MaxDiskMB, &org.CreatedAt, &org.UpdatedAt,
 		&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
@@ -1001,6 +1002,14 @@ func (s *Store) SetCheckpointReady(ctx context.Context, checkpointID uuid.UUID, 
 		`UPDATE sandbox_checkpoints SET status = 'ready', rootfs_s3_key = $2, workspace_s3_key = $3, size_bytes = $4
 		 WHERE id = $1`,
 		checkpointID, rootfsKey, workspaceKey, sizeBytes)
+	return err
+}
+
+// UpdateCheckpointS3Keys sets the S3 keys without changing the checkpoint status.
+func (s *Store) UpdateCheckpointS3Keys(ctx context.Context, checkpointID uuid.UUID, rootfsKey, workspaceKey string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET rootfs_s3_key = $2, workspace_s3_key = $3 WHERE id = $1`,
+		checkpointID, rootfsKey, workspaceKey)
 	return err
 }
 

@@ -20,7 +20,7 @@ on:
 
 env:
   AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
-  AZURE_LOCATION: westus2
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus2' }}
   AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 jobs:

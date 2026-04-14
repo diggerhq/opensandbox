@@ -24,15 +24,34 @@ var TierMetadataKey = map[int]string{
 	65536: "sandbox_64gb",
 }
 
-// CalculateUsageCostCents returns total cost in cents from usage summaries.
+// Disk overage billing — every GB above DiskFreeAllowanceMB is metered for the
+// full lifetime of the sandbox (running OR hibernated, since the workspace
+// qcow2 still occupies host disk).
+const (
+	DiskFreeAllowanceMB           = 20480              // 20GB included with every sandbox
+	DiskOveragePricePerGBPerSecond = 0.0000001         // ~$0.26 per GB-month
+	DiskOverageMetadataKey         = "sandbox_disk_overage"
+)
+
+// DiskOverageGBSeconds returns the chargeable GB-seconds for one usage summary
+// row (zero if the sandbox stayed within the free allowance).
+func DiskOverageGBSeconds(s db.OrgUsageSummary) float64 {
+	overageMB := s.DiskMB - DiskFreeAllowanceMB
+	if overageMB <= 0 || s.TotalSeconds <= 0 {
+		return 0
+	}
+	return float64(overageMB) / 1024.0 * s.TotalSeconds
+}
+
+// CalculateUsageCostCents returns total cost in cents from usage summaries —
+// memory tier compute plus per-GB-second disk overage above 20GB.
 func CalculateUsageCostCents(summaries []db.OrgUsageSummary) float64 {
 	var totalUSD float64
 	for _, s := range summaries {
-		rate, ok := TierPricePerSecond[s.MemoryMB]
-		if !ok {
-			continue
+		if rate, ok := TierPricePerSecond[s.MemoryMB]; ok {
+			totalUSD += s.TotalSeconds * rate
 		}
-		totalUSD += s.TotalSeconds * rate
+		totalUSD += DiskOverageGBSeconds(s) * DiskOveragePricePerGBPerSecond
 	}
 	return totalUSD * 100.0
 }

@@ -14,6 +14,7 @@ type ScaleEvent struct {
 	OrgID     string     `json:"orgId"`
 	MemoryMB  int        `json:"memoryMB"`
 	CPUPct    int        `json:"cpuPercent"`
+	DiskMB    int        `json:"diskMB"`
 	StartedAt time.Time  `json:"startedAt"`
 	EndedAt   *time.Time `json:"endedAt,omitempty"`
 }
@@ -30,12 +31,28 @@ type UsageSample struct {
 }
 
 // RecordScaleEvent ends the current scale event (if any) and starts a new one.
-func (s *Store) RecordScaleEvent(ctx context.Context, sandboxID, orgID string, memoryMB, cpuPct int) error {
+// diskMB is the workspace disk size at this point — pass 0 to inherit from the
+// most recent scale event (disk doesn't change at runtime).
+func (s *Store) RecordScaleEvent(ctx context.Context, sandboxID, orgID string, memoryMB, cpuPct, diskMB int) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+
+	if diskMB <= 0 {
+		// Inherit from the most recent open or closed event for this sandbox.
+		var prev int
+		err = tx.QueryRow(ctx,
+			`SELECT disk_mb FROM sandbox_scale_events
+			 WHERE sandbox_id = $1
+			 ORDER BY started_at DESC LIMIT 1`, sandboxID).Scan(&prev)
+		if err == nil && prev > 0 {
+			diskMB = prev
+		} else {
+			diskMB = 20480 // fall back to default 20GB
+		}
+	}
 
 	// End the current open event
 	_, err = tx.Exec(ctx,
@@ -47,9 +64,9 @@ func (s *Store) RecordScaleEvent(ctx context.Context, sandboxID, orgID string, m
 
 	// Start a new event
 	_, err = tx.Exec(ctx,
-		`INSERT INTO sandbox_scale_events (sandbox_id, org_id, memory_mb, cpu_percent)
-		 VALUES ($1, $2, $3, $4)`,
-		sandboxID, orgID, memoryMB, cpuPct)
+		`INSERT INTO sandbox_scale_events (sandbox_id, org_id, memory_mb, cpu_percent, disk_mb)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		sandboxID, orgID, memoryMB, cpuPct, diskMB)
 	if err != nil {
 		return err
 	}
@@ -146,24 +163,25 @@ func (s *Store) InsertUsageSamples(ctx context.Context, samples []UsageSample) e
 	return tx.Commit(ctx)
 }
 
-// OrgUsageSummary returns total billed seconds per memory tier for an org in a time range.
+// OrgUsageSummary returns total billed seconds per (memory tier, disk size) for an org in a time range.
 type OrgUsageSummary struct {
 	MemoryMB     int     `json:"memoryMB"`
 	CPUPercent   int     `json:"cpuPercent"`
+	DiskMB       int     `json:"diskMB"`
 	TotalSeconds float64 `json:"totalSeconds"`
 }
 
 // GetOrgUsage returns billing summary for an org.
 func (s *Store) GetOrgUsage(ctx context.Context, orgID string, from, to time.Time) ([]OrgUsageSummary, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT memory_mb, cpu_percent,
+		SELECT memory_mb, cpu_percent, disk_mb,
 		       SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, LEAST(now(), $3)) - GREATEST(started_at, $2)))) as total_seconds
 		FROM sandbox_scale_events
 		WHERE org_id = $1
 		  AND started_at < $3
 		  AND (ended_at IS NULL OR ended_at > $2)
-		GROUP BY memory_mb, cpu_percent
-		ORDER BY memory_mb`,
+		GROUP BY memory_mb, cpu_percent, disk_mb
+		ORDER BY memory_mb, disk_mb`,
 		orgID, from, to)
 	if err != nil {
 		return nil, err
@@ -173,7 +191,7 @@ func (s *Store) GetOrgUsage(ctx context.Context, orgID string, from, to time.Tim
 	var results []OrgUsageSummary
 	for rows.Next() {
 		var s OrgUsageSummary
-		if err := rows.Scan(&s.MemoryMB, &s.CPUPercent, &s.TotalSeconds); err != nil {
+		if err := rows.Scan(&s.MemoryMB, &s.CPUPercent, &s.DiskMB, &s.TotalSeconds); err != nil {
 			return nil, err
 		}
 		results = append(results, s)

@@ -13,6 +13,10 @@ function resolveApiUrl(url: string): string {
 
 export interface SandboxOpts {
   template?: string;
+  /**
+   * Idle timeout in seconds after which the sandbox auto-hibernates.
+   * Default: `0` (persistent — never auto-hibernate).
+   */
   timeout?: number;
   apiKey?: string;
   apiUrl?: string;
@@ -20,6 +24,14 @@ export interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  /**
+   * Workspace disk size in MB (default 20480 = 20GB). Any additional GB above
+   * 20GB is metered at a per-second rate comparable to EBS gp3.
+   *
+   * Closed beta: requests above 20GB require the org's `max_disk_mb` to be
+   * raised. Contact us: https://cal.com/team/digger/opencomputer-founder-chat
+   */
+  diskMB?: number;
   /** Secret store name — resolves encrypted secrets and egress allowlist. */
   secretStore?: string;
   /** Declarative image definition. The server builds and caches it as a checkpoint. */
@@ -134,12 +146,14 @@ export class Sandbox {
 
     const body: Record<string, unknown> = {
       templateID: opts.template ?? "base",
-      timeout: opts.timeout ?? 300,
+      // Default to 0 (persistent). Callers who want auto-hibernate must opt in.
+      timeout: opts.timeout ?? 0,
     };
     if (opts.envs) body.envs = opts.envs;
     if (opts.metadata) body.metadata = opts.metadata;
     if (opts.cpuCount != null) body.cpuCount = opts.cpuCount;
     if (opts.memoryMB != null) body.memoryMB = opts.memoryMB;
+    if (opts.diskMB != null) body.diskMB = opts.diskMB;
     if (opts.secretStore) body.secretStore = opts.secretStore;
     if (opts.image) body.image = opts.image.toJSON();
     if (opts.snapshot) body.snapshot = opts.snapshot;
@@ -242,7 +256,8 @@ export class Sandbox {
         "Content-Type": "application/json",
         ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
       },
-      body: JSON.stringify({ timeout: opts.timeout ?? 300 }),
+      // Default to 0 (persistent) — matches create() default.
+      body: JSON.stringify({ timeout: opts.timeout ?? 0 }),
     });
 
     if (!resp.ok) {
@@ -338,12 +353,14 @@ export class Sandbox {
     (this as any).pty = new Pty(this.apiUrl, this.apiKey, this.sandboxId, "");
   }
 
-  static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout"> = {}): Promise<Sandbox> {
+  static async createFromCheckpoint(checkpointId: string, opts: Pick<SandboxOpts, "apiKey" | "apiUrl" | "timeout" | "envs" | "secretStore"> = {}): Promise<Sandbox> {
     const apiUrl = resolveApiUrl(opts.apiUrl ?? process.env.OPENCOMPUTER_API_URL ?? "https://app.opencomputer.dev");
     const apiKey = opts.apiKey ?? process.env.OPENCOMPUTER_API_KEY ?? "";
 
     const body: Record<string, unknown> = {};
     if (opts.timeout != null) body.timeout = opts.timeout;
+    if (opts.envs) body.envs = opts.envs;
+    if (opts.secretStore) body.secretStore = opts.secretStore;
 
     const resp = await fetch(`${apiUrl}/sandboxes/from-checkpoint/${checkpointId}`, {
       method: "POST",

@@ -251,7 +251,8 @@ func main() {
 					if err != nil || orgID == "" {
 						return
 					}
-					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent)
+					// Disk doesn't change on memory scale; pass 0 to inherit disk_mb from the prior event.
+					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent, 0)
 				})
 			}
 		}

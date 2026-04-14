@@ -71,6 +71,7 @@ message CreateSandboxRequest {
   // Env vars resolved from a SecretStore. Sealed by the worker's secrets proxy
   // before injection into the VM. Disjoint from `envs` (which is plaintext).
   map<string, string> secret_envs = 15;
+  int32 disk_mb = 16;  // workspace disk size in MB (0 = default 20GB)
 }
 
 message CreateSandboxResponse {

@@ -121,6 +121,16 @@ func CreateWorkspace(path string, sizeMB int, uuid ...string) error {
 	return nil
 }
 
+// ResizeWorkspace expands a qcow2 workspace image to the target size.
+// Must be called BEFORE QEMU attaches the disk.
+func ResizeWorkspace(path string, targetMB int) error {
+	cmd := exec.Command("qemu-img", "resize", path, fmt.Sprintf("%dM", targetMB))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img resize: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // getWorkspaceUUID extracts the ext4 filesystem UUID from a qcow2 workspace image.
 // Converts to raw, runs tune2fs, and parses the UUID line.
 func getWorkspaceUUID(qcow2Path string) (string, error) {

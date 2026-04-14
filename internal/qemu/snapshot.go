@@ -477,17 +477,15 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("agent not ready: %w", err)
 	}
 
-	// Mount /home/sandbox (data disk, was unmounted before savevm)
-	postCtx, postCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_, _ = agentClient.Exec(postCtx, &pb.ExecRequest{
-		Command: "/bin/sh",
-		Args: []string{"-c", strings.Join([]string{
-			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
-			"chown 1000:1000 /home/sandbox",
-		}, " && ")},
-		RunAsRoot: true,
-	})
-	postCancel()
+	// Hibernate captured the guest with its mount state intact (we never
+	// unmount before savevm), so loadvm restores the correct mount layout
+	// automatically. Do NOT blindly mount /dev/vdb on /home/sandbox here:
+	// cold-booted VMs have their workspace disk mounted at /workspace per the
+	// guest's fstab, with /home/sandbox being a regular directory on the
+	// rootfs. If we force-mount /dev/vdb over /home/sandbox post-wake, we
+	// shadow any files the user wrote to /home/sandbox (which live on the
+	// rootfs qcow2) with the empty workspace qcow2 view, silently losing
+	// their data.
 
 	if err := patchGuestNetwork(context.Background(), agentClient, netCfg); err != nil {
 		log.Printf("qemu: wake %s: network patch failed: %v", sandboxID, err)

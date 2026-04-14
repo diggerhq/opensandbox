@@ -141,6 +141,41 @@ func (q *QMPClient) execute(cmd qmpCommand, timeout time.Duration) (*qmpResponse
 	}
 }
 
+// QMPBlockDevice represents an entry in the query-block response.
+type QMPBlockDevice struct {
+	Device   string `json:"device"`
+	Inserted struct {
+		File string `json:"file"`
+	} `json:"inserted"`
+}
+
+// QueryBlock returns the list of block devices attached to the VM.
+func (q *QMPClient) QueryBlock() ([]QMPBlockDevice, error) {
+	resp, err := q.execute(qmpCommand{Execute: "query-block"}, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	var devs []QMPBlockDevice
+	if err := json.Unmarshal(resp.Return, &devs); err != nil {
+		return nil, fmt.Errorf("parse query-block: %w", err)
+	}
+	return devs, nil
+}
+
+// BlockResize notifies QEMU that the backing image for `device` has been
+// resized to `sizeBytes`. QEMU fires a virtio-blk capacity change event;
+// the guest kernel picks up the new size on /dev/vdX.
+func (q *QMPClient) BlockResize(device string, sizeBytes int64) error {
+	_, err := q.execute(qmpCommand{
+		Execute: "block_resize",
+		Arguments: map[string]interface{}{
+			"device": device,
+			"size":   sizeBytes,
+		},
+	}, 30*time.Second)
+	return err
+}
+
 // Stop pauses the VM (equivalent to pressing the pause button).
 func (q *QMPClient) Stop() error {
 	_, err := q.execute(qmpCommand{Execute: "stop"}, 10*time.Second)

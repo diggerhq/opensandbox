@@ -76,11 +76,13 @@ func (s *Server) billingGet(c echo.Context) error {
 	type tierUsage struct {
 		MemoryMB     int     `json:"memoryMB"`
 		VCPUs        int     `json:"vcpus"`
+		DiskMB       int     `json:"diskMB"`
 		TotalSeconds float64 `json:"totalSeconds"`
 		CostCents    float64 `json:"costCents"`
 	}
 	var tiers []tierUsage
 	var totalCost float64
+	var diskOverageGBSeconds float64
 	for _, u := range usage {
 		rate := billing.TierPricePerSecond[u.MemoryMB]
 		cost := u.TotalSeconds * rate * 100
@@ -88,9 +90,19 @@ func (s *Server) billingGet(c echo.Context) error {
 		tiers = append(tiers, tierUsage{
 			MemoryMB:     u.MemoryMB,
 			VCPUs:        u.CPUPercent / 100,
+			DiskMB:       u.DiskMB,
 			TotalSeconds: u.TotalSeconds,
 			CostCents:    cost,
 		})
+		diskOverageGBSeconds += billing.DiskOverageGBSeconds(u)
+	}
+	diskOverageCostCents := diskOverageGBSeconds * billing.DiskOveragePricePerGBPerSecond * 100
+	totalCost += diskOverageCostCents
+	diskOverage := map[string]interface{}{
+		"freeAllowanceMB":     billing.DiskFreeAllowanceMB,
+		"pricePerGBPerSecond": billing.DiskOveragePricePerGBPerSecond,
+		"gbSeconds":           diskOverageGBSeconds,
+		"costCents":           diskOverageCostCents,
 	}
 
 	// Stripe balance for pro users
@@ -109,6 +121,7 @@ func (s *Server) billingGet(c echo.Context) error {
 		"hasPaymentMethod":        org.StripeCustomerID != nil,
 		"currentUsage": map[string]interface{}{
 			"tiers":          tiers,
+			"diskOverage":    diskOverage,
 			"totalCostCents": totalCost,
 		},
 	})

@@ -34,11 +34,12 @@ class Sandbox:
     async def create(
         cls,
         template: str = "base",
-        timeout: int = 300,
+        timeout: int = 0,
         api_key: str | None = None,
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
+        disk_mb: int | None = None,
         secret_store: str | None = None,
         image: Image | None = None,
         snapshot: str | None = None,
@@ -48,11 +49,16 @@ class Sandbox:
 
         Args:
             template: Template to use (default "base").
-            timeout: Sandbox timeout in seconds (default 300).
+            timeout: Idle timeout in seconds. 0 = persistent, never auto-hibernates (default).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
             envs: Environment variables to inject. Overrides store secrets.
             metadata: Custom metadata key-value pairs.
+            disk_mb: Workspace disk size in MB (default 20480 = 20GB). Any
+                additional GB above 20GB is metered at a per-second rate
+                comparable to EBS gp3. Closed beta: requests above 20GB
+                require the org's ``max_disk_mb`` to be raised. Contact us:
+                https://cal.com/team/digger/opencomputer-founder-chat
             secret_store: Secret store name — resolves encrypted secrets
                 and egress allowlist.
             image: Declarative Image definition. The server builds and caches it as a checkpoint.
@@ -88,6 +94,8 @@ class Sandbox:
             body["envs"] = envs
         if metadata:
             body["metadata"] = metadata
+        if disk_mb is not None:
+            body["diskMB"] = disk_mb
         if secret_store:
             body["secretStore"] = secret_store
         if image is not None:
@@ -332,17 +340,23 @@ class Sandbox:
     async def create_from_checkpoint(
         cls,
         checkpoint_id: str,
-        timeout: int = 300,
+        timeout: int = 0,
         api_key: str | None = None,
         api_url: str | None = None,
+        envs: dict[str, str] | None = None,
+        secret_store: str | None = None,
     ) -> Sandbox:
         """Create a new sandbox from an existing checkpoint (fork).
 
         Args:
             checkpoint_id: UUID of the checkpoint to fork from.
-            timeout: Sandbox timeout in seconds (default 300).
+            timeout: Idle timeout in seconds. 0 = persistent, never auto-hibernates (default).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
+            envs: Environment variables to override on the fork.
+            secret_store: Secret store name to attach. If the checkpoint
+                already has a store, secrets are merged (new store wins
+                on collision, egress allowlists aggregate).
         """
         url = api_url or os.environ.get("OPENCOMPUTER_API_URL", "https://app.opencomputer.dev")
         url = url.rstrip("/")
@@ -356,9 +370,15 @@ class Sandbox:
 
         client = httpx.AsyncClient(base_url=api_base, headers=headers, timeout=120.0)
 
+        body: dict[str, Any] = {"timeout": timeout}
+        if envs:
+            body["envs"] = envs
+        if secret_store:
+            body["secretStore"] = secret_store
+
         resp = await client.post(
             f"/sandboxes/from-checkpoint/{checkpoint_id}",
-            json={"timeout": timeout},
+            json=body,
         )
         resp.raise_for_status()
         data = resp.json()

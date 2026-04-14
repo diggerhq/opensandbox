@@ -224,7 +224,7 @@ var lsShortcut = &cobra.Command{
 func init() {
 	// sandbox create flags
 	for _, cmd := range []*cobra.Command{sandboxCreateCmd, createShortcut} {
-		cmd.Flags().Int("timeout", 300, "Timeout in seconds")
+		cmd.Flags().Int("timeout", 0, "Idle timeout in seconds before auto-hibernate (0 = never hibernate)")
 		cmd.Flags().Int("cpu", 0, "CPU count")
 		cmd.Flags().Int("memory", 0, "Memory in MB")
 		cmd.Flags().StringSlice("env", nil, "Environment variables (KEY=VALUE)")
@@ -233,7 +233,7 @@ func init() {
 	}
 
 	// sandbox wake flags
-	sandboxWakeCmd.Flags().Int("timeout", 300, "Timeout in seconds after wake")
+	sandboxWakeCmd.Flags().Int("timeout", 0, "Idle timeout in seconds after wake (0 = never hibernate)")
 
 	sandboxCmd.AddCommand(sandboxCreateCmd)
 	sandboxCmd.AddCommand(sandboxListCmd)
