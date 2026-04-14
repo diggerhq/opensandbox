@@ -20,6 +20,14 @@ export interface SandboxOpts {
   metadata?: Record<string, string>;
   cpuCount?: number;
   memoryMB?: number;
+  /**
+   * Workspace disk size in MB (default 20480 = 20GB). Any additional GB above
+   * 20GB is metered at a per-second rate comparable to EBS gp3.
+   *
+   * Closed beta: requests above 20GB require the org's `max_disk_mb` to be
+   * raised. Contact us: https://cal.com/team/digger/opencomputer-founder-chat
+   */
+  diskMB?: number;
   /** Secret store name — resolves encrypted secrets and egress allowlist. */
   secretStore?: string;
   /** Declarative image definition. The server builds and caches it as a checkpoint. */
@@ -140,6 +148,7 @@ export class Sandbox {
     if (opts.metadata) body.metadata = opts.metadata;
     if (opts.cpuCount != null) body.cpuCount = opts.cpuCount;
     if (opts.memoryMB != null) body.memoryMB = opts.memoryMB;
+    if (opts.diskMB != null) body.diskMB = opts.diskMB;
     if (opts.secretStore) body.secretStore = opts.secretStore;
     if (opts.image) body.image = opts.image.toJSON();
     if (opts.snapshot) body.snapshot = opts.snapshot;

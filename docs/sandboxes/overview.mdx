@@ -37,6 +37,7 @@ const sandbox = await Sandbox.create({
   timeout: 600,
   cpuCount: 2,
   memoryMB: 1024,
+  diskMB: 20480, // 20GB workspace (default; larger sizes in closed beta)
   envs: { NODE_ENV: "production" },
   metadata: { project: "my-app" },
 });
@@ -46,6 +47,7 @@ const sandbox = await Sandbox.create({
 sandbox = await Sandbox.create(
     template="my-custom-template",
     timeout=600,
+    disk_mb=20480,  # 20GB workspace (default; larger sizes in closed beta)
     envs={"NODE_ENV": "production"},
     metadata={"project": "my-app"},
 )
@@ -60,6 +62,7 @@ curl -X POST https://app.opencomputer.dev/api/sandboxes \
     "timeout": 600,
     "cpuCount": 2,
     "memoryMB": 1024,
+    "diskMB": 20480,
     "envs": {"NODE_ENV": "production"},
     "metadata": {"project": "my-app"}
   }'
@@ -77,6 +80,7 @@ curl -X POST https://app.opencomputer.dev/api/sandboxes \
 | `metadata` | object | — | Arbitrary key-value pairs stored with the sandbox |
 | `cpuCount` | number | — | CPU cores. TypeScript and HTTP API only |
 | `memoryMB` | number | — | Memory in MB. TypeScript and HTTP API only |
+| `diskMB` | number | `20480` | Workspace disk size in MB (20GB–256GB). See disk sizing note below. |
 | `secretStore` | string | — | Secret store name — resolves encrypted secrets and egress allowlist |
 | `image` | Image | — | Declarative image definition (see [Templates](/sandboxes/templates)) |
 | `snapshot` | string | — | Name of a pre-built snapshot for instant boot |
@@ -86,6 +90,15 @@ curl -X POST https://app.opencomputer.dev/api/sandboxes \
 <Note>
   `cpuCount`, `memoryMB`, and `secretStore` are not available in the Python SDK. Use the [HTTP API](/reference/api#sandbox-lifecycle) directly for custom resources from Python.
 </Note>
+
+<Info>
+  **Disk sizing (closed beta).** Every sandbox ships with a 20GB workspace on
+  `/home/sandbox`. You can request up to 256GB via `diskMB`; any GB above the
+  20GB baseline is metered per-second at a rate comparable to AWS EBS gp3.
+  Larger disk limits are gated per-organization during the beta — [book a
+  call](https://cal.com/team/digger/opencomputer-founder-chat) to have your
+  org's ceiling raised.
+</Info>
 
 ## Connecting to an Existing Sandbox
 

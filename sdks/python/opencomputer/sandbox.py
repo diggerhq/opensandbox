@@ -39,6 +39,7 @@ class Sandbox:
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
+        disk_mb: int | None = None,
         secret_store: str | None = None,
         image: Image | None = None,
         snapshot: str | None = None,
@@ -53,6 +54,11 @@ class Sandbox:
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
             envs: Environment variables to inject. Overrides store secrets.
             metadata: Custom metadata key-value pairs.
+            disk_mb: Workspace disk size in MB (default 20480 = 20GB). Any
+                additional GB above 20GB is metered at a per-second rate
+                comparable to EBS gp3. Closed beta: requests above 20GB
+                require the org's ``max_disk_mb`` to be raised. Contact us:
+                https://cal.com/team/digger/opencomputer-founder-chat
             secret_store: Secret store name — resolves encrypted secrets
                 and egress allowlist.
             image: Declarative Image definition. The server builds and caches it as a checkpoint.
@@ -88,6 +94,8 @@ class Sandbox:
             body["envs"] = envs
         if metadata:
             body["metadata"] = metadata
+        if disk_mb is not None:
+            body["diskMB"] = disk_mb
         if secret_store:
             body["secretStore"] = secret_store
         if image is not None:
