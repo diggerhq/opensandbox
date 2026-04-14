@@ -16,7 +16,15 @@ This guide walks through creating a managed Hermes agent on OpenComputer, connec
 See [CLI installation](/cli/overview#installation) for all platforms, or quick-install on macOS:
 
 ```bash
-sudo curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && sudo chmod +x /usr/local/bin/oc
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o ~/.local/bin/oc
+chmod +x ~/.local/bin/oc
+```
+
+Add `~/.local/bin` to your PATH if it isn't already:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ```bash
