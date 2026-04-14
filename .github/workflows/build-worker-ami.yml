@@ -86,14 +86,14 @@ jobs:
             -var "image_version_patch=$PATCH" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
-          # Use the gallery image ID (NVMe-compatible for v6 VMs)
-          GALLERY_IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/galleries/${AZURE_GALLERY_NAME}/images/osb-worker/versions/1.0.${PATCH}"
+          # Use the gallery image ID (NVMe-compatible for v7 VMs)
+          GALLERY_IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/galleries/${AZURE_GALLERY_NAME}/images/osb-worker-v7/versions/1.0.${PATCH}"
 
           # Verify it exists
           if ! az sig image-version show \
             --resource-group "$AZURE_RESOURCE_GROUP" \
             --gallery-name ${AZURE_GALLERY_NAME} \
-            --gallery-image-definition osb-worker \
+            --gallery-image-definition osb-worker-v7 \
             --gallery-image-version "1.0.${PATCH}" -o none 2>/dev/null; then
             echo "ERROR: Gallery image version 1.0.${PATCH} not found after build"
             cat /tmp/packer-output.txt
