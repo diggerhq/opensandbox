@@ -22,6 +22,7 @@ env:
   AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
   AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus2' }}
   AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_GALLERY_NAME: ${{ vars.AZURE_GALLERY_NAME || 'opensandbox_gallery' }}
 
 jobs:
   build-image:
@@ -81,16 +82,17 @@ jobs:
             -var "subscription_id=$AZURE_SUBSCRIPTION_ID" \
             -var "resource_group=$AZURE_RESOURCE_GROUP" \
             -var "location=$AZURE_LOCATION" \
+            -var "gallery_name=$AZURE_GALLERY_NAME" \
             -var "image_version_patch=$PATCH" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
           # Use the gallery image ID (NVMe-compatible for v6 VMs)
-          GALLERY_IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/galleries/opensandbox_gallery/images/osb-worker/versions/1.0.${PATCH}"
+          GALLERY_IMAGE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/galleries/${AZURE_GALLERY_NAME}/images/osb-worker/versions/1.0.${PATCH}"
 
           # Verify it exists
           if ! az sig image-version show \
             --resource-group "$AZURE_RESOURCE_GROUP" \
-            --gallery-name opensandbox_gallery \
+            --gallery-name ${AZURE_GALLERY_NAME} \
             --gallery-image-definition osb-worker \
             --gallery-image-version "1.0.${PATCH}" -o none 2>/dev/null; then
             echo "ERROR: Gallery image version 1.0.${PATCH} not found after build"
