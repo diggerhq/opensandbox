@@ -61,8 +61,8 @@ func (s *StripeClient) EnsureProducts() error {
 		existingMeters[m.EventName] = m
 	}
 
-	for memMB, metaKey := range TierMetadataKey {
-		eventName := "sandbox_compute_" + metaKey
+	for memMB, meterKey := range TierMeterKey {
+		eventName := "sandbox_compute_" + meterKey
 		s.MeterEventNames[memMB] = eventName
 
 		if m, ok := existingMeters[eventName]; ok {
@@ -72,7 +72,7 @@ func (s *StripeClient) EnsureProducts() error {
 		}
 
 		m, err := meter.New(&stripe.BillingMeterParams{
-			DisplayName: stripe.String(fmt.Sprintf("Sandbox Compute %s", metaKey)),
+			DisplayName: stripe.String(fmt.Sprintf("Sandbox Compute %s", meterKey)),
 			EventName:   stripe.String(eventName),
 			DefaultAggregation: &stripe.BillingMeterDefaultAggregationParams{
 				Formula: stripe.String(string(stripe.BillingMeterDefaultAggregationFormulaSum)),
@@ -126,10 +126,10 @@ func (s *StripeClient) EnsureProducts() error {
 		}
 	}
 
-	for memMB, metaKey := range TierMetadataKey {
-		if id, ok := existingPrices[metaKey]; ok {
+	for memMB, priceKey := range TierPriceKey {
+		if id, ok := existingPrices[priceKey]; ok {
 			s.PriceIDs[memMB] = id
-			log.Printf("billing: found existing price for %s (id=%s)", metaKey, id)
+			log.Printf("billing: found existing price for %s (id=%s)", priceKey, id)
 			continue
 		}
 
@@ -149,16 +149,16 @@ func (s *StripeClient) EnsureProducts() error {
 				Meter:     stripe.String(meterID),
 			},
 			Metadata: map[string]string{
-				"tier":        metaKey,
+				"tier":        priceKey,
 				"memory_mb":   fmt.Sprintf("%d", memMB),
 				"opensandbox": "compute",
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("create price for %s: %w", metaKey, err)
+			return fmt.Errorf("create price for %s: %w", priceKey, err)
 		}
 		s.PriceIDs[memMB] = p.ID
-		log.Printf("billing: created price for %s (id=%s)", metaKey, p.ID)
+		log.Printf("billing: created price for %s (id=%s)", priceKey, p.ID)
 	}
 
 	// 4. Disk overage meter + price (single dimension, billed per GB-second above 20GB).

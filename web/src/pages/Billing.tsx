@@ -8,7 +8,7 @@ import {
 const PRICING_TIERS = [
   { memory: '1 GB', vcpus: 1, bestEffort: true, perSec: 0.000001080246914 },
   { memory: '4 GB', vcpus: 1, perSec: 0.000005787037037 },
-  { memory: '8 GB', vcpus: 2, perSec: 0.000005015432099 },
+  { memory: '8 GB', vcpus: 2, perSec: 0.00001350308642 },
   { memory: '16 GB', vcpus: 4, perSec: 0.00002700617284 },
   { memory: '32 GB', vcpus: 8, perSec: 0.0001929012346 },
   { memory: '64 GB', vcpus: 16, perSec: 0.0005401234568 },
