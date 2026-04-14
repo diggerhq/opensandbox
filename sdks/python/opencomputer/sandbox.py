@@ -34,7 +34,7 @@ class Sandbox:
     async def create(
         cls,
         template: str = "base",
-        timeout: int = 300,
+        timeout: int = 0,
         api_key: str | None = None,
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
@@ -49,7 +49,7 @@ class Sandbox:
 
         Args:
             template: Template to use (default "base").
-            timeout: Sandbox timeout in seconds (default 300).
+            timeout: Idle timeout in seconds. 0 = persistent, never auto-hibernates (default).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
             envs: Environment variables to inject. Overrides store secrets.
@@ -340,7 +340,7 @@ class Sandbox:
     async def create_from_checkpoint(
         cls,
         checkpoint_id: str,
-        timeout: int = 300,
+        timeout: int = 0,
         api_key: str | None = None,
         api_url: str | None = None,
         envs: dict[str, str] | None = None,
@@ -350,7 +350,7 @@ class Sandbox:
 
         Args:
             checkpoint_id: UUID of the checkpoint to fork from.
-            timeout: Sandbox timeout in seconds (default 300).
+            timeout: Idle timeout in seconds. 0 = persistent, never auto-hibernates (default).
             api_key: API key (or OPENCOMPUTER_API_KEY env var).
             api_url: API URL (or OPENCOMPUTER_API_URL env var).
             envs: Environment variables to override on the fork.

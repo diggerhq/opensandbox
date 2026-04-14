@@ -13,6 +13,10 @@ function resolveApiUrl(url: string): string {
 
 export interface SandboxOpts {
   template?: string;
+  /**
+   * Idle timeout in seconds after which the sandbox auto-hibernates.
+   * Default: `0` (persistent — never auto-hibernate).
+   */
   timeout?: number;
   apiKey?: string;
   apiUrl?: string;
@@ -142,7 +146,8 @@ export class Sandbox {
 
     const body: Record<string, unknown> = {
       templateID: opts.template ?? "base",
-      timeout: opts.timeout ?? 300,
+      // Default to 0 (persistent). Callers who want auto-hibernate must opt in.
+      timeout: opts.timeout ?? 0,
     };
     if (opts.envs) body.envs = opts.envs;
     if (opts.metadata) body.metadata = opts.metadata;
@@ -251,7 +256,8 @@ export class Sandbox {
         "Content-Type": "application/json",
         ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
       },
-      body: JSON.stringify({ timeout: opts.timeout ?? 300 }),
+      // Default to 0 (persistent) — matches create() default.
+      body: JSON.stringify({ timeout: opts.timeout ?? 0 }),
     });
 
     if (!resp.ok) {

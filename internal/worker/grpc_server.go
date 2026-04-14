@@ -145,9 +145,10 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		sb, err := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 		if err == nil {
 			if s.router != nil {
+				// timeout == 0 means "persistent" (no auto-hibernate).
 				timeout := cfg.Timeout
-				if timeout <= 0 {
-					timeout = 300
+				if timeout < 0 {
+					timeout = 0
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
@@ -166,9 +167,10 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				sb, err = s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 				if err == nil {
 					if s.router != nil {
+						// timeout == 0 means "persistent" (no auto-hibernate).
 						timeout := cfg.Timeout
-						if timeout <= 0 {
-							timeout = 300
+						if timeout < 0 {
+							timeout = 0
 						}
 						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 					}
@@ -200,11 +202,12 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		return nil, fmt.Errorf("failed to create sandbox: %w", err)
 	}
 
-	// Register with sandbox router for rolling timeout tracking
+	// Register with sandbox router for rolling timeout tracking.
+	// timeout == 0 means "persistent" (no auto-hibernate).
 	if s.router != nil {
 		timeout := cfg.Timeout
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 	}
@@ -573,11 +576,12 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 		return nil, fmt.Errorf("failed to wake sandbox: %w", err)
 	}
 
-	// Register with sandbox router after explicit wake
+	// Register with sandbox router after explicit wake.
+	// timeout == 0 means "persistent" (no auto-hibernate).
 	if s.router != nil {
 		timeout := int(req.Timeout)
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 	}

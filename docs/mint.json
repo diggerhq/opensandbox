@@ -65,6 +65,7 @@
         "sandboxes/working-with-files",
         "sandboxes/signed-urls",
         "sandboxes/interactive-terminals",
+        "sandboxes/timeout",
         "sandboxes/checkpoints",
         "sandboxes/templates",
         "sandboxes/secrets",

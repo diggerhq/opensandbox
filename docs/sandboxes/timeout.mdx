@@ -1,0 +1,133 @@
+---
+title: "Timeout & Hibernation"
+description: "Control how long a sandbox stays alive when idle"
+---
+
+Sandboxes have a rolling **idle timeout** that determines when they auto-hibernate to save cost. The timeout is what you'd expect from a "laptop lid" — the sandbox sleeps when nothing is happening and wakes the moment you talk to it again.
+
+## Default: persistent (no auto-hibernate)
+
+By default the timeout is `0`, which means **never auto-hibernate**. The sandbox stays running until you explicitly kill or hibernate it.
+
+<CodeGroup>
+
+```typescript TypeScript
+import { Sandbox } from "@opencomputer/sdk";
+
+// No `timeout` — sandbox is persistent (stays alive until killed).
+const sandbox = await Sandbox.create();
+```
+
+```python Python
+from opencomputer import Sandbox
+
+# No `timeout` — sandbox is persistent (stays alive until killed).
+sandbox = await Sandbox.create()
+```
+
+```bash CLI
+# --timeout defaults to 0 (never hibernate).
+oc sandbox create
+```
+
+</CodeGroup>
+
+<Note>
+  Persistent sandboxes keep accruing compute cost for as long as they're running. If you only need the sandbox to respond to occasional requests, set a timeout so it hibernates between them — see below.
+</Note>
+
+## Setting a timeout
+
+Pass `timeout` in seconds to have the sandbox auto-hibernate after N seconds of **idle** time. The timer resets on every operation — exec, file access, agent activity — so a busy sandbox never hits the timeout.
+
+<CodeGroup>
+
+```typescript TypeScript
+// Auto-hibernate after 5 minutes of inactivity.
+const sandbox = await Sandbox.create({ timeout: 300 });
+```
+
+```python Python
+# Auto-hibernate after 5 minutes of inactivity.
+sandbox = await Sandbox.create(timeout=300)
+```
+
+```bash CLI
+oc sandbox create --timeout 300
+```
+
+</CodeGroup>
+
+### Update on a running sandbox
+
+You can change the timeout at any time:
+
+<CodeGroup>
+
+```typescript TypeScript
+await sandbox.setTimeout(600); // 10 minutes
+await sandbox.setTimeout(0);   // make it persistent
+```
+
+```python Python
+await sandbox.set_timeout(600)
+await sandbox.set_timeout(0)
+```
+
+```bash CLI
+oc sandbox set-timeout sb-abc123 600
+oc sandbox set-timeout sb-abc123 0
+```
+
+</CodeGroup>
+
+## What happens when the timeout expires
+
+When an idle sandbox hits its timeout, the platform:
+
+1. Snapshots the VM state (memory + disk) and stops the VM — no compute cost while hibernated.
+2. Marks the sandbox `hibernated`. Its ID, files, and configuration are preserved.
+
+You don't pay for CPU/memory while a sandbox is hibernated — only for the stored snapshot.
+
+## Waking up
+
+**Any operation from the SDK automatically wakes a hibernated sandbox.** You don't need to call `wake()` yourself — calling `sandbox.exec.run(...)`, reading a file, or any other operation transparently restores the VM and then performs the requested action.
+
+<CodeGroup>
+
+```typescript TypeScript
+// Earlier: sandbox auto-hibernated after 5 minutes of idleness.
+// Now, hours later — this call just works. The SDK wakes it first.
+const result = await sandbox.exec.run("echo hello");
+```
+
+```python Python
+# Same behavior in Python.
+result = await sandbox.exec.run("echo hello")
+```
+
+</CodeGroup>
+
+Wake is typically sub-second thanks to snapshot restore, with a cold-boot fallback if the snapshot isn't available. Once woken, the idle timer restarts with the sandbox's configured timeout.
+
+<Note>
+  You can still call `sandbox.wake()` explicitly if you want to pre-warm a sandbox before routing user traffic to it.
+</Note>
+
+## Choosing a timeout
+
+| Use case | Suggested `timeout` |
+| --- | --- |
+| Always-on agent / bot that must respond instantly | `0` (persistent) |
+| Interactive dev sandbox, keep for the session | `600`–`3600` (10 min – 1 hr) |
+| Short-lived batch or test run | `60`–`300` (1–5 min) |
+| One-off exec — kill it yourself when done | `0` + explicit `kill()` |
+
+The tradeoff is latency vs cost: a lower timeout saves money but adds wake latency on the next request after idleness.
+
+## See also
+
+- [Lifecycle overview](/sandboxes/overview#lifecycle) — all sandbox states
+- [Set timeout API](/api-reference/sandboxes/set-timeout)
+- [Hibernate API](/api-reference/sandboxes/hibernate) / [Wake API](/api-reference/sandboxes/wake)

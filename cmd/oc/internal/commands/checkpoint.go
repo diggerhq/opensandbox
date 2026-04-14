@@ -149,7 +149,7 @@ func init() {
 	checkpointCreateCmd.Flags().String("name", "", "Checkpoint name (required)")
 	checkpointCreateCmd.MarkFlagRequired("name")
 
-	checkpointSpawnCmd.Flags().Int("timeout", 300, "Timeout in seconds")
+	checkpointSpawnCmd.Flags().Int("timeout", 0, "Idle timeout in seconds before auto-hibernate (0 = never hibernate)")
 
 	checkpointCmd.AddCommand(checkpointCreateCmd)
 	checkpointCmd.AddCommand(checkpointListCmd)

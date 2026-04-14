@@ -274,7 +274,7 @@ func TestDocumentedSandboxResponseFields(t *testing.T) {
 
 // TestDocumentedDefaultValues verifies that QEMU manager defaults match docs.
 //
-// Docs say: cpuCount=1, memoryMB=256, timeout=300, port=80
+// Docs say: cpuCount=1, memoryMB=256, timeout=0 (persistent), port=80
 func TestDocumentedDefaultValues(t *testing.T) {
 	// NewManager applies defaults to zero-valued Config fields.
 	// We simulate that logic here since NewManager needs real dirs.

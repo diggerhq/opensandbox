@@ -163,11 +163,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 		})
 	}
 
-	// Register with sandbox router for rolling timeout tracking
+	// Register with sandbox router for rolling timeout tracking.
+	// timeout == 0 means "persistent" (no auto-hibernate). Negative values are
+	// normalized to 0 for safety.
 	if s.router != nil {
 		timeout := cfg.Timeout
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 	}
@@ -769,9 +771,11 @@ func (s *Server) setTimeout(c echo.Context) error {
 		})
 	}
 
-	if req.Timeout <= 0 {
+	// timeout == 0 means "persistent" (disable auto-hibernate). Negative values
+	// are invalid.
+	if req.Timeout < 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "timeout must be positive",
+			"error": "timeout must be non-negative (0 disables auto-hibernate)",
 		})
 	}
 
@@ -1182,11 +1186,12 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 		})
 	}
 
-	// Register with sandbox router after explicit wake
+	// Register with sandbox router after explicit wake.
+	// timeout == 0 means "persistent" (no auto-hibernate).
 	if s.router != nil {
 		timeout := req.Timeout
-		if timeout <= 0 {
-			timeout = 300
+		if timeout < 0 {
+			timeout = 0
 		}
 		s.router.Register(id, time.Duration(timeout)*time.Second)
 	}
@@ -1270,10 +1275,6 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 
 	// Issue fresh JWT
 	orgID, _ := auth.GetOrgID(c)
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = 300
-	}
 	var token string
 	if s.jwtIssuer != nil {
 		t, err := s.jwtIssuer.IssueSandboxToken(orgID, sandboxID, worker.ID, 24*time.Hour)
@@ -1720,12 +1721,17 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 	}
 
+	// Resolve timeout. With int-valued JSON fields we can't distinguish "not sent"
+	// from "explicitly zero", so treat req.Timeout as authoritative. Fall back to
+	// the checkpoint's original timeout only when req.Timeout is negative (which is
+	// itself invalid, but could occur historically). timeout == 0 is valid and means
+	// "persistent / never auto-hibernate".
 	timeout := req.Timeout
-	if timeout <= 0 {
+	if timeout < 0 {
 		timeout = originalCfg.Timeout
 	}
-	if timeout <= 0 {
-		timeout = 300
+	if timeout < 0 {
+		timeout = 0
 	}
 
 	// Unified async fork: return immediately, boot VM in background.
