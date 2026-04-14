@@ -1,0 +1,129 @@
+---
+title: "Create a Hermes Agent"
+description: "Deploy a personal AI agent on Telegram with persistent memory using the oc CLI"
+---
+
+This guide walks through creating a managed Hermes agent on OpenComputer, connecting it to Telegram, and chatting with it. By the end you'll have a personal AI agent running Claude via OpenRouter, reachable from your phone.
+
+## Prerequisites
+
+- An **OpenComputer API key** from [app.opencomputer.dev](https://app.opencomputer.dev)
+- The **oc CLI** installed and configured
+- **Telegram** installed on your phone or desktop ([download here](https://telegram.org/apps))
+
+### Install the CLI
+
+See [CLI installation](/cli/overview#installation) for all platforms, or quick-install on macOS:
+
+```bash
+curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+oc config set api-key YOUR_API_KEY
+```
+
+---
+
+## Step 1: Create the agent
+
+```bash
+oc agent create my-hermes --core hermes
+```
+
+This creates the agent, provisions its environment, configures the LLM provider, and starts the Hermes gateway.
+
+Check that the agent is running:
+
+```bash
+oc agent get my-hermes
+```
+
+```
+ID:        my-hermes
+Name:      my-hermes
+Core:      hermes
+Channels:  -
+Packages:  -
+Instance:  inst_... (running)
+```
+
+Wait for the status to show `running` before proceeding. Provisioning typically takes 20–30 seconds.
+
+---
+
+## Step 2: Create a Telegram bot
+
+Open [this link to BotFather](https://t.me/BotFather) in Telegram (or search for `@BotFather` in the app). Then:
+
+1. Tap **Start** if it's your first time
+2. Send `/newbot`
+3. Enter a display name when prompted (e.g. "My Hermes Agent")
+4. Enter a username — must end in `bot` (e.g. `my_hermes_test_bot`)
+5. BotFather replies with a token like `110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw` — copy it
+
+---
+
+## Step 3: Connect Telegram
+
+```bash
+oc agent connect my-hermes telegram
+```
+
+The CLI will prompt you to paste the bot token. Alternatively, use the API directly:
+
+```bash
+curl -X POST https://api.opencomputer.dev/v1/agents/my-hermes/channels/telegram \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"bot_token": "YOUR_BOT_TOKEN"}'
+```
+
+This registers a webhook with Telegram, configures Hermes for webhook mode, and restarts the gateway. Verify it worked:
+
+```bash
+oc agent get my-hermes
+```
+
+```
+Channels:  telegram
+```
+
+---
+
+## Step 4: Chat with your agent
+
+Open Telegram, find your bot by its username, and send a message. The agent responds using Claude (via OpenRouter) with the full Hermes personality — memory, tool use, and multi-turn conversation.
+
+If the bot suggests setting a home channel (`/sethome`), do it — this is where Hermes delivers cron job results and cross-platform messages.
+
+---
+
+## Shell access
+
+You can shell into the agent's sandbox at any time:
+
+```bash
+oc shell my-hermes
+```
+
+This opens an interactive terminal inside the agent's environment. You have full access — inspect logs, edit Hermes config, install tools, change the model, add skills. Anything you can do with Hermes locally, you can do here. See the [Hermes docs](https://hermes-agent.nousresearch.com/docs/) for what's possible.
+
+---
+
+## Cleanup
+
+Disconnect the channel and delete the agent:
+
+```bash
+oc agent disconnect my-hermes telegram
+oc agent delete my-hermes
+```
+
+Disconnecting deregisters the Telegram webhook and removes the channel config from Hermes. Deleting the agent tears down the sandbox.
+
+---
+
+## What's next
+
+- **Install gbrain** for persistent memory: `oc agent install my-hermes gbrain` (coming soon)
+- **Connect Slack** instead of Telegram (planned)
+- **Custom cores** — bring your own agent runtime with `oc shell` and the raw sandbox API
+- **Hermes docs** — see the full [Hermes documentation](https://hermes-agent.nousresearch.com/docs/) for skills, cron jobs, voice, browser tools, and more
