@@ -28,7 +28,7 @@ Without `--core`, the agent uses the raw sandbox path — you provide your own `
 A channel is a messaging platform connected to your agent. You **connect** and **disconnect** channels.
 
 ```bash
-oc agent connect my-agent telegram --bot-token <token>
+oc agent connect my-agent telegram
 oc agent disconnect my-agent telegram
 ```
 
@@ -71,7 +71,7 @@ Three commands to a personal AI agent on Telegram with persistent memory:
 oc agent create my-hermes --core hermes
 
 # Connect Telegram (create a bot via @BotFather first)
-oc agent connect my-hermes telegram --bot-token <token>
+oc agent connect my-hermes telegram
 
 # Install persistent memory
 oc agent install my-hermes gbrain
