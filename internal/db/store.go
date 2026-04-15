@@ -497,11 +497,30 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 		query = `UPDATE sandbox_sessions SET status = $1 WHERE sandbox_id = $2 AND status = 'running'`
 		args = []interface{}{status, sandboxID}
 	}
-	_, err := s.pool.Exec(ctx, query, args...)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update sandbox session: %w", err)
 	}
-	return nil
+
+	// Close any open scale_events when the session actually transitioned to a
+	// non-billable state. Tied to the same tx as the session update so the
+	// usage reporter can never observe a stopped/hibernated session with an
+	// ended_at IS NULL scale_event (which would keep billing the window).
+	if tag.RowsAffected() > 0 && (status == "stopped" || status == "hibernated" || status == "error") {
+		if _, err := tx.Exec(ctx,
+			`UPDATE sandbox_scale_events SET ended_at = now()
+			 WHERE sandbox_id = $1 AND ended_at IS NULL`, sandboxID); err != nil {
+			return fmt.Errorf("failed to close scale events: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // SetMigrating marks a sandbox as migrating to a target worker.
@@ -911,8 +930,14 @@ func (s *Store) UpdateSandboxSessionForWake(ctx context.Context, sandboxID, newW
 // Sessions without a checkpoint are set to "stopped" (VM is gone, no recovery possible).
 // Returns the count of sessions transitioned to each state.
 func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (hibernated, stopped int, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// First: mark sessions that have an active hibernation as "hibernated"
-	res1, err := s.pool.Exec(ctx,
+	res1, err := tx.Exec(ctx,
 		`UPDATE sandbox_sessions SET status = 'hibernated'
 		 WHERE worker_id = $1 AND status = 'running'
 		 AND sandbox_id IN (
@@ -924,7 +949,7 @@ func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (h
 	}
 
 	// Second: mark remaining "running" sessions as "stopped"
-	res2, err := s.pool.Exec(ctx,
+	res2, err := tx.Exec(ctx,
 		`UPDATE sandbox_sessions SET status = 'stopped', stopped_at = now(),
 		 error_msg = 'worker restarted'
 		 WHERE worker_id = $1 AND status = 'running'`, workerID)
@@ -932,6 +957,21 @@ func (s *Store) ReconcileWorkerSessions(ctx context.Context, workerID string) (h
 		return int(res1.RowsAffected()), 0, fmt.Errorf("failed to reconcile stopped sessions: %w", err)
 	}
 
+	// Close any open scale_events for sessions we just transitioned off running
+	// on this worker, so billing stops at reconciliation time.
+	if _, err := tx.Exec(ctx,
+		`UPDATE sandbox_scale_events se SET ended_at = now()
+		 WHERE se.ended_at IS NULL
+		   AND se.sandbox_id IN (
+		       SELECT sandbox_id FROM sandbox_sessions
+		       WHERE worker_id = $1 AND status IN ('hibernated', 'stopped')
+		   )`, workerID); err != nil {
+		return int(res1.RowsAffected()), int(res2.RowsAffected()), fmt.Errorf("failed to close scale events: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("failed to commit reconcile tx: %w", err)
+	}
 	return int(res1.RowsAffected()), int(res2.RowsAffected()), nil
 }
 
