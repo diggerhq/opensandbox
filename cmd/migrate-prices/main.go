@@ -9,7 +9,10 @@
 //     go run ./cmd/migrate-prices --tier=8192 --live
 //
 // By default, orgs with orgs.price_locked=TRUE are skipped (grandfathered).
-// Pass --force to override and migrate locked orgs too.
+// Pass --force to override and migrate every locked org at the given tier.
+// To cherry-pick a single grandfathered org onto new pricing, pass
+// --org=<uuid> — that scopes the run to just that org and implicitly
+// overrides its lock (no need to combine with --force).
 //
 // The command is idempotent: items already attached to the target price are
 // skipped. Usage already accrued this cycle stays at the previous rate because
@@ -36,6 +39,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", true, "if true, prints what would change without calling Stripe")
 	live := flag.Bool("live", false, "must be set to actually mutate Stripe; overrides --dry-run")
 	force := flag.Bool("force", false, "also migrate orgs with price_locked=TRUE (off by default — grandfathered orgs stay on their current price)")
+	orgID := flag.String("org", "", "if set, scope the run to this single org UUID and override its price_locked status (no need to also pass --force)")
 	flag.Parse()
 
 	if *live {
@@ -79,10 +83,16 @@ func main() {
 		   JOIN orgs o ON o.id = osi.org_id
 		  WHERE osi.memory_mb = $1
 		    AND o.stripe_subscription_id IS NOT NULL`
-	if !*force {
+	args := []interface{}{*tier}
+	switch {
+	case *orgID != "":
+		// --org scopes to one org and implicitly overrides its lock.
+		query += ` AND o.id = $2`
+		args = append(args, *orgID)
+	case !*force:
 		query += ` AND o.price_locked = FALSE`
 	}
-	rows, err := pool.Query(ctx, query, *tier)
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		log.Fatalf("query items: %v", err)
 	}
@@ -103,9 +113,12 @@ func main() {
 	if err := rows.Err(); err != nil {
 		log.Fatalf("rows err: %v", err)
 	}
-	if *force {
+	switch {
+	case *orgID != "":
+		log.Printf("found %d candidate subscription item(s) (--org=%s: scoped to single org, price_locked ignored)", len(targets), *orgID)
+	case *force:
 		log.Printf("found %d candidate subscription item(s) (--force: price_locked ignored)", len(targets))
-	} else {
+	default:
 		log.Printf("found %d candidate subscription item(s) (price_locked=FALSE)", len(targets))
 	}
 
