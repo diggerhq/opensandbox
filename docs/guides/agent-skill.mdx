@@ -18,7 +18,7 @@ This works with Claude Code, Codex, Cursor, and any agent that supports the [Age
 The `oc` CLI must be installed and configured:
 
 ```bash
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+curl -fsSL https://raw.githubusercontent.com/diggerhq/opencomputer/main/scripts/install.sh | bash
 oc config set api-key YOUR_API_KEY
 ```
 
