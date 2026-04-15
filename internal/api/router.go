@@ -364,6 +364,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/billing", s.billingGet)
 		dash.GET("/billing/invoices", s.billingInvoices)
 		dash.POST("/billing/redeem", s.billingRedeem)
+		dash.POST("/billing/portal", s.billingPortal)
 
 		// Admin endpoints
 

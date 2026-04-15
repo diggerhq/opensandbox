@@ -1,18 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
-  getBilling, billingSetup, getBillingInvoices, redeemPromoCode,
-  type BillingTierUsage, type StripeInvoice,
+  getBilling, billingSetup, billingPortal, getBillingInvoices, redeemPromoCode,
+  type StripeInvoice,
 } from '../api/client'
-
-const PRICING_TIERS = [
-  { memory: '1 GB', vcpus: 1, bestEffort: true, perSec: 0.000001080246914 },
-  { memory: '4 GB', vcpus: 1, perSec: 0.000005787037037 },
-  { memory: '8 GB', vcpus: 2, perSec: 0.00001350308642 },
-  { memory: '16 GB', vcpus: 4, perSec: 0.00002700617284 },
-  { memory: '32 GB', vcpus: 8, perSec: 0.0001929012346 },
-  { memory: '64 GB', vcpus: 16, perSec: 0.0005401234568 },
-]
 
 export default function Billing() {
   const queryClient = useQueryClient()
@@ -24,6 +15,11 @@ export default function Billing() {
 
   const setupMutation = useMutation({
     mutationFn: billingSetup,
+    onSuccess: (data) => { window.location.href = data.url },
+  })
+
+  const portalMutation = useMutation({
+    mutationFn: billingPortal,
     onSuccess: (data) => { window.location.href = data.url },
   })
 
@@ -43,7 +39,7 @@ export default function Billing() {
     <div>
       <div style={{ marginBottom: 32 }}>
         <h1 className="page-title">Billing</h1>
-        <p className="page-subtitle">Manage your plan, usage, and payment settings</p>
+        <p className="page-subtitle">Manage your plan and payment settings</p>
       </div>
 
       {isLoading ? (
@@ -52,164 +48,109 @@ export default function Billing() {
         </div>
       ) : (
         <>
-          {/* Plan + Usage row */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 14 }}>
-
-            {/* Plan Card */}
-            <div className="glass-card animate-in stagger-1" style={{ padding: 28 }}>
-              <span className="section-title" style={{ marginBottom: 16, display: 'block' }}>
-                Current Plan
+          {/* Plan Card */}
+          <div className="glass-card animate-in stagger-1" style={{ padding: 28, marginBottom: 14 }}>
+            <span className="section-title" style={{ marginBottom: 16, display: 'block' }}>
+              Current Plan
+            </span>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+              <span className="metric-value" style={{
+                fontSize: 36, fontWeight: 700,
+                color: isPro ? 'var(--accent-indigo)' : 'var(--text-primary)',
+              }}>
+                {isPro ? 'Pro' : 'Free'}
               </span>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
-                <span className="metric-value" style={{
-                  fontSize: 36, fontWeight: 700,
-                  color: isPro ? 'var(--accent-indigo)' : 'var(--text-primary)',
-                }}>
-                  {isPro ? 'Pro' : 'Free'}
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                  {isPro
-                    ? `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, all tiers`
-                    : `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, up to 4GB / 1 vCPU`}
-                </span>
-              </div>
-
-              {isPro && billing?.stripeCreditCents != null && billing.stripeCreditCents > 0 && (
-                <div style={{ fontSize: 13, color: 'var(--accent-emerald)', marginBottom: 12 }}>
-                  ${(billing.stripeCreditCents / 100).toFixed(2)} promotional credit remaining
-                </div>
-              )}
-
-              {!isPro && (
-                <div style={{ marginTop: 16 }}>
-                  <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
-                    Unlock larger machine sizes and get $30 free credit
-                  </div>
-                  <button
-                    onClick={() => setupMutation.mutate()}
-                    disabled={setupMutation.isPending}
-                    style={{
-                      padding: '10px 24px', fontSize: 14, fontWeight: 600,
-                      fontFamily: 'var(--font-body)', cursor: 'pointer',
-                      border: 'none', borderRadius: 'var(--radius-sm)',
-                      background: 'var(--accent-indigo)', color: '#fff',
-                      opacity: setupMutation.isPending ? 0.6 : 1,
-                    }}
-                  >
-                    {setupMutation.isPending ? 'Redirecting...' : 'Upgrade to Pro'}
-                  </button>
-                  {setupMutation.isError && (
-                    <p style={{ fontSize: 12, color: 'var(--accent-rose)', marginTop: 8 }}>
-                      {(setupMutation.error as Error).message}
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {isPro && (
-                <div style={{
-                  fontSize: 11, color: 'var(--accent-emerald)', marginTop: 4,
-                  display: 'flex', alignItems: 'center', gap: 6,
-                }}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
-                  Payment method on file — billed monthly via Stripe
-                </div>
-              )}
-
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 12 }}>
-                Need more concurrency?{' '}
-                <a href="https://cal.com/team/digger/opencomputer-founder-chat" target="_blank" rel="noreferrer"
-                  style={{ color: 'var(--accent-indigo)', textDecoration: 'none' }}>
-                  Talk to us
-                </a>
-              </div>
+              <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                {isPro
+                  ? `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, all tiers`
+                  : `${billing?.maxConcurrentSandboxes ?? 5} concurrent sandboxes, up to 4GB / 1 vCPU`}
+              </span>
             </div>
 
-            {/* Current Usage */}
-            <div className="glass-card animate-in stagger-2" style={{ padding: 28 }}>
-              <span className="section-title" style={{ marginBottom: 16, display: 'block' }}>
-                Current Month Usage
-              </span>
-              {!billing?.currentUsage?.tiers?.length ? (
-                <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                  No usage this month
+            {isPro && billing?.stripeCreditCents != null && billing.stripeCreditCents > 0 && (
+              <div style={{ fontSize: 13, color: 'var(--accent-emerald)', marginBottom: 12 }}>
+                ${(billing.stripeCreditCents / 100).toFixed(2)} promotional credit remaining
+              </div>
+            )}
+
+            {!isPro && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
+                  Unlock larger machine sizes and get $30 free credit
                 </div>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-                    {billing.currentUsage.tiers.map((tier: BillingTierUsage) => (
-                      <div key={tier.memoryMB} style={{
-                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                        padding: '8px 12px', borderRadius: 'var(--radius-sm)',
-                        background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.03)',
-                      }}>
-                        <div>
-                          <span style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 500 }}>
-                            {tier.memoryMB / 1024} GB
-                          </span>
-                          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 8 }}>
-                            {tier.vcpus} vCPU
-                          </span>
-                        </div>
-                        <div style={{ textAlign: 'right' }}>
-                          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)' }}>
-                            ${(tier.costCents / 100).toFixed(4)}
-                          </span>
-                          <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 8 }}>
-                            {formatSeconds(tier.totalSeconds)}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    paddingTop: 12, borderTop: '1px solid var(--border-subtle)',
-                  }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Total</span>
-                    <span className="metric-value" style={{ fontSize: 18, color: 'var(--accent-cyan)' }}>
-                      ${(billing.currentUsage.totalCostCents / 100).toFixed(4)}
-                    </span>
-                  </div>
-                </>
-              )}
+                <button
+                  onClick={() => setupMutation.mutate()}
+                  disabled={setupMutation.isPending}
+                  style={{
+                    padding: '10px 24px', fontSize: 14, fontWeight: 600,
+                    fontFamily: 'var(--font-body)', cursor: 'pointer',
+                    border: 'none', borderRadius: 'var(--radius-sm)',
+                    background: 'var(--accent-indigo)', color: '#fff',
+                    opacity: setupMutation.isPending ? 0.6 : 1,
+                  }}
+                >
+                  {setupMutation.isPending ? 'Redirecting...' : 'Upgrade to Pro'}
+                </button>
+                {setupMutation.isError && (
+                  <p style={{ fontSize: 12, color: 'var(--accent-rose)', marginTop: 8 }}>
+                    {(setupMutation.error as Error).message}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {isPro && (
+              <div style={{
+                fontSize: 11, color: 'var(--accent-emerald)', marginTop: 4,
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12" /></svg>
+                Payment method on file — billed monthly via Stripe
+              </div>
+            )}
+
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 12 }}>
+              Need more concurrency?{' '}
+              <a href="https://cal.com/team/digger/opencomputer-founder-chat" target="_blank" rel="noreferrer"
+                style={{ color: 'var(--accent-indigo)', textDecoration: 'none' }}>
+                Talk to us
+              </a>
             </div>
           </div>
 
-          {/* Pricing Table */}
-          <div className="glass-card animate-in stagger-3" style={{ padding: '22px 24px', marginBottom: 14 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <span className="section-title" style={{ marginBottom: 0 }}>Pricing</span>
-              <span style={{ fontSize: 11, color: 'var(--accent-emerald)', fontFamily: 'var(--font-mono)' }}>
-                Hibernated sandboxes are not charged
+          {/* Stripe Billing Portal CTA (pro only) */}
+          {isPro && (
+            <div className="glass-card animate-in stagger-2" style={{ padding: '22px 24px', marginBottom: 14 }}>
+              <span className="section-title" style={{ marginBottom: 10, display: 'block' }}>
+                Usage & Invoices
               </span>
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 14, lineHeight: 1.5 }}>
+                View your current-cycle usage, invoices, and manage your payment method on Stripe.
+              </p>
+              <button
+                onClick={() => portalMutation.mutate()}
+                disabled={portalMutation.isPending}
+                style={{
+                  padding: '10px 20px', fontSize: 13, fontWeight: 600,
+                  fontFamily: 'var(--font-body)', cursor: 'pointer',
+                  border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)',
+                  background: 'rgba(255,255,255,0.02)', color: 'var(--text-primary)',
+                  opacity: portalMutation.isPending ? 0.6 : 1,
+                }}
+              >
+                {portalMutation.isPending ? 'Opening Stripe…' : 'Open Stripe billing portal ↗'}
+              </button>
+              {portalMutation.isError && (
+                <p style={{ fontSize: 12, color: 'var(--accent-rose)', marginTop: 10 }}>
+                  {(portalMutation.error as Error).message}
+                </p>
+              )}
             </div>
-            <table className="data-table">
-              <thead>
-                <tr><th>Memory</th><th>vCPUs</th><th>Per Second</th></tr>
-              </thead>
-              <tbody>
-                {PRICING_TIERS.map((t, i) => {
-                  const locked = !isPro && i > 0
-                  return (
-                    <tr key={t.memory} style={{ opacity: locked ? 0.35 : 1 }}>
-                      <td style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {t.memory}{locked && ' — Pro'}
-                      </td>
-                      <td>{t.vcpus}{('bestEffort' in t) && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 4 }}>best-effort</span>}</td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: locked ? 'var(--text-tertiary)' : 'var(--accent-cyan)' }}>
-                        ${t.perSec.toFixed(11)}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          )}
 
           {/* Redeem Promotion Code (pro only) */}
           {isPro && (
-            <div className="glass-card animate-in stagger-4" style={{ padding: '22px 24px', marginBottom: 14 }}>
+            <div className="glass-card animate-in stagger-3" style={{ padding: '22px 24px', marginBottom: 14 }}>
               <span className="section-title" style={{ marginBottom: 12, display: 'block' }}>Promotion Code</span>
               <div style={{ display: 'flex', alignItems: 'end', gap: 14 }}>
                 <div>
@@ -252,7 +193,7 @@ export default function Billing() {
 
           {/* Invoice History (pro only) */}
           {isPro && (
-            <div className="glass-card animate-in stagger-5" style={{ padding: '22px 24px' }}>
+            <div className="glass-card animate-in stagger-4" style={{ padding: '22px 24px' }}>
               <span className="section-title" style={{ marginBottom: 14, display: 'block' }}>Invoices</span>
               {!invoiceData?.invoices?.length ? (
                 <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-tertiary)', fontSize: 13 }}>
@@ -308,10 +249,4 @@ function InvoiceStatus({ status }: { status: string }) {
       textTransform: 'uppercase', letterSpacing: '0.5px',
     }}>{status}</span>
   )
-}
-
-function formatSeconds(s: number): string {
-  if (s < 60) return `${Math.round(s)}s`
-  if (s < 3600) return `${Math.round(s / 60)}m`
-  return `${(s / 3600).toFixed(1)}h`
 }

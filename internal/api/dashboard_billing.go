@@ -6,12 +6,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/opensandbox/opensandbox/internal/auth"
-	"github.com/opensandbox/opensandbox/internal/billing"
 )
 
 // billingSetup initiates the upgrade flow: creates Stripe customer + Checkout session.
@@ -68,43 +66,6 @@ func (s *Server) billingGet(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "org not found"})
 	}
 
-	// Current month usage
-	now := time.Now()
-	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
-	usage, _ := s.store.GetOrgUsage(ctx, orgID.String(), monthStart, now)
-
-	type tierUsage struct {
-		MemoryMB     int     `json:"memoryMB"`
-		VCPUs        int     `json:"vcpus"`
-		DiskMB       int     `json:"diskMB"`
-		TotalSeconds float64 `json:"totalSeconds"`
-		CostCents    float64 `json:"costCents"`
-	}
-	var tiers []tierUsage
-	var totalCost float64
-	var diskOverageGBSeconds float64
-	for _, u := range usage {
-		rate := billing.TierPricePerSecond[u.MemoryMB]
-		cost := u.TotalSeconds * rate * 100
-		totalCost += cost
-		tiers = append(tiers, tierUsage{
-			MemoryMB:     u.MemoryMB,
-			VCPUs:        u.CPUPercent / 100,
-			DiskMB:       u.DiskMB,
-			TotalSeconds: u.TotalSeconds,
-			CostCents:    cost,
-		})
-		diskOverageGBSeconds += billing.DiskOverageGBSeconds(u)
-	}
-	diskOverageCostCents := diskOverageGBSeconds * billing.DiskOveragePricePerGBPerSecond * 100
-	totalCost += diskOverageCostCents
-	diskOverage := map[string]interface{}{
-		"freeAllowanceMB":     billing.DiskFreeAllowanceMB,
-		"pricePerGBPerSecond": billing.DiskOveragePricePerGBPerSecond,
-		"gbSeconds":           diskOverageGBSeconds,
-		"costCents":           diskOverageCostCents,
-	}
-
 	// Stripe balance for pro users
 	var stripeCreditCents int64
 	if org.Plan == "pro" && org.StripeCustomerID != nil && s.stripeClient != nil {
@@ -114,17 +75,46 @@ func (s *Server) billingGet(c echo.Context) error {
 		}
 	}
 
+	// Cost estimates are intentionally not returned from here. Billing truth
+	// (usage, price, invoice totals) lives in Stripe — the dashboard links to
+	// the Stripe Billing Portal instead of re-computing cost locally against a
+	// hardcoded rate table that would diverge for grandfathered orgs.
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"plan":                    org.Plan,
-		"stripeCreditCents":       stripeCreditCents,
-		"maxConcurrentSandboxes":  org.MaxConcurrentSandboxes,
-		"hasPaymentMethod":        org.StripeCustomerID != nil,
-		"currentUsage": map[string]interface{}{
-			"tiers":          tiers,
-			"diskOverage":    diskOverage,
-			"totalCostCents": totalCost,
-		},
+		"plan":                   org.Plan,
+		"stripeCreditCents":      stripeCreditCents,
+		"maxConcurrentSandboxes": org.MaxConcurrentSandboxes,
+		"hasPaymentMethod":       org.StripeCustomerID != nil,
 	})
+}
+
+// billingPortal creates a Stripe Billing Portal session and returns the URL.
+// The frontend opens this URL so the customer can view authoritative usage,
+// invoices, and manage their payment method — all served directly by Stripe.
+func (s *Server) billingPortal(c echo.Context) error {
+	if s.store == nil || s.stripeClient == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "billing not configured"})
+	}
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+	ctx := c.Request().Context()
+	org, err := s.store.GetOrg(ctx, orgID)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "org not found"})
+	}
+	if org.StripeCustomerID == nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "no billing customer — upgrade to Pro first"})
+	}
+
+	// Send the user back to wherever they came from when they close the portal.
+	returnURL := c.Request().Header.Get("Referer")
+	url, err := s.stripeClient.CreatePortalSession(*org.StripeCustomerID, returnURL)
+	if err != nil {
+		log.Printf("billing: create portal session failed for org %s: %v", orgID, err)
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create portal session"})
+	}
+	return c.JSON(http.StatusOK, map[string]string{"url": url})
 }
 
 // billingRedeem redeems a promotion code and applies the credit to the org's Stripe balance.
