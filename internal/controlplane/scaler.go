@@ -37,6 +37,10 @@ const (
 	evacuationBatchSize    = 3                  // sandboxes to migrate per eval cycle per worker
 	evacuationCooldown     = 60 * time.Second   // per-worker cooldown between evacuation batches
 	drainTimeout           = 15 * time.Minute   // max time to drain a worker via live migration
+
+	creationFailureThreshold = 3                // consecutive failures before exponential backoff
+	creationBackoffMin       = 1 * time.Minute  // initial backoff after threshold hit
+	creationBackoffMax       = 10 * time.Minute // cap on exponential backoff
 )
 
 // ScalerRegistry is the interface the Scaler uses to query worker state.
@@ -310,9 +314,14 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	}
 
 	// Ensure minimum workers are running (pre-provisioned capacity).
-	// Ignores cooldowns — if we're below minimum, launch immediately.
+	// Ignores cooldowns but respects creation failure backoff.
 	totalWorkers := len(workers) + len(s.state.GetPendingLaunches(region))
 	if totalWorkers < s.minWorkers {
+		if until, ok := s.state.GetCreationBackoffUntil(region); ok {
+			log.Printf("scaler: region %s below minimum workers (%d/%d) but creation backoff active until %s",
+				region, totalWorkers, s.minWorkers, until.Format(time.RFC3339))
+			return
+		}
 		deficit := s.minWorkers - totalWorkers
 		log.Printf("scaler: region %s below minimum workers (%d/%d), launching %d",
 			region, totalWorkers, s.minWorkers, deficit)
@@ -388,11 +397,24 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 }
 
 func (s *Scaler) scaleUp(_ context.Context, region string) {
+	// Check creation failure backoff
+	if until, ok := s.state.GetCreationBackoffUntil(region); ok {
+		log.Printf("scaler: region %s creation backoff active until %s, skipping scale-up",
+			region, until.Format(time.RFC3339))
+		return
+	}
+
 	// Record scale-up intent immediately (prevents duplicate launches)
 	s.state.SetLastScaleUp(region, time.Now(), s.cooldown)
 
+	// Register a placeholder pending launch so other code paths see it in-flight.
+	placeholderID := fmt.Sprintf("osb-worker-pending-%d", time.Now().UnixNano())
+	s.state.AddPendingLaunch(region, pendingLaunch{
+		MachineID:  placeholderID,
+		LaunchedAt: time.Now(),
+	})
+
 	// Run VM creation in background — Azure/EC2 can take 2-5 minutes.
-	// Uses a 5-minute timeout independent of the evaluation cycle.
 	go func() {
 		createCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -405,13 +427,28 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 		machine, err := s.pool.CreateMachine(createCtx, opts)
 		if err != nil {
 			log.Printf("scaler: failed to create machine in %s: %v", region, err)
+			s.state.RemovePendingLaunch(region, placeholderID)
+
+			failures := s.state.IncrCreationFailures(region)
+			if failures >= creationFailureThreshold {
+				backoff := creationBackoffMin * time.Duration(1<<(failures-creationFailureThreshold))
+				if backoff > creationBackoffMax {
+					backoff = creationBackoffMax
+				}
+				s.state.SetCreationBackoffUntil(region, time.Now().Add(backoff))
+				log.Printf("scaler: region %s hit %d consecutive creation failures, backing off %s",
+					region, failures, backoff)
+			}
 			return
 		}
 
+		// Swap placeholder for real machine ID
+		s.state.RemovePendingLaunch(region, placeholderID)
 		s.state.AddPendingLaunch(region, pendingLaunch{
 			MachineID:  machine.ID,
 			LaunchedAt: time.Now(),
 		})
+		s.state.ResetCreationFailures(region)
 		log.Printf("scaler: created machine %s in %s (addr=%s), pending registration", machine.ID, region, machine.Addr)
 	}()
 }

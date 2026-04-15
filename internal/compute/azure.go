@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -187,28 +188,12 @@ func (p *AzurePool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machi
 	}, nil)
 	if err != nil {
 		log.Printf("azure: VM %s BeginCreateOrUpdate error detail: %+v", vmName, err)
-		// Clean up orphaned NIC
-		go func() {
-			cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if delPoller, delErr := p.nicClient.BeginDelete(cleanCtx, p.cfg.ResourceGroup, nicName, nil); delErr == nil {
-				delPoller.PollUntilDone(cleanCtx, nil)
-				log.Printf("azure: cleaned up orphaned NIC %s", nicName)
-			}
-		}()
+		go p.cleanupNIC(nicName, "create failed")
 		return nil, fmt.Errorf("azure: create VM %s failed: %w", vmName, err)
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
-		// Clean up orphaned NIC on poll failure too
-		go func() {
-			cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if delPoller, delErr := p.nicClient.BeginDelete(cleanCtx, p.cfg.ResourceGroup, nicName, nil); delErr == nil {
-				delPoller.PollUntilDone(cleanCtx, nil)
-				log.Printf("azure: cleaned up orphaned NIC %s after poll failure", nicName)
-			}
-		}()
+		go p.cleanupNIC(nicName, "poll failed")
 		return nil, fmt.Errorf("azure: VM %s poll failed: %w", vmName, err)
 	}
 	log.Printf("azure: VM %s created successfully", vmName)
@@ -343,41 +328,82 @@ func (p *AzurePool) DrainMachine(ctx context.Context, machineID string) error {
 	return err
 }
 
+// cleanupNIC deletes a single orphaned NIC in the background with a generous timeout.
+func (p *AzurePool) cleanupNIC(nicName, reason string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	poller, err := p.nicClient.BeginDelete(ctx, p.cfg.ResourceGroup, nicName, nil)
+	if err != nil {
+		log.Printf("azure: failed to start NIC cleanup for %s (%s): %v", nicName, reason, err)
+		return
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+		log.Printf("azure: NIC cleanup poll failed for %s (%s): %v", nicName, reason, err)
+		return
+	}
+	log.Printf("azure: cleaned up orphaned NIC %s (%s)", nicName, reason)
+}
+
 // CleanupOrphanedResources finds and deletes NICs not attached to any VM.
-// These accumulate when VM creation fails partway through.
-func (p *AzurePool) CleanupOrphanedResources(ctx context.Context) (int, error) {
-	cleaned := 0
+// Uses its own long-lived context and deletes in parallel to handle large backlogs.
+func (p *AzurePool) CleanupOrphanedResources(_ context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var orphaned []string
 	pager := p.nicClient.NewListPager(p.cfg.ResourceGroup, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return cleaned, fmt.Errorf("azure: list NICs: %w", err)
+			return 0, fmt.Errorf("azure: list NICs: %w", err)
 		}
 		for _, nic := range page.Value {
 			if nic.Properties == nil || nic.Properties.VirtualMachine != nil {
-				continue // attached to a VM, skip
+				continue
 			}
 			name := ""
 			if nic.Name != nil {
 				name = *nic.Name
 			}
 			if !strings.HasPrefix(name, "osb-worker-") {
-				continue // not ours
-			}
-			log.Printf("azure: cleaning orphaned NIC %s", name)
-			poller, err := p.nicClient.BeginDelete(ctx, p.cfg.ResourceGroup, name, nil)
-			if err != nil {
-				log.Printf("azure: failed to delete orphaned NIC %s: %v", name, err)
 				continue
 			}
-			if _, err := poller.PollUntilDone(ctx, nil); err != nil {
-				log.Printf("azure: orphaned NIC %s delete poll failed: %v", name, err)
-			} else {
-				cleaned++
-			}
+			orphaned = append(orphaned, name)
 		}
 	}
-	return cleaned, nil
+
+	if len(orphaned) == 0 {
+		return 0, nil
+	}
+
+	log.Printf("azure: found %d orphaned NICs, cleaning up in parallel", len(orphaned))
+
+	var (
+		cleaned int64
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, 10)
+	)
+	for _, name := range orphaned {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(nicName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			poller, err := p.nicClient.BeginDelete(ctx, p.cfg.ResourceGroup, nicName, nil)
+			if err != nil {
+				log.Printf("azure: failed to delete orphaned NIC %s: %v", nicName, err)
+				return
+			}
+			if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+				log.Printf("azure: orphaned NIC %s delete poll failed: %v", nicName, err)
+				return
+			}
+			atomic.AddInt64(&cleaned, 1)
+		}(name)
+	}
+	wg.Wait()
+
+	return int(cleaned), nil
 }
 
 // RefreshAMI checks Azure Key Vault for a new worker image ID and version.
