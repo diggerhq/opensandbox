@@ -93,7 +93,17 @@ type agentListResponse struct {
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Manage agents",
-	Long:  "Create and manage managed agents on OpenComputer.",
+	Long: "Create and manage managed agents on OpenComputer.\n\n" +
+		"Exit codes:\n" +
+		"  0  Success\n" +
+		"  1  General error (unclassified failures, bad args/flags)\n" +
+		"  3  Upstream 4xx (not found, unauthorized, org mismatch)\n" +
+		"  4  Conflict (already exists, invalid state)\n" +
+		"  5  Transient error (timeout, retry-safe)\n\n" +
+		"Classes 3-5 are emitted by create/install/get when the failure\n" +
+		"carries a known code. Other commands exit 0 on success, 1 on\n" +
+		"failure. Agent callers can branch on the class to decide retry\n" +
+		"vs surface-to-user vs give-up.",
 }
 
 // ── Formatting helpers ──
