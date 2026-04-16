@@ -13,7 +13,7 @@ oc agent create my-agent --core openclaw
 oc agent create my-agent --core hermes --secret OPENAI_API_KEY=sk-...
 ```
 
-With `--core`, OpenComputer boots a sandbox with the runtime pre-installed and an instance running. Without `--core`, you get a raw agent — provide your own `snapshot` and `entrypoint` via the [REST API](/agents/rest/agents).
+`--core` is required. OpenComputer boots a sandbox with the runtime pre-installed and an instance running. To create a raw agent with your own `snapshot` and `entrypoint`, use the [REST API](/agents/rest/agents) directly.
 
 ## Listing & Inspecting
 
@@ -34,10 +34,11 @@ oc agent get my-agent
 Connect messaging platforms to your agent. Currently supports Telegram.
 
 ```bash
-# Connect (prompts for bot token interactively)
+# Connect — prompts for bot token on TTY, or pass via flag for scripts
 oc agent connect my-agent telegram
+oc agent connect my-agent telegram --bot-token 123:ABC
 
-# Disconnect
+# Disconnect (use --yes in scripts)
 oc agent disconnect my-agent telegram
 
 # List connected channels
@@ -64,10 +65,11 @@ oc agent packages my-agent
 ## Deleting an Agent
 
 ```bash
-oc agent delete my-agent
+oc agent delete my-agent          # prompts for confirmation
+oc agent delete my-agent --yes    # non-interactive (scripts, CI)
 ```
 
-Cascades to instances and sessions — the sandbox is destroyed.
+Cascades to instances and sessions — the sandbox is destroyed. The command refuses to delete without `--yes` when stdin is not a TTY, so a typo in a script can't silently destroy state.
 
 ## Shell Access
 
