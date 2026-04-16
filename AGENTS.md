@@ -49,6 +49,12 @@ instead.
 **NEVER push to main.** Always create a feature branch and open a pull request.
 Direct pushes to `main` are not allowed in this repo.
 
+**Confirm pushes, with one exception.** Pushing to a branch the agent itself
+just created in this session does not require a fresh confirmation each time
+once the initial push is authorized. Pushing to any branch that existed before
+the session — or that anyone else may have touched — needs explicit
+confirmation every time. When in doubt, confirm.
+
 ## Repo scope
 
 This repo owns the **sandbox platform**:
