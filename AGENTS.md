@@ -3,6 +3,12 @@
 Cloud sandboxes for running AI agents. Persistent VMs with checkpoints,
 hibernation, elasticity, and preview URLs.
 
+**Naming:** The product is **OpenComputer**, but the Go module is
+`github.com/opensandbox/opensandbox`, binaries are `opensandbox-server` /
+`opensandbox-worker` / `osb-agent`, env vars are `OPENSANDBOX_*`, and
+API key prefixes are `osb_`. Don't be confused by the mismatch — it's
+historical. Use "OpenComputer" in docs and UI, `opensandbox` in code.
+
 ## Hard rules
 
 **NEVER force push.** `git push --force`, `git push -f`, and
@@ -47,10 +53,13 @@ Communication between tiers:
 | `internal/qemu/` | QEMU VM manager — snapshots, hibernation, migration (large: ~108KB) |
 | `internal/compute/` | Cloud provider pools (EC2, Azure) |
 | `internal/controlplane/` | Server scaling, worker registry (Redis), gRPC leader |
-| `internal/db/` | PostgreSQL schema, migrations (21 pairs in `migrations/`) |
+| `internal/db/` | PostgreSQL schema, migrations (23 pairs in `migrations/`) |
 | `internal/billing/` | Stripe integration, usage tracking, scale events |
-| `internal/proxy/` | Subdomain routing, secrets MITM proxy |
+| `internal/proxy/` | Subdomain routing for preview URLs |
+| `internal/secretsproxy/` | MITM proxy — substitutes secret placeholders in outbound HTTPS |
 | `internal/config/` | Environment-based configuration (`config.go` is the reference) |
+| `internal/analytics/` | Segment event tracking |
+| `internal/grpctls/` | TLS helpers for gRPC connections |
 | `proto/` | Protocol Buffer definitions — agent and worker gRPC services |
 | `sdks/typescript/` | `@opencomputer/sdk` npm package |
 | `sdks/python/` | `opencomputer-sdk` PyPI package |
@@ -59,6 +68,7 @@ Communication between tiers:
 | `deploy/` | Dockerfiles, Terraform, cloud deployment scripts |
 | `scripts/` | Integration tests, QEMU tests, benchmarks |
 | `examples/` | SDK usage examples |
+| `archive/` | Dead code (microvm-tests, process-level). Ignore. |
 
 ## Dev loop
 
@@ -92,10 +102,18 @@ make install-oc
 make test          # all tests
 make test-unit     # unit only
 
+# Lint + format
+make fmt           # gofmt
+make lint          # golangci-lint (if installed)
+make tidy          # go mod tidy
+
 # Web dashboard dev
 make web-dev       # Vite dev server, proxies to :8080
 make web-build     # production build
 ```
+
+Note: `make run-dev` and other run targets build the server binary first
+(CGO_ENABLED=1, so you need a C compiler / Xcode CLT on macOS).
 
 Three dev tiers, pick the simplest one that covers your change:
 1. **Tier 1** (`make run-dev`): combined mode, no DB, in-memory only
@@ -151,6 +169,13 @@ make build-oc        # build
 make install-oc      # build + install to $GOPATH/bin
 ```
 
+The CLI has two kinds of commands:
+- **Sandbox commands** (`sandbox`, `exec`, `shell`, `checkpoint`, `patch`,
+  `preview`, `secret`) — talk directly to the OpenComputer API.
+- **Agent commands** (`agent create/connect/install/get/delete`) — thin
+  wrappers that talk to sessions-api (separate service). Require
+  `SESSIONS_API_URL` or `--sessions-api-url` flag.
+
 CLI releases are automated via `.github/workflows/release-cli.yml` on merge
 to main. The release workflow builds cross-platform binaries.
 
@@ -176,7 +201,7 @@ CI/CD workflows in `.github/workflows/`:
 
 ## Database
 
-PostgreSQL with raw SQL migrations in `internal/db/migrations/` (21 pairs,
+PostgreSQL with raw SQL migrations in `internal/db/migrations/` (23 pairs,
 `.up.sql` / `.down.sql`). No ORM — direct queries via `pgx`.
 
 Core tables: `orgs`, `users`, `api_keys`, `sandbox_sessions`, `workers`,
