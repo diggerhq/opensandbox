@@ -7,12 +7,16 @@ description: "Manage agents, channels, and packages"
 
 Create a new agent. [HTTP API →](/api-reference/agents/create)
 
-<ParamField query="--core" type="string">
-  Managed core to use (e.g. `hermes`, `openclaw`). Without this flag, creates a raw agent.
+<ParamField query="--core" type="string" required>
+  Managed core to use (e.g. `hermes`, `openclaw`). Required — a core-less agent has no runtime and can't connect channels or install packages. To create a raw agent with your own snapshot, use the [REST API](/api-reference/agents/create) directly.
 </ParamField>
 
 <ParamField query="--secret" type="string">
   Secret `KEY=VALUE` (repeatable). Secrets are stored encrypted and injected at sandbox creation.
+</ParamField>
+
+<ParamField query="--no-wait" type="boolean">
+  Return immediately after the agent record is created, without polling for sandbox readiness. The `async` JSON field indicates the caller should re-check with `oc agent get`.
 </ParamField>
 
 ```bash
@@ -53,8 +57,13 @@ oc agent get my-hermes
 
 Delete an agent. Cascades to instances and sessions — the sandbox is destroyed. [HTTP API →](/api-reference/agents/delete)
 
+<ParamField query="--yes" type="boolean">
+  Skip the confirmation prompt. Required when stdin is not a TTY (e.g. running from a script) — the command otherwise refuses rather than destroying state silently on a typo.
+</ParamField>
+
 ```bash
-oc agent delete my-hermes
+oc agent delete my-hermes           # interactive: prompts "Delete agent my-hermes? [y/N]"
+oc agent delete my-hermes --yes     # script-safe: no prompt
 ```
 
 ---
@@ -63,15 +72,13 @@ oc agent delete my-hermes
 
 Connect a messaging channel to an agent. [HTTP API →](/api-reference/agents/connect-channel)
 
-For Telegram, prompts interactively for the bot token if `--bot-token` is not provided.
-
 <ParamField query="--bot-token" type="string">
-  Telegram bot token (Telegram channel only). If omitted, prompts interactively.
+  Telegram bot token (Telegram channel only). If omitted and stdin is a TTY, the CLI prompts interactively. If omitted and stdin is not a TTY (scripts, CI, agent callers), the command exits with an error — pass the flag explicitly.
 </ParamField>
 
 ```bash
-oc agent connect my-hermes telegram
-oc agent connect my-hermes telegram --bot-token 123:ABC
+oc agent connect my-hermes telegram                        # interactive prompt
+oc agent connect my-hermes telegram --bot-token 123:ABC    # script-safe
 ```
 
 ---
@@ -80,8 +87,13 @@ oc agent connect my-hermes telegram --bot-token 123:ABC
 
 Disconnect a channel from an agent. Removes webhook registration and config. [HTTP API →](/api-reference/agents/disconnect-channel)
 
+<ParamField query="--yes" type="boolean">
+  Skip the confirmation prompt. Required when stdin is not a TTY.
+</ParamField>
+
 ```bash
 oc agent disconnect my-hermes telegram
+oc agent disconnect my-hermes telegram --yes
 ```
 
 ---
@@ -110,8 +122,13 @@ oc agent install my-hermes gbrain
 
 Uninstall a package from an agent. Data is preserved by default. [HTTP API →](/api-reference/agents/uninstall-package)
 
+<ParamField query="--yes" type="boolean">
+  Skip the confirmation prompt. Required when stdin is not a TTY.
+</ParamField>
+
 ```bash
 oc agent uninstall my-hermes gbrain
+oc agent uninstall my-hermes gbrain --yes
 ```
 
 ---
@@ -123,3 +140,19 @@ List packages installed on an agent. [HTTP API →](/api-reference/agents/list-p
 ```bash
 oc agent packages my-hermes
 ```
+
+---
+
+## Exit codes
+
+`oc agent` commands use a class-based exit code scheme so scripts and agent callers can branch on failure type without parsing stderr.
+
+| Code | Class          | Meaning                                                      |
+|------|----------------|--------------------------------------------------------------|
+| 0    | Success        | Command completed successfully                               |
+| 1    | General error  | Unclassified failure, bad args/flags, aborted confirmation   |
+| 3    | Upstream 4xx   | Not found, unauthorized, org mismatch, bad request           |
+| 4    | Conflict       | Already exists, invalid state transition                     |
+| 5    | Transient      | Timeout, retry-safe — try again                              |
+
+Codes 3–5 are emitted by `create`, `install`, and `get` when the failure carries a known error code. Other subcommands exit 0 on success and 1 on any failure.
