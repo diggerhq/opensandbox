@@ -13,7 +13,10 @@ import (
 var agentCreateCmd = &cobra.Command{
 	Use:   "create <id>",
 	Short: "Create a new managed agent",
-	Args:  cobra.ExactArgs(1),
+	Long: "Create a new managed agent. A core (e.g. --core hermes) is required:\n" +
+		"without one, the agent has no runtime and cannot connect channels\n" +
+		"or install packages.",
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sc, err := sessionsClient(cmd)
 		if err != nil {
@@ -26,10 +29,8 @@ var agentCreateCmd = &cobra.Command{
 		noWait, _ := cmd.Flags().GetBool("no-wait")
 
 		body := map[string]interface{}{
-			"id": id,
-		}
-		if core != "" {
-			body["core"] = core
+			"id":   id,
+			"core": core,
 		}
 
 		// Parse --secret KEY=VAL flags into secrets map
@@ -58,12 +59,6 @@ var agentCreateCmd = &cobra.Command{
 			}
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, "  ✓ Agent record created")
-		}
-
-		// No core means no instance to wait for — skip polling.
-		if agent.Core == nil {
-			printer.Print(agent, func() {})
-			return nil
 		}
 
 		// --no-wait short-circuits into Mode 3 (async fallback). Scripts

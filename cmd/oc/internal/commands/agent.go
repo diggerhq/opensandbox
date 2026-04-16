@@ -100,7 +100,8 @@ func formatAge(isoTime string) string {
 
 func init() {
 	// Per-subcommand flags
-	agentCreateCmd.Flags().String("core", "", "Managed core (e.g. hermes)")
+	agentCreateCmd.Flags().String("core", "", "Managed core (required, e.g. hermes|openclaw)")
+	_ = agentCreateCmd.MarkFlagRequired("core")
 	agentCreateCmd.Flags().StringSlice("secret", nil, "Secrets (KEY=VALUE)")
 	agentCreateCmd.Flags().Bool("no-wait", false, "Don't wait for instance provisioning; exit after agent record is created")
 
