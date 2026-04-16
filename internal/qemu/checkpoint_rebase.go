@@ -28,10 +28,11 @@ func (m *Manager) rebaseCheckpointToCurrentBase(ctx context.Context, checkpointD
 		return fmt.Errorf("rootfs.qcow2 not found in %s", checkpointDir)
 	}
 
-	oldBasePath, err := downloadOldBase(ctx, m.checkpointStore, oldGoldenVersion)
+	oldBasePath, release, err := acquireOldBase(ctx, m.checkpointStore, oldGoldenVersion)
 	if err != nil {
 		return fmt.Errorf("download old base %s: %w", oldGoldenVersion, err)
 	}
+	defer release()
 
 	// Step 1: point overlay at the downloaded old base (metadata-only repoint).
 	rebaseCmd := exec.CommandContext(ctx, "qemu-img", "rebase", "-u", "-b", oldBasePath, "-F", "raw", rootfs)
@@ -54,26 +55,86 @@ func (m *Manager) rebaseCheckpointToCurrentBase(ctx context.Context, checkpointD
 	return nil
 }
 
-// oldBaseCache prevents duplicate downloads of the same old base version.
+// oldBaseCache coordinates downloads of old base images, preventing duplicate
+// concurrent downloads and tracking reference counts for cleanup.
 var (
-	oldBaseMu    sync.Mutex
-	oldBaseCache = map[string]string{} // goldenVersion → local temp path
+	oldBaseMu     sync.Mutex
+	oldBaseCache  = map[string]string{}        // goldenVersion → local temp path
+	oldBaseRefs   = map[string]int{}           // goldenVersion → active reference count
+	oldBaseFlight = map[string]chan struct{}{}  // goldenVersion → closed when download completes
 )
 
-// downloadOldBase downloads an old base image from S3, caching in /tmp.
-// Multiple concurrent callers for the same version share one download.
-func downloadOldBase(ctx context.Context, store *storage.CheckpointStore, goldenVersion string) (string, error) {
-	oldBaseMu.Lock()
-	if path, ok := oldBaseCache[goldenVersion]; ok {
+// acquireOldBase returns the path to a cached (or freshly downloaded) old base
+// image, incrementing its reference count. Caller MUST call the returned release
+// function when done — the file is deleted from /tmp when refs drop to zero.
+// Concurrent callers for the same version share a single download.
+func acquireOldBase(ctx context.Context, store *storage.CheckpointStore, goldenVersion string) (path string, release func(), err error) {
+	for {
+		oldBaseMu.Lock()
+
+		// Already cached and on disk — bump ref and return.
+		if p, ok := oldBaseCache[goldenVersion]; ok {
+			if fileExists(p) {
+				oldBaseRefs[goldenVersion]++
+				oldBaseMu.Unlock()
+				return p, makeRelease(goldenVersion), nil
+			}
+			delete(oldBaseCache, goldenVersion)
+			delete(oldBaseRefs, goldenVersion)
+		}
+
+		// Another goroutine is downloading — wait for it.
+		if ch, downloading := oldBaseFlight[goldenVersion]; downloading {
+			oldBaseMu.Unlock()
+			select {
+			case <-ch:
+				continue // loop back to check cache
+			case <-ctx.Done():
+				return "", nil, ctx.Err()
+			}
+		}
+
+		// We own the download.
+		ch := make(chan struct{})
+		oldBaseFlight[goldenVersion] = ch
 		oldBaseMu.Unlock()
-		if fileExists(path) {
-			return path, nil
+
+		p, dlErr := doDownloadOldBase(ctx, store, goldenVersion)
+
+		oldBaseMu.Lock()
+		delete(oldBaseFlight, goldenVersion)
+		if dlErr == nil {
+			oldBaseCache[goldenVersion] = p
+			oldBaseRefs[goldenVersion] = 1
+		}
+		oldBaseMu.Unlock()
+		close(ch)
+
+		if dlErr != nil {
+			return "", nil, dlErr
+		}
+		return p, makeRelease(goldenVersion), nil
+	}
+}
+
+func makeRelease(goldenVersion string) func() {
+	return func() {
+		oldBaseMu.Lock()
+		defer oldBaseMu.Unlock()
+		oldBaseRefs[goldenVersion]--
+		if oldBaseRefs[goldenVersion] <= 0 {
+			if p, ok := oldBaseCache[goldenVersion]; ok {
+				os.Remove(p)
+				delete(oldBaseCache, goldenVersion)
+			}
+			delete(oldBaseRefs, goldenVersion)
 		}
 	}
-	oldBaseMu.Unlock()
+}
 
+func doDownloadOldBase(ctx context.Context, store *storage.CheckpointStore, goldenVersion string) (string, error) {
 	key := fmt.Sprintf("bases/%s/default.ext4", goldenVersion)
-	localPath := filepath.Join(os.TempDir(), fmt.Sprintf("old-base-%s.ext4", goldenVersion))
+	finalPath := filepath.Join(os.TempDir(), fmt.Sprintf("old-base-%s.ext4", goldenVersion))
 
 	reader, err := store.Download(ctx, key)
 	if err != nil {
@@ -81,31 +142,36 @@ func downloadOldBase(ctx context.Context, store *storage.CheckpointStore, golden
 	}
 	defer reader.Close()
 
-	f, err := os.Create(localPath)
+	tmpFile, err := os.CreateTemp(os.TempDir(), "old-base-dl-*.ext4")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
-	if _, err := io.Copy(f, reader); err != nil {
-		f.Close()
-		os.Remove(localPath)
+	tmpPath := tmpFile.Name()
+
+	if _, err := io.Copy(tmpFile, reader); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("write base image: %w", err)
 	}
-	f.Close()
+	tmpFile.Close()
 
-	oldBaseMu.Lock()
-	oldBaseCache[goldenVersion] = localPath
-	oldBaseMu.Unlock()
+	if err := os.Rename(tmpPath, finalPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("rename: %w", err)
+	}
 
-	return localPath, nil
+	return finalPath, nil
 }
 
-// cleanupOldBases removes cached old base images from /tmp.
+// cleanupOldBases force-removes all cached old base images from /tmp,
+// regardless of refcount. Only safe when no rebases are in flight.
 func cleanupOldBases() {
 	oldBaseMu.Lock()
 	defer oldBaseMu.Unlock()
 	for ver, path := range oldBaseCache {
 		os.Remove(path)
 		delete(oldBaseCache, ver)
+		delete(oldBaseRefs, ver)
 	}
 }
 

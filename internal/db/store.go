@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -898,8 +899,7 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 		 RETURNING hibernation_key`,
 		sandboxID,
 	).Scan(&supersededKey)
-	if err != nil && err.Error() != "no rows in result set" {
-		// Real DB error (not just "no prior hibernation") — log and continue
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		supersededKey = ""
 	}
 
