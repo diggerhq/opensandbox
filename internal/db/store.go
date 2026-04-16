@@ -879,10 +879,32 @@ type SandboxHibernation struct {
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
 }
 
-// CreateHibernation inserts a new hibernation record.
-func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, error) {
+// CreateHibernation inserts a new hibernation record, marking any prior active
+// hibernation for the same sandbox as expired. Returns the new record plus the
+// superseded hibernation key (if any) so the caller can delete the old S3 blob
+// — we only keep one hibernation per sandbox to bound storage growth.
+func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Find + expire any prior active hibernation for this sandbox
+	var supersededKey string
+	err = tx.QueryRow(ctx,
+		`UPDATE sandbox_hibernations SET expired_at = now()
+		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL
+		 RETURNING hibernation_key`,
+		sandboxID,
+	).Scan(&supersededKey)
+	if err != nil && err.Error() != "no rows in result set" {
+		// Real DB error (not just "no prior hibernation") — log and continue
+		supersededKey = ""
+	}
+
 	cp := &SandboxHibernation{}
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO sandbox_hibernations (sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at`,
@@ -890,9 +912,14 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
 		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create hibernation: %w", err)
+		return nil, "", fmt.Errorf("failed to create hibernation: %w", err)
 	}
-	return cp, nil
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", fmt.Errorf("commit tx: %w", err)
+	}
+
+	return cp, supersededKey, nil
 }
 
 // GetActiveHibernation returns the active (not restored, not expired) hibernation for a sandbox.

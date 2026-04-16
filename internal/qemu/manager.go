@@ -134,7 +134,8 @@ type Manager struct {
 	onSandboxReady   func(sandboxID, guestIP, template string, startedAt time.Time)
 	onSandboxDestroy func(sandboxID string)
 
-	secretsProxy SecretsProxyIntegration // nil if secrets proxy is not configured
+	secretsProxy    SecretsProxyIntegration  // nil if secrets proxy is not configured
+	checkpointStore *storage.CheckpointStore // for base image archival + checkpoint rebasing (nil until set)
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -210,6 +211,12 @@ func (m *Manager) SetMetadataCallbacks(
 // Must be called before any sandboxes are created.
 func (m *Manager) SetSecretsProxy(sp SecretsProxyIntegration) {
 	m.secretsProxy = sp
+}
+
+// SetCheckpointStore sets the S3 checkpoint store for base image archival and
+// on-demand checkpoint rebasing across golden versions.
+func (m *Manager) SetCheckpointStore(cs *storage.CheckpointStore) {
+	m.checkpointStore = cs
 }
 
 // GoldenVersion returns the hash identifying this worker's golden snapshot base image.
@@ -308,6 +315,8 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 				}
 			}
 			log.Printf("qemu: golden snapshot already exists at %s (CID=%d, guestIP=%s, version=%s)", goldenDir, m.goldenCID, m.goldenGuestIP, m.goldenVersion)
+			go m.uploadBaseImageIfNew(m.goldenVersion)
+			go m.migrateStaleCheckpoints()
 			return nil
 		}
 
@@ -541,6 +550,8 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	_ = os.WriteFile(filepath.Join(goldenDir, "host_ip"), []byte(netCfg.HostIP), 0644)
 	log.Printf("qemu: golden snapshot ready (%dms total, mem=%s, CID=%d, guestIP=%s, version=%s)",
 		time.Since(t0).Milliseconds(), memFile, goldenCID, netCfg.GuestIP, m.goldenVersion)
+	go m.uploadBaseImageIfNew(m.goldenVersion)
+	go m.migrateStaleCheckpoints()
 	return nil
 }
 
@@ -2136,17 +2147,18 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	workspaceKey = fmt.Sprintf("checkpoints/%s/%s/workspace.tar.zst", sandboxID, checkpointID)
 
 	meta := &SnapshotMeta{
-		SandboxID:    vm.ID,
-		Network:      vm.network,
-		GuestCID:     vm.guestCID,
-		GuestMAC:     vm.guestMAC,
-		BootArgs:     vm.bootArgs,
-		CpuCount:     vm.CpuCount,
-		MemoryMB:     vm.MemoryMB,
-		BaseMemoryMB: vm.baseMemoryMB,
-		Template:     vm.Template,
-		GuestPort:    vm.GuestPort,
-		SnapshotedAt: time.Now(),
+		SandboxID:      vm.ID,
+		Network:        vm.network,
+		GuestCID:       vm.guestCID,
+		GuestMAC:       vm.guestMAC,
+		BootArgs:       vm.bootArgs,
+		CpuCount:       vm.CpuCount,
+		MemoryMB:       vm.MemoryMB,
+		BaseMemoryMB:   vm.baseMemoryMB,
+		Template:       vm.Template,
+		GuestPort:      vm.GuestPort,
+		GoldenVersion:  vm.goldenVersion,
+		SnapshotedAt:   time.Now(),
 	}
 	// Persist secrets proxy state so RestoreFromCheckpoint can re-register the session.
 	if m.secretsProxy != nil && vm.network != nil {
@@ -2226,6 +2238,11 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		return fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
 	defer vm.opMu.Unlock()
+
+	// Ensure checkpoint is compatible with current base image — rebases inline if needed.
+	if err := m.ensureCheckpointRebased(ctx, checkpointID); err != nil {
+		return fmt.Errorf("checkpoint %s: rebase failed: %w", checkpointID, err)
+	}
 
 	t0 := time.Now()
 
@@ -2497,6 +2514,12 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 // The new sandbox gets its own network, CID, and drives (reflinked from cache).
 func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error) {
 	t0 := time.Now()
+
+	// Ensure checkpoint is compatible with current base image — rebases inline if needed.
+	// Return the error so we don't silently fork a stale checkpoint against the wrong base.
+	if err := m.ensureCheckpointRebased(ctx, checkpointID); err != nil {
+		return nil, fmt.Errorf("checkpoint %s: base migration failed: %w", checkpointID, err)
+	}
 
 	// Lock checkpoint cache for reading — prevents race with CreateCheckpoint writing cache
 	m.checkpointCacheMu.RLock()

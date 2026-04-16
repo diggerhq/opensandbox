@@ -1380,7 +1380,8 @@ func (s *Server) hibernateSandbox(c echo.Context) error {
 			template = session.Template
 			region = session.Region
 		}
-		_, _ = s.store.CreateHibernation(ctx, id, orgID, result.HibernationKey, result.SizeBytes, region, template, cfg)
+		_, superseded, _ := s.store.CreateHibernation(ctx, id, orgID, result.HibernationKey, result.SizeBytes, region, template, cfg)
+		s.deleteSupersededHibernation(superseded)
 		_ = s.store.UpdateSandboxSessionStatus(ctx, id, "hibernated", nil)
 	}
 
@@ -1394,6 +1395,20 @@ func (s *Server) hibernateSandbox(c echo.Context) error {
 		"hibernationKey": result.HibernationKey,
 		"sizeBytes":      result.SizeBytes,
 	})
+}
+
+// deleteSupersededHibernation best-effort removes a prior hibernation archive
+// from S3 when it's been replaced by a new hibernation for the same sandbox.
+// We only keep one hibernation per sandbox to bound storage growth.
+func (s *Server) deleteSupersededHibernation(key string) {
+	if s.checkpointStore == nil || key == "" || strings.HasPrefix(key, "local://") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.checkpointStore.Delete(ctx, key); err != nil {
+		log.Printf("api: failed to delete superseded hibernation %s: %v", key, err)
+	}
 }
 
 func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error {
@@ -1430,9 +1445,10 @@ func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error 
 
 	// Record hibernation in PG
 	orgID, _ := auth.GetOrgID(c)
-	_, _ = s.store.CreateHibernation(c.Request().Context(), sandboxID, orgID,
+	_, superseded, _ := s.store.CreateHibernation(c.Request().Context(), sandboxID, orgID,
 		grpcResp.CheckpointKey, grpcResp.SizeBytes,
 		session.Region, session.Template, session.Config)
+	s.deleteSupersededHibernation(superseded)
 	_ = s.store.UpdateSandboxSessionStatus(c.Request().Context(), sandboxID, "hibernated", nil)
 
 	// Invalidate the proxy route cache: wake may land the sandbox on a
