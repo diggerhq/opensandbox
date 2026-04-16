@@ -109,6 +109,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{22, "migrations/020_scale_events_disk_mb.up.sql"},
 		{23, "migrations/021_migration_state.up.sql"},
 		{24, "migrations/022_orgs_price_locked.up.sql"},
+		{25, "migrations/023_checkpoints_public.up.sql"},
 	}
 
 	for _, m := range migrations {
