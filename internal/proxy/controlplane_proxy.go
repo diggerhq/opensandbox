@@ -90,6 +90,18 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) 
 
 	// If the sandbox is hibernated, wake it on-demand before proxying
 	if session.Status == "hibernated" {
+		// Free-tier credits gate: don't auto-wake via preview URL if the
+		// owning org's trial credits are exhausted. Surface a 402 so the
+		// user sees a clear "upgrade required" instead of a silent wake
+		// that burns non-existent credits.
+		if org, err := p.store.GetOrg(ctx, session.OrgID); err == nil {
+			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
+				return c.JSON(http.StatusPaymentRequired, map[string]string{
+					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
+				})
+			}
+		}
+
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)
 		if err != nil {
 			log.Printf("cp-proxy: wake-on-request failed for sandbox %s: %v", sandboxID, err)
