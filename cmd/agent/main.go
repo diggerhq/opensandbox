@@ -35,7 +35,11 @@ func main() {
 	srv := agent.NewServer(Version)
 	// Only set ListenPort for vsock-based backends (Firecracker).
 	// For virtio-serial (QEMU), PTY I/O flows over gRPC PTYAttach instead.
-	if _, isVirtioSerial := lis.(*virtioSerialListener); !isVirtioSerial {
+	if vsl, isVirtioSerial := lis.(*virtioSerialListener); isVirtioSerial {
+		// Wire the PrepareHibernate RPC to reset the virtio-serial listener
+		// synchronously — replaces the old SIGUSR1 + sleep dance.
+		srv.OnPrepareHibernate = vsl.PrepareHibernate
+	} else {
 		srv.ListenPort = listenPortForPTY
 	}
 

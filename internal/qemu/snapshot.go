@@ -64,19 +64,12 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 
 	// Step 1: Sync filesystems and quiesce agent.
 	// Don't unmount /workspace — open FDs prevent clean unmount and cause ext4 corruption.
-	// Just sync to flush dirty pages. savevm captures a consistent snapshot.
-	// SIGUSR1 resets the virtio-serial listener for instant reconnection on wake.
+	// PrepareHibernate syncs dirty pages and resets the virtio-serial listener
+	// synchronously, so no post-close sleep is needed.
 	if vm.agent != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, _ = vm.agent.Exec(shutdownCtx, &pb.ExecRequest{
-			Command:   "/bin/sh",
-			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
-			RunAsRoot: true,
-		})
-		cancel()
+		prepareAgentForHibernate(ctx, vm.agent)
 		vm.agent.Close()
 		vm.agent = nil
-		time.Sleep(500 * time.Millisecond) // let guest process SIGUSR1
 	}
 	log.Printf("qemu: hibernate %s: guest sync + unmount done (%dms)", vm.ID, time.Since(t0).Milliseconds())
 

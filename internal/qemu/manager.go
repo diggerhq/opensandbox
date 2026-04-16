@@ -24,7 +24,39 @@ import (
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// prepareAgentForHibernate synchronously syncs the guest filesystems and quiesces
+// the virtio-serial listener. Returns when the guest is fully prepared — no sleep
+// needed afterward.
+//
+// On agents that don't implement the PrepareHibernate RPC (older builds), falls
+// back to the legacy Exec("sync; kill -USR1 1") path with a 1s sleep.
+func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) {
+	if agent == nil {
+		return
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
+	if err == nil {
+		return
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unimplemented {
+		log.Printf("qemu: PrepareHibernate RPC failed: %v (falling back to legacy path)", err)
+	}
+	// Fallback for older agents: sync + SIGUSR1 + sleep.
+	execCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	_, _ = agent.Exec(execCtx, &pb.ExecRequest{
+		Command:   "/bin/sh",
+		Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
+		RunAsRoot: true,
+	})
+	time.Sleep(1 * time.Second)
+}
 
 // Compile-time check that Manager implements sandbox.Manager.
 var _ sandbox.Manager = (*Manager)(nil)
@@ -2030,29 +2062,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
-	// Sync filesystem before snapshot. Flush dirty pages so the drives are
-	// consistent when we copy them while the VM is paused.
+	// Sync filesystem and quiesce virtio-serial before snapshot. The PrepareHibernate
+	// RPC returns only after the guest is fully prepared, so no sleep is needed.
 	if vm.agent != nil {
-		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, syncErr := vm.agent.Exec(syncCtx, &pb.ExecRequest{
-			Command:   "/bin/sh",
-			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
-			RunAsRoot: true,
-		})
-		cancel()
-		if syncErr != nil {
-			log.Printf("qemu: CreateCheckpoint %s/%s: sync failed: %v", sandboxID, checkpointID, syncErr)
-		}
-		// Close the agent connection before pausing — the agent's SIGUSR1 handler
-		// resets the virtio-serial listener so forks start with a clean Accept state.
+		prepareAgentForHibernate(ctx, vm.agent)
 		vm.agent.Close()
 		vm.agent = nil
-		// Give the guest time to fully quiesce virtio-serial state. 500ms was
-		// observed to leave a small residual rate of "agent not ready" failures
-		// on fork after loadvm (post-loadvm virtio-serial comes up but Accept
-		// doesn't land cleanly). 1s should give the guest enough time without
-		// noticeably adding to checkpoint latency.
-		time.Sleep(1 * time.Second)
 	}
 
 	// Savevm-based checkpoint: pack memory + device state + disk deltas into
