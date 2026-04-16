@@ -47,11 +47,23 @@ func (r *UsageReporter) loop() {
 	for {
 		select {
 		case <-ticker.C:
-			r.reportAll()
+			r.safeReportAll()
 		case <-r.stop:
 			return
 		}
 	}
+}
+
+// safeReportAll wraps reportAll with a recover so a panic in one tick
+// (e.g. nil-pointer in a gRPC call) doesn't kill the reporter goroutine
+// and silently stop all future billing/credit ticks.
+func (r *UsageReporter) safeReportAll() {
+	defer func() {
+		if v := recover(); v != nil {
+			log.Printf("usage-reporter: recovered from panic: %v", v)
+		}
+	}()
+	r.reportAll()
 }
 
 func (r *UsageReporter) reportAll() {

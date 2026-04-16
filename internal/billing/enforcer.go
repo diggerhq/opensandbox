@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -59,9 +60,14 @@ func EnforceCreditExhaustion(
 				orgID, sess.SandboxID, sess.WorkerID, err)
 			continue
 		}
-		if _, err := client.HibernateSandbox(ctx, &pb.HibernateSandboxRequest{
+		// Per-sandbox timeout so one slow/stuck worker can't block the entire
+		// enforcer pass (and kill the reporter goroutine's tick loop).
+		callCtx, callCancel := context.WithTimeout(ctx, 30*time.Second)
+		_, err = client.HibernateSandbox(callCtx, &pb.HibernateSandboxRequest{
 			SandboxId: sess.SandboxID,
-		}); err != nil {
+		})
+		callCancel()
+		if err != nil {
 			log.Printf("enforcer: org %s sandbox %s hibernate failed: %v",
 				orgID, sess.SandboxID, err)
 			continue

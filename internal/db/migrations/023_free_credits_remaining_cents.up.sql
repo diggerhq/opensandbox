@@ -5,3 +5,8 @@ ALTER TABLE orgs ADD COLUMN free_credits_remaining_cents BIGINT NOT NULL DEFAULT
 
 -- Grandfather existing free orgs to the new $5 trial starting balance.
 UPDATE orgs SET free_credits_remaining_cents = 500 WHERE plan = 'free';
+
+-- Reset the usage-reporting watermark for free orgs so the first deduction
+-- window only covers post-migration usage, not months of historical scale
+-- events that would cause a massive one-shot over-deduction.
+UPDATE orgs SET last_usage_reported_at = now() WHERE plan = 'free';
