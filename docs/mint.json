@@ -100,7 +100,7 @@
     },
     {
       "group": "Guides",
-      "pages": ["guides/create-hermes-agent", "guides/build-a-lovable-clone", "guides/agent-skill", "guides/deploy-openclaw"]
+      "pages": ["guides/create-hermes-agent", "guides/create-openclaw-agent", "guides/build-a-lovable-clone", "guides/agent-skill", "guides/deploy-openclaw"]
     },
     {
       "group": "TypeScript SDK",
