@@ -1,238 +1,177 @@
 # OpenComputer
 
 Cloud sandboxes for running AI agents. Persistent VMs with checkpoints,
-hibernation, elasticity, and preview URLs.
+hibernation, elasticity, preview URLs, SDKs, and a CLI.
 
-**Naming:** The product is **OpenComputer**, but the Go module is
+**Naming:** the product is **OpenComputer**, but the Go module is
 `github.com/opensandbox/opensandbox`, binaries are `opensandbox-server` /
-`opensandbox-worker` / `osb-agent`, env vars are `OPENSANDBOX_*`, and
-API key prefixes are `osb_`. Don't be confused by the mismatch — it's
-historical. Use "OpenComputer" in docs and UI, `opensandbox` in code.
+`opensandbox-worker` / `osb-agent`, env vars are `OPENSANDBOX_*`, and API key
+prefixes are `osb_`. This is historical. Use "OpenComputer" in docs and UI,
+`opensandbox` in code.
+
+## Purpose
+
+This file is the **durable starting point for agents** working in this repo.
+It should stay stable and high-level:
+
+- what this repo owns
+- what it does not own
+- where to look first
+- which boundaries and contracts matter
+- hard rules that should not drift
+
+It should **not** become a runbook. Exact commands, env vars, workflows,
+deployment steps, and current rollout details should live in the real source of
+truth they come from.
+
+## Start here
+
+- `README.md` — product overview and human quick start
+- `Makefile` — local dev, build, test, and common run targets
+- `internal/config/config.go` — environment variables and runtime config
+- `proto/` — inter-tier contracts
+- `docs/mint.json` — docs navigation
+- `cmd/oc/` — CLI entrypoint
+- `sdks/typescript/` and `sdks/python/` — published SDKs
+
+Managed-agent product behavior is mostly **not** implemented here:
+
+- `sessions-api` — managed-agent control plane and orchestration
+- `ws-gstack` — design workspace for managed agents, channels, packages, and
+  product shape
 
 ## Hard rules
 
 **NEVER force push.** `git push --force`, `git push -f`, and
-`git push --force-with-lease` are forbidden. No exceptions, all branches.
-Make a new commit instead.
+`git push --force-with-lease` are forbidden. No exceptions. Make a new commit
+instead.
 
-## Architecture
+## Repo scope
 
-Three-tier distributed system: control plane, data plane, in-VM agent.
+This repo owns the **sandbox platform**:
 
-```
-Client → Control Plane (server) → Data Plane (worker) → VM Agent
-            REST API                  gRPC                gRPC over
-            PostgreSQL                QEMU/Firecracker    vsock/virtio-serial
-            billing, auth             sandbox lifecycle
-            orchestration             checkpoints
-```
+- control plane API
+- worker / VM lifecycle
+- in-VM agent
+- checkpoints, hibernation, preview URLs
+- auth, billing, secrets, autoscaling
+- SDKs, CLI, dashboard, and docs for the platform itself
 
-| Tier | Binary | Owns | Key files |
-|------|--------|------|-----------|
-| Control plane | `cmd/server` | API, routing, orchestration, billing, autoscaling | `internal/api/router.go`, `internal/controlplane/` |
-| Data plane | `cmd/worker` | VM lifecycle, snapshots, hibernation, storage | `internal/qemu/manager.go`, `internal/worker/` |
-| In-VM agent | `cmd/agent` | Exec, files, PTY, stats inside the sandbox | `internal/agent/`, `proto/agent/agent.proto` |
-| CLI | `cmd/oc` | User-facing commands | `cmd/oc/internal/commands/` |
+This repo does **not** own the managed-agent product layer:
 
-Communication between tiers:
-- Client ↔ Server: HTTP/REST + WebSocket (port 8080)
-- Server ↔ Worker: gRPC (port 9090)
-- Worker ↔ Agent: gRPC over vsock (Firecracker) or virtio-serial (QEMU)
+- managed cores, channels, and packages
+- agent-specific orchestration flows
+- sessions-api control plane behavior
 
-## Source layout
+Those depend on this repo's APIs, SDKs, CLI, and sandbox primitives, but the
+product logic lives elsewhere.
 
-| Path | What it is |
-|------|-----------|
-| `cmd/server/` | Control plane entry point |
-| `cmd/worker/` | Data plane entry point |
-| `cmd/agent/` | In-VM agent entry point |
-| `cmd/oc/` | CLI tool (Cobra framework) |
-| `internal/api/` | REST API handlers — sandbox, exec, files, PTY, checkpoints, auth |
-| `internal/auth/` | JWT, WorkOS OAuth, API key validation, middleware |
-| `internal/sandbox/` | Sandbox state machine, routing |
-| `internal/qemu/` | QEMU VM manager — snapshots, hibernation, migration (large: ~108KB) |
-| `internal/compute/` | Cloud provider pools (EC2, Azure) |
-| `internal/controlplane/` | Server scaling, worker registry (Redis), gRPC leader |
-| `internal/db/` | PostgreSQL schema, migrations (23 pairs in `migrations/`) |
-| `internal/billing/` | Stripe integration, usage tracking, scale events |
-| `internal/proxy/` | Subdomain routing for preview URLs |
-| `internal/secretsproxy/` | MITM proxy — substitutes secret placeholders in outbound HTTPS |
-| `internal/config/` | Environment-based configuration (`config.go` is the reference) |
-| `internal/analytics/` | Segment event tracking |
-| `internal/grpctls/` | TLS helpers for gRPC connections |
-| `proto/` | Protocol Buffer definitions — agent and worker gRPC services |
-| `sdks/typescript/` | `@opencomputer/sdk` npm package |
-| `sdks/python/` | `opencomputer-sdk` PyPI package |
-| `web/` | React + Vite dashboard (TanStack Query, xterm.js) |
-| `docs/` | Mintlify documentation site |
-| `deploy/` | Dockerfiles, Terraform, cloud deployment scripts |
-| `scripts/` | Integration tests, QEMU tests, benchmarks |
-| `examples/` | SDK usage examples |
-| `archive/` | Dead code (microvm-tests, process-level). Ignore. |
+## Durable architecture
 
-## Dev loop
+OpenComputer is a three-tier system:
 
-**Language:** Go 1.24 (CGO for server/worker). Static binaries for agent.
-
-**Prerequisites:** Go 1.24+, Docker (for infra), PostgreSQL + NATS (via compose).
-
-```bash
-# Start local infra (Postgres + NATS)
-make infra-up
-
-# Seed test org + API key
-make seed
-
-# Run combined server+worker (no auth, simplest path)
-make run-dev
-
-# Run with PostgreSQL
-make run-pg
-
-# Run with full auth (WorkOS) + Vite dashboard
-make run-pg-workos
-
-# Build everything
-make build
-
-# Build + install CLI
-make install-oc
-
-# Run tests
-make test          # all tests
-make test-unit     # unit only
-
-# Lint + format
-make fmt           # gofmt
-make lint          # golangci-lint (if installed)
-make tidy          # go mod tidy
-
-# Web dashboard dev
-make web-dev       # Vite dev server, proxies to :8080
-make web-build     # production build
+```text
+Client -> Control Plane -> Data Plane -> In-VM Agent
+          HTTP / REST       gRPC         gRPC over vsock or virtio-serial
 ```
 
-Note: `make run-dev` and other run targets build the server binary first
-(CGO_ENABLED=1, so you need a C compiler / Xcode CLT on macOS).
+- **Control plane** (`cmd/server`, `internal/api/`, `internal/controlplane/`)
+  owns API, auth, routing, orchestration, billing, and worker coordination.
+- **Data plane** (`cmd/worker`, `internal/worker/`, `internal/qemu/`,
+  `internal/compute/`) owns sandbox lifecycle, snapshots, hibernation, and
+  machine-level execution.
+- **In-VM agent** (`cmd/agent`, `internal/agent/`, `proto/agent/`) owns exec,
+  files, PTY, and process interaction inside the sandbox.
+- **CLI** (`cmd/oc/`) is the user-facing shell over platform APIs.
 
-Three dev tiers, pick the simplest one that covers your change:
-1. **Tier 1** (`make run-dev`): combined mode, no DB, in-memory only
-2. **Tier 2** (`make run-pg`): combined mode, real PostgreSQL
-3. **Tier 3** (`make run-full-server` + `make run-full-worker`): distributed
+The stable mental model is:
 
-## Key environment variables
+- the server owns global coordination
+- the worker owns VM reality
+- the in-VM agent owns inside-the-sandbox operations
 
-Reference: `internal/config/config.go` and `deploy/*.env.example`.
+## Source map
 
-| Var | What it is |
-|-----|-----------|
-| `OPENSANDBOX_MODE` | `combined`, `server`, or `worker` |
-| `OPENSANDBOX_PORT` | HTTP port (default 8080) |
-| `OPENSANDBOX_DATABASE_URL` | PostgreSQL connection string |
-| `OPENSANDBOX_JWT_SECRET` | Signs sandbox-scoped JWTs |
-| `OPENSANDBOX_API_KEY` | Static API key (dev/combined mode) |
-| `OPENSANDBOX_REDIS_URL` | Worker registry (distributed mode) |
-| `OPENSANDBOX_VM_BACKEND` | `qemu` or `firecracker` |
-| `OPENSANDBOX_REGION` | Worker region identifier |
-| `OPENSANDBOX_S3_BUCKET` | Checkpoint storage bucket |
-| `OPENSANDBOX_SECRET_ENCRYPTION_KEY` | AES-256 key for secret store at rest |
+Use this as a routing map, not a full index:
+
+- `cmd/server/`, `cmd/worker/`, `cmd/agent/`, `cmd/oc/` — entrypoints
+- `internal/api/` — HTTP handlers and API composition
+- `internal/auth/` — auth, API keys, WorkOS, middleware
+- `internal/sandbox/` — sandbox state machine and routing
+- `internal/qemu/` — VM manager and checkpoint/hibernation logic
+- `internal/worker/` — worker-side orchestration and sandbox operations
+- `internal/controlplane/` — control-plane coordination and scaling
+- `internal/db/` — schema and migrations
+- `internal/proxy/` — preview URL and subdomain routing
+- `internal/secretsproxy/` — outbound secret substitution proxy
+- `sdks/` — published SDKs
+- `web/` — dashboard
+- `docs/` — docs site
+- `deploy/` — deployment assets
+- `archive/` — old code; ignore unless you are explicitly archaeology-mode
+
+## External contracts
+
+Be careful when changing these. They have consumers outside the immediate code
+you are editing:
+
+- `proto/` — contracts between tiers
+- public HTTP API routes in `internal/api/`
+- `sdks/` — published TypeScript and Python SDKs
+- `cmd/oc/` — CLI behavior users script against
+- `docs/` — user-facing product and API documentation
+
+If a change crosses one of these boundaries, treat it as a contract change, not
+just a refactor.
 
 ## Architecture boundaries
 
-**API handlers** (`internal/api/`) own HTTP concerns: request parsing,
-response formatting, auth middleware. They call into domain packages
-(`sandbox`, `qemu`, `compute`) for business logic. Don't put domain
-logic in handlers.
+- **HTTP handlers own HTTP concerns.** Request parsing, auth, and response
+  formatting belong in `internal/api/`. Do not bury domain logic there.
+- **Sandbox state transitions go through the sandbox state machine.** Do not
+  mutate sandbox state ad hoc from handlers.
+- **Proto files are real contracts.** If they change, regenerate code and
+  think through both sides of the boundary.
+- **SDKs and CLI are public surfaces.** Prefer preserving behavior over
+  rearranging internals for neatness.
+- **Docs navigation is explicit.** Adding a page without wiring it into
+  `docs/mint.json` leaves it effectively invisible.
 
-**Sandbox state machine** (`internal/sandbox/`) owns state transitions.
-Don't change sandbox state from API handlers directly — go through the
-state machine.
+## CLI boundary
 
-**Proto definitions** (`proto/`) are the contract between tiers. Changes
-to `.proto` files are contract changes — regenerate Go code (`make proto`)
-and verify both sides.
+`cmd/oc/` spans two kinds of user flows:
 
-**SDKs** (`sdks/`) are published packages with external consumers. Breaking
-changes need version bumps and migration guidance. The TypeScript SDK is
-the primary SDK — keep it working first.
+- direct OpenComputer platform commands: sandboxes, exec, files, checkpoints,
+  previews, secrets
+- managed-agent commands, which delegate to `sessions-api`
 
-**Docs** (`docs/`) are a Mintlify site. Navigation lives in `docs/mint.json`.
-When adding a new page, add it to the `navigation` array or it won't appear
-in the sidebar.
+Do not assume all `oc` behavior is implemented in this repo just because the
+command lives here.
 
-## CLI development
+## Change strategy
 
-The `oc` CLI lives in `cmd/oc/`. Cobra framework, config at `~/.oc/config.yaml`.
+When making changes, prefer the narrowest layer that can correctly own the work:
 
-```bash
-make build-oc        # build
-make install-oc      # build + install to $GOPATH/bin
-```
+- docs/content issue -> `docs/`
+- CLI UX issue -> `cmd/oc/`
+- SDK issue -> `sdks/`
+- API shape/auth issue -> `internal/api/` or `internal/auth/`
+- sandbox lifecycle issue -> `internal/sandbox/`, `internal/worker/`,
+  `internal/qemu/`
+- managed-agent orchestration issue -> probably not this repo
 
-The CLI has two kinds of commands:
-- **Sandbox commands** (`sandbox`, `exec`, `shell`, `checkpoint`, `patch`,
-  `preview`, `secret`) — talk directly to the OpenComputer API.
-- **Agent commands** (`agent create/connect/install/get/delete`) — thin
-  wrappers that talk to sessions-api (separate service). Require
-  `SESSIONS_API_URL` or `--sessions-api-url` flag.
+## Maintenance rule for this file
 
-CLI releases are automated via `.github/workflows/release-cli.yml` on merge
-to main. The release workflow builds cross-platform binaries.
+Update `AGENTS.md` when the repo's **shape, ownership boundaries, hard rules,
+or source-of-truth map** changes.
 
-## Deploying
+Do **not** update it for:
 
-**Server:** Docker image from `deploy/Dockerfile.server`. Deployed to cloud
-VMs or container services.
+- current feature status
+- exact commands or flags
+- env var inventories
+- workflow filenames
+- deployment playbooks
+- temporary rollout details
 
-**Worker:** Docker image from `deploy/Dockerfile.worker`. Complex build
-(CRIU from source + crun + Podman + QEMU). Deployed to bare-metal or
-large VMs with nested virtualization.
-
-**Docs:** Mintlify auto-deploys from the `docs/` directory on the default
-branch.
-
-CI/CD workflows in `.github/workflows/`:
-- `deploy-server.yml` — control plane
-- `deploy-worker.yml` — data plane
-- `build-worker-ami.yml` — Packer AMI for worker instances
-- `publish-ts-sdk.yml` — npm package
-- `publish-python-sdk.yml` — PyPI package
-- `release-cli.yml` — CLI binaries
-
-## Database
-
-PostgreSQL with raw SQL migrations in `internal/db/migrations/` (23 pairs,
-`.up.sql` / `.down.sql`). No ORM — direct queries via `pgx`.
-
-Core tables: `orgs`, `users`, `api_keys`, `sandbox_sessions`, `workers`,
-`checkpoints`, `templates`, `preview_urls`, `scale_events`.
-
-Secrets are encrypted at rest with AES-256 (`internal/crypto/`), with key
-rotation support.
-
-## Testing
-
-```bash
-make test            # all tests (unit + integration)
-make test-unit       # unit only
-```
-
-Integration tests in `scripts/integration-tests/` (TypeScript, run against
-a live server). QEMU-specific tests in `scripts/qemu-tests/`. Benchmarks
-in `scripts/bench-*.sh`.
-
-## Managed agents context
-
-The managed agent platform (`oc agent create/connect/install`) is built in
-[sessions-api](https://github.com/diggerhq/sessions-api), a separate
-service deployed on Fly. It uses the OpenComputer SDK to create sandboxes
-from checkpoints and exec into them. The managed agent code does not live
-in this repo — this repo is the sandbox infrastructure.
-
-What lives here that managed agents depend on:
-- **Checkpoint API** — `POST /api/sandboxes/:id/checkpoints`, restore, fork
-- **Secret store** — `POST /api/secret-stores`, secrets injected at sandbox boot
-- **Exec API** — `POST /api/sandboxes/:id/exec` (how the adapter configures cores)
-- **SDK** (`sdks/typescript/`) — `@opencomputer/sdk` used by sessions-api
-- **CLI** (`cmd/oc/`) — `oc agent` commands (thin wrapper over sessions-api)
-- **Docs** (`docs/`) — managed agent guides and API reference
+Those belong in the concrete files they come from.
