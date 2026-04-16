@@ -1,37 +1,47 @@
 ---
 title: "Overview"
-description: "Define agents, run persistent instances or ephemeral sessions on OpenComputer sandboxes"
+description: "Run AI agents on OpenComputer — pick a core, connect channels, install packages"
 ---
 
-Agents are a higher-level interface for running AI on OpenComputer. Instead of managing sandboxes directly, you define an **Agent** (configuration) and then create **Instances** (persistent) or **Sessions** (ephemeral) from it.
-
-| Concept | What it is | Lifecycle | Use case |
-|---------|-----------|-----------|----------|
-| **Agent** | Configuration — core, snapshot, entrypoint, secrets | Indefinite | Define once, reuse |
-| **Instance** | Persistent sandbox, hibernates/wakes, multiplexes conversations | Long-lived | AI coworkers (Slack, Teams, Telegram) |
-| **Session** | Ephemeral sandbox, runs to completion | Bounded | Batch jobs, webhook handlers |
-
-## Managed vs raw agents
-
-A **managed agent** has a **core** — a blessed runtime that OpenComputer knows how to configure, connect, and extend:
+A managed agent on OpenComputer is a **core** plus the **channels** and **packages** you bolt onto it. Pick a runtime, connect the messaging platforms you want, install the capabilities you need.
 
 ```
 ManagedAgent = Core + Channels + Packages + Secrets
 ```
 
-| Core | Runtime | What you get |
-|------|---------|-------------|
-| [`hermes`](/agents/cores/hermes) | Hermes Agent | Self-improving agent with skill creation, memory, multi-channel gateway, browser, code execution |
-| [`openclaw`](/agents/cores/openclaw) | OpenClaw | Multi-channel AI gateway with plugin SDK, native MCP support, hot-reload config |
+## Cores
 
-A **raw agent** uses no core — you provide your own `snapshot` and `entrypoint` via the REST API. Managed and raw agents coexist on the same platform.
+The AI runtime that powers your agent. OpenComputer ships two blessed cores:
+
+| Core | What you get |
+|------|-------------|
+| [`hermes`](/agents/cores/hermes) | Self-improving agent with skill creation, memory, multi-channel gateway, browser, code execution |
+| [`openclaw`](/agents/cores/openclaw) | Multi-channel AI gateway with plugin SDK, native MCP support, hot-reload config |
+
+Picking a core is the one decision that matters most — it determines the agent's capabilities, config model, and extension surface.
+
+## Packages
+
+Stateful extensions beyond the core — installed via `oc agent install`. Packages can provision infrastructure (managed databases, vector stores) and wire it into the agent transparently.
+
+| Package | What it adds |
+|---------|-------------|
+| [`gbrain`](/agents/packages/gbrain) | Persistent memory — 34 MCP tools for pages, vector search, graph, timeline, files. Backed by a managed Postgres database. |
+
+## Channels
+
+Messaging platforms connected to your agent.
+
+| Channel | How it works |
+|---------|-------------|
+| [`telegram`](/agents/channels/telegram) | Webhook-based. Messages flow through the OpenComputer gateway to your agent and back. |
 
 ## Three commands to a running agent
 
 ```bash
 oc agent create my-agent --core hermes       # boot an agent
-oc agent connect my-agent telegram            # connect Telegram
-oc agent install my-agent gbrain              # add persistent memory
+oc agent connect my-agent telegram           # connect Telegram
+oc agent install my-agent gbrain             # add persistent memory
 ```
 
 ## Two ways to interact
@@ -47,22 +57,17 @@ Everything you can do with the CLI you can do with the REST API, and vice versa.
   </Card>
 </CardGroup>
 
-## Building blocks
+## Agents, instances, sessions
 
-<CardGroup cols={2}>
-  <Card title="Cores" icon="microchip" href="/agents/cores/hermes">
-    AI runtimes that power your agent
-  </Card>
-  <Card title="Channels" icon="comments" href="/agents/channels/telegram">
-    Messaging platforms connected to your agent
-  </Card>
-  <Card title="Packages" icon="puzzle-piece" href="/agents/packages/gbrain">
-    Stateful extensions beyond the core
-  </Card>
-  <Card title="Guides" icon="book" href="/guides/create-hermes-agent">
-    Step-by-step walkthroughs
-  </Card>
-</CardGroup>
+An **agent** is configuration. Its actual compute runs in one of two modes:
+
+| Concept | What it is | Use case |
+|---------|-----------|----------|
+| [**Agent**](/agents/rest/agents) | Configuration — core, snapshot, entrypoint, secrets | Define once, reuse |
+| [**Instance**](/agents/rest/instances) | Persistent sandbox, hibernates/wakes, multiplexes conversations | AI coworkers on Slack, Teams, Telegram |
+| [**Session**](/agents/rest/sessions) | Ephemeral sandbox, runs to completion | Batch jobs, webhook handlers |
+
+Managed agents (those with a core) get an instance automatically on creation. Raw agents — which have no core and use your own `snapshot` and `entrypoint` — create instances or sessions explicitly via the REST API. Managed and raw agents coexist on the same platform.
 
 ## Authentication
 
