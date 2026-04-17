@@ -173,6 +173,25 @@ func formatList(v interface{}) string {
 	}
 }
 
+func listEntries(v interface{}) []string {
+	switch items := v.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	case []string:
+		return append([]string(nil), items...)
+	default:
+		return nil
+	}
+}
+
+func listIsEmpty(v interface{}) bool {
+	return len(listEntries(v)) == 0
+}
+
 func formatAge(isoTime string) string {
 	t, err := time.Parse(time.RFC3339Nano, isoTime)
 	if err != nil {

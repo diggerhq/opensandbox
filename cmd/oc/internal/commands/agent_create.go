@@ -82,7 +82,34 @@ var agentCreateCmd = &cobra.Command{
 			return nil
 		}
 
-		printer.Print(finalAgent, func() {})
+		printer.Print(finalAgent, func() {
+			fmt.Fprintln(os.Stdout, "Agent ready.")
+			renderCreateNextSteps(finalAgent)
+		})
 		return nil
 	},
+}
+
+func renderCreateNextSteps(agent *agentResponse) {
+	noChannels := listIsEmpty(agent.Channels)
+	noPackages := listIsEmpty(agent.Packages)
+	if !noChannels && !noPackages {
+		return
+	}
+
+	fmt.Fprintln(os.Stdout)
+	if noChannels {
+		fmt.Fprintln(os.Stdout, "No channels connected yet.")
+	}
+	if noPackages {
+		fmt.Fprintln(os.Stdout, "No packages installed yet.")
+	}
+
+	fmt.Fprintln(os.Stdout, "Next:")
+	if noChannels {
+		fmt.Fprintf(os.Stdout, "  oc agent connect %s telegram\n", agent.ID)
+	}
+	if noPackages {
+		fmt.Fprintf(os.Stdout, "  oc agent install %s gbrain\n", agent.ID)
+	}
 }
