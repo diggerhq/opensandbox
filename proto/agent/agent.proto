@@ -59,6 +59,12 @@ service SandboxAgent {
   // Used before snapshot to ensure disk state is consistent.
   rpc SyncFS(SyncFSRequest) returns (SyncFSResponse);
 
+  // PrepareHibernate synchronously prepares the guest for hibernate/checkpoint:
+  // syncs filesystems, flushes block device buffers, and quiesces the virtio-serial
+  // listener so a clean Accept happens on wake/fork. Returns only after all work
+  // completes — no sleep needed on the host side after this RPC.
+  rpc PrepareHibernate(PrepareHibernateRequest) returns (PrepareHibernateResponse);
+
   // SetResourceLimits adjusts sandbox cgroup limits at runtime.
   // Used for elastic scaling — raise/lower memory, CPU, pids without restart.
   rpc SetResourceLimits(SetResourceLimitsRequest) returns (SetResourceLimitsResponse);
@@ -321,6 +327,12 @@ message ShutdownResponse {}
 message SyncFSRequest {}
 
 message SyncFSResponse {}
+
+// --- PrepareHibernate ---
+
+message PrepareHibernateRequest {}
+
+message PrepareHibernateResponse {}
 
 // --- Resource Limits ---
 

@@ -26,7 +26,7 @@ type enforcerStore interface {
 	ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status string, limit, offset int) ([]db.SandboxSession, error)
 	UpdateSandboxSessionStatus(ctx context.Context, sandboxID, status string, errorMsg *string) error
 	EndScaleEvent(ctx context.Context, sandboxID string) error
-	CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*db.SandboxHibernation, error)
+	CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*db.SandboxHibernation, string, error)
 }
 
 // EnforceCreditExhaustion force-hibernates every running sandbox belonging to
@@ -95,7 +95,7 @@ func EnforceCreditExhaustion(
 			sizeBytes = resp.SizeBytes
 		}
 		if checkpointKey != "" {
-			if _, err := store.CreateHibernation(ctx, sess.SandboxID, orgID, checkpointKey, sizeBytes, sess.Region, sess.Template, sess.Config); err != nil {
+			if _, _, err := store.CreateHibernation(ctx, sess.SandboxID, orgID, checkpointKey, sizeBytes, sess.Region, sess.Template, sess.Config); err != nil {
 				log.Printf("enforcer: org %s sandbox %s: CreateHibernation failed: %v", orgID, sess.SandboxID, err)
 			}
 		} else {

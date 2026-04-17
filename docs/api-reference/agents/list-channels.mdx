@@ -1,0 +1,20 @@
+---
+title: 'List Channels'
+api: 'GET /v1/agents/{agentId}/channels'
+---
+
+List channels connected to an agent.
+
+**CLI equivalent:** `oc agent channels <id>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "channels": ["telegram"]
+}
+```
+</ResponseExample>

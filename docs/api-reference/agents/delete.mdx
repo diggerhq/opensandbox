@@ -1,0 +1,18 @@
+---
+title: 'Delete Agent'
+api: 'DELETE /v1/agents/{agentId}'
+---
+
+Delete an agent. Cascades to all instances and sessions — their sandboxes are destroyed.
+
+**CLI equivalent:** `oc agent delete <id>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

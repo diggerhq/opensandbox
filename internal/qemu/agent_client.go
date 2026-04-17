@@ -184,6 +184,13 @@ func (c *AgentClient) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRe
 	return c.client.Exec(ctx, req)
 }
 
+// PrepareHibernate synchronously prepares the guest for hibernate/checkpoint.
+// Returns only after the guest has synced filesystems and reset the virtio-serial
+// listener, so no sleep is needed after this call.
+func (c *AgentClient) PrepareHibernate(ctx context.Context, req *pb.PrepareHibernateRequest) (*pb.PrepareHibernateResponse, error) {
+	return c.client.PrepareHibernate(ctx, req)
+}
+
 // ReadFile reads a file from the VM.
 func (c *AgentClient) ReadFile(ctx context.Context, path string) ([]byte, error) {
 	resp, err := c.client.ReadFile(ctx, &pb.ReadFileRequest{Path: path})

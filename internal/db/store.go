@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -109,7 +110,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{22, "migrations/020_scale_events_disk_mb.up.sql"},
 		{23, "migrations/021_migration_state.up.sql"},
 		{24, "migrations/022_orgs_price_locked.up.sql"},
-		{25, "migrations/023_free_credits_remaining_cents.up.sql"},
+		{25, "migrations/023_checkpoints_public.up.sql"},
+		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -887,10 +889,31 @@ type SandboxHibernation struct {
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
 }
 
-// CreateHibernation inserts a new hibernation record.
-func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, error) {
+// CreateHibernation inserts a new hibernation record, marking any prior active
+// hibernation for the same sandbox as expired. Returns the new record plus the
+// superseded hibernation key (if any) so the caller can delete the old S3 blob
+// — we only keep one hibernation per sandbox to bound storage growth.
+func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Find + expire any prior active hibernation for this sandbox
+	var supersededKey string
+	err = tx.QueryRow(ctx,
+		`UPDATE sandbox_hibernations SET expired_at = now()
+		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL
+		 RETURNING hibernation_key`,
+		sandboxID,
+	).Scan(&supersededKey)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		supersededKey = ""
+	}
+
 	cp := &SandboxHibernation{}
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO sandbox_hibernations (sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at`,
@@ -898,9 +921,14 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
 		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create hibernation: %w", err)
+		return nil, "", fmt.Errorf("failed to create hibernation: %w", err)
 	}
-	return cp, nil
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", fmt.Errorf("commit tx: %w", err)
+	}
+
+	return cp, supersededKey, nil
 }
 
 // GetActiveHibernation returns the active (not restored, not expired) hibernation for a sandbox.
@@ -1037,6 +1065,7 @@ type Checkpoint struct {
 	SandboxConfig   json.RawMessage `json:"sandboxConfig"`
 	Status          string          `json:"status"`
 	SizeBytes       int64           `json:"sizeBytes"`
+	IsPublic        bool            `json:"isPublic"`
 	CreatedAt       time.Time       `json:"createdAt"`
 }
 
@@ -1079,10 +1108,10 @@ func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID,
 func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE id = $1`, checkpointID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1092,7 +1121,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Che
 // ListCheckpoints returns all checkpoints for a sandbox, newest first.
 func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 ORDER BY created_at DESC`, sandboxID)
 	if err != nil {
 		return nil, err
@@ -1103,7 +1132,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	for rows.Next() {
 		var cp Checkpoint
 		if err := rows.Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt); err != nil {
+			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt); err != nil {
 			return nil, err
 		}
 		checkpoints = append(checkpoints, cp)
@@ -1129,7 +1158,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id, c.sandbox_id, c.org_id, c.name, c.rootfs_s3_key, c.workspace_s3_key,
-		        c.sandbox_config, c.status, c.size_bytes, c.created_at,
+		        c.sandbox_config, c.status, c.size_bytes, c.is_public, c.created_at,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id AND ss.status IN ('running', 'hibernated')) AS active_forks,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id) AS total_forks
 		 FROM sandbox_checkpoints c WHERE c.org_id = $1
@@ -1143,7 +1172,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 	for rows.Next() {
 		var cf CheckpointWithForks
 		if err := rows.Scan(&cf.ID, &cf.SandboxID, &cf.OrgID, &cf.Name, &cf.RootfsS3Key, &cf.WorkspaceS3Key,
-			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.CreatedAt,
+			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.IsPublic, &cf.CreatedAt,
 			&cf.ActiveForks, &cf.TotalForks); err != nil {
 			return nil, 0, err
 		}
@@ -1156,10 +1185,10 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1202,6 +1231,21 @@ func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoin
 	}
 
 	return tx.Commit(ctx)
+}
+
+// SetCheckpointPublic toggles the is_public flag on a checkpoint the org owns.
+// Returns sql.ErrNoRows equivalent if the checkpoint is missing or not owned.
+func (s *Store) SetCheckpointPublic(ctx context.Context, checkpointID, orgID uuid.UUID, isPublic bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET is_public = $3 WHERE id = $1 AND org_id = $2`,
+		checkpointID, orgID, isPublic)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("checkpoint not found or not owned by org")
+	}
+	return nil
 }
 
 // --- Checkpoint Patch operations ---

@@ -1,5 +1,13 @@
 package commands
 
+// This file holds the parent `oc agent` cobra command, init() for flag +
+// subcommand registration, shared response types used across multiple agent
+// subcommands, and small formatting helpers. Each subcommand lives in its
+// own file: agent_create.go, agent_get.go, agent_list.go, agent_delete.go,
+// agent_connect.go, agent_packages.go, agent_events.go. Error rendering
+// helpers (LastError, ExitError, codeCatalog, RenderLastError,
+// renderAsyncFallback) live in agent_errors.go.
+
 import (
 	"bufio"
 	"fmt"
@@ -11,6 +19,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// stdinIsTTY reports whether stdin is attached to a terminal. Used to gate
+// interactive prompts: if stdin isn't a TTY we refuse to prompt, since the
+// caller is a script or agent that can't respond.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// confirmDestructive gates delete/disconnect/uninstall on explicit consent.
+// With --yes: proceed. Without --yes and a TTY: prompt. Without --yes and
+// no TTY: refuse — scripts and agents must pass --yes so accidental
+// invocation can't quietly destroy state.
+func confirmDestructive(cmd *cobra.Command, action string) error {
+	if yes, _ := cmd.Flags().GetBool("yes"); yes {
+		return nil
+	}
+	if !stdinIsTTY() {
+		return fmt.Errorf("refusing to %s without --yes (stdin is not a terminal)", action)
+	}
+	fmt.Fprintf(os.Stderr, "%s? [y/N] ", action)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return nil
+	default:
+		return fmt.Errorf("aborted")
+	}
+}
+
 // sessionsClient returns the sessions-api client from context, or errors if not configured.
 func sessionsClient(cmd *cobra.Command) (*client.Client, error) {
 	c := client.SessionsFromContext(cmd.Context())
@@ -20,8 +60,12 @@ func sessionsClient(cmd *cobra.Command) (*client.Client, error) {
 	return c, nil
 }
 
-// ── Types for sessions-api responses ──
+// ── Shared response types ──
 
+// agentResponse is the shape returned by sessions-api for both GET /v1/agents
+// (list rows) and GET /v1/agents/:id (detail). The list endpoint only
+// populates the top half; the detail endpoint additionally populates Status,
+// InstanceID, and LastError.
 type agentResponse struct {
 	ID          string      `json:"id"`
 	DisplayName string      `json:"display_name"`
@@ -32,342 +76,37 @@ type agentResponse struct {
 	Config      interface{} `json:"config"`
 	CreatedAt   string      `json:"created_at"`
 	UpdatedAt   string      `json:"updated_at"`
+
+	// Populated by GET /v1/agents/:id (enriched response); omitted by
+	// POST /v1/agents and the list endpoint.
+	Status     *string    `json:"status,omitempty"`
+	InstanceID *string    `json:"instance_id,omitempty"`
+	LastError  *LastError `json:"last_error,omitempty"`
 }
 
 type agentListResponse struct {
 	Agents []agentResponse `json:"agents"`
 }
 
-type instanceResponse struct {
-	ID        string `json:"id"`
-	AgentID   string `json:"agent_id"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
-}
-
-type instanceListResponse struct {
-	Instances []instanceResponse `json:"instances"`
-}
-
-// ── Commands ──
+// ── Parent command ──
 
 var agentCmd = &cobra.Command{
 	Use:   "agent",
 	Short: "Manage agents",
-	Long:  "Create and manage managed agents on OpenComputer.",
+	Long: "Create and manage managed agents on OpenComputer.\n\n" +
+		"Exit codes:\n" +
+		"  0  Success\n" +
+		"  1  General error (unclassified failures, bad args/flags)\n" +
+		"  3  Upstream 4xx (not found, unauthorized, org mismatch)\n" +
+		"  4  Conflict (already exists, invalid state)\n" +
+		"  5  Transient error (timeout, retry-safe)\n\n" +
+		"Classes 3-5 are emitted by create/install/get when the failure\n" +
+		"carries a known code. Other commands exit 0 on success, 1 on\n" +
+		"failure. Agent callers can branch on the class to decide retry\n" +
+		"vs surface-to-user vs give-up.",
 }
 
-var agentCreateCmd = &cobra.Command{
-	Use:   "create <id>",
-	Short: "Create a new managed agent",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		id := args[0]
-		core, _ := cmd.Flags().GetString("core")
-		secretSlice, _ := cmd.Flags().GetStringSlice("secret")
-
-		body := map[string]interface{}{
-			"id": id,
-		}
-		if core != "" {
-			body["core"] = core
-		}
-
-		// Parse --secret KEY=VAL flags into secrets map
-		if len(secretSlice) > 0 {
-			secrets := make(map[string]string)
-			for _, s := range secretSlice {
-				parts := strings.SplitN(s, "=", 2)
-				if len(parts) == 2 {
-					secrets[parts[0]] = parts[1]
-				}
-			}
-			body["secrets"] = secrets
-		}
-
-		var agent agentResponse
-		if err := sc.Post(cmd.Context(), "/v1/agents", body, &agent); err != nil {
-			return err
-		}
-
-		printer.Print(agent, func() {
-			fmt.Printf("Created agent %s", agent.ID)
-			if agent.Core != nil {
-				fmt.Printf(" (core: %s)", *agent.Core)
-			}
-			fmt.Println()
-			if agent.Core != nil {
-				fmt.Println("Instance is booting...")
-			}
-		})
-		return nil
-	},
-}
-
-var agentListCmd = &cobra.Command{
-	Use:     "list",
-	Aliases: []string{"ls"},
-	Short:   "List agents",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		var resp agentListResponse
-		if err := sc.Get(cmd.Context(), "/v1/agents", &resp); err != nil {
-			return err
-		}
-
-		printer.Print(resp.Agents, func() {
-			if len(resp.Agents) == 0 {
-				fmt.Println("No agents found.")
-				return
-			}
-			headers := []string{"ID", "CORE", "CHANNELS", "PACKAGES", "CREATED"}
-			var rows [][]string
-			for _, a := range resp.Agents {
-				coreStr := "-"
-				if a.Core != nil {
-					coreStr = *a.Core
-				}
-				channels := formatList(a.Channels)
-				packages := formatList(a.Packages)
-				created := formatAge(a.CreatedAt)
-				rows = append(rows, []string{a.ID, coreStr, channels, packages, created})
-			}
-			printer.Table(headers, rows)
-		})
-		return nil
-	},
-}
-
-var agentGetCmd = &cobra.Command{
-	Use:   "get <id>",
-	Short: "Get agent details",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		var agent agentResponse
-		if err := sc.Get(cmd.Context(), "/v1/agents/"+args[0], &agent); err != nil {
-			return err
-		}
-
-		printer.Print(agent, func() {
-			fmt.Printf("ID:        %s\n", agent.ID)
-			fmt.Printf("Name:      %s\n", agent.DisplayName)
-			coreStr := "-"
-			if agent.Core != nil {
-				coreStr = *agent.Core
-			}
-			fmt.Printf("Core:      %s\n", coreStr)
-			fmt.Printf("Channels:  %s\n", formatList(agent.Channels))
-			fmt.Printf("Packages:  %s\n", formatList(agent.Packages))
-			fmt.Printf("Created:   %s\n", agent.CreatedAt)
-		})
-
-		// Show instance status
-		var instResp instanceListResponse
-		if err := sc.Get(cmd.Context(), "/v1/agents/"+args[0]+"/instances", &instResp); err == nil && len(instResp.Instances) > 0 {
-			inst := instResp.Instances[0]
-			fmt.Printf("Instance:  %s (%s)\n", inst.ID, inst.Status)
-		}
-
-		return nil
-	},
-}
-
-var agentDeleteCmd = &cobra.Command{
-	Use:   "delete <id>",
-	Short: "Delete an agent",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		if err := sc.Delete(cmd.Context(), "/v1/agents/"+args[0]); err != nil {
-			return err
-		}
-
-		fmt.Printf("Agent %s deleted.\n", args[0])
-		return nil
-	},
-}
-
-var agentConnectCmd = &cobra.Command{
-	Use:   "connect <id> <channel>",
-	Short: "Connect a channel to an agent",
-	Long:  "Connect a messaging channel (e.g. telegram) to a managed agent.",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		agentID := args[0]
-		channel := args[1]
-
-		body := map[string]interface{}{}
-
-		if channel == "telegram" {
-			fmt.Println("To connect Telegram:")
-			fmt.Println("  1. Open Telegram and message @BotFather")
-			fmt.Println("  2. Send /newbot, choose a name and username")
-			fmt.Println("  3. Copy the bot token")
-			fmt.Println()
-			fmt.Print("Paste bot token: ")
-
-			reader := bufio.NewReader(os.Stdin)
-			token, _ := reader.ReadString('\n')
-			token = strings.TrimSpace(token)
-			if token == "" {
-				return fmt.Errorf("bot token is required")
-			}
-			body["bot_token"] = token
-		}
-
-		var result map[string]interface{}
-		if err := sc.Post(cmd.Context(), "/v1/agents/"+agentID+"/channels/"+channel, body, &result); err != nil {
-			return err
-		}
-
-		fmt.Printf("Telegram connected to %s.\n", agentID)
-		if channel == "telegram" {
-			fmt.Println("Message your bot on Telegram to start chatting.")
-		}
-		return nil
-	},
-}
-
-var agentDisconnectCmd = &cobra.Command{
-	Use:   "disconnect <id> <channel>",
-	Short: "Disconnect a channel from an agent",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		if err := sc.Delete(cmd.Context(), "/v1/agents/"+args[0]+"/channels/"+args[1]); err != nil {
-			return err
-		}
-
-		fmt.Printf("Channel %s disconnected from %s.\n", args[1], args[0])
-		return nil
-	},
-}
-
-var agentChannelsCmd = &cobra.Command{
-	Use:   "channels <id>",
-	Short: "List channels connected to an agent",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		var resp map[string]interface{}
-		if err := sc.Get(cmd.Context(), "/v1/agents/"+args[0]+"/channels", &resp); err != nil {
-			return err
-		}
-
-		printer.Print(resp, func() {
-			channels := formatList(resp["channels"])
-			if channels == "-" {
-				fmt.Println("No channels connected.")
-			} else {
-				fmt.Printf("Channels: %s\n", channels)
-			}
-		})
-		return nil
-	},
-}
-
-var agentInstallCmd = &cobra.Command{
-	Use:   "install <id> <package>",
-	Short: "Install a package on an agent",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		agentID := args[0]
-		pkg := args[1]
-
-		var result map[string]interface{}
-		if err := sc.Post(cmd.Context(), "/v1/agents/"+agentID+"/packages/"+pkg, nil, &result); err != nil {
-			return err
-		}
-
-		fmt.Printf("Package %s installed on %s.\n", pkg, agentID)
-		return nil
-	},
-}
-
-var agentUninstallCmd = &cobra.Command{
-	Use:   "uninstall <id> <package>",
-	Short: "Uninstall a package from an agent",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		if err := sc.Delete(cmd.Context(), "/v1/agents/"+args[0]+"/packages/"+args[1]); err != nil {
-			return err
-		}
-
-		fmt.Printf("Package %s uninstalled from %s.\n", args[1], args[0])
-		return nil
-	},
-}
-
-var agentPackagesCmd = &cobra.Command{
-	Use:   "packages <id>",
-	Short: "List packages installed on an agent",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		sc, err := sessionsClient(cmd)
-		if err != nil {
-			return err
-		}
-
-		var resp map[string]interface{}
-		if err := sc.Get(cmd.Context(), "/v1/agents/"+args[0]+"/packages", &resp); err != nil {
-			return err
-		}
-
-		printer.Print(resp, func() {
-			packages := formatList(resp["packages"])
-			if packages == "-" {
-				fmt.Println("No packages installed.")
-			} else {
-				fmt.Printf("Packages: %s\n", packages)
-			}
-		})
-		return nil
-	},
-}
-
-// ── Helpers ──
+// ── Formatting helpers ──
 
 func formatList(v interface{}) string {
 	if v == nil {
@@ -401,11 +140,28 @@ func formatAge(isoTime string) string {
 	return time.Since(t).Truncate(time.Second).String()
 }
 
-func init() {
-	// agent create flags
-	agentCreateCmd.Flags().String("core", "", "Managed core (e.g. hermes)")
-	agentCreateCmd.Flags().StringSlice("secret", nil, "Secrets (KEY=VALUE)")
+// ── Registration ──
 
+func init() {
+	// Per-subcommand flags
+	agentCreateCmd.Flags().String("core", "", "Managed core (required, e.g. hermes|openclaw)")
+	_ = agentCreateCmd.MarkFlagRequired("core")
+	agentCreateCmd.Flags().StringSlice("secret", nil, "Secrets (KEY=VALUE)")
+	agentCreateCmd.Flags().Bool("no-wait", false, "Don't wait for instance provisioning; exit after agent record is created")
+
+	agentConnectCmd.Flags().String("bot-token", "", "Telegram bot token (required for channel=telegram when stdin is not a TTY)")
+
+	agentInstallCmd.Flags().Bool("no-wait", false, "Don't wait for install orchestration to finish")
+
+	// Destructive ops — require explicit --yes in non-TTY callers.
+	agentDeleteCmd.Flags().Bool("yes", false, "Skip confirmation (required for non-interactive callers)")
+	agentDisconnectCmd.Flags().Bool("yes", false, "Skip confirmation (required for non-interactive callers)")
+	agentUninstallCmd.Flags().Bool("yes", false, "Skip confirmation (required for non-interactive callers)")
+
+	agentEventsCmd.Flags().Int("limit", 0, "Max events to return (1-200, default 50)")
+	agentEventsCmd.Flags().String("before", "", "Return events before this ISO timestamp (for pagination)")
+
+	// Subcommand registration — each is defined in its own file in this package.
 	agentCmd.AddCommand(agentCreateCmd)
 	agentCmd.AddCommand(agentListCmd)
 	agentCmd.AddCommand(agentGetCmd)
@@ -416,4 +172,5 @@ func init() {
 	agentCmd.AddCommand(agentInstallCmd)
 	agentCmd.AddCommand(agentUninstallCmd)
 	agentCmd.AddCommand(agentPackagesCmd)
+	agentCmd.AddCommand(agentEventsCmd)
 }

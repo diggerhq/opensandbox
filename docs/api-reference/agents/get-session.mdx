@@ -1,0 +1,30 @@
+---
+title: 'Get Session'
+api: 'GET /v1/agents/{agentId}/sessions/{id}'
+---
+
+Get a specific session.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="id" type="string" required>
+  Session ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "id": "sess_98adcc7e",
+  "agent_id": "issue-resolver",
+  "status": "running",
+  "input": { "repo": "acme/backend", "issue_number": 42 },
+  "result": null,
+  "preview_url": null,
+  "metadata": { "trigger": "github_webhook" },
+  "created_at": "2026-04-09T10:30:00Z",
+  "updated_at": "2026-04-09T10:30:00Z"
+}
+```
+</ResponseExample>

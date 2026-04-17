@@ -15,11 +15,14 @@ A core is the AI runtime that powers your agent. When you create a managed agent
 
 ```bash
 oc agent create my-agent --core hermes
+# or
+oc agent create my-agent --core openclaw
 ```
 
 | Core | Runtime | What you get |
 |------|---------|-------------|
 | `hermes` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | Self-improving AI agent with skill creation, memory, multi-channel gateway, browser, code execution |
+| `openclaw` | [OpenClaw](https://openclaw.ai) | Multi-channel AI gateway with rich plugin SDK, native MCP support, hot-reload config, 6 built-in channels + 20 plugin channels |
 
 Without `--core`, the agent uses the raw sandbox path — you provide your own `snapshot` and `entrypoint` via the API. Managed and raw agents coexist on the same platform.
 
@@ -67,15 +70,17 @@ Uninstalling a package removes the wiring (MCP config) but preserves the data by
 Three commands to a personal AI agent on Telegram with persistent memory:
 
 ```bash
-# Boot a Hermes agent
-oc agent create my-hermes --core hermes
+# Boot an agent (pick a core)
+oc agent create my-agent --core hermes   # or --core openclaw
 
 # Connect Telegram (create a bot via @BotFather first)
-oc agent connect my-hermes telegram --bot-token <token>
+oc agent connect my-agent telegram --bot-token <token>
 
 # Install persistent memory
-oc agent install my-hermes gbrain
+oc agent install my-agent gbrain
 ```
+
+The user journey is the same regardless of core. The adapter handles the differences — Hermes uses YAML config + gateway restart, OpenClaw uses JSON5 config + hot-reload.
 
 See the [Create a Hermes Agent](/guides/create-hermes-agent) guide for a step-by-step walkthrough, and the [gbrain package](/agents-api/gbrain) page for details on persistent memory.
 
@@ -85,11 +90,16 @@ Managed agents are sugar over OpenComputer sandboxes. You can always drop to the
 
 ```bash
 # Shell into any agent's sandbox
-oc shell my-hermes
+oc shell my-agent
 
 # From there: edit config, install software, debug, run native commands
+# Hermes:
 cat ~/.hermes/config.yaml
 hermes skill list
+
+# OpenClaw:
+cat ~/.openclaw/openclaw.json
+openclaw mcp list
 ```
 
 The managed path and the manual path coexist. Channels and packages that you wire manually (via `oc shell`) won't appear in the managed state, but they work fine.

@@ -36,9 +36,9 @@ func (f *fakeLister) EndScaleEvent(_ context.Context, sandboxID string) error {
 	return nil
 }
 
-func (f *fakeLister) CreateHibernation(_ context.Context, sandboxID string, _ uuid.UUID, key string, _ int64, _, _ string, _ json.RawMessage) (*db.SandboxHibernation, error) {
+func (f *fakeLister) CreateHibernation(_ context.Context, sandboxID string, _ uuid.UUID, key string, _ int64, _, _ string, _ json.RawMessage) (*db.SandboxHibernation, string, error) {
 	f.hibernations = append(f.hibernations, sandboxID+"="+key)
-	return &db.SandboxHibernation{SandboxID: sandboxID, HibernationKey: key}, nil
+	return &db.SandboxHibernation{SandboxID: sandboxID, HibernationKey: key}, "", nil
 }
 
 type fakeWorkerClient struct {

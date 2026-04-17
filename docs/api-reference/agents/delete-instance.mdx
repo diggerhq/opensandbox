@@ -1,0 +1,20 @@
+---
+title: 'Delete Instance'
+api: 'DELETE /v1/agents/{agentId}/instances/{id}'
+---
+
+Delete an instance. Kills the backing sandbox.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="id" type="string" required>
+  Instance ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

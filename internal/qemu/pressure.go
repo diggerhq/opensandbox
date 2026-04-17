@@ -6,8 +6,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // PressureLevel represents the current host resource pressure state.
@@ -272,25 +270,4 @@ func (pm *PressureMonitor) idleSandboxes(threshold time.Duration) []string {
 	return idle
 }
 
-// sampleRAMPercent returns the percentage of available RAM.
-func sampleRAMPercent() float64 {
-	var info unix.Sysinfo_t
-	if err := unix.Sysinfo(&info); err != nil {
-		return 100.0 // assume OK on error
-	}
-	total := info.Totalram * uint64(info.Unit)
-	avail := info.Freeram * uint64(info.Unit)
-	if total == 0 {
-		return 100.0
-	}
-	return float64(avail) / float64(total) * 100.0
-}
-
-// sampleDiskAvail returns available bytes on the filesystem containing path.
-func sampleDiskAvail(path string) uint64 {
-	var stat unix.Statfs_t
-	if err := unix.Statfs(path, &stat); err != nil {
-		return 1 << 40 // 1TB default on error
-	}
-	return stat.Bavail * uint64(stat.Bsize)
-}
+// sampleRAMPercent and sampleDiskAvail are in pressure_linux.go / pressure_other.go.

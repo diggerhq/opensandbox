@@ -219,6 +219,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/checkpoints/:checkpointId/patches", s.listCheckpointPatches)
 	api.DELETE("/sandboxes/checkpoints/:checkpointId/patches/:patchId", s.deleteCheckpointPatch)
 
+	// Checkpoint publish / unpublish (design 009)
+	api.POST("/sandboxes/checkpoints/:checkpointId/publish", s.publishCheckpoint)
+	api.POST("/sandboxes/checkpoints/:checkpointId/unpublish", s.unpublishCheckpoint)
+
 	// Signed file URLs
 	api.POST("/sandboxes/:id/files/download-url", s.createDownloadURL)
 	api.POST("/sandboxes/:id/files/upload-url", s.createUploadURL)
