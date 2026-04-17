@@ -80,10 +80,11 @@ func (s *Server) billingGet(c echo.Context) error {
 	// the Stripe Billing Portal instead of re-computing cost locally against a
 	// hardcoded rate table that would diverge for grandfathered orgs.
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"plan":                   org.Plan,
-		"stripeCreditCents":      stripeCreditCents,
-		"maxConcurrentSandboxes": org.MaxConcurrentSandboxes,
-		"hasPaymentMethod":       org.StripeCustomerID != nil,
+		"plan":                       org.Plan,
+		"stripeCreditCents":          stripeCreditCents,
+		"maxConcurrentSandboxes":     org.MaxConcurrentSandboxes,
+		"hasPaymentMethod":           org.StripeCustomerID != nil,
+		"freeCreditsRemainingCents":  org.FreeCreditsRemainingCents,
 	})
 }
 

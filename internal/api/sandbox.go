@@ -44,8 +44,15 @@ func (s *Server) createSandbox(c echo.Context) error {
 		var err error
 		org, err = s.store.GetOrg(ctx, orgID)
 		if err == nil {
-			// Free-tier: trial credits gate instead of a concurrent-sandbox cap.
-			// Pro (and any other non-free plan): concurrent limit still applies.
+			// Concurrent sandbox limit applies to all plans.
+			count, err := s.store.CountActiveSandboxes(ctx, orgID)
+			if err == nil && count >= org.MaxConcurrentSandboxes {
+				return c.JSON(http.StatusTooManyRequests, map[string]string{
+					"error": "concurrent sandbox limit reached",
+				})
+			}
+
+			// Free-tier: trial credits gate + machine-size restriction.
 			if org.Plan == "free" {
 				if org.FreeCreditsRemainingCents <= 0 {
 					return c.JSON(http.StatusPaymentRequired, map[string]string{
@@ -55,13 +62,6 @@ func (s *Server) createSandbox(c echo.Context) error {
 				if cfg.MemoryMB > 4096 || cfg.CpuCount > 1 {
 					return c.JSON(http.StatusPaymentRequired, map[string]string{
 						"error": "upgrade to pro for larger instances",
-					})
-				}
-			} else {
-				count, err := s.store.CountActiveSandboxes(ctx, orgID)
-				if err == nil && count >= org.MaxConcurrentSandboxes {
-					return c.JSON(http.StatusTooManyRequests, map[string]string{
-						"error": "concurrent sandbox limit reached",
 					})
 				}
 			}

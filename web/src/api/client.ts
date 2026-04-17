@@ -278,6 +278,7 @@ export interface BillingState {
   stripeCreditCents: number
   maxConcurrentSandboxes: number
   hasPaymentMethod: boolean
+  freeCreditsRemainingCents: number
 }
 
 export interface StripeInvoice {
