@@ -44,19 +44,24 @@ func (s *Server) createSandbox(c echo.Context) error {
 		var err error
 		org, err = s.store.GetOrg(ctx, orgID)
 		if err == nil {
-			// Concurrent sandbox limit
-			count, err := s.store.CountActiveSandboxes(ctx, orgID)
-			if err == nil && count >= org.MaxConcurrentSandboxes {
-				return c.JSON(http.StatusTooManyRequests, map[string]string{
-					"error": "concurrent sandbox limit reached",
-				})
-			}
-
-			// Free tier: 4GB / 1 vCPU only
+			// Free-tier: trial credits gate instead of a concurrent-sandbox cap.
+			// Pro (and any other non-free plan): concurrent limit still applies.
 			if org.Plan == "free" {
+				if org.FreeCreditsRemainingCents <= 0 {
+					return c.JSON(http.StatusPaymentRequired, map[string]string{
+						"error": "free trial credits exhausted — upgrade to pro to create new sandboxes",
+					})
+				}
 				if cfg.MemoryMB > 4096 || cfg.CpuCount > 1 {
 					return c.JSON(http.StatusPaymentRequired, map[string]string{
 						"error": "upgrade to pro for larger instances",
+					})
+				}
+			} else {
+				count, err := s.store.CountActiveSandboxes(ctx, orgID)
+				if err == nil && count >= org.MaxConcurrentSandboxes {
+					return c.JSON(http.StatusTooManyRequests, map[string]string{
+						"error": "concurrent sandbox limit reached",
 					})
 				}
 			}
@@ -1474,6 +1479,17 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 
 	var req types.WakeRequest
 	_ = c.Bind(&req)
+
+	// Free-tier credits gate: refuse to wake if trial credits are exhausted.
+	if orgID, ok := auth.GetOrgID(c); ok && s.store != nil {
+		if org, err := s.store.GetOrg(ctx, orgID); err == nil {
+			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
+				return c.JSON(http.StatusPaymentRequired, map[string]string{
+					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
+				})
+			}
+		}
+	}
 
 	// Server mode: pick any worker, dispatch via gRPC
 	if s.workerRegistry != nil {

@@ -111,6 +111,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{23, "migrations/021_migration_state.up.sql"},
 		{24, "migrations/022_orgs_price_locked.up.sql"},
 		{25, "migrations/023_checkpoints_public.up.sql"},
+		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -170,6 +171,11 @@ type Org struct {
 	OwnerUserID        *uuid.UUID `json:"ownerUserId,omitempty"`
 	CreditBalanceCents int        `json:"creditBalanceCents"`
 
+	// Free-tier trial credits. Decremented by the usage reporter while
+	// plan='free'. At <=0, running sandboxes are force-hibernated and new
+	// create/wake is rejected until upgrade to pro. Ignored for plan='pro'.
+	FreeCreditsRemainingCents int64 `json:"freeCreditsRemainingCents"`
+
 	// Stripe billing fields
 	StripeCustomerID     *string    `json:"stripeCustomerId,omitempty"`
 	StripeSubscriptionID *string    `json:"stripeSubscriptionId,omitempty"`
@@ -182,7 +188,8 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
-	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked`
+	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked,
+	free_credits_remaining_cents`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -195,6 +202,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
 		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
 		&org.PriceLocked,
+		&org.FreeCreditsRemainingCents,
 	)
 	return org, err
 }

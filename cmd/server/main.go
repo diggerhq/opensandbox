@@ -369,9 +369,16 @@ func main() {
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
 
-	// Start usage reporter (reports sandbox usage to Stripe every 5 min)
+	// Start usage reporter — reports Pro org usage to Stripe and deducts
+	// free-tier trial credits (force-hibernates on empty) every 5 min.
+	// redisRegistry may be nil in combined mode; reporter tolerates that by
+	// logging instead of hibernating when free credits run out.
 	if opts.Store != nil && stripeClient != nil {
-		reporter := billing.NewUsageReporter(opts.Store, stripeClient)
+		var workers billing.WorkerClientSource
+		if redisRegistry != nil {
+			workers = redisRegistry
+		}
+		reporter := billing.NewUsageReporter(opts.Store, stripeClient, workers)
 		reporter.Start()
 		defer reporter.Stop()
 		log.Println("opensandbox: usage reporter started (interval=5m)")
