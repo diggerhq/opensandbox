@@ -322,13 +322,15 @@ message SetSandboxLimitsResponse {}
 // Live migration messages
 message PreCopyDrivesRequest {
   string sandbox_id = 1;
-  bool flatten_rootfs = 2;   // if true, flatten qcow2 overlay before upload (cross-golden-version)
+  reserved 2;  // was flatten_rootfs — no longer used; source always uploads thin overlay
 }
 
 message PreCopyDrivesResponse {
   string rootfs_key = 1;       // S3 key for rootfs qcow2
   string workspace_key = 2;    // S3 key for workspace qcow2
   string golden_version = 3;   // golden version the sandbox was created from
+  int32 base_memory_mb = 4;    // QEMU -m value from source (target must match for migration)
+  int32 base_cpu_count = 5;    // QEMU -smp value from source (target must match for migration)
 }
 
 message PrepareMigrationIncomingRequest {
@@ -343,6 +345,7 @@ message PrepareMigrationIncomingRequest {
   string workspace_s3_key = 9;  // if set, download from S3 instead of using local workspace_path
   bool overlay_mode = 10;       // if true, rootfs is thin overlay — rebase to local golden on target
   int32 target_memory_mb = 11;  // final memory after scale — worker checks capacity and reserves atomically
+  string source_golden_version = 12;  // source's golden version — target rebases overlay if different from its own
 }
 
 message PrepareMigrationIncomingResponse {

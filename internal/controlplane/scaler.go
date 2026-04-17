@@ -1037,41 +1037,36 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 
 	t0 := time.Now()
 
-	// Determine if source and target share the same golden snapshot version.
-	// Same version → upload thin overlay, target rebases to local base image (fast, small).
-	// Different version → flatten rootfs before upload, target uses it as-is (slow, large).
-	sourceWorker := s.getWorkerInfo(sourceWorkerID)
-	targetWorker := s.getWorkerInfo(targetWorkerID)
-	sameGolden := sourceWorker != nil && targetWorker != nil &&
-		sourceWorker.GoldenVersion != "" && sourceWorker.GoldenVersion == targetWorker.GoldenVersion
-	flatten := !sameGolden
-
-	// Step 1: Pre-copy drives to S3 (source uploads qcow2s)
+	// Step 1: Pre-copy drives to S3 (source uploads thin overlay — never flattens).
+	// Target worker rebases to its own base if golden versions differ.
 	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer preCopyCancel()
 	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
-		SandboxId:    sandboxID,
-		FlattenRootfs: flatten,
+		SandboxId: sandboxID,
 	})
 	if err != nil {
 		return fmt.Errorf("pre-copy drives: %w", err)
 	}
 
-	migrationMode := "overlay"
-	if flatten {
-		migrationMode = "flatten"
+	// If the source has no goldenVersion, we can't safely rebase on the target.
+	// Fall back to hibernate → wake which handles legacy checkpoints.
+	if preCopyResp.GoldenVersion == "" {
+		return fmt.Errorf("source sandbox has no goldenVersion — cannot live migrate safely; use hibernate/wake instead")
 	}
-	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, mode=%s)", sandboxID, time.Since(t0).Milliseconds(), migrationMode)
 
-	// Step 2: Prepare target (downloads from S3, starts QEMU -incoming)
-	// IMPORTANT: Use the BASE memory (from creation), not the scaled total.
-	// QEMU migration requires matching memory layout: -m <base> + virtio-mem pool.
-	// The hotplugged virtio-mem state transfers as part of the migration stream.
-	// The golden snapshot is created with OPENSANDBOX_DEFAULT_SANDBOX_CPUS (2) and
-	// OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB (1024). QEMU migration requires exact
-	// match of -smp and -m between source and target.
-	// TODO: read base cpus/memory from source worker heartbeat instead of hardcoding.
-	cpuCount, memoryMB, guestPort, template := int32(2), int32(1024), int32(80), "default"
+	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, golden=%s)", sandboxID, time.Since(t0).Milliseconds(), preCopyResp.GoldenVersion)
+
+	// Step 2: Prepare target (downloads thin overlay from S3, rebases if needed, starts QEMU -incoming)
+	// CPU and memory come from the source worker — must match exactly for QEMU migration.
+	cpuCount := preCopyResp.BaseCpuCount
+	memoryMB := preCopyResp.BaseMemoryMb
+	if cpuCount == 0 {
+		cpuCount = 2 // fallback for old workers that don't report
+	}
+	if memoryMB == 0 {
+		memoryMB = 1024
+	}
+	guestPort, template := int32(80), "default"
 	if s.store != nil {
 		session, err := s.store.GetSandboxSession(ctx, sandboxID)
 		if err == nil && session != nil {
@@ -1084,15 +1079,16 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	prepCtx, prepCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId:      sandboxID,
-		CpuCount:       cpuCount,
-		MemoryMb:       memoryMB,
-		GuestPort:      guestPort,
-		Template:       template,
-		RootfsS3Key:    preCopyResp.RootfsKey,
-		WorkspaceS3Key: preCopyResp.WorkspaceKey,
-		OverlayMode:    sameGolden,
-		TargetMemoryMb: 4096, // default tier — worker checks real capacity atomically
+		SandboxId:           sandboxID,
+		CpuCount:            cpuCount,
+		MemoryMb:            memoryMB,
+		GuestPort:           guestPort,
+		Template:            template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		TargetMemoryMb:      4096,
 	})
 	if err != nil {
 		return fmt.Errorf("prepare target: %w", err)

@@ -866,31 +866,45 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 
 	t0 := time.Now()
 
-	// Step 1: Prepare target worker — starts QEMU with -incoming tcp
-	// Use session config for VM parameters. Drives are created fresh on target;
-	// memory contents (including filesystem cache) migrate via QMP tcp.
-	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer prepCancel()
-	// Parse sandbox config to get the actual memory/CPU (must match source for migration)
-	var sbCfg struct {
-		MemoryMB int `json:"memoryMB"`
-		CpuCount int `json:"cpuCount"`
-	}
-	_ = json.Unmarshal(session.Config, &sbCfg)
-	// IMPORTANT: Use the QEMU base memory (from golden snapshot), not the API-requested total.
-	// Virtio-mem hotplug state transfers during migration — the target QEMU must start
-	// with the same base memory as the source for the memory layout to match.
-	sbCfg.MemoryMB = 256
-	if sbCfg.CpuCount <= 0 {
-		sbCfg.CpuCount = 1
+	// Step 1: Pre-copy drives to S3 (thin overlay, never flatten).
+	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer preCopyCancel()
+	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
+		SandboxId: id,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "pre-copy drives: " + err.Error()})
 	}
 
+	if preCopyResp.GoldenVersion == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "source sandbox has no goldenVersion — cannot live migrate safely; use hibernate/wake instead"})
+	}
+
+	log.Printf("migrate %s: drives pre-copied to S3 (%dms, golden=%s)", id, time.Since(t0).Milliseconds(), preCopyResp.GoldenVersion)
+
+	// Step 2: Prepare target (downloads thin overlay, rebases if needed, starts QEMU -incoming).
+	// CPU and memory come from the source worker — must match exactly for QEMU migration.
+	cpuCount := preCopyResp.BaseCpuCount
+	memoryMB := preCopyResp.BaseMemoryMb
+	if cpuCount == 0 {
+		cpuCount = 2
+	}
+	if memoryMB == 0 {
+		memoryMB = 1024
+	}
+
+	prepCtx, prepCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId: id,
-		CpuCount:  int32(sbCfg.CpuCount),
-		MemoryMb:  int32(sbCfg.MemoryMB),
-		GuestPort: 80,
-		Template:  session.Template,
+		SandboxId:           id,
+		CpuCount:            cpuCount,
+		MemoryMb:            memoryMB,
+		GuestPort:           80,
+		Template:            session.Template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
@@ -1273,24 +1287,43 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		template = "default"
 	}
 
-	// IMPORTANT: Use the QEMU base memory (from golden snapshot), not the API-requested total.
-	// Virtio-mem hotplug state transfers during migration — the target QEMU must start
-	// with the same base memory as the source for the memory layout to match.
-	baseMem := 256
-	baseCPU := 1
+	// Step 1: Pre-copy drives to S3 (thin overlay).
+	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer preCopyCancel()
+	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
+		SandboxId: sandboxID,
+	})
+	if err != nil {
+		return fmt.Errorf("pre-copy drives: %w", err)
+	}
 
-	log.Printf("scale-migrate %s: migrating to %s (template=%s, baseMem=%dMB, targetMem=%dMB, cpu=%d)", sandboxID, target.ID, template, baseMem, memoryMB, cpuCount)
+	// CPU and memory from source — must match for QEMU migration.
+	baseCPU := preCopyResp.BaseCpuCount
+	baseMem := preCopyResp.BaseMemoryMb
+	if baseCPU == 0 {
+		baseCPU = 2
+	}
+	if baseMem == 0 {
+		baseMem = 1024
+	}
 
-	// Step 1: Prepare target with the SOURCE's base memory (must match for migration)
-	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	log.Printf("scale-migrate %s: drives pre-copied (%dms), migrating to %s (baseMem=%dMB, targetMem=%dMB, cpu=%d)",
+		sandboxID, time.Since(t0).Milliseconds(), target.ID, baseMem, memoryMB, baseCPU)
+
+	// Step 2: Prepare target with the SOURCE's base memory (must match for migration)
+	prepCtx, prepCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId:      sandboxID,
-		CpuCount:       int32(baseCPU),
-		MemoryMb:       int32(baseMem),
-		GuestPort:      80,
-		Template:       template,
-		TargetMemoryMb: int32(memoryMB),
+		SandboxId:           sandboxID,
+		CpuCount:            baseCPU,
+		MemoryMb:            baseMem,
+		GuestPort:           80,
+		Template:            template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		TargetMemoryMb:      int32(memoryMB),
 	})
 	if err != nil {
 		log.Printf("scale-migrate %s: prepare target failed: %v", sandboxID, err)
