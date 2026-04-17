@@ -481,12 +481,16 @@ type SandboxSession struct {
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
+	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running")
+}
+
+func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence`,
-		sandboxID, orgID, userID, template, region, workerID, config, metadata,
+		sandboxID, orgID, userID, template, region, workerID, config, metadata, status,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
 		&session.BasedOnCheckpointID, &session.LastPatchSequence)
@@ -502,6 +506,14 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 	if status == "stopped" || status == "error" {
 		query = `UPDATE sandbox_sessions SET status = $1, stopped_at = now(), error_msg = $2 WHERE sandbox_id = $3 AND status = 'running'`
 		args = []interface{}{status, errorMsg, sandboxID}
+	} else if status == "failed" {
+		// Pending → failed: creation never succeeded, record the error.
+		query = `UPDATE sandbox_sessions SET status = $1, stopped_at = now(), error_msg = $2 WHERE sandbox_id = $3 AND status = 'pending'`
+		args = []interface{}{status, errorMsg, sandboxID}
+	} else if status == "running" {
+		// Pending → running: creation succeeded, promote the session.
+		query = `UPDATE sandbox_sessions SET status = $1 WHERE sandbox_id = $2 AND status IN ('running', 'pending')`
+		args = []interface{}{status, sandboxID}
 	} else if status == "hibernated" {
 		// Hibernated sandboxes are not stopped — don't set stopped_at
 		query = `UPDATE sandbox_sessions SET status = $1 WHERE sandbox_id = $2 AND status = 'running'`

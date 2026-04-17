@@ -458,7 +458,27 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 	requestedMemoryMB := cfg.MemoryMB
 	requestedCpuCount := cfg.CpuCount
 
+	// Pre-generate sandbox ID so we can create the session in PG before the
+	// gRPC call. The worker's RecordScaleEvent needs the org_id from the
+	// session row, which must exist before the worker looks it up.
+	sandboxID := "sb-" + uuid.New().String()[:8]
+
+	// Create session with "pending" status before dispatching to worker.
+	if s.store != nil && hasOrg {
+		template := cfg.Template
+		if template == "" {
+			template = "default"
+		}
+		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
+		metadataJSON, _ := json.Marshal(cfg.Metadata)
+		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, "pending")
+		if templateID != nil {
+			_ = s.store.UpdateSandboxSessionTemplate(ctx, sandboxID, *templateID)
+		}
+	}
+
 	grpcResp, err := grpcClient.CreateSandbox(grpcCtx, &pb.CreateSandboxRequest{
+		SandboxId:            sandboxID,
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
@@ -472,9 +492,19 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		DiskMb:               int32(cfg.DiskMB),
 	})
 	if err != nil {
+		// Mark session as failed so it doesn't count as active.
+		if s.store != nil {
+			errMsg := err.Error()
+			_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "failed", &errMsg)
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "worker create failed: " + err.Error(),
 		})
+	}
+
+	// Creation succeeded — promote session to running.
+	if s.store != nil {
+		_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "running", nil)
 	}
 
 	// Scale to requested resources after creation (virtio-mem hotplug + cgroup).
@@ -516,20 +546,6 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 			log.Printf("sandbox: failed to issue JWT: %v", err)
 		} else {
 			token = t
-		}
-	}
-
-	// Record session in PG
-	if s.store != nil && hasOrg {
-		template := cfg.Template
-		if template == "" {
-			template = "default"
-		}
-		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
-		metadataJSON, _ := json.Marshal(cfg.Metadata)
-		_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
-		if templateID != nil {
-			_ = s.store.UpdateSandboxSessionTemplate(ctx, grpcResp.SandboxId, *templateID)
 		}
 	}
 
