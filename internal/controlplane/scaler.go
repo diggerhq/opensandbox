@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/opensandbox/opensandbox/internal/compute"
@@ -36,7 +37,7 @@ const (
 	emergencyDiskThreshold = 90.0
 	evacuationBatchSize    = 3                  // sandboxes to migrate per eval cycle per worker
 	evacuationCooldown     = 60 * time.Second   // per-worker cooldown between evacuation batches
-	drainTimeout           = 15 * time.Minute   // max time to drain a worker via live migration
+	drainTimeout           = 45 * time.Minute   // max time to drain a worker via live migration (allows 30 sandboxes × 10min each in batches of 3)
 
 	creationFailureThreshold = 3                // consecutive failures before exponential backoff
 	creationBackoffMin       = 1 * time.Minute  // initial backoff after threshold hit
@@ -846,19 +847,30 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 			return
 		}
 
-		// Migrate a batch
+		// Migrate a batch — bounded parallelism to avoid overwhelming
+		// network/disk on source and target workers.
 		batch := running
 		if len(batch) > evacuationBatchSize {
 			batch = batch[:evacuationBatchSize]
 		}
 
 		batchFailed := false
+		var wg sync.WaitGroup
+		var failCount int64
 		for _, sandboxID := range batch {
-			if err := s.liveMigrateSandbox(ctx, sandboxID, workerID, target.ID); err != nil {
-				log.Printf("scaler: drain: migrate %s to %s failed: %v", sandboxID, target.ID, err)
-				migrationFailures++
-				batchFailed = true
-			}
+			wg.Add(1)
+			go func(sbID string) {
+				defer wg.Done()
+				if err := s.liveMigrateSandbox(ctx, sbID, workerID, target.ID); err != nil {
+					log.Printf("scaler: drain: migrate %s to %s failed: %v", sbID, target.ID, err)
+					atomic.AddInt64(&failCount, 1)
+				}
+			}(sandboxID)
+		}
+		wg.Wait()
+		if failCount > 0 {
+			migrationFailures += int(failCount)
+			batchFailed = true
 		}
 
 		if batchFailed {
@@ -1074,40 +1086,36 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 
 	t0 := time.Now()
 
-	// Determine if source and target share the same golden snapshot version.
-	// Same version → upload thin overlay, target rebases to local base image (fast, small).
-	// Different version → flatten rootfs before upload, target uses it as-is (slow, large).
-	sourceWorker := s.getWorkerInfo(sourceWorkerID)
-	targetWorker := s.getWorkerInfo(targetWorkerID)
-	sameGolden := sourceWorker != nil && targetWorker != nil &&
-		sourceWorker.GoldenVersion != "" && sourceWorker.GoldenVersion == targetWorker.GoldenVersion
-	flatten := !sameGolden
-
-	// Step 1: Pre-copy drives to S3 (source uploads qcow2s)
-	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 3*time.Minute)
+	// Step 1: Pre-copy drives to S3 (source uploads thin overlay — never flattens).
+	// Target worker rebases to its own base if golden versions differ.
+	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer preCopyCancel()
 	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
-		SandboxId:    sandboxID,
-		FlattenRootfs: flatten,
+		SandboxId: sandboxID,
 	})
 	if err != nil {
 		return fmt.Errorf("pre-copy drives: %w", err)
 	}
 
-	migrationMode := "overlay"
-	if flatten {
-		migrationMode = "flatten"
+	// If the source has no goldenVersion, we can't safely rebase on the target.
+	// Fall back to hibernate → wake which handles legacy checkpoints.
+	if preCopyResp.GoldenVersion == "" {
+		return fmt.Errorf("source sandbox has no goldenVersion — cannot live migrate safely; use hibernate/wake instead")
 	}
-	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, mode=%s)", sandboxID, time.Since(t0).Milliseconds(), migrationMode)
 
-	// Step 2: Prepare target (downloads from S3, starts QEMU -incoming)
-	// IMPORTANT: Use the BASE memory (from creation), not the scaled total.
-	// QEMU migration requires matching memory layout: -m <base> + virtio-mem pool.
-	// The hotplugged virtio-mem state transfers as part of the migration stream.
-	// IMPORTANT: Use the QEMU base memory (256MB from golden snapshot), not the
-	// API-requested total. Virtio-mem hotplug state transfers during migration —
-	// the target QEMU must start with the same base memory as the source.
-	cpuCount, memoryMB, guestPort, template := int32(1), int32(256), int32(80), "default"
+	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, golden=%s)", sandboxID, time.Since(t0).Milliseconds(), preCopyResp.GoldenVersion)
+
+	// Step 2: Prepare target (downloads thin overlay from S3, rebases if needed, starts QEMU -incoming)
+	// CPU and memory come from the source worker — must match exactly for QEMU migration.
+	cpuCount := preCopyResp.BaseCpuCount
+	memoryMB := preCopyResp.BaseMemoryMb
+	if cpuCount == 0 {
+		cpuCount = 2 // fallback for old workers that don't report
+	}
+	if memoryMB == 0 {
+		memoryMB = 1024
+	}
+	guestPort, template := int32(80), "default"
 	if s.store != nil {
 		session, err := s.store.GetSandboxSession(ctx, sandboxID)
 		if err == nil && session != nil {
@@ -1117,18 +1125,19 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		}
 	}
 
-	prepCtx, prepCancel := context.WithTimeout(ctx, 3*time.Minute)
+	prepCtx, prepCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId:      sandboxID,
-		CpuCount:       cpuCount,
-		MemoryMb:       memoryMB,
-		GuestPort:      guestPort,
-		Template:       template,
-		RootfsS3Key:    preCopyResp.RootfsKey,
-		WorkspaceS3Key: preCopyResp.WorkspaceKey,
-		OverlayMode:    sameGolden,
-		TargetMemoryMb: 4096, // default tier — worker checks real capacity atomically
+		SandboxId:           sandboxID,
+		CpuCount:            cpuCount,
+		MemoryMb:            memoryMB,
+		GuestPort:           guestPort,
+		Template:            template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		TargetMemoryMb:      4096,
 	})
 	if err != nil {
 		return fmt.Errorf("prepare target: %w", err)
@@ -1159,9 +1168,14 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		return fmt.Errorf("complete migration: %w", err)
 	}
 
-	// Step 5: Complete migration — update DB status and worker_id atomically
+	// Step 5: Complete migration — update DB status and worker_id atomically.
+	// Use background context in case the drain context is close to expiry.
 	if s.store != nil {
-		s.store.CompleteMigration(ctx, sandboxID, targetWorkerID)
+		dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.store.CompleteMigration(dbCtx, sandboxID, targetWorkerID); err != nil {
+			log.Printf("scaler: migrate %s: WARNING: CompleteMigration DB update failed: %v", sandboxID, err)
+		}
+		dbCancel()
 	}
 	migrationCompleted = true
 

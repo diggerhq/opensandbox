@@ -1,0 +1,1 @@
+ALTER TABLE orgs DROP COLUMN IF EXISTS price_locked;

@@ -39,6 +39,12 @@ type CheckpointStore struct {
 	cacheMu  sync.Mutex
 }
 
+// NewCheckpointStoreFromClient creates a CheckpointStore using an existing
+// BlobClient. Useful for testing with a mock backend.
+func NewCheckpointStoreFromClient(blob BlobClient, bucket string) *CheckpointStore {
+	return &CheckpointStore{blob: blob, bucket: bucket}
+}
+
 // NewCheckpointStore creates a new checkpoint store.
 // Automatically selects Azure Blob or AWS S3 based on the endpoint URL.
 func NewCheckpointStore(cfg S3Config) (*CheckpointStore, error) {

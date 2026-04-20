@@ -2732,7 +2732,6 @@ func (*SetSandboxLimitsResponse) Descriptor() ([]byte, []int) {
 type PreCopyDrivesRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	FlattenRootfs bool                   `protobuf:"varint,2,opt,name=flatten_rootfs,json=flattenRootfs,proto3" json:"flatten_rootfs,omitempty"` // if true, flatten qcow2 overlay before upload (cross-golden-version)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2774,18 +2773,13 @@ func (x *PreCopyDrivesRequest) GetSandboxId() string {
 	return ""
 }
 
-func (x *PreCopyDrivesRequest) GetFlattenRootfs() bool {
-	if x != nil {
-		return x.FlattenRootfs
-	}
-	return false
-}
-
 type PreCopyDrivesResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RootfsKey     string                 `protobuf:"bytes,1,opt,name=rootfs_key,json=rootfsKey,proto3" json:"rootfs_key,omitempty"`             // S3 key for rootfs qcow2
 	WorkspaceKey  string                 `protobuf:"bytes,2,opt,name=workspace_key,json=workspaceKey,proto3" json:"workspace_key,omitempty"`    // S3 key for workspace qcow2
 	GoldenVersion string                 `protobuf:"bytes,3,opt,name=golden_version,json=goldenVersion,proto3" json:"golden_version,omitempty"` // golden version the sandbox was created from
+	BaseMemoryMb  int32                  `protobuf:"varint,4,opt,name=base_memory_mb,json=baseMemoryMb,proto3" json:"base_memory_mb,omitempty"` // QEMU -m value from source (target must match for migration)
+	BaseCpuCount  int32                  `protobuf:"varint,5,opt,name=base_cpu_count,json=baseCpuCount,proto3" json:"base_cpu_count,omitempty"` // QEMU -smp value from source (target must match for migration)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2841,21 +2835,36 @@ func (x *PreCopyDrivesResponse) GetGoldenVersion() string {
 	return ""
 }
 
+func (x *PreCopyDrivesResponse) GetBaseMemoryMb() int32 {
+	if x != nil {
+		return x.BaseMemoryMb
+	}
+	return 0
+}
+
+func (x *PreCopyDrivesResponse) GetBaseCpuCount() int32 {
+	if x != nil {
+		return x.BaseCpuCount
+	}
+	return 0
+}
+
 type PrepareMigrationIncomingRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId      string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	RootfsPath     string                 `protobuf:"bytes,2,opt,name=rootfs_path,json=rootfsPath,proto3" json:"rootfs_path,omitempty"`          // local path to rootfs on target (pre-copied)
-	WorkspacePath  string                 `protobuf:"bytes,3,opt,name=workspace_path,json=workspacePath,proto3" json:"workspace_path,omitempty"` // local path to workspace on target (pre-copied)
-	CpuCount       int32                  `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
-	MemoryMb       int32                  `protobuf:"varint,5,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
-	GuestPort      int32                  `protobuf:"varint,6,opt,name=guest_port,json=guestPort,proto3" json:"guest_port,omitempty"`
-	Template       string                 `protobuf:"bytes,7,opt,name=template,proto3" json:"template,omitempty"`
-	RootfsS3Key    string                 `protobuf:"bytes,8,opt,name=rootfs_s3_key,json=rootfsS3Key,proto3" json:"rootfs_s3_key,omitempty"`            // if set, download from S3 instead of using local rootfs_path
-	WorkspaceS3Key string                 `protobuf:"bytes,9,opt,name=workspace_s3_key,json=workspaceS3Key,proto3" json:"workspace_s3_key,omitempty"`   // if set, download from S3 instead of using local workspace_path
-	OverlayMode    bool                   `protobuf:"varint,10,opt,name=overlay_mode,json=overlayMode,proto3" json:"overlay_mode,omitempty"`            // if true, rootfs is thin overlay — rebase to local golden on target
-	TargetMemoryMb int32                  `protobuf:"varint,11,opt,name=target_memory_mb,json=targetMemoryMb,proto3" json:"target_memory_mb,omitempty"` // final memory after scale — worker checks capacity and reserves atomically
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId           string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	RootfsPath          string                 `protobuf:"bytes,2,opt,name=rootfs_path,json=rootfsPath,proto3" json:"rootfs_path,omitempty"`          // local path to rootfs on target (pre-copied)
+	WorkspacePath       string                 `protobuf:"bytes,3,opt,name=workspace_path,json=workspacePath,proto3" json:"workspace_path,omitempty"` // local path to workspace on target (pre-copied)
+	CpuCount            int32                  `protobuf:"varint,4,opt,name=cpu_count,json=cpuCount,proto3" json:"cpu_count,omitempty"`
+	MemoryMb            int32                  `protobuf:"varint,5,opt,name=memory_mb,json=memoryMb,proto3" json:"memory_mb,omitempty"`
+	GuestPort           int32                  `protobuf:"varint,6,opt,name=guest_port,json=guestPort,proto3" json:"guest_port,omitempty"`
+	Template            string                 `protobuf:"bytes,7,opt,name=template,proto3" json:"template,omitempty"`
+	RootfsS3Key         string                 `protobuf:"bytes,8,opt,name=rootfs_s3_key,json=rootfsS3Key,proto3" json:"rootfs_s3_key,omitempty"`                          // if set, download from S3 instead of using local rootfs_path
+	WorkspaceS3Key      string                 `protobuf:"bytes,9,opt,name=workspace_s3_key,json=workspaceS3Key,proto3" json:"workspace_s3_key,omitempty"`                 // if set, download from S3 instead of using local workspace_path
+	OverlayMode         bool                   `protobuf:"varint,10,opt,name=overlay_mode,json=overlayMode,proto3" json:"overlay_mode,omitempty"`                          // if true, rootfs is thin overlay — rebase to local golden on target
+	TargetMemoryMb      int32                  `protobuf:"varint,11,opt,name=target_memory_mb,json=targetMemoryMb,proto3" json:"target_memory_mb,omitempty"`               // final memory after scale — worker checks capacity and reserves atomically
+	SourceGoldenVersion string                 `protobuf:"bytes,12,opt,name=source_golden_version,json=sourceGoldenVersion,proto3" json:"source_golden_version,omitempty"` // source's golden version — target rebases overlay if different from its own
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *PrepareMigrationIncomingRequest) Reset() {
@@ -2963,6 +2972,13 @@ func (x *PrepareMigrationIncomingRequest) GetTargetMemoryMb() int32 {
 		return x.TargetMemoryMb
 	}
 	return 0
+}
+
+func (x *PrepareMigrationIncomingRequest) GetSourceGoldenVersion() string {
+	if x != nil {
+		return x.SourceGoldenVersion
+	}
+	return ""
 }
 
 type PrepareMigrationIncomingResponse struct {
@@ -3505,16 +3521,17 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\fcpu_max_usec\x18\x04 \x01(\x03R\n" +
 	"cpuMaxUsec\x12&\n" +
 	"\x0fcpu_period_usec\x18\x05 \x01(\x03R\rcpuPeriodUsec\"\x1a\n" +
-	"\x18SetSandboxLimitsResponse\"\\\n" +
+	"\x18SetSandboxLimitsResponse\";\n" +
 	"\x14PreCopyDrivesRequest\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
-	"\x0eflatten_rootfs\x18\x02 \x01(\bR\rflattenRootfs\"\x82\x01\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxIdJ\x04\b\x02\x10\x03\"\xce\x01\n" +
 	"\x15PreCopyDrivesResponse\x12\x1d\n" +
 	"\n" +
 	"rootfs_key\x18\x01 \x01(\tR\trootfsKey\x12#\n" +
 	"\rworkspace_key\x18\x02 \x01(\tR\fworkspaceKey\x12%\n" +
-	"\x0egolden_version\x18\x03 \x01(\tR\rgoldenVersion\"\x98\x03\n" +
+	"\x0egolden_version\x18\x03 \x01(\tR\rgoldenVersion\x12$\n" +
+	"\x0ebase_memory_mb\x18\x04 \x01(\x05R\fbaseMemoryMb\x12$\n" +
+	"\x0ebase_cpu_count\x18\x05 \x01(\x05R\fbaseCpuCount\"\xcc\x03\n" +
 	"\x1fPrepareMigrationIncomingRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
@@ -3530,7 +3547,8 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\x10workspace_s3_key\x18\t \x01(\tR\x0eworkspaceS3Key\x12!\n" +
 	"\foverlay_mode\x18\n" +
 	" \x01(\bR\voverlayMode\x12(\n" +
-	"\x10target_memory_mb\x18\v \x01(\x05R\x0etargetMemoryMb\"d\n" +
+	"\x10target_memory_mb\x18\v \x01(\x05R\x0etargetMemoryMb\x122\n" +
+	"\x15source_golden_version\x18\f \x01(\tR\x13sourceGoldenVersion\"d\n" +
 	" PrepareMigrationIncomingResponse\x12#\n" +
 	"\rincoming_addr\x18\x01 \x01(\tR\fincomingAddr\x12\x1b\n" +
 	"\thost_port\x18\x02 \x01(\x05R\bhostPort\"X\n" +

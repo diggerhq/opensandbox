@@ -1,0 +1,22 @@
+---
+title: 'Disconnect Channel'
+api: 'DELETE /v1/agents/{agentId}/channels/{channel}'
+---
+
+Disconnect a channel from an agent. Removes webhook registration and config.
+
+**CLI equivalent:** `oc agent disconnect <id> <channel>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="channel" type="string" required>
+  Channel type (e.g. `telegram`)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

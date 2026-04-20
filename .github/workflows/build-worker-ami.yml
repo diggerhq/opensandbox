@@ -3,13 +3,34 @@ name: Build Worker Image
 on:
   push:
     branches: [main, autoscaling-etc]
+    # Only trigger on paths the worker binary actually depends on.
+    # Server-only directories (internal/api, internal/billing) don't trigger rebuild.
+    # If you add a new internal package used by cmd/worker, add it here.
     paths:
       - 'cmd/worker/**'
       - 'cmd/agent/**'
-      - 'internal/**'
-      - 'proto/**'
+      - 'internal/agent/**'
+      - 'internal/analytics/**'
+      - 'internal/auth/**'
+      - 'internal/compute/**'
+      - 'internal/config/**'
+      - 'internal/controlplane/**'
+      - 'internal/crypto/**'
+      - 'internal/db/**'
+      - 'internal/grpctls/**'
+      - 'internal/metrics/**'
+      - 'internal/proxy/**'
+      - 'internal/qemu/**'
+      - 'internal/sandbox/**'
+      - 'internal/secretsproxy/**'
+      - 'internal/sparse/**'
+      - 'internal/storage/**'
+      - 'internal/worker/**'
+      - 'pkg/**'
+      - 'proto/agent/**'
+      - 'proto/worker/**'
       - 'deploy/firecracker/rootfs/**'
-      - 'deploy/azure/**'
+      - 'deploy/azure/setup-azure-host.sh'
       - 'deploy/ec2/build-rootfs-docker.sh'
       - 'deploy/packer/**'
       - 'scripts/claude-agent-wrapper/**'
@@ -84,6 +105,8 @@ jobs:
             -var "location=$AZURE_LOCATION" \
             -var "gallery_name=$AZURE_GALLERY_NAME" \
             -var "image_version_patch=$PATCH" \
+            -var "base_archive_account=${{ secrets.AZURE_STORAGE_ACCOUNT }}" \
+            -var "base_archive_key=${{ secrets.AZURE_STORAGE_KEY }}" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
           # Use the gallery image ID (NVMe-compatible for v7 VMs)

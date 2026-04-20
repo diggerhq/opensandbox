@@ -54,6 +54,12 @@ func NewRedisHeartbeat(redisURL, workerID, region, grpcAddr, httpAddr string) (*
 	if err != nil {
 		return nil, fmt.Errorf("invalid redis URL: %w", err)
 	}
+	// Explicit pool management to prevent connection leaks and detect stale connections.
+	opts.PoolSize = 5
+	opts.MinIdleConns = 1
+	opts.ConnMaxIdleTime = 5 * time.Minute
+	opts.ConnMaxLifetime = 30 * time.Minute
+	opts.MaxRetries = 3
 
 	rdb := redis.NewClient(opts)
 

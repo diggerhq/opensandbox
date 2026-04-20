@@ -187,6 +187,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api := e.Group("/api")
 	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey))
 
+	// Identity
+	api.POST("/auth/token", s.createAuthToken)
+
 	// Sandbox lifecycle
 	api.POST("/sandboxes", s.createSandbox)
 	api.GET("/sandboxes", s.listSandboxes)
@@ -215,6 +218,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/checkpoints/:checkpointId/patches", s.createCheckpointPatch)
 	api.GET("/sandboxes/checkpoints/:checkpointId/patches", s.listCheckpointPatches)
 	api.DELETE("/sandboxes/checkpoints/:checkpointId/patches/:patchId", s.deleteCheckpointPatch)
+
+	// Checkpoint publish / unpublish (design 009)
+	api.POST("/sandboxes/checkpoints/:checkpointId/publish", s.publishCheckpoint)
+	api.POST("/sandboxes/checkpoints/:checkpointId/unpublish", s.unpublishCheckpoint)
 
 	// Signed file URLs
 	api.POST("/sandboxes/:id/files/download-url", s.createDownloadURL)
@@ -296,6 +303,19 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/snapshots/:name", s.getSnapshot)
 	api.DELETE("/snapshots/:name", s.deleteSnapshot)
 
+	// Snapshot patches (resolve snapshot name → checkpoint, then delegate to checkpoint patch logic)
+	api.POST("/snapshots/:name/patches", s.createSnapshotPatch)
+	api.GET("/snapshots/:name/patches", s.listSnapshotPatches)
+	api.DELETE("/snapshots/:name/patches/:patchId", s.deleteSnapshotPatch)
+
+	// Images (all cached images, named or unnamed)
+	api.GET("/images", s.listImages)
+
+	// Image patches — by name or by ID
+	api.POST("/images/:name/patches", s.createImagePatch)
+	api.GET("/images/:name/patches", s.listImagePatches)
+	api.DELETE("/images/:name/patches/:patchId", s.deleteImagePatch)
+
 	// Secret stores
 	api.POST("/secret-stores", s.createSecretStore)
 	api.GET("/secret-stores", s.listSecretStores)
@@ -361,6 +381,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/billing", s.billingGet)
 		dash.GET("/billing/invoices", s.billingInvoices)
 		dash.POST("/billing/redeem", s.billingRedeem)
+		dash.POST("/billing/portal", s.billingPortal)
 
 		// Admin endpoints
 

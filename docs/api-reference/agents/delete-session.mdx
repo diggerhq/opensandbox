@@ -1,0 +1,20 @@
+---
+title: 'Delete Session'
+api: 'DELETE /v1/agents/{agentId}/sessions/{id}'
+---
+
+Delete a session. Kills the backing sandbox if still running.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="id" type="string" required>
+  Session ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

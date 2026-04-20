@@ -1,0 +1,27 @@
+---
+title: 'List Instances'
+api: 'GET /v1/agents/{agentId}/instances'
+---
+
+List all instances for an agent.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "instances": [
+    {
+      "id": "inst_98adcc7e",
+      "agent_id": "my-hermes",
+      "status": "running",
+      "metadata": { "slack_user": "U123" },
+      "created_at": "2026-04-09T10:30:00Z",
+      "updated_at": "2026-04-09T10:30:00Z"
+    }
+  ]
+}
+```
+</ResponseExample>

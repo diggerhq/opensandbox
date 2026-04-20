@@ -59,6 +59,11 @@ type Server struct {
 	// gRPC server reference for hibernate GracefulStop
 	mu         sync.Mutex
 	grpcServer *grpc.Server
+
+	// OnPrepareHibernate is called during the PrepareHibernate RPC after
+	// filesystem sync completes. The host wires this to virtioSerialListener.PrepareHibernate
+	// so the listener is ready for a fresh Accept on wake/fork.
+	OnPrepareHibernate func()
 }
 
 // NewServer creates a new agent server.

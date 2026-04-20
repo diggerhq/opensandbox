@@ -8,6 +8,12 @@
 //   DATABASE_URL=... STRIPE_SECRET_KEY=... \
 //     go run ./cmd/migrate-prices --tier=8192 --live
 //
+// By default, orgs with orgs.price_locked=TRUE are skipped (grandfathered).
+// Pass --force to override and migrate every locked org at the given tier.
+// To cherry-pick a single grandfathered org onto new pricing, pass
+// --org=<uuid> — that scopes the run to just that org and implicitly
+// overrides its lock (no need to combine with --force).
+//
 // The command is idempotent: items already attached to the target price are
 // skipped. Usage already accrued this cycle stays at the previous rate because
 // we pass proration_behavior=none; metered events are matched to whichever
@@ -32,6 +38,8 @@ func main() {
 	tier := flag.Int("tier", 8192, "memory_mb tier to migrate (must be a key in billing.TierPriceKey)")
 	dryRun := flag.Bool("dry-run", true, "if true, prints what would change without calling Stripe")
 	live := flag.Bool("live", false, "must be set to actually mutate Stripe; overrides --dry-run")
+	force := flag.Bool("force", false, "also migrate orgs with price_locked=TRUE (off by default — grandfathered orgs stay on their current price)")
+	orgID := flag.String("org", "", "if set, scope the run to this single org UUID and override its price_locked status (no need to also pass --force)")
 	flag.Parse()
 
 	if *live {
@@ -70,12 +78,21 @@ func main() {
 	}
 	log.Printf("target price for tier %d: %s (key=%s)", *tier, targetPriceID, billing.TierPriceKey[*tier])
 
-	rows, err := pool.Query(ctx,
-		`SELECT osi.org_id, osi.stripe_subscription_item_id, o.stripe_subscription_id
+	query := `SELECT osi.org_id, osi.stripe_subscription_item_id, o.stripe_subscription_id, o.price_locked
 		   FROM org_subscription_items osi
 		   JOIN orgs o ON o.id = osi.org_id
 		  WHERE osi.memory_mb = $1
-		    AND o.stripe_subscription_id IS NOT NULL`, *tier)
+		    AND o.stripe_subscription_id IS NOT NULL`
+	args := []interface{}{*tier}
+	switch {
+	case *orgID != "":
+		// --org scopes to one org and implicitly overrides its lock.
+		query += ` AND o.id = $2`
+		args = append(args, *orgID)
+	case !*force:
+		query += ` AND o.price_locked = FALSE`
+	}
+	rows, err := pool.Query(ctx, query, args...)
 	if err != nil {
 		log.Fatalf("query items: %v", err)
 	}
@@ -83,11 +100,12 @@ func main() {
 
 	type target struct {
 		orgID, itemID, subID string
+		locked               bool
 	}
 	var targets []target
 	for rows.Next() {
 		var t target
-		if err := rows.Scan(&t.orgID, &t.itemID, &t.subID); err != nil {
+		if err := rows.Scan(&t.orgID, &t.itemID, &t.subID, &t.locked); err != nil {
 			log.Fatalf("scan: %v", err)
 		}
 		targets = append(targets, t)
@@ -95,7 +113,14 @@ func main() {
 	if err := rows.Err(); err != nil {
 		log.Fatalf("rows err: %v", err)
 	}
-	log.Printf("found %d candidate subscription item(s)", len(targets))
+	switch {
+	case *orgID != "":
+		log.Printf("found %d candidate subscription item(s) (--org=%s: scoped to single org, price_locked ignored)", len(targets), *orgID)
+	case *force:
+		log.Printf("found %d candidate subscription item(s) (--force: price_locked ignored)", len(targets))
+	default:
+		log.Printf("found %d candidate subscription item(s) (price_locked=FALSE)", len(targets))
+	}
 
 	stripe.Key = stripeKey
 
@@ -116,7 +141,11 @@ func main() {
 			continue
 		}
 
-		log.Printf("[PLAN] org=%s item=%s price %s → %s", t.orgID, t.itemID, currentPrice, targetPriceID)
+		lockTag := ""
+		if t.locked {
+			lockTag = " [LOCKED-override]"
+		}
+		log.Printf("[PLAN]%s org=%s item=%s price %s → %s", lockTag, t.orgID, t.itemID, currentPrice, targetPriceID)
 		if *dryRun {
 			continue
 		}

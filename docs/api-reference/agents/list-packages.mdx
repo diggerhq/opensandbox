@@ -1,0 +1,20 @@
+---
+title: 'List Packages'
+api: 'GET /v1/agents/{agentId}/packages'
+---
+
+List packages installed on an agent.
+
+**CLI equivalent:** `oc agent packages <id>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "packages": ["gbrain"]
+}
+```
+</ResponseExample>

@@ -1,0 +1,69 @@
+---
+title: "OpenClaw"
+description: "Multi-channel AI gateway with plugin SDK, native MCP support, and hot-reload config"
+---
+
+[OpenClaw](https://openclaw.ai) is a multi-channel AI gateway with a rich plugin SDK, native MCP support, and hot-reload configuration. It comes with 6 built-in channels and 20+ plugin channels.
+
+## What you get
+
+| Capability | Description |
+|-----------|-------------|
+| **Multi-channel gateway** | Serves Telegram, Slack, Discord, and more from a single agent |
+| **Plugin SDK** | Extend the agent with custom plugins |
+| **Native MCP** | First-class Model Context Protocol support for tool servers |
+| **Hot-reload config** | Configuration changes take effect without gateway restart |
+| **Built-in channels** | 6 built-in channel types out of the box |
+| **Plugin channels** | 20+ additional channels via the plugin ecosystem |
+
+## Create an OpenClaw agent
+
+<CodeGroup>
+
+```bash CLI
+oc agent create my-claw --core openclaw
+```
+
+```bash REST API
+curl -X POST https://api.opencomputer.dev/v1/agents \
+  -H "X-API-Key: $OC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my-claw", "core": "openclaw"}'
+```
+
+</CodeGroup>
+
+This boots a sandbox with OpenClaw pre-installed, an LLM key configured, and the gateway running. An instance is created automatically.
+
+## Configuration
+
+OpenClaw uses JSON5 configuration at `~/.openclaw/openclaw.json` inside the sandbox. Unlike Hermes, OpenClaw supports **hot-reload** — config changes take effect without restarting the gateway.
+
+To inspect or edit manually:
+
+```bash
+oc shell my-claw
+cat ~/.openclaw/openclaw.json
+```
+
+## MCP servers
+
+OpenClaw has native MCP support. When you [install a package](/agents/packages/gbrain) like gbrain, the platform adds it as an MCP server in the OpenClaw config. To see what MCP servers are configured:
+
+```bash
+oc shell my-claw
+openclaw mcp list
+```
+
+## Extending with packages
+
+OpenClaw supports [packages](/agents/packages/gbrain) that add capabilities via MCP servers. Because of hot-reload, package installation takes effect immediately without a gateway restart.
+
+<CardGroup cols={2}>
+  <Card title="Create an OpenClaw Agent" icon="rocket" href="/guides/create-openclaw-agent">
+    Step-by-step guide
+  </Card>
+  <Card title="oc agent CLI" icon="terminal" href="/cli/agents">
+    CLI commands for managing agents
+  </Card>
+</CardGroup>

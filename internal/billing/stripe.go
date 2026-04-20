@@ -8,6 +8,7 @@ import (
 	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/billing/meter"
 	"github.com/stripe/stripe-go/v82/billing/meterevent"
+	portalsession "github.com/stripe/stripe-go/v82/billingportal/session"
 	checkoutsession "github.com/stripe/stripe-go/v82/checkout/session"
 	"github.com/stripe/stripe-go/v82/customer"
 	"github.com/stripe/stripe-go/v82/customerbalancetransaction"
@@ -257,6 +258,20 @@ func (s *StripeClient) CreateSetupCheckoutSession(customerID, orgID string) (url
 		return "", "", fmt.Errorf("create setup session: %w", err)
 	}
 	return sess.URL, sess.ID, nil
+}
+
+// CreatePortalSession creates a Stripe Billing Portal session so the customer
+// can self-serve: view subscription, usage, invoices, and update payment method.
+// returnURL is where Stripe sends the user after they close the portal.
+func (s *StripeClient) CreatePortalSession(customerID, returnURL string) (string, error) {
+	sess, err := portalsession.New(&stripe.BillingPortalSessionParams{
+		Customer:  stripe.String(customerID),
+		ReturnURL: stripe.String(returnURL),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create portal session: %w", err)
+	}
+	return sess.URL, nil
 }
 
 // CreateSubscription creates a subscription with metered prices for all tiers.

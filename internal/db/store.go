@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -40,6 +41,11 @@ func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	// Each proxied exec/file/pty call does a DB lookup before forwarding.
 	poolCfg.MaxConns = 50
 	poolCfg.MinConns = 5
+	// Recycle connections periodically to prevent stale/leaked connections from
+	// piling up on the Postgres server (e.g. after worker restarts/deletions).
+	poolCfg.MaxConnLifetime = 30 * time.Minute
+	poolCfg.MaxConnIdleTime = 5 * time.Minute
+	poolCfg.HealthCheckPeriod = 30 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -108,6 +114,10 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{21, "migrations/019_org_max_disk_mb.up.sql"},
 		{22, "migrations/020_scale_events_disk_mb.up.sql"},
 		{23, "migrations/021_migration_state.up.sql"},
+		{24, "migrations/022_orgs_price_locked.up.sql"},
+		{25, "migrations/023_checkpoints_public.up.sql"},
+		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
+		{27, "migrations/024_patch_error_tracking.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -167,10 +177,16 @@ type Org struct {
 	OwnerUserID        *uuid.UUID `json:"ownerUserId,omitempty"`
 	CreditBalanceCents int        `json:"creditBalanceCents"`
 
+	// Free-tier trial credits. Decremented by the usage reporter while
+	// plan='free'. At <=0, running sandboxes are force-hibernated and new
+	// create/wake is rejected until upgrade to pro. Ignored for plan='pro'.
+	FreeCreditsRemainingCents int64 `json:"freeCreditsRemainingCents"`
+
 	// Stripe billing fields
 	StripeCustomerID     *string    `json:"stripeCustomerId,omitempty"`
 	StripeSubscriptionID *string    `json:"stripeSubscriptionId,omitempty"`
 	LastUsageReportedAt  time.Time  `json:"lastUsageReportedAt"`
+	PriceLocked          bool       `json:"priceLocked"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
@@ -178,7 +194,8 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
-	stripe_customer_id, stripe_subscription_id, last_usage_reported_at`
+	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked,
+	free_credits_remaining_cents`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -190,6 +207,8 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
 		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
+		&org.PriceLocked,
+		&org.FreeCreditsRemainingCents,
 	)
 	return org, err
 }
@@ -465,18 +484,23 @@ type SandboxSession struct {
 	BasedOnCheckpointID  *uuid.UUID      `json:"basedOnCheckpointId,omitempty"`
 	LastPatchSequence    int             `json:"lastPatchSequence"`
 	MigratingToWorker    string          `json:"migratingToWorker,omitempty"`
+	PatchError           *string         `json:"patchError,omitempty"`
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
+	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running")
+}
+
+func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence`,
-		sandboxID, orgID, userID, template, region, workerID, config, metadata,
+		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error`,
+		sandboxID, orgID, userID, template, region, workerID, config, metadata, status,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
-		&session.BasedOnCheckpointID, &session.LastPatchSequence)
+		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sandbox session: %w", err)
 	}
@@ -489,6 +513,14 @@ func (s *Store) UpdateSandboxSessionStatus(ctx context.Context, sandboxID, statu
 	if status == "stopped" || status == "error" {
 		query = `UPDATE sandbox_sessions SET status = $1, stopped_at = now(), error_msg = $2 WHERE sandbox_id = $3 AND status = 'running'`
 		args = []interface{}{status, errorMsg, sandboxID}
+	} else if status == "failed" {
+		// Pending → failed: creation never succeeded, record the error.
+		query = `UPDATE sandbox_sessions SET status = $1, stopped_at = now(), error_msg = $2 WHERE sandbox_id = $3 AND status = 'pending'`
+		args = []interface{}{status, errorMsg, sandboxID}
+	} else if status == "running" {
+		// Pending → running: creation succeeded, promote the session.
+		query = `UPDATE sandbox_sessions SET status = $1 WHERE sandbox_id = $2 AND status IN ('running', 'pending')`
+		args = []interface{}{status, sandboxID}
 	} else if status == "hibernated" {
 		// Hibernated sandboxes are not stopped — don't set stopped_at
 		query = `UPDATE sandbox_sessions SET status = $1 WHERE sandbox_id = $2 AND status = 'running'`
@@ -535,11 +567,20 @@ func (s *Store) SetMigrating(ctx context.Context, sandboxID, targetWorkerID stri
 
 // CompleteMigration marks a sandbox as running on the new worker after successful migration.
 func (s *Store) CompleteMigration(ctx context.Context, sandboxID, newWorkerID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_sessions SET status = 'running', worker_id = $1, migrating_to_worker = ''
-		 WHERE sandbox_id = $2 AND status = 'migrating'`,
+	// Use status IN ('migrating', 'running', 'stopped') — a race with the source
+	// worker's cleanup may have already set it to 'stopped' or reverted to 'running'.
+	// The migration DID succeed (QEMU is running on the target), so force the update.
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', worker_id = $1, migrating_to_worker = '', stopped_at = NULL, error_msg = NULL
+		 WHERE sandbox_id = $2 AND status IN ('migrating', 'running', 'stopped')`,
 		newWorkerID, sandboxID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("no session found for %s in migrating/running/stopped state", sandboxID)
+	}
+	return nil
 }
 
 // FailMigration reverts a sandbox to running on its original worker after a failed migration.
@@ -597,11 +638,11 @@ func (s *Store) MarkOrphanedSandboxes(ctx context.Context, liveWorkers map[strin
 func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 		 FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`, sandboxID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
-		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence)
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox session not found: %w", err)
 	}
@@ -613,12 +654,12 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 	var err error
 	if status != "" {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 			 FROM sandbox_sessions WHERE org_id = $1 AND status = $2 ORDER BY started_at DESC LIMIT $3 OFFSET $4`,
 			orgID, status, limit, offset)
 	} else {
 		rows, err = s.pool.Query(ctx,
-			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+			`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 			 FROM sandbox_sessions WHERE org_id = $1 ORDER BY started_at DESC LIMIT $2 OFFSET $3`,
 			orgID, limit, offset)
 	}
@@ -632,7 +673,7 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)
@@ -876,10 +917,31 @@ type SandboxHibernation struct {
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
 }
 
-// CreateHibernation inserts a new hibernation record.
-func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, error) {
+// CreateHibernation inserts a new hibernation record, marking any prior active
+// hibernation for the same sandbox as expired. Returns the new record plus the
+// superseded hibernation key (if any) so the caller can delete the old S3 blob
+// — we only keep one hibernation per sandbox to bound storage growth.
+func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID uuid.UUID, hibernationKey string, sizeBytes int64, region, template string, sandboxConfig json.RawMessage) (*SandboxHibernation, string, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Find + expire any prior active hibernation for this sandbox
+	var supersededKey string
+	err = tx.QueryRow(ctx,
+		`UPDATE sandbox_hibernations SET expired_at = now()
+		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL
+		 RETURNING hibernation_key`,
+		sandboxID,
+	).Scan(&supersededKey)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		supersededKey = ""
+	}
+
 	cp := &SandboxHibernation{}
-	err := s.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO sandbox_hibernations (sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at`,
@@ -887,9 +949,14 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
 		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create hibernation: %w", err)
+		return nil, "", fmt.Errorf("failed to create hibernation: %w", err)
 	}
-	return cp, nil
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, "", fmt.Errorf("commit tx: %w", err)
+	}
+
+	return cp, supersededKey, nil
 }
 
 // GetActiveHibernation returns the active (not restored, not expired) hibernation for a sandbox.
@@ -1026,6 +1093,7 @@ type Checkpoint struct {
 	SandboxConfig   json.RawMessage `json:"sandboxConfig"`
 	Status          string          `json:"status"`
 	SizeBytes       int64           `json:"sizeBytes"`
+	IsPublic        bool            `json:"isPublic"`
 	CreatedAt       time.Time       `json:"createdAt"`
 }
 
@@ -1068,10 +1136,10 @@ func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID,
 func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE id = $1`, checkpointID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1081,7 +1149,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Che
 // ListCheckpoints returns all checkpoints for a sandbox, newest first.
 func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 ORDER BY created_at DESC`, sandboxID)
 	if err != nil {
 		return nil, err
@@ -1092,7 +1160,7 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	for rows.Next() {
 		var cp Checkpoint
 		if err := rows.Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt); err != nil {
+			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt); err != nil {
 			return nil, err
 		}
 		checkpoints = append(checkpoints, cp)
@@ -1118,7 +1186,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id, c.sandbox_id, c.org_id, c.name, c.rootfs_s3_key, c.workspace_s3_key,
-		        c.sandbox_config, c.status, c.size_bytes, c.created_at,
+		        c.sandbox_config, c.status, c.size_bytes, c.is_public, c.created_at,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id AND ss.status IN ('running', 'hibernated')) AS active_forks,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id) AS total_forks
 		 FROM sandbox_checkpoints c WHERE c.org_id = $1
@@ -1132,7 +1200,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 	for rows.Next() {
 		var cf CheckpointWithForks
 		if err := rows.Scan(&cf.ID, &cf.SandboxID, &cf.OrgID, &cf.Name, &cf.RootfsS3Key, &cf.WorkspaceS3Key,
-			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.CreatedAt,
+			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.IsPublic, &cf.CreatedAt,
 			&cf.ActiveForks, &cf.TotalForks); err != nil {
 			return nil, 0, err
 		}
@@ -1145,10 +1213,10 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1191,6 +1259,21 @@ func (s *Store) DeleteCheckpoint(ctx context.Context, orgID uuid.UUID, checkpoin
 	}
 
 	return tx.Commit(ctx)
+}
+
+// SetCheckpointPublic toggles the is_public flag on a checkpoint the org owns.
+// Returns sql.ErrNoRows equivalent if the checkpoint is missing or not owned.
+func (s *Store) SetCheckpointPublic(ctx context.Context, checkpointID, orgID uuid.UUID, isPublic bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_checkpoints SET is_public = $3 WHERE id = $1 AND org_id = $2`,
+		checkpointID, orgID, isPublic)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("checkpoint not found or not owned by org")
+	}
+	return nil
 }
 
 // --- Checkpoint Patch operations ---
@@ -1281,6 +1364,15 @@ func (s *Store) UpdateSandboxPatchSequence(ctx context.Context, sandboxID string
 	return err
 }
 
+// SetSandboxPatchError sets or clears the patch_error on a sandbox session.
+// Pass nil to clear the error (e.g., after a successful patch or patch deletion).
+func (s *Store) SetSandboxPatchError(ctx context.Context, sandboxID string, patchError *string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET patch_error = $1 WHERE sandbox_id = $2`,
+		patchError, sandboxID)
+	return err
+}
+
 // SetSandboxCheckpointID sets the based_on_checkpoint_id for a sandbox session.
 func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, checkpointID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
@@ -1292,7 +1384,7 @@ func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, ch
 // ListSandboxesByCheckpoint returns all non-stopped sandboxes forked from a checkpoint.
 func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid.UUID) ([]SandboxSession, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error
 		 FROM sandbox_sessions WHERE based_on_checkpoint_id = $1 AND status IN ('running', 'hibernated') ORDER BY started_at DESC`,
 		checkpointID)
 	if err != nil {
@@ -1305,7 +1397,7 @@ func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)
@@ -1474,6 +1566,28 @@ func (s *Store) GetImageCacheByName(ctx context.Context, orgID uuid.UUID, name s
 		return nil, fmt.Errorf("snapshot %q not found: %w", name, err)
 	}
 	return ic, nil
+}
+
+// GetImageCacheByID looks up an image cache entry by its ID, scoped to org.
+func (s *Store) GetImageCacheByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) (*ImageCache, error) {
+	ic := &ImageCache{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, org_id, content_hash, checkpoint_id, name, manifest, status, created_at, last_used_at
+		 FROM image_cache WHERE org_id = $1 AND id = $2`,
+		orgID, id,
+	).Scan(&ic.ID, &ic.OrgID, &ic.ContentHash, &ic.CheckpointID, &ic.Name, &ic.Manifest, &ic.Status, &ic.CreatedAt, &ic.LastUsedAt)
+	if err != nil {
+		return nil, fmt.Errorf("image %q not found: %w", id, err)
+	}
+	return ic, nil
+}
+
+// SetImageCacheName assigns a name to an existing cache entry, making it addressable as a snapshot.
+func (s *Store) SetImageCacheName(ctx context.Context, id uuid.UUID, orgID uuid.UUID, name string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE image_cache SET name = $1 WHERE id = $2 AND org_id = $3`,
+		name, id, orgID)
+	return err
 }
 
 // CreateImageCache inserts a new image cache record.

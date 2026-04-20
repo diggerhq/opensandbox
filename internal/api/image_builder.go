@@ -22,6 +22,7 @@ import (
 type ImageManifest struct {
 	Base  string      `json:"base"`
 	Steps []ImageStep `json:"steps"`
+	Name  string      `json:"name,omitempty"` // optional — makes image addressable as a snapshot (for patches, etc.)
 }
 
 // ImageStep is a single build step in an image manifest.
@@ -44,9 +45,13 @@ type imageBuild struct {
 }
 
 // computeManifestHash returns a deterministic SHA-256 hash for the manifest.
+// The Name field is excluded so that naming an image doesn't change its cache key.
 func computeManifestHash(manifest *ImageManifest) string {
-	// Canonical JSON: marshal with sorted keys (Go's encoding/json sorts map keys)
-	data, _ := json.Marshal(manifest)
+	hashInput := struct {
+		Base  string      `json:"base"`
+		Steps []ImageStep `json:"steps"`
+	}{Base: manifest.Base, Steps: manifest.Steps}
+	data, _ := json.Marshal(hashInput)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -221,28 +226,33 @@ func (s *Server) resolveImageManifest(ctx context.Context, orgID uuid.UUID, mani
 				log.Printf("image-builder: cache hit for hash %s but checkpoint %s is invalid, rebuilding",
 					contentHash[:12], cached.CheckpointID)
 				_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
-			} else if s.checkpointStore != nil {
-				if exists, _ := s.checkpointStore.Exists(ctx, *cp.RootfsS3Key); !exists {
-					log.Printf("image-builder: cache hit for hash %s but S3 object missing for checkpoint %s, rebuilding",
-						contentHash[:12], cached.CheckpointID)
-					_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
-				} else {
-					// Cache hit is valid
+			} else {
+				validHit := s.checkpointStore == nil
+				if !validHit {
+					if exists, _ := s.checkpointStore.Exists(ctx, *cp.RootfsS3Key); exists {
+						validHit = true
+					} else {
+						log.Printf("image-builder: cache hit for hash %s but S3 object missing for checkpoint %s, rebuilding",
+							contentHash[:12], cached.CheckpointID)
+						_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
+					}
+				}
+				if validHit {
 					_ = s.store.TouchImageCacheUsage(ctx, cached.ID)
+					// If manifest includes a name, assign it to the cached entry (makes it addressable as a snapshot)
+					if manifest.Name != "" && (cached.Name == nil || *cached.Name != manifest.Name) {
+						if err := s.store.SetImageCacheName(ctx, cached.ID, orgID, manifest.Name); err != nil {
+							log.Printf("image-builder: failed to set name %q on cache entry: %v", manifest.Name, err)
+						} else {
+							log.Printf("image-builder: named cache entry %s as %q", cached.ID, manifest.Name)
+						}
+					}
 					log.Printf("image-builder: cache hit for hash %s (checkpoint=%s)", contentHash[:12], cached.CheckpointID)
 					if logFn != nil {
 						logFn(0, "cache_hit", fmt.Sprintf("Image found in cache (hash=%s)", contentHash[:12]))
 					}
 					return *cached.CheckpointID, nil
 				}
-			} else {
-				// No checkpoint store — trust the cache
-				_ = s.store.TouchImageCacheUsage(ctx, cached.ID)
-				log.Printf("image-builder: cache hit for hash %s (checkpoint=%s)", contentHash[:12], cached.CheckpointID)
-				if logFn != nil {
-					logFn(0, "cache_hit", fmt.Sprintf("Image found in cache (hash=%s)", contentHash[:12]))
-				}
-				return *cached.CheckpointID, nil
 			}
 		}
 		if err == nil && cached.Status == "building" {

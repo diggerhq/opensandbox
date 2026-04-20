@@ -1,0 +1,144 @@
+---
+title: "Agents"
+description: "Create and manage agent definitions — snapshot, entrypoint, secrets, elasticity"
+---
+
+An Agent is configuration, not compute. It defines what core or snapshot to boot, what entrypoint to run, which secrets to inject, and how elasticity works. The same agent can back both Instances and Sessions.
+
+<Tip>
+  **Prefer the CLI?** All operations below have [`oc agent`](/cli/agents) equivalents.
+</Tip>
+
+## Create agent
+
+```
+POST /v1/agents
+```
+
+```json
+{
+  "id": "issue-resolver",
+  "display_name": "Issue Resolver",
+  "config": {
+    "snapshot": "agent-snapshot-v1",
+    "entrypoint": "node /workspace/agent/index.js",
+    "env": { "LOG_LEVEL": "info" },
+    "elasticity": { "baseline_mb": 1024, "max_mb": 8192 },
+    "idle_timeout_s": 600
+  }
+}
+```
+
+`id` must be DNS-safe (lowercase alphanumeric + hyphens). Returns `201` with the agent object.
+
+**Managed agents** — pass `core` instead of `config` to create a managed agent:
+
+```json
+{
+  "id": "my-hermes",
+  "core": "hermes"
+}
+```
+
+**CLI equivalent:** `oc agent create my-hermes --core hermes`
+
+**Entrypoint vs agent_config**: if `config.entrypoint` is set, the platform runs it via `sandbox.exec.start()`. If `config.agent_config` is set instead, the platform uses `sandbox.agent.start()` with the provided `system_prompt` and `allowed_tools`. They are mutually exclusive.
+
+## CRUD
+
+```
+GET    /v1/agents                  List all agents
+GET    /v1/agents/:agentId         Get agent
+PATCH  /v1/agents/:agentId         Update (accepts display_name, config)
+DELETE /v1/agents/:agentId         Delete (cascades to instances and sessions)
+```
+
+| Operation | CLI equivalent |
+|-----------|---------------|
+| List | `oc agent list` |
+| Get | `oc agent get <id>` |
+| Update | — (REST only) |
+| Delete | `oc agent delete <id>` |
+
+## Agent object
+
+```json
+{
+  "id": "issue-resolver",
+  "display_name": "Issue Resolver",
+  "secret_store": "agent:issue-resolver",
+  "config": { ... },
+  "created_at": "2026-04-09T...",
+  "updated_at": "2026-04-09T..."
+}
+```
+
+## Secrets
+
+Convenience wrapper over OpenComputer's [secret store](/sandboxes/secrets). Values are AES-256-GCM encrypted at rest, injected as sealed tokens at sandbox creation. Values are never returned via API.
+
+```
+PUT    /v1/agents/:agentId/secrets/:key     Set a secret
+GET    /v1/agents/:agentId/secrets          List keys (values never returned)
+DELETE /v1/agents/:agentId/secrets/:key     Remove a secret
+```
+
+**Set secret:**
+
+```json
+PUT /v1/agents/issue-resolver/secrets/ANTHROPIC_API_KEY
+{ "value": "sk-ant-...", "allowed_hosts": ["api.anthropic.com"] }
+```
+
+The first `PUT` auto-creates a backing OC secret store named `agent:{agentId}`. `allowed_hosts` is optional — restricts which outbound hosts can receive the decrypted value.
+
+**List secrets** returns keys and metadata only:
+
+```json
+{ "secrets": [{ "key": "ANTHROPIC_API_KEY", "allowed_hosts": ["api.anthropic.com"], "set_at": "..." }] }
+```
+
+**CLI note:** Secrets can be set at creation time with `oc agent create --secret KEY=VALUE`. There is no standalone `oc agent secret` command yet.
+
+## Channels
+
+```
+POST   /v1/agents/:agentId/channels/:channel    Connect a channel
+DELETE /v1/agents/:agentId/channels/:channel    Disconnect a channel
+GET    /v1/agents/:agentId/channels             List connected channels
+```
+
+| Operation | CLI equivalent |
+|-----------|---------------|
+| Connect | `oc agent connect <id> <channel>` |
+| Disconnect | `oc agent disconnect <id> <channel>` |
+| List | `oc agent channels <id>` |
+
+See [Telegram channel](/agents/channels/telegram) for details.
+
+## Packages
+
+```
+POST   /v1/agents/:agentId/packages/:pkg    Install a package
+DELETE /v1/agents/:agentId/packages/:pkg    Uninstall a package
+GET    /v1/agents/:agentId/packages         List installed packages
+```
+
+| Operation | CLI equivalent |
+|-----------|---------------|
+| Install | `oc agent install <id> <pkg>` |
+| Uninstall | `oc agent uninstall <id> <pkg>` |
+| List | `oc agent packages <id>` |
+
+See [gbrain package](/agents/packages/gbrain) for details.
+
+## Errors
+
+```json
+{
+  "error": {
+    "type": "invalid_request | not_found | conflict | internal_error",
+    "message": "Human-readable description"
+  }
+}
+```

@@ -43,6 +43,7 @@ const (
 	SandboxAgent_SetEnvs_FullMethodName           = "/agent.SandboxAgent/SetEnvs"
 	SandboxAgent_Shutdown_FullMethodName          = "/agent.SandboxAgent/Shutdown"
 	SandboxAgent_SyncFS_FullMethodName            = "/agent.SandboxAgent/SyncFS"
+	SandboxAgent_PrepareHibernate_FullMethodName  = "/agent.SandboxAgent/PrepareHibernate"
 	SandboxAgent_SetResourceLimits_FullMethodName = "/agent.SandboxAgent/SetResourceLimits"
 	SandboxAgent_GetVersion_FullMethodName        = "/agent.SandboxAgent/GetVersion"
 	SandboxAgent_Upgrade_FullMethodName           = "/agent.SandboxAgent/Upgrade"
@@ -95,6 +96,11 @@ type SandboxAgentClient interface {
 	// SyncFS flushes all filesystem buffers without exiting.
 	// Used before snapshot to ensure disk state is consistent.
 	SyncFS(ctx context.Context, in *SyncFSRequest, opts ...grpc.CallOption) (*SyncFSResponse, error)
+	// PrepareHibernate synchronously prepares the guest for hibernate/checkpoint:
+	// syncs filesystems, flushes block device buffers, and quiesces the virtio-serial
+	// listener so a clean Accept happens on wake/fork. Returns only after all work
+	// completes — no sleep needed on the host side after this RPC.
+	PrepareHibernate(ctx context.Context, in *PrepareHibernateRequest, opts ...grpc.CallOption) (*PrepareHibernateResponse, error)
 	// SetResourceLimits adjusts sandbox cgroup limits at runtime.
 	// Used for elastic scaling — raise/lower memory, CPU, pids without restart.
 	SetResourceLimits(ctx context.Context, in *SetResourceLimitsRequest, opts ...grpc.CallOption) (*SetResourceLimitsResponse, error)
@@ -380,6 +386,16 @@ func (c *sandboxAgentClient) SyncFS(ctx context.Context, in *SyncFSRequest, opts
 	return out, nil
 }
 
+func (c *sandboxAgentClient) PrepareHibernate(ctx context.Context, in *PrepareHibernateRequest, opts ...grpc.CallOption) (*PrepareHibernateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareHibernateResponse)
+	err := c.cc.Invoke(ctx, SandboxAgent_PrepareHibernate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxAgentClient) SetResourceLimits(ctx context.Context, in *SetResourceLimitsRequest, opts ...grpc.CallOption) (*SetResourceLimitsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetResourceLimitsResponse)
@@ -457,6 +473,11 @@ type SandboxAgentServer interface {
 	// SyncFS flushes all filesystem buffers without exiting.
 	// Used before snapshot to ensure disk state is consistent.
 	SyncFS(context.Context, *SyncFSRequest) (*SyncFSResponse, error)
+	// PrepareHibernate synchronously prepares the guest for hibernate/checkpoint:
+	// syncs filesystems, flushes block device buffers, and quiesces the virtio-serial
+	// listener so a clean Accept happens on wake/fork. Returns only after all work
+	// completes — no sleep needed on the host side after this RPC.
+	PrepareHibernate(context.Context, *PrepareHibernateRequest) (*PrepareHibernateResponse, error)
 	// SetResourceLimits adjusts sandbox cgroup limits at runtime.
 	// Used for elastic scaling — raise/lower memory, CPU, pids without restart.
 	SetResourceLimits(context.Context, *SetResourceLimitsRequest) (*SetResourceLimitsResponse, error)
@@ -546,6 +567,9 @@ func (UnimplementedSandboxAgentServer) Shutdown(context.Context, *ShutdownReques
 }
 func (UnimplementedSandboxAgentServer) SyncFS(context.Context, *SyncFSRequest) (*SyncFSResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SyncFS not implemented")
+}
+func (UnimplementedSandboxAgentServer) PrepareHibernate(context.Context, *PrepareHibernateRequest) (*PrepareHibernateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareHibernate not implemented")
 }
 func (UnimplementedSandboxAgentServer) SetResourceLimits(context.Context, *SetResourceLimitsRequest) (*SetResourceLimitsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetResourceLimits not implemented")
@@ -962,6 +986,24 @@ func _SandboxAgent_SyncFS_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxAgent_PrepareHibernate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareHibernateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxAgentServer).PrepareHibernate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxAgent_PrepareHibernate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxAgentServer).PrepareHibernate(ctx, req.(*PrepareHibernateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxAgent_SetResourceLimits_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetResourceLimitsRequest)
 	if err := dec(in); err != nil {
@@ -1098,6 +1140,10 @@ var SandboxAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SyncFS",
 			Handler:    _SandboxAgent_SyncFS_Handler,
+		},
+		{
+			MethodName: "PrepareHibernate",
+			Handler:    _SandboxAgent_PrepareHibernate_Handler,
 		},
 		{
 			MethodName: "SetResourceLimits",
