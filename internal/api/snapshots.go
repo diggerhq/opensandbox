@@ -237,3 +237,160 @@ func (s *Server) deleteSnapshot(c echo.Context) error {
 
 	return c.NoContent(http.StatusNoContent)
 }
+func (s *Server) resolveNamedCheckpoint(c echo.Context, label string) (uuid.UUID, error) {
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("org context required")
+	}
+
+	nameOrID := c.Param("name")
+	ctx := c.Request().Context()
+
+	var entry *db.ImageCache
+	var err error
+
+	// Try as UUID first (for unnamed images referenced by ID)
+	if id, parseErr := uuid.Parse(nameOrID); parseErr == nil {
+		entry, err = s.store.GetImageCacheByID(ctx, orgID, id)
+	} else {
+		entry, err = s.store.GetImageCacheByName(ctx, orgID, nameOrID)
+	}
+
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("%s %q not found", label, nameOrID)
+	}
+	if entry.CheckpointID == nil {
+		return uuid.Nil, fmt.Errorf("%s %q has no checkpoint", label, nameOrID)
+	}
+	return *entry.CheckpointID, nil
+}
+
+// listImages handles GET /api/images — lists all images (named and unnamed) for the org.
+func (s *Server) listImages(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	images, err := s.store.ListImageCacheByOrg(c.Request().Context(), orgID, false)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if images == nil {
+		images = []db.ImageCache{}
+	}
+	return c.JSON(http.StatusOK, images)
+}
+
+// resolveSnapshotCheckpoint resolves a snapshot name to its underlying checkpoint ID.
+func (s *Server) resolveSnapshotCheckpoint(c echo.Context) (uuid.UUID, error) {
+	return s.resolveNamedCheckpoint(c, "snapshot")
+}
+
+// createSnapshotPatch adds a patch to a snapshot's underlying checkpoint.
+// POST /api/snapshots/:name/patches
+func (s *Server) createSnapshotPatch(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveSnapshotCheckpoint(c)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	// Delegate to the existing checkpoint patch handler by setting the param
+	c.SetParamNames("checkpointId")
+	c.SetParamValues(checkpointID.String())
+	return s.createCheckpointPatch(c)
+}
+
+// listSnapshotPatches lists patches for a snapshot's underlying checkpoint.
+// GET /api/snapshots/:name/patches
+func (s *Server) listSnapshotPatches(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveSnapshotCheckpoint(c)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	c.SetParamNames("checkpointId")
+	c.SetParamValues(checkpointID.String())
+	return s.listCheckpointPatches(c)
+}
+
+// deleteSnapshotPatch deletes a patch from a snapshot's underlying checkpoint.
+// DELETE /api/snapshots/:name/patches/:patchId
+func (s *Server) deleteSnapshotPatch(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveSnapshotCheckpoint(c)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	patchId := c.Param("patchId")
+	c.SetParamNames("checkpointId", "patchId")
+	c.SetParamValues(checkpointID.String(), patchId)
+	return s.deleteCheckpointPatch(c)
+}
+
+// createImagePatch adds a patch to a named image's underlying checkpoint.
+// POST /api/images/:name/patches
+func (s *Server) createImagePatch(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveNamedCheckpoint(c, "image")
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	c.SetParamNames("checkpointId")
+	c.SetParamValues(checkpointID.String())
+	return s.createCheckpointPatch(c)
+}
+
+// listImagePatches lists patches for a named image's underlying checkpoint.
+// GET /api/images/:name/patches
+func (s *Server) listImagePatches(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveNamedCheckpoint(c, "image")
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	c.SetParamNames("checkpointId")
+	c.SetParamValues(checkpointID.String())
+	return s.listCheckpointPatches(c)
+}
+
+// deleteImagePatch deletes a patch from a named image's underlying checkpoint.
+// DELETE /api/images/:name/patches/:patchId
+func (s *Server) deleteImagePatch(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	checkpointID, err := s.resolveNamedCheckpoint(c, "image")
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+
+	patchId := c.Param("patchId")
+	c.SetParamNames("checkpointId", "patchId")
+	c.SetParamValues(checkpointID.String(), patchId)
+	return s.deleteCheckpointPatch(c)
+}

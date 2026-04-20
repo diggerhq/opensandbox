@@ -303,6 +303,19 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/snapshots/:name", s.getSnapshot)
 	api.DELETE("/snapshots/:name", s.deleteSnapshot)
 
+	// Snapshot patches (resolve snapshot name → checkpoint, then delegate to checkpoint patch logic)
+	api.POST("/snapshots/:name/patches", s.createSnapshotPatch)
+	api.GET("/snapshots/:name/patches", s.listSnapshotPatches)
+	api.DELETE("/snapshots/:name/patches/:patchId", s.deleteSnapshotPatch)
+
+	// Images (all cached images, named or unnamed)
+	api.GET("/images", s.listImages)
+
+	// Image patches — by name or by ID
+	api.POST("/images/:name/patches", s.createImagePatch)
+	api.GET("/images/:name/patches", s.listImagePatches)
+	api.DELETE("/images/:name/patches/:patchId", s.deleteImagePatch)
+
 	// Secret stores
 	api.POST("/secret-stores", s.createSecretStore)
 	api.GET("/secret-stores", s.listSecretStores)
