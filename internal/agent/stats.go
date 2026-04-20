@@ -182,6 +182,34 @@ func (s *Server) SyncFS(ctx context.Context, req *pb.SyncFSRequest) (*pb.SyncFSR
 	return &pb.SyncFSResponse{}, nil
 }
 
+// PrepareHibernate does all the pre-hibernate work synchronously:
+// sync filesystems, flush block device buffers, and reset the virtio-serial
+// listener so a clean Accept happens on wake/fork. Returns only after all
+// work completes — the host does not need to sleep after this call.
+func (s *Server) PrepareHibernate(ctx context.Context, req *pb.PrepareHibernateRequest) (*pb.PrepareHibernateResponse, error) {
+	syscall.Sync()
+	flushBlockDevices("/dev/vda", "/dev/vdb")
+	syscall.Sync()
+	if s.OnPrepareHibernate != nil {
+		s.OnPrepareHibernate()
+	}
+	return &pb.PrepareHibernateResponse{}, nil
+}
+
+// flushBlockDevices issues BLKFLSBUF on each device (equivalent to `blockdev --flushbufs`).
+// Ignores errors — not all devices may be present (e.g., /dev/vdb).
+func flushBlockDevices(paths ...string) {
+	const BLKFLSBUF = 0x1261
+	for _, path := range paths {
+		f, err := os.OpenFile(path, os.O_RDONLY, 0)
+		if err != nil {
+			continue
+		}
+		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(BLKFLSBUF), 0)
+		f.Close()
+	}
+}
+
 // syncFS calls sync(2) to flush all filesystem buffers.
 // This syncs ALL mounted filesystems (rootfs + workspace), ensuring dirty pages
 // are written to their backing ext4 images before snapshot/checkpoint.

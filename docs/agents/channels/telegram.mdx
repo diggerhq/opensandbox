@@ -1,0 +1,82 @@
+---
+title: "Telegram"
+description: "Connect your agent to Telegram via webhook"
+---
+
+The Telegram channel connects your agent to a Telegram bot. Messages flow through the OpenComputer gateway to your agent's sandbox, and the agent replies directly to Telegram.
+
+## Connect
+
+<CodeGroup>
+
+```bash CLI
+oc agent connect my-agent telegram --bot-token <token>
+```
+
+```bash REST API
+curl -X POST https://api.opencomputer.dev/v1/agents/my-agent/channels/telegram \
+  -H "X-API-Key: $OC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"bot_token": "<token>"}'
+```
+
+</CodeGroup>
+
+If you omit `--bot-token`, the CLI prompts for it interactively.
+
+### What happens
+
+1. The bot token is stored in the agent's secret store
+2. A webhook is registered with Telegram pointing to `https://<gateway>/gw/agents/<id>/telegram`
+3. The core config is updated for webhook mode
+4. The gateway is restarted (Hermes) or hot-reloaded (OpenClaw)
+
+## Prerequisites
+
+Create a Telegram bot first:
+
+1. Open Telegram and message [@BotFather](https://t.me/BotFather)
+2. Send `/newbot`, choose a name and username
+3. Copy the bot token
+
+## Disconnect
+
+<CodeGroup>
+
+```bash CLI
+oc agent disconnect my-agent telegram
+```
+
+```bash REST API
+curl -X DELETE https://api.opencomputer.dev/v1/agents/my-agent/channels/telegram \
+  -H "X-API-Key: $OC_API_KEY"
+```
+
+</CodeGroup>
+
+Disconnecting removes the webhook registration and config entry. The bot token is removed from the secret store.
+
+## List channels
+
+<CodeGroup>
+
+```bash CLI
+oc agent channels my-agent
+```
+
+```bash REST API
+curl https://api.opencomputer.dev/v1/agents/my-agent/channels \
+  -H "X-API-Key: $OC_API_KEY"
+```
+
+</CodeGroup>
+
+## How it works
+
+```
+Telegram → webhook POST → OpenComputer gateway → agent sandbox → reply → Telegram
+```
+
+The gateway receives Telegram updates at `/gw/agents/:agentId/telegram` and enqueues them for the agent. The agent processes the message through its core runtime and sends a response back via the Telegram Bot API.
+
+Channels are **stateless** from the platform's perspective — disconnecting removes the webhook and config. Nothing to clean up inside the sandbox.

@@ -1,0 +1,100 @@
+---
+title: "Agent Management"
+description: "Create, inspect, and manage agents, channels, and packages from the CLI"
+---
+
+## Creating an Agent
+
+`oc agent create` provisions a managed agent with a core runtime:
+
+```bash
+oc agent create my-agent --core hermes
+oc agent create my-agent --core openclaw
+oc agent create my-agent --core hermes --secret OPENAI_API_KEY=sk-...
+```
+
+`--core` is required. OpenComputer boots a sandbox with the runtime pre-installed and an instance running. To create a raw agent with your own `snapshot` and `entrypoint`, use the [REST API](/agents/rest/agents) directly.
+
+## Listing & Inspecting
+
+```bash
+# List all agents
+oc agent ls
+
+# Detailed info for a specific agent
+oc agent get my-agent
+```
+
+`oc agent ls` shows a table with ID, core, channels, packages, and age. Add `--json` for machine-readable output.
+
+`oc agent get` also shows instance status if one exists.
+
+## Connecting Channels
+
+Connect messaging platforms to your agent. Currently supports Telegram.
+
+```bash
+# Connect — prompts for bot token on TTY, or pass via flag for scripts
+oc agent connect my-agent telegram
+oc agent connect my-agent telegram --bot-token 123:ABC
+
+# Disconnect (use --yes in scripts)
+oc agent disconnect my-agent telegram
+
+# List connected channels
+oc agent channels my-agent
+```
+
+See [Telegram channel](/agents/channels/telegram) for setup details.
+
+## Installing Packages
+
+Extend what the agent can do with packages like [gbrain](/agents/packages/gbrain) for persistent memory.
+
+```bash
+# Install
+oc agent install my-agent gbrain
+
+# Uninstall (data preserved)
+oc agent uninstall my-agent gbrain
+
+# List installed packages
+oc agent packages my-agent
+```
+
+## Deleting an Agent
+
+```bash
+oc agent delete my-agent          # prompts for confirmation
+oc agent delete my-agent --yes    # non-interactive (scripts, CI)
+```
+
+Cascades to instances and sessions — the sandbox is destroyed. The command refuses to delete without `--yes` when stdin is not a TTY, so a typo in a script can't silently destroy state.
+
+## Shell Access
+
+Any agent is also a sandbox. Drop into it for manual inspection and debugging:
+
+```bash
+oc shell my-agent
+```
+
+## Common Patterns
+
+### Create a full agent setup
+
+```bash
+oc agent create my-agent --core hermes
+oc agent connect my-agent telegram
+oc agent install my-agent gbrain
+```
+
+### Script with JSON output
+
+```bash
+oc agent ls --json | jq -r '.[].id'
+```
+
+<Tip>
+  Full flag reference: [CLI Reference](/reference/cli/agent). REST API equivalents: [Agents REST](/agents/rest/agents).
+</Tip>

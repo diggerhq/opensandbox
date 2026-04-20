@@ -7,7 +7,7 @@ import {
 
 export default function Billing() {
   const queryClient = useQueryClient()
-  const { data: billing, isLoading } = useQuery({ queryKey: ['billing'], queryFn: getBilling })
+  const { data: billing, isLoading } = useQuery({ queryKey: ['billing'], queryFn: getBilling, refetchInterval: 30_000 })
   const { data: invoiceData } = useQuery({ queryKey: ['invoices'], queryFn: () => getBillingInvoices() })
 
   const [promoCode, setPromoCode] = useState('')
@@ -73,10 +73,29 @@ export default function Billing() {
               </div>
             )}
 
-            {!isPro && (
-              <div style={{ marginTop: 16 }}>
+            {!isPro && billing != null && (
+              <div style={{ marginTop: 12 }}>
+                {billing.freeCreditsRemainingCents > 0 ? (
+                  <div style={{
+                    fontSize: 14, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                    color: 'var(--accent-emerald)', marginBottom: 12,
+                  }}>
+                    ${(billing.freeCreditsRemainingCents / 100).toFixed(2)} free trial credit remaining
+                  </div>
+                ) : (
+                  <div style={{
+                    fontSize: 13, color: 'var(--accent-rose)', marginBottom: 12,
+                    display: 'flex', alignItems: 'center', gap: 6,
+                  }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    Free trial credits exhausted — upgrade to continue using sandboxes
+                  </div>
+                )}
+
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
-                  Unlock larger machine sizes and get $30 free credit
+                  Upgrade to Pro for an additional $30 free credit and larger machine sizes
                 </div>
                 <button
                   onClick={() => setupMutation.mutate()}

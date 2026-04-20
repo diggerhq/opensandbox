@@ -1,0 +1,25 @@
+---
+title: 'Install Package'
+api: 'POST /v1/agents/{agentId}/packages/{pkg}'
+---
+
+Install a package on an agent.
+
+**CLI equivalent:** `oc agent install <id> <package>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="pkg" type="string" required>
+  Package name (e.g. `gbrain`)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "package": "gbrain",
+  "status": "installed"
+}
+```
+</ResponseExample>

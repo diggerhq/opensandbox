@@ -1,0 +1,34 @@
+---
+title: 'Send Message'
+api: 'POST /v1/agents/{agentId}/instances/{id}/messages'
+---
+
+Send a message to an agent instance. Returns a server-sent event stream with the agent's response.
+
+If the instance is still `creating`, waits up to 30s for it to become ready.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="id" type="string" required>
+  Instance ID
+</ParamField>
+
+<ParamField body="content" type="string" required>
+  Message content
+</ParamField>
+
+<ParamField body="conversation_id" type="string">
+  Conversation identifier for multiplexing. The caller owns this identity (e.g. Slack thread timestamp).
+</ParamField>
+
+<ResponseExample>
+```text 200
+Content-Type: text/event-stream
+
+data: {"type":"text","content":"Cloning the repo now...","conversation_id":"1712345678.123456"}
+data: {"type":"text","content":"Found 3 issues...","conversation_id":"1712345678.123456"}
+data: {"type":"done"}
+```
+</ResponseExample>

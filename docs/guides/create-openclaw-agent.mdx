@@ -1,0 +1,162 @@
+---
+title: "Create an OpenClaw Agent"
+description: "Deploy a personal AI agent on Telegram using OpenClaw — a multi-channel gateway with native plugin support"
+---
+
+This guide walks through creating a managed [OpenClaw](https://openclaw.ai) agent on OpenComputer, connecting it to Telegram, and chatting with it. By the end you'll have a personal AI agent running Claude via OpenRouter, reachable from your phone.
+
+OpenClaw is a multi-channel AI gateway with a rich plugin SDK, native MCP support, and hot-reload configuration. It supports Telegram, Discord, Slack, Signal, WhatsApp, and more out of the box.
+
+## Prerequisites
+
+- An **OpenComputer API key** from [app.opencomputer.dev](https://app.opencomputer.dev)
+- The **oc CLI** installed and configured
+- **Telegram** installed on your phone or desktop ([download here](https://telegram.org/apps))
+
+### Install the CLI
+
+Install the `oc` binary from the [CLI installation guide](/cli/overview#installation).
+
+```bash
+oc config set api-key YOUR_API_KEY
+```
+
+---
+
+## Step 1: Create the agent
+
+```bash
+oc agent create my-claw --core openclaw
+```
+
+This creates the agent, provisions an OpenClaw sandbox with Node 22 and the OpenRouter LLM provider pre-configured, and starts the OpenClaw gateway.
+
+Check that the agent is running:
+
+```bash
+oc agent get my-claw
+```
+
+```
+ID:        my-claw
+Name:      my-claw
+Core:      openclaw
+Channels:  -
+Packages:  -
+Instance:  inst_... (running)
+```
+
+Wait for the status to show `running` before proceeding. Provisioning typically takes 20-30 seconds.
+
+---
+
+## Step 2: Create a Telegram bot
+
+Open [this link to BotFather](https://t.me/BotFather) in Telegram (or search for `@BotFather` in the app). Then:
+
+1. Tap **Start** if it's your first time
+2. Send `/newbot`
+3. Enter a display name when prompted (e.g. "My OpenClaw Agent")
+4. Enter a username -- must end in `bot` (e.g. `my_claw_test_bot`)
+5. BotFather replies with a token like `110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw` -- copy it
+
+---
+
+## Step 3: Connect Telegram
+
+```bash
+oc agent connect my-claw telegram
+```
+
+The CLI will prompt you to paste the bot token. Alternatively, use the API directly:
+
+```bash
+curl -X POST https://api.opencomputer.dev/v1/agents/my-claw/channels/telegram \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -d '{"bot_token": "YOUR_BOT_TOKEN"}'
+```
+
+This registers a webhook with Telegram and configures OpenClaw's built-in Telegram channel. OpenClaw hot-reloads the config automatically -- no gateway restart needed. Verify it worked:
+
+```bash
+oc agent get my-claw
+```
+
+```
+Channels:  telegram
+```
+
+---
+
+## Step 4: Chat with your agent
+
+Open Telegram, find your bot by its username, and send a message. The agent responds using Claude (via OpenRouter).
+
+---
+
+## Shell access
+
+You can shell into the agent's sandbox at any time:
+
+```bash
+oc shell my-claw
+```
+
+This opens an interactive terminal inside the agent's environment. Some useful commands:
+
+```bash
+# Check the gateway health
+curl -s http://localhost:18789/health
+
+# View the config
+cat ~/.openclaw/openclaw.json
+
+# List MCP servers (packages wired as tool providers)
+openclaw mcp list
+
+# Check channel status
+openclaw channels status
+
+# View gateway logs
+cat /tmp/openclaw/openclaw-*.log
+```
+
+See the [OpenClaw docs](https://openclaw.ai) for the full feature set: plugins, canvas, voice, browser tools, and more.
+
+---
+
+## Cleanup
+
+Disconnect the channel and delete the agent:
+
+```bash
+oc agent disconnect my-claw telegram
+oc agent delete my-claw
+```
+
+Disconnecting removes the Telegram channel config. Deleting the agent tears down the sandbox.
+
+---
+
+## OpenClaw vs Hermes
+
+Both cores support the same user journey (`create` / `connect` / `install`). The differences are under the hood:
+
+| | Hermes | OpenClaw |
+|---|---|---|
+| Config format | YAML | JSON5 |
+| Config reload | Gateway restart | Hot-reload (file watcher) |
+| Channel support | One at a time, adapter-configured | 6 built-in + 20 plugin channels |
+| Plugin model | Skills (files) + MCP | Rich plugin SDK with manifests |
+| MCP support | `mcp_servers` in YAML | `mcp.servers` in JSON5 |
+
+Choose Hermes for its self-improving skill loop and built-in memory. Choose OpenClaw for its breadth of channels and native plugin ecosystem.
+
+---
+
+## What's next
+
+- **[Install gbrain](/agents/packages/gbrain)** for persistent memory: `oc agent install my-claw gbrain`
+- **[Create a Hermes Agent](/guides/create-hermes-agent)** -- try the other managed core
+- **Custom cores** -- bring your own agent runtime with `oc shell` and the raw sandbox API

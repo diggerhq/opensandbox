@@ -90,6 +90,18 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) 
 
 	// If the sandbox is hibernated, wake it on-demand before proxying
 	if session.Status == "hibernated" {
+		// Free-tier credits gate: don't auto-wake via preview URL if the
+		// owning org's trial credits are exhausted. Surface a 402 so the
+		// user sees a clear "upgrade required" instead of a silent wake
+		// that burns non-existent credits.
+		if org, err := p.store.GetOrg(ctx, session.OrgID); err == nil {
+			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
+				return c.JSON(http.StatusPaymentRequired, map[string]string{
+					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
+				})
+			}
+		}
+
 		worker, workerURL, err := p.wakeHibernatedSandbox(ctx, sandboxID)
 		if err != nil {
 			log.Printf("cp-proxy: wake-on-request failed for sandbox %s: %v", sandboxID, err)
@@ -141,6 +153,15 @@ func (p *ControlPlaneProxy) doProxy(c echo.Context, sandboxID string, port int) 
 // exists, it wakes the sandbox on a new worker. Otherwise, it marks the session
 // as stopped and returns a clear error.
 func (p *ControlPlaneProxy) tryRecoverOrFail(c echo.Context, ctx context.Context, sandboxID string, session *db.SandboxSession, port int) error {
+	// If the sandbox is mid-migration, don't mark it stopped — the controlplane
+	// is about to update the worker_id. Return a temporary error so the client retries.
+	if session.MigratingToWorker != "" {
+		log.Printf("cp-proxy: sandbox %s is migrating to %s, returning temporary unavailable", sandboxID, session.MigratingToWorker)
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": fmt.Sprintf("sandbox %s is being migrated, retry shortly", sandboxID),
+		})
+	}
+
 	// Check if there's a hibernation we can wake from
 	checkpoint, err := p.store.GetActiveHibernation(ctx, sandboxID)
 	if err == nil && checkpoint != nil {

@@ -1,0 +1,68 @@
+---
+title: 'Create Agent'
+api: 'POST /v1/agents'
+---
+
+Create a new agent. For managed agents, pass `core` to get a pre-configured runtime. For raw agents, pass `config` with your own snapshot and entrypoint.
+
+**CLI equivalent:** `oc agent create <id> [--core <core>] [--secret KEY=VALUE]`
+
+<ParamField body="id" type="string" required>
+  Agent ID. Must be DNS-safe (lowercase alphanumeric + hyphens).
+</ParamField>
+
+<ParamField body="display_name" type="string">
+  Human-readable display name
+</ParamField>
+
+<ParamField body="core" type="string">
+  Managed core (`hermes` or `openclaw`). Mutually exclusive with `config`.
+</ParamField>
+
+<ParamField body="config" type="object">
+  Raw agent configuration. Mutually exclusive with `core`.
+</ParamField>
+
+<ParamField body="config.snapshot" type="string">
+  Snapshot to boot the sandbox from
+</ParamField>
+
+<ParamField body="config.entrypoint" type="string">
+  Command to run on sandbox start
+</ParamField>
+
+<ParamField body="config.agent_config" type="object">
+  Alternative to entrypoint — uses `sandbox.agent.start()` with `system_prompt` and `allowed_tools`
+</ParamField>
+
+<ParamField body="config.env" type="object">
+  Environment variables
+</ParamField>
+
+<ParamField body="config.elasticity" type="object">
+  Memory elasticity. `baseline_mb` and `max_mb`.
+</ParamField>
+
+<ParamField body="config.idle_timeout_s" type="integer">
+  Idle timeout in seconds
+</ParamField>
+
+<ParamField body="secrets" type="object">
+  Key-value map of secrets to set on creation
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "id": "my-hermes",
+  "display_name": "my-hermes",
+  "core": "hermes",
+  "channels": [],
+  "packages": [],
+  "secret_store": "agent:my-hermes",
+  "config": null,
+  "created_at": "2026-04-09T10:30:00Z",
+  "updated_at": "2026-04-09T10:30:00Z"
+}
+```
+</ResponseExample>

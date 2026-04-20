@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 
 	"github.com/gorilla/websocket"
@@ -31,9 +32,10 @@ Examples:
 		sandboxID := args[0]
 		shellPath, _ := cmd.Flags().GetString("shell")
 
-		// If the argument doesn't look like a UUID, try to resolve it as an
-		// agent name through sessions-api → agent → instance → sandbox_id.
-		if !uuidPattern.MatchString(sandboxID) {
+		// If the argument doesn't look like a sandbox ID (full UUID or sb-* short form),
+		// try to resolve it as an agent name through sessions-api.
+		isSandboxID := uuidPattern.MatchString(sandboxID) || strings.HasPrefix(sandboxID, "sb-")
+		if !isSandboxID {
 			sc := client.SessionsFromContext(cmd.Context())
 			if sc != nil {
 				resolved, err := resolveAgentSandbox(cmd, sc, sandboxID)

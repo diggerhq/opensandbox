@@ -1,0 +1,29 @@
+---
+title: 'Connect Channel'
+api: 'POST /v1/agents/{agentId}/channels/{channel}'
+---
+
+Connect a messaging channel to an agent.
+
+**CLI equivalent:** `oc agent connect <id> <channel>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="channel" type="string" required>
+  Channel type (e.g. `telegram`)
+</ParamField>
+
+<ParamField body="bot_token" type="string">
+  Bot token (required for Telegram)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "channel": "telegram",
+  "status": "connected"
+}
+```
+</ResponseExample>

@@ -1,0 +1,122 @@
+---
+title: "gbrain Package"
+description: "Install persistent memory on a managed agent with gbrain"
+---
+
+[gbrain](https://github.com/garrytan/gbrain) is a personal knowledge system that gives your agent persistent memory backed by Postgres with vector search. When installed on a managed agent, it's wired as an MCP server — the agent gets 34 tools for storing, searching, and organizing knowledge.
+
+## Install
+
+<CodeGroup>
+
+```bash CLI
+oc agent install my-agent gbrain
+```
+
+```bash REST API
+curl -X POST https://api.opencomputer.dev/v1/agents/my-agent/packages/gbrain \
+  -H "X-API-Key: $OC_API_KEY"
+```
+
+</CodeGroup>
+
+This runs through five phases:
+
+| Phase | What happens |
+|-------|-------------|
+| **Allocate** | Creates a managed Postgres database (with `pgvector` and `pg_trgm` extensions) for this agent |
+| **Provision** | Clones gbrain from GitHub into the sandbox and installs dependencies |
+| **Initialize** | Runs `gbrain init` against the managed database to create the schema |
+| **Wire** | Adds gbrain as an MCP server in the core's config and restarts the gateway |
+| **Verify** | Runs `gbrain doctor` to confirm the installation |
+
+Install is **idempotent** — re-running it after a partial failure is safe. The allocate phase skips if the database exists, provision skips if gbrain is already cloned, and so on.
+
+## What the agent gets
+
+After install, the agent has these tool groups available:
+
+| Group | Tools | What they do |
+|-------|-------|-------------|
+| **Pages** | `put_page`, `get_page`, `delete_page`, `list_pages` | Store and retrieve knowledge pages with Markdown content |
+| **Search** | `query` (vector + keyword hybrid), `search` (full-text) | Find pages by meaning or keywords |
+| **Versions** | `get_versions`, `revert_version` | Page version history |
+| **Graph** | `add_link`, `remove_link`, `get_links`, `get_backlinks`, `traverse_graph` | Link pages into a knowledge graph |
+| **Tags** | `add_tag`, `remove_tag`, `get_tags` | Categorize pages |
+| **Timeline** | `add_timeline_entry`, `get_timeline` | Chronological event log |
+| **Files** | `file_upload`, `file_list`, `file_url` | Attach files to the knowledge base |
+| **System** | `get_stats`, `get_health`, `sync_brain` | Health checks and maintenance |
+
+## Test it
+
+After installing, message your agent on Telegram:
+
+```
+You:   What new tools do you have?
+Agent: I now have gbrain tools — search, put_page, timeline...
+
+You:   Use gbrain to remember that our deployment target is Kubernetes on GCP
+Agent: Saved to knowledge base.
+
+You:   Use gbrain to search for deployment
+Agent: You deploy to Kubernetes on GCP.
+```
+
+## Managed database
+
+The database that backs gbrain is **managed by OpenComputer** — you don't need to provision or configure Postgres yourself. The database:
+
+- Lives outside the sandbox on a shared Postgres cluster
+- Survives instance restarts and sandbox recreation
+- Is preserved when you uninstall gbrain (your data isn't deleted)
+- Is restored when you reinstall gbrain on the same agent
+
+The connection URL is passed to gbrain via the MCP server's environment config, not as a sandbox-level secret.
+
+## Uninstall
+
+<CodeGroup>
+
+```bash CLI
+oc agent uninstall my-agent gbrain
+```
+
+```bash REST API
+curl -X DELETE https://api.opencomputer.dev/v1/agents/my-agent/packages/gbrain \
+  -H "X-API-Key: $OC_API_KEY"
+```
+
+</CodeGroup>
+
+This removes the MCP wiring from the core's config and restarts the gateway. The agent loses access to gbrain tools, but the **database is preserved**. Reinstalling gbrain on the same agent reconnects to the existing data.
+
+## Debugging
+
+Shell into the sandbox to inspect the installation:
+
+```bash
+oc shell my-agent
+```
+
+```bash
+# Check if gbrain is cloned
+ls ~/.gbrain/src/cli.ts
+
+# Check the MCP config (Hermes)
+cat ~/.hermes/config.yaml
+
+# Check the MCP config (OpenClaw)
+cat ~/.openclaw/openclaw.json
+
+# Check gateway logs for MCP connection status
+tail -20 ~/.hermes/logs/gateway.log
+
+# Run gbrain directly
+~/.bun/bin/bun run ~/.gbrain/src/cli.ts doctor
+```
+
+Common issues:
+
+- **"missing executable 'bun'"** in gateway logs — the MCP config needs absolute paths (e.g., `/home/sandbox/.bun/bin/bun`), not bare `bun`
+- **Embedding failures** — gbrain uses OpenAI for vector embeddings. If `OPENAI_API_KEY` is missing from the MCP env config, pages are stored but semantic search won't work
+- **Gateway didn't pick up MCP** — check if the gateway restarted after the wire phase. Run `hermes gateway run --replace` from the shell to force a restart

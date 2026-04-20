@@ -1,0 +1,22 @@
+---
+title: 'Uninstall Package'
+api: 'DELETE /v1/agents/{agentId}/packages/{pkg}'
+---
+
+Uninstall a package from an agent. Data is preserved by default — reinstalling reconnects to existing data.
+
+**CLI equivalent:** `oc agent uninstall <id> <package>`
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField path="pkg" type="string" required>
+  Package name (e.g. `gbrain`)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{}
+```
+</ResponseExample>

@@ -1,0 +1,79 @@
+---
+title: "Hermes"
+description: "Self-improving AI agent with skill creation, memory, and multi-channel gateway"
+---
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) is an AI runtime that gives your agent self-improvement capabilities, automatic skill creation, built-in memory, browser access, and code execution — all behind a multi-channel gateway.
+
+## What you get
+
+| Capability | Description |
+|-----------|-------------|
+| **Gateway** | HTTP gateway that accepts webhooks from connected channels and routes them to the agent |
+| **Skill creation** | Agent can create, edit, and invoke reusable skills to extend its own capabilities |
+| **Memory** | Built-in conversation memory with configurable retention |
+| **Browser** | Headless browser for web navigation and scraping |
+| **Code execution** | Sandboxed code execution for computation tasks |
+| **Multi-channel** | Single agent instance serves multiple channels simultaneously |
+
+## Create a Hermes agent
+
+<CodeGroup>
+
+```bash CLI
+oc agent create my-hermes --core hermes
+```
+
+```bash REST API
+curl -X POST https://api.opencomputer.dev/v1/agents \
+  -H "X-API-Key: $OC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "my-hermes", "core": "hermes"}'
+```
+
+</CodeGroup>
+
+This boots a sandbox with Hermes pre-installed, an LLM key configured, and the gateway running. An instance is created automatically.
+
+## Configuration
+
+Hermes uses YAML configuration at `~/.hermes/config.yaml` inside the sandbox. When you connect channels or install packages via `oc agent`, the platform updates this config and restarts the gateway.
+
+To inspect or edit manually:
+
+```bash
+oc shell my-hermes
+cat ~/.hermes/config.yaml
+```
+
+## Gateway
+
+The Hermes gateway listens for incoming webhooks and dispatches them to the agent. When you [connect a channel](/agents/channels/telegram), the platform:
+
+1. Registers the channel's webhook with the provider
+2. Adds the channel config to `~/.hermes/config.yaml`
+3. Restarts the gateway with `hermes gateway run --replace`
+
+Gateway logs are at `~/.hermes/logs/gateway.log`.
+
+## Skills
+
+Hermes can create skills — reusable functions it builds and invokes on its own. To see what skills an agent has created:
+
+```bash
+oc shell my-hermes
+hermes skill list
+```
+
+## Extending with packages
+
+Hermes supports [packages](/agents/packages/gbrain) that add capabilities via MCP servers. When a package is installed, the platform adds it to the Hermes MCP config and restarts the gateway.
+
+<CardGroup cols={2}>
+  <Card title="Create a Hermes Agent" icon="rocket" href="/guides/create-hermes-agent">
+    Step-by-step guide
+  </Card>
+  <Card title="oc agent CLI" icon="terminal" href="/cli/agents">
+    CLI commands for managing agents
+  </Card>
+</CardGroup>

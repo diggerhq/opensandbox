@@ -367,6 +367,15 @@ func (p *SandboxAPIProxy) doWebSocket(c echo.Context, sandboxID, workerURL, toke
 
 // tryRecoverOrFail handles the case where a sandbox's worker is gone.
 func (p *SandboxAPIProxy) tryRecoverOrFail(c echo.Context, ctx context.Context, sandboxID string, session *db.SandboxSession) error {
+	// If the sandbox is mid-migration, don't mark it stopped — the controlplane
+	// is about to update the worker_id. Return a temporary error so the client retries.
+	if session.MigratingToWorker != "" {
+		log.Printf("sandbox-api-proxy: sandbox %s is migrating to %s, returning temporary unavailable", sandboxID, session.MigratingToWorker)
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": fmt.Sprintf("sandbox %s is being migrated, retry shortly", sandboxID),
+		})
+	}
+
 	checkpoint, err := p.store.GetActiveHibernation(ctx, sandboxID)
 	if err == nil && checkpoint != nil {
 		log.Printf("sandbox-api-proxy: sandbox %s has active hibernation, attempting recovery wake", sandboxID)

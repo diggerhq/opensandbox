@@ -258,6 +258,33 @@ func (s *Store) ListBillableOrgIDs(ctx context.Context) ([]uuid.UUID, error) {
 	return ids, rows.Err()
 }
 
+// ListFreeOrgIDsWithOpenUsage returns org IDs with plan="free" that have
+// deductible usage: either a currently-running sandbox or a scale event that
+// ended after the last deduction watermark. Mirrors ListBillableOrgIDs but
+// for the free-tier credit deduction loop.
+func (s *Store) ListFreeOrgIDsWithOpenUsage(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT se.org_id
+		 FROM sandbox_scale_events se
+		 JOIN orgs o ON o.id = se.org_id
+		 WHERE o.plan = 'free'
+		   AND (se.ended_at IS NULL OR se.ended_at > o.last_usage_reported_at)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // SubscriptionItem maps a memory tier to a Stripe subscription item ID.
 type SubscriptionItem struct {
 	OrgID                    uuid.UUID `json:"orgId"`
@@ -300,6 +327,21 @@ func (s *Store) AddCredits(ctx context.Context, orgID uuid.UUID, amountCents int
 		`UPDATE orgs SET credit_balance_cents = credit_balance_cents + $2, updated_at = now() WHERE id = $1`,
 		orgID, amountCents)
 	return err
+}
+
+// DeductFreeCredits atomically subtracts cents from the free-tier trial
+// balance and returns the resulting balance. Caller triggers hibernation
+// enforcement when the returned value is <= 0.
+func (s *Store) DeductFreeCredits(ctx context.Context, orgID uuid.UUID, amountCents int64) (int64, error) {
+	var newBalance int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE orgs
+		 SET free_credits_remaining_cents = free_credits_remaining_cents - $2,
+		     updated_at = now()
+		 WHERE id = $1
+		 RETURNING free_credits_remaining_cents`,
+		orgID, amountCents).Scan(&newBalance)
+	return newBalance, err
 }
 
 // GetSubscriptionItems returns the subscription item mapping for an org.

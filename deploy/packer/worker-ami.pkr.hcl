@@ -90,6 +90,25 @@ variable "agent_binary" {
   description = "Path to the pre-built agent binary (amd64 Linux)."
 }
 
+variable "base_archive_account" {
+  type        = string
+  default     = ""
+  description = "Azure storage account for archiving default.ext4 by goldenVersion hash. Empty to skip archival."
+}
+
+variable "base_archive_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Storage account key for the base archive. Paired with base_archive_account."
+}
+
+variable "base_archive_container" {
+  type        = string
+  default     = "checkpoints"
+  description = "Container name for the base archive."
+}
+
 # ---------------------------------------------------------------------
 # Source: Ubuntu 24.04 x86_64 on Azure
 # ---------------------------------------------------------------------
@@ -202,6 +221,78 @@ build {
 
       # Remove any stale golden snapshot (must rebuild per-instance at first boot)
       "rm -rf /data/sandboxes/golden-snapshot /data/sandboxes/golden 2>/dev/null || true",
+    ]
+  }
+
+  # 4b. Archive base image to blob storage keyed by goldenVersion so that old
+  #     checkpoints referencing this base can be rebased even after workers roll.
+  provisioner "shell" {
+    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
+    environment_vars = [
+      "ARCHIVE_ACCOUNT=${var.base_archive_account}",
+      "ARCHIVE_KEY=${var.base_archive_key}",
+      "ARCHIVE_CONTAINER=${var.base_archive_container}",
+    ]
+    inline = [
+      "if [ -z \"$ARCHIVE_ACCOUNT\" ] || [ -z \"$ARCHIVE_KEY\" ]; then",
+      "  echo 'Base archive account/key not set — skipping archival'",
+      "  exit 0",
+      "fi",
+      "if [ ! -f /opt/opensandbox/images/default.ext4 ]; then",
+      "  echo 'default.ext4 not found — skipping archival'",
+      "  exit 0",
+      "fi",
+      "GOLDEN_VER=$(head -c 1048576 /opt/opensandbox/images/default.ext4 | sha256sum | cut -c1-16)",
+      "echo \"Base image golden version: $GOLDEN_VER\"",
+      "python3 - <<PYEOF",
+      "import http.client, hashlib, hmac, base64, datetime, os, sys",
+      "account = os.environ['ARCHIVE_ACCOUNT']",
+      "key = os.environ['ARCHIVE_KEY']",
+      "container = os.environ['ARCHIVE_CONTAINER']",
+      "golden_ver = '$GOLDEN_VER'",
+      "blob = f'bases/{golden_ver}/default.ext4'",
+      "path = '/opt/opensandbox/images/default.ext4'",
+      "",
+      "# Check if already archived",
+      "now = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')",
+      "string_to_sign = f'HEAD\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\nx-ms-date:{now}\\nx-ms-version:2020-10-02\\n/{account}/{container}/{blob}'",
+      "signature = base64.b64encode(hmac.new(base64.b64decode(key), string_to_sign.encode(), hashlib.sha256).digest()).decode()",
+      "conn = http.client.HTTPSConnection(f'{account}.blob.core.windows.net')",
+      "headers = {'x-ms-date': now, 'x-ms-version': '2020-10-02', 'Authorization': f'SharedKey {account}:{signature}'}",
+      "conn.request('HEAD', f'/{container}/{blob}', headers=headers)",
+      "resp = conn.getresponse()",
+      "resp.read()",
+      "conn.close()",
+      "if resp.status == 200:",
+      "    print(f'Base {golden_ver} already archived')",
+      "    sys.exit(0)",
+      "if resp.status not in (404, 200):",
+      "    print(f'HEAD check failed: {resp.status}')",
+      "    sys.exit(1)",
+      "",
+      "# Upload",
+      "size = os.path.getsize(path)",
+      "print(f'Uploading {size} bytes to bases/{golden_ver}/default.ext4')",
+      "now = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')",
+      "string_to_sign = f'PUT\\n\\n\\n{size}\\n\\napplication/octet-stream\\n\\n\\n\\n\\n\\n\\nx-ms-blob-type:BlockBlob\\nx-ms-date:{now}\\nx-ms-version:2020-10-02\\n/{account}/{container}/{blob}'",
+      "signature = base64.b64encode(hmac.new(base64.b64decode(key), string_to_sign.encode(), hashlib.sha256).digest()).decode()",
+      "conn = http.client.HTTPSConnection(f'{account}.blob.core.windows.net')",
+      "headers = {",
+      "    'x-ms-blob-type': 'BlockBlob',",
+      "    'x-ms-date': now,",
+      "    'x-ms-version': '2020-10-02',",
+      "    'Content-Length': str(size),",
+      "    'Content-Type': 'application/octet-stream',",
+      "    'Authorization': f'SharedKey {account}:{signature}',",
+      "}",
+      "with open(path, 'rb') as f:",
+      "    conn.request('PUT', f'/{container}/{blob}', body=f, headers=headers)",
+      "    resp = conn.getresponse()",
+      "    print(f'Upload: {resp.status} {resp.reason}')",
+      "    if resp.status >= 400:",
+      "        print(resp.read().decode())",
+      "        sys.exit(1)",
+      "PYEOF",
     ]
   }
 

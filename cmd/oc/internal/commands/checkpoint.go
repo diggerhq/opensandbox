@@ -19,6 +19,7 @@ type CheckpointInfo struct {
 	RootfsS3Key     string    `json:"rootfsS3Key,omitempty"`
 	WorkspaceS3Key  string    `json:"workspaceS3Key,omitempty"`
 	SizeBytes       int64     `json:"sizeBytes"`
+	IsPublic        bool      `json:"isPublic"`
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
@@ -145,6 +146,43 @@ var checkpointDeleteCmd = &cobra.Command{
 	},
 }
 
+// checkpointPublishCmd marks a checkpoint as publicly forkable across orgs
+// (design 009). The owner org still keeps exclusive control of patches and
+// deletion; publish only affects the fork auth gate.
+var checkpointPublishCmd = &cobra.Command{
+	Use:   "publish <checkpoint-id>",
+	Short: "Mark a checkpoint as publicly forkable by any org",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setCheckpointPublic(cmd, args[0], true)
+	},
+}
+
+var checkpointUnpublishCmd = &cobra.Command{
+	Use:   "unpublish <checkpoint-id>",
+	Short: "Revoke public forkability of a checkpoint",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return setCheckpointPublic(cmd, args[0], false)
+	},
+}
+
+func setCheckpointPublic(cmd *cobra.Command, id string, isPublic bool) error {
+	c := client.FromContext(cmd.Context())
+	verb := "publish"
+	if !isPublic {
+		verb = "unpublish"
+	}
+	var cp CheckpointInfo
+	if err := c.Post(cmd.Context(), fmt.Sprintf("/sandboxes/checkpoints/%s/%s", id, verb), nil, &cp); err != nil {
+		return err
+	}
+	printer.Print(cp, func() {
+		fmt.Printf("Checkpoint %s is_public=%t\n", cp.ID, cp.IsPublic)
+	})
+	return nil
+}
+
 func init() {
 	checkpointCreateCmd.Flags().String("name", "", "Checkpoint name (required)")
 	checkpointCreateCmd.MarkFlagRequired("name")
@@ -156,4 +194,6 @@ func init() {
 	checkpointCmd.AddCommand(checkpointRestoreCmd)
 	checkpointCmd.AddCommand(checkpointSpawnCmd)
 	checkpointCmd.AddCommand(checkpointDeleteCmd)
+	checkpointCmd.AddCommand(checkpointPublishCmd)
+	checkpointCmd.AddCommand(checkpointUnpublishCmd)
 }

@@ -1,0 +1,36 @@
+---
+title: 'Update Agent'
+api: 'PATCH /v1/agents/{agentId}'
+---
+
+Update an agent's display name or configuration.
+
+**CLI equivalent:** none (REST only)
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField body="display_name" type="string">
+  New display name
+</ParamField>
+
+<ParamField body="config" type="object">
+  Updated configuration (partial update)
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "id": "my-hermes",
+  "display_name": "My Hermes Agent",
+  "core": "hermes",
+  "channels": ["telegram"],
+  "packages": ["gbrain"],
+  "secret_store": "agent:my-hermes",
+  "config": null,
+  "created_at": "2026-04-09T10:30:00Z",
+  "updated_at": "2026-04-10T08:15:00Z"
+}
+```
+</ResponseExample>

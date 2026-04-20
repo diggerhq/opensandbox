@@ -1,0 +1,27 @@
+---
+title: 'Create Instance'
+api: 'POST /v1/agents/{agentId}/instances'
+---
+
+Create a persistent instance for an agent. The platform provisions a sandbox from the agent's snapshot in the background.
+
+<ParamField path="agentId" type="string" required>
+  Agent ID
+</ParamField>
+
+<ParamField body="metadata" type="object">
+  Arbitrary metadata for matching instances to external identities (e.g. Slack user IDs)
+</ParamField>
+
+<ResponseExample>
+```json 201
+{
+  "id": "inst_98adcc7e",
+  "agent_id": "my-hermes",
+  "status": "creating",
+  "metadata": { "slack_user": "U123" },
+  "created_at": "2026-04-09T10:30:00Z",
+  "updated_at": "2026-04-09T10:30:00Z"
+}
+```
+</ResponseExample>

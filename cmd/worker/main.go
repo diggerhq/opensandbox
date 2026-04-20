@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -162,7 +163,7 @@ func main() {
 				log.Printf("opensandbox-worker: %d VMs failed to hibernate: %v", len(failed), failed)
 			}
 
-			processHibernateResults(results, store, func(r interface{}) (string, string, error) {
+			processHibernateResults(results, store, checkpointStore, func(r interface{}) (string, string, error) {
 				hr := r.(qm.HibernateAllResult)
 				return hr.SandboxID, hr.HibernationKey, hr.Err
 			})
@@ -224,6 +225,13 @@ func main() {
 		}
 	}
 
+	// Wire checkpoint store into QEMU manager for base image archival + checkpoint rebasing
+	if checkpointStore != nil && qemuMgr != nil {
+		qemuMgr.SetCheckpointStore(checkpointStore)
+		go qemuMgr.UploadBaseImageIfNew()
+		go qemuMgr.MigrateStaleCheckpoints()
+	}
+
 	// PostgreSQL store
 	var store *db.Store
 	dbURL := getDBURL(cfg)
@@ -271,8 +279,9 @@ func main() {
 			if store != nil {
 				session, err := store.GetSandboxSession(context.Background(), sandboxID)
 				if err == nil {
-					_, _ = store.CreateHibernation(context.Background(), sandboxID, session.OrgID,
+					_, superseded, _ := store.CreateHibernation(context.Background(), sandboxID, session.OrgID,
 						result.HibernationKey, result.SizeBytes, session.Region, session.Template, session.Config)
+					deleteOldHibernation(checkpointStore, superseded)
 				}
 				_ = store.UpdateSandboxSessionStatus(context.Background(), sandboxID, "hibernated", nil)
 			}
@@ -686,8 +695,22 @@ func createPTYSessionQEMU(agent *qm.AgentClient, sandboxID string, req types.PTY
 	}, nil
 }
 
+// deleteOldHibernation best-effort removes a superseded hibernation archive from S3.
+// Called after a new hibernation replaces a prior one for the same sandbox.
+// We only keep one hibernation per sandbox to bound storage growth.
+func deleteOldHibernation(store *storage.CheckpointStore, key string) {
+	if store == nil || key == "" || strings.HasPrefix(key, "local://") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := store.Delete(ctx, key); err != nil {
+		log.Printf("opensandbox-worker: failed to delete superseded hibernation %s: %v", key, err)
+	}
+}
+
 // processHibernateResults handles results from HibernateAll for both backends.
-func processHibernateResults(results interface{}, store *db.Store, extract func(interface{}) (string, string, error)) {
+func processHibernateResults(results interface{}, store *db.Store, checkpointStore *storage.CheckpointStore, extract func(interface{}) (string, string, error)) {
 	switch rs := results.(type) {
 	case []qm.HibernateAllResult:
 		for _, r := range rs {
@@ -703,8 +726,9 @@ func processHibernateResults(results interface{}, store *db.Store, extract func(
 			if store != nil {
 				session, err := store.GetSandboxSession(context.Background(), r.SandboxID)
 				if err == nil {
-					_, _ = store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
+					_, superseded, _ := store.CreateHibernation(context.Background(), r.SandboxID, session.OrgID,
 						r.HibernationKey, 0, session.Region, session.Template, session.Config)
+					deleteOldHibernation(checkpointStore, superseded)
 					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
 				}
 			}
@@ -725,7 +749,9 @@ func recoverLocalQEMU(ctx context.Context, qmMgr *qm.Manager, store *db.Store, c
 			log.Printf("opensandbox-worker: no DB session for %s, skipping recovery", r.SandboxID)
 			continue
 		}
-		_, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
+		// local:// hibernations are recovery markers, not S3 archives —
+		// no superseded blob to delete.
+		_, _, _ = store.CreateHibernation(ctx, r.SandboxID, session.OrgID,
 			"local://"+r.SandboxID, 0, session.Region, session.Template, session.Config)
 		_ = store.UpdateSandboxSessionStatus(ctx, r.SandboxID, "hibernated", nil)
 		if r.HasSnapshot {

@@ -44,7 +44,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		var err error
 		org, err = s.store.GetOrg(ctx, orgID)
 		if err == nil {
-			// Concurrent sandbox limit
+			// Concurrent sandbox limit applies to all plans.
 			count, err := s.store.CountActiveSandboxes(ctx, orgID)
 			if err == nil && count >= org.MaxConcurrentSandboxes {
 				return c.JSON(http.StatusTooManyRequests, map[string]string{
@@ -52,8 +52,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 				})
 			}
 
-			// Free tier: 4GB / 1 vCPU only
+			// Free-tier: trial credits gate + machine-size restriction.
 			if org.Plan == "free" {
+				if org.FreeCreditsRemainingCents <= 0 {
+					return c.JSON(http.StatusPaymentRequired, map[string]string{
+						"error": "free trial credits exhausted — upgrade to pro to create new sandboxes",
+					})
+				}
 				if cfg.MemoryMB > 4096 || cfg.CpuCount > 1 {
 					return c.JSON(http.StatusPaymentRequired, map[string]string{
 						"error": "upgrade to pro for larger instances",
@@ -453,7 +458,27 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 	requestedMemoryMB := cfg.MemoryMB
 	requestedCpuCount := cfg.CpuCount
 
+	// Pre-generate sandbox ID so we can create the session in PG before the
+	// gRPC call. The worker's RecordScaleEvent needs the org_id from the
+	// session row, which must exist before the worker looks it up.
+	sandboxID := "sb-" + uuid.New().String()[:8]
+
+	// Create session with "pending" status before dispatching to worker.
+	if s.store != nil && hasOrg {
+		template := cfg.Template
+		if template == "" {
+			template = "default"
+		}
+		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
+		metadataJSON, _ := json.Marshal(cfg.Metadata)
+		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, "pending")
+		if templateID != nil {
+			_ = s.store.UpdateSandboxSessionTemplate(ctx, sandboxID, *templateID)
+		}
+	}
+
 	grpcResp, err := grpcClient.CreateSandbox(grpcCtx, &pb.CreateSandboxRequest{
+		SandboxId:            sandboxID,
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
@@ -467,9 +492,19 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		DiskMb:               int32(cfg.DiskMB),
 	})
 	if err != nil {
+		// Mark session as failed so it doesn't count as active.
+		if s.store != nil {
+			errMsg := err.Error()
+			_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "failed", &errMsg)
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "worker create failed: " + err.Error(),
 		})
+	}
+
+	// Creation succeeded — promote session to running.
+	if s.store != nil {
+		_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "running", nil)
 	}
 
 	// Scale to requested resources after creation (virtio-mem hotplug + cgroup).
@@ -511,20 +546,6 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 			log.Printf("sandbox: failed to issue JWT: %v", err)
 		} else {
 			token = t
-		}
-	}
-
-	// Record session in PG
-	if s.store != nil && hasOrg {
-		template := cfg.Template
-		if template == "" {
-			template = "default"
-		}
-		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
-		metadataJSON, _ := json.Marshal(cfg.Metadata)
-		_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
-		if templateID != nil {
-			_ = s.store.UpdateSandboxSessionTemplate(ctx, grpcResp.SandboxId, *templateID)
 		}
 	}
 
@@ -869,31 +890,45 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 
 	t0 := time.Now()
 
-	// Step 1: Prepare target worker — starts QEMU with -incoming tcp
-	// Use session config for VM parameters. Drives are created fresh on target;
-	// memory contents (including filesystem cache) migrate via QMP tcp.
-	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer prepCancel()
-	// Parse sandbox config to get the actual memory/CPU (must match source for migration)
-	var sbCfg struct {
-		MemoryMB int `json:"memoryMB"`
-		CpuCount int `json:"cpuCount"`
-	}
-	_ = json.Unmarshal(session.Config, &sbCfg)
-	// IMPORTANT: Use the QEMU base memory (from golden snapshot), not the API-requested total.
-	// Virtio-mem hotplug state transfers during migration — the target QEMU must start
-	// with the same base memory as the source for the memory layout to match.
-	sbCfg.MemoryMB = 256
-	if sbCfg.CpuCount <= 0 {
-		sbCfg.CpuCount = 1
+	// Step 1: Pre-copy drives to S3 (thin overlay, never flatten).
+	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer preCopyCancel()
+	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
+		SandboxId: id,
+	})
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "pre-copy drives: " + err.Error()})
 	}
 
+	if preCopyResp.GoldenVersion == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "source sandbox has no goldenVersion — cannot live migrate safely; use hibernate/wake instead"})
+	}
+
+	log.Printf("migrate %s: drives pre-copied to S3 (%dms, golden=%s)", id, time.Since(t0).Milliseconds(), preCopyResp.GoldenVersion)
+
+	// Step 2: Prepare target (downloads thin overlay, rebases if needed, starts QEMU -incoming).
+	// CPU and memory come from the source worker — must match exactly for QEMU migration.
+	cpuCount := preCopyResp.BaseCpuCount
+	memoryMB := preCopyResp.BaseMemoryMb
+	if cpuCount == 0 {
+		cpuCount = 2
+	}
+	if memoryMB == 0 {
+		memoryMB = 1024
+	}
+
+	prepCtx, prepCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId: id,
-		CpuCount:  int32(sbCfg.CpuCount),
-		MemoryMb:  int32(sbCfg.MemoryMB),
-		GuestPort: 80,
-		Template:  session.Template,
+		SandboxId:           id,
+		CpuCount:            cpuCount,
+		MemoryMb:            memoryMB,
+		GuestPort:           80,
+		Template:            session.Template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
@@ -932,9 +967,14 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "complete migration: " + err.Error()})
 	}
 
-	// Step 5: Complete migration — update DB status and worker_id atomically
+	// Step 5: Complete migration — update DB status and worker_id atomically.
+	// Use background context — the request context may be close to expiry for large migrations.
 	if s.store != nil {
-		s.store.CompleteMigration(ctx, id, req.TargetWorker)
+		completeDBCtx, completeDBCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := s.store.CompleteMigration(completeDBCtx, id, req.TargetWorker); err != nil {
+			log.Printf("migrate %s: WARNING: CompleteMigration DB update failed: %v", id, err)
+		}
+		completeDBCancel()
 	}
 	migrationDone = true
 
@@ -1155,9 +1195,14 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 			})
 		}
 
-		// Migration succeeded — update state
+		// Migration succeeded — update state.
+		// Use background context in case the request context is close to expiry.
 		if s.store != nil {
-			s.store.CompleteMigration(ctx, sandboxID, target.ID)
+			dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.store.CompleteMigration(dbCtx, sandboxID, target.ID); err != nil {
+				log.Printf("scale-migrate %s: WARNING: CompleteMigration DB update failed: %v", sandboxID, err)
+			}
+			dbCancel()
 		}
 		if s.sandboxAPIProxy != nil {
 			s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
@@ -1276,24 +1321,43 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		template = "default"
 	}
 
-	// IMPORTANT: Use the QEMU base memory (from golden snapshot), not the API-requested total.
-	// Virtio-mem hotplug state transfers during migration — the target QEMU must start
-	// with the same base memory as the source for the memory layout to match.
-	baseMem := 256
-	baseCPU := 1
+	// Step 1: Pre-copy drives to S3 (thin overlay).
+	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer preCopyCancel()
+	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
+		SandboxId: sandboxID,
+	})
+	if err != nil {
+		return fmt.Errorf("pre-copy drives: %w", err)
+	}
 
-	log.Printf("scale-migrate %s: migrating to %s (template=%s, baseMem=%dMB, targetMem=%dMB, cpu=%d)", sandboxID, target.ID, template, baseMem, memoryMB, cpuCount)
+	// CPU and memory from source — must match for QEMU migration.
+	baseCPU := preCopyResp.BaseCpuCount
+	baseMem := preCopyResp.BaseMemoryMb
+	if baseCPU == 0 {
+		baseCPU = 2
+	}
+	if baseMem == 0 {
+		baseMem = 1024
+	}
 
-	// Step 1: Prepare target with the SOURCE's base memory (must match for migration)
-	prepCtx, prepCancel := context.WithTimeout(ctx, 2*time.Minute)
+	log.Printf("scale-migrate %s: drives pre-copied (%dms), migrating to %s (baseMem=%dMB, targetMem=%dMB, cpu=%d)",
+		sandboxID, time.Since(t0).Milliseconds(), target.ID, baseMem, memoryMB, baseCPU)
+
+	// Step 2: Prepare target with the SOURCE's base memory (must match for migration)
+	prepCtx, prepCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
-		SandboxId:      sandboxID,
-		CpuCount:       int32(baseCPU),
-		MemoryMb:       int32(baseMem),
-		GuestPort:      80,
-		Template:       template,
-		TargetMemoryMb: int32(memoryMB),
+		SandboxId:           sandboxID,
+		CpuCount:            baseCPU,
+		MemoryMb:            baseMem,
+		GuestPort:           80,
+		Template:            template,
+		RootfsS3Key:         preCopyResp.RootfsKey,
+		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
+		OverlayMode:         true,
+		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		TargetMemoryMb:      int32(memoryMB),
 	})
 	if err != nil {
 		log.Printf("scale-migrate %s: prepare target failed: %v", sandboxID, err)
@@ -1383,7 +1447,8 @@ func (s *Server) hibernateSandbox(c echo.Context) error {
 			template = session.Template
 			region = session.Region
 		}
-		_, _ = s.store.CreateHibernation(ctx, id, orgID, result.HibernationKey, result.SizeBytes, region, template, cfg)
+		_, superseded, _ := s.store.CreateHibernation(ctx, id, orgID, result.HibernationKey, result.SizeBytes, region, template, cfg)
+		s.deleteSupersededHibernation(superseded)
 		_ = s.store.UpdateSandboxSessionStatus(ctx, id, "hibernated", nil)
 	}
 
@@ -1397,6 +1462,20 @@ func (s *Server) hibernateSandbox(c echo.Context) error {
 		"hibernationKey": result.HibernationKey,
 		"sizeBytes":      result.SizeBytes,
 	})
+}
+
+// deleteSupersededHibernation best-effort removes a prior hibernation archive
+// from S3 when it's been replaced by a new hibernation for the same sandbox.
+// We only keep one hibernation per sandbox to bound storage growth.
+func (s *Server) deleteSupersededHibernation(key string) {
+	if s.checkpointStore == nil || key == "" || strings.HasPrefix(key, "local://") {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.checkpointStore.Delete(ctx, key); err != nil {
+		log.Printf("api: failed to delete superseded hibernation %s: %v", key, err)
+	}
 }
 
 func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error {
@@ -1433,9 +1512,10 @@ func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error 
 
 	// Record hibernation in PG
 	orgID, _ := auth.GetOrgID(c)
-	_, _ = s.store.CreateHibernation(c.Request().Context(), sandboxID, orgID,
+	_, superseded, _ := s.store.CreateHibernation(c.Request().Context(), sandboxID, orgID,
 		grpcResp.CheckpointKey, grpcResp.SizeBytes,
 		session.Region, session.Template, session.Config)
+	s.deleteSupersededHibernation(superseded)
 	_ = s.store.UpdateSandboxSessionStatus(c.Request().Context(), sandboxID, "hibernated", nil)
 
 	// Invalidate the proxy route cache: wake may land the sandbox on a
@@ -1461,6 +1541,17 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 
 	var req types.WakeRequest
 	_ = c.Bind(&req)
+
+	// Free-tier credits gate: refuse to wake if trial credits are exhausted.
+	if orgID, ok := auth.GetOrgID(c); ok && s.store != nil {
+		if org, err := s.store.GetOrg(ctx, orgID); err == nil {
+			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
+				return c.JSON(http.StatusPaymentRequired, map[string]string{
+					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
+				})
+			}
+		}
+	}
 
 	// Server mode: pick any worker, dispatch via gRPC
 	if s.workerRegistry != nil {
@@ -1917,12 +2008,15 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		return nil, http.StatusBadRequest, fmt.Errorf("invalid checkpoint ID")
 	}
 
-	// Verify checkpoint exists, belongs to org, and is ready
+	// Verify checkpoint exists, is accessible, and is ready.
+	// Fork is the only checkpoint op relaxed for public checkpoints — patch,
+	// list-patches, delete-patch, and delete-checkpoint remain owner-only.
+	// See ws-gstack design 009 (publishable checkpoints).
 	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
 	if err != nil {
 		return nil, http.StatusNotFound, fmt.Errorf("checkpoint not found")
 	}
-	if cp.OrgID != orgID {
+	if cp.OrgID != orgID && !cp.IsPublic {
 		return nil, http.StatusForbidden, fmt.Errorf("checkpoint does not belong to this organization")
 	}
 	// Poll for checkpoint readiness — checkpoints transition from "processing" to "ready"
@@ -2457,6 +2551,53 @@ func (s *Server) deleteCheckpointPatch(c echo.Context) error {
 	}
 
 	return c.NoContent(http.StatusNoContent)
+}
+
+// publishCheckpoint marks a checkpoint as publicly forkable. Owner-org only.
+// Idempotent — publishing an already-public checkpoint is a no-op 200.
+// See ws-gstack design 009.
+func (s *Server) publishCheckpoint(c echo.Context) error {
+	return s.setCheckpointPublic(c, true)
+}
+
+// unpublishCheckpoint flips is_public back to false. Owner-org only, idempotent.
+// In-flight forks that already passed the auth check continue; new forks 403.
+func (s *Server) unpublishCheckpoint(c echo.Context) error {
+	return s.setCheckpointPublic(c, false)
+}
+
+func (s *Server) setCheckpointPublic(c echo.Context, isPublic bool) error {
+	checkpointIDStr := c.Param("checkpointId")
+	ctx := c.Request().Context()
+
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	checkpointID, err := uuid.Parse(checkpointIDStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
+	}
+
+	cp, err := s.store.GetCheckpoint(ctx, checkpointID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "checkpoint not found"})
+	}
+	if cp.OrgID != orgID {
+		return c.JSON(http.StatusForbidden, map[string]string{"error": "checkpoint does not belong to this organization"})
+	}
+
+	if err := s.store.SetCheckpointPublic(ctx, checkpointID, orgID, isPublic); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	cp.IsPublic = isPublic
+	return c.JSON(http.StatusOK, cp)
 }
 
 // listSessions returns session history from PostgreSQL.
