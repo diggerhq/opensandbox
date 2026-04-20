@@ -409,23 +409,16 @@ func main() {
 		}
 	}
 
-	// NATS
-	if cfg.NATSURL != "" {
-		pub, err := worker.NewEventPublisher(cfg.NATSURL, cfg.Region, cfg.WorkerID, sandboxDBMgr)
+	// Redis Streams event publisher: XADDs to events:{cell_id}. Replaces NATS.
+	// Heartbeat already handled by redis_heartbeat above.
+	if cfg.RedisURL != "" {
+		pub, err := worker.NewRedisEventPublisher(cfg.RedisURL, cfg.CellID, cfg.WorkerID, sandboxDBMgr, store)
 		if err != nil {
-			log.Printf("opensandbox-worker: NATS not available: %v (continuing without event sync)", err)
+			log.Printf("opensandbox-worker: Redis event publisher not available: %v (continuing without event sync)", err)
 		} else {
 			pub.Start()
-			if qemuMgr != nil {
-				pub.SetGoldenVersion(qemuMgr.GoldenVersion())
-			}
-			pub.StartHeartbeat(func() (int, int, float64, float64, float64) {
-				count, _ := mgr.Count(context.Background())
-				cpuPct, memPct, diskPct := worker.SystemStats()
-				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
-			})
 			defer pub.Stop()
-			log.Println("opensandbox-worker: NATS event publisher started")
+			log.Printf("opensandbox-worker: Redis event publisher started (stream=events:%s)", cfg.CellID)
 		}
 	}
 
@@ -442,7 +435,7 @@ func main() {
 
 	// Usage collector for billing (samples cgroup stats every 60s, flushes to DB every 5 min)
 	if store != nil {
-		usageCollector := worker.NewUsageCollector(mgr, store, segmentClient)
+		usageCollector := worker.NewUsageCollector(mgr, store, segmentClient, sandboxDBMgr)
 		usageCollector.Start()
 		defer usageCollector.Stop()
 	}

@@ -5,12 +5,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"os/signal"
 	"syscall"
 
 	"time"
+
+	"github.com/labstack/echo/v4"
 
 	"github.com/opensandbox/opensandbox/internal/api"
 	"github.com/opensandbox/opensandbox/internal/auth"
@@ -384,19 +387,46 @@ func main() {
 		log.Println("opensandbox: usage reporter started (interval=5m)")
 	}
 
-	// Start NATS sync consumer if both PG and NATS are configured
-	if opts.Store != nil && cfg.NATSURL != "" {
-		consumer, err := db.NewSyncConsumer(opts.Store, cfg.NATSURL)
+	// Cloudflare event forwarder: drains events:{cell_id} Redis stream to the CF
+	// events-ingest Worker. Only starts when both endpoint and secret are set
+	// — missing config means running without CF integration (e.g. early dev).
+	if cfg.CFEventEndpoint != "" && cfg.CFEventSecret != "" && cfg.RedisURL != "" {
+		forwarder, err := controlplane.NewEventForwarder(
+			cfg.RedisURL, cfg.CellID, cfg.CFEventEndpoint, cfg.CFEventSecret,
+		)
 		if err != nil {
-			log.Printf("opensandbox: NATS sync consumer not available: %v (continuing without)", err)
+			log.Printf("opensandbox: event forwarder not available: %v (continuing without)", err)
 		} else {
-			if err := consumer.Start(); err != nil {
-				log.Printf("opensandbox: failed to start NATS sync consumer: %v", err)
-			} else {
-				defer consumer.Stop()
-				log.Println("opensandbox: NATS sync consumer started")
-			}
+			forwarder.SetStore(opts.Store)
+			forwarder.Start()
+			defer forwarder.Stop()
+			log.Printf("opensandbox: event forwarder started (cell=%s → %s)", cfg.CellID, cfg.CFEventEndpoint)
 		}
+	}
+
+	// Cloudflare admin handlers: /admin/halt-org and /admin/resume-org, called
+	// by the CreditAccount DO (push) and halt_reconciler (pull). Requires the
+	// Redis worker registry for halt (gRPC client lookup) and resume (worker
+	// selection for wake).
+	var adminHandlers *controlplane.AdminHandlers
+	if cfg.CFAdminSecret != "" && opts.Store != nil && redisRegistry != nil {
+		adminHandlers = controlplane.NewAdminHandlers(opts.Store, redisRegistry, redisRegistry, cfg.CFAdminSecret)
+		adminMux := http.NewServeMux()
+		adminHandlers.Register(adminMux)
+		server.Echo().Any("/admin/*", echo.WrapHandler(adminMux))
+		log.Println("opensandbox: admin handlers registered (/admin/halt-org, /admin/resume-org)")
+	}
+
+	// Halt reconciler: 60s pull of /internal/halt-list from the CF api-edge
+	// Worker, as a safety net for DO push webhooks lost to network partitions.
+	if cfg.HaltListURL != "" && cfg.CFAdminSecret != "" && adminHandlers != nil {
+		reconciler := controlplane.NewHaltReconciler(
+			opts.Store, redisRegistry, redisRegistry,
+			cfg.HaltListURL, cfg.CFAdminSecret, cfg.CellID, adminHandlers,
+		)
+		reconciler.Start()
+		defer reconciler.Stop()
+		log.Printf("opensandbox: halt reconciler started (cell=%s → %s)", cfg.CellID, cfg.HaltListURL)
 	}
 
 	// Graceful shutdown

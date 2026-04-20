@@ -14,11 +14,15 @@ import (
 // UsageCollector periodically samples resource usage from running sandboxes
 // and batch-inserts the data into Postgres for billing.
 type UsageCollector struct {
-	manager  sandbox.Manager
-	store    *db.Store
-	segment  *analytics.Client // optional; nil = no Segment shipping
-	interval time.Duration     // how often to sample (default 60s)
-	flushN   int               // flush to DB every N samples (default 5 = every 5 min)
+	manager    sandbox.Manager
+	store      *db.Store
+	segment    *analytics.Client // optional; nil = no Segment shipping
+	sandboxDBs *sandbox.SandboxDBManager
+	// sandboxDBs is optional. When set, each tick also writes a `usage_tick`
+	// event into the per-sandbox SQLite, which the Redis event publisher
+	// forwards to the CF events-ingest Worker for billing aggregation.
+	interval time.Duration // how often to sample (default 60s)
+	flushN   int           // flush to DB every N samples (default 5 = every 5 min)
 
 	mu       sync.Mutex
 	buffer   []db.UsageSample
@@ -28,16 +32,18 @@ type UsageCollector struct {
 }
 
 // NewUsageCollector creates a collector that samples every interval.
-// segment may be nil to disable analytics shipping.
-func NewUsageCollector(manager sandbox.Manager, store *db.Store, segment *analytics.Client) *UsageCollector {
+// segment may be nil to disable analytics shipping; sandboxDBs may be nil to
+// skip emitting usage_tick events into the CF event stream.
+func NewUsageCollector(manager sandbox.Manager, store *db.Store, segment *analytics.Client, sandboxDBs *sandbox.SandboxDBManager) *UsageCollector {
 	return &UsageCollector{
-		manager:  manager,
-		store:    store,
-		segment:  segment,
-		interval: 60 * time.Second,
-		flushN:   5,
-		stopCh:   make(chan struct{}),
-		stopped:  make(chan struct{}),
+		manager:    manager,
+		store:      store,
+		segment:    segment,
+		sandboxDBs: sandboxDBs,
+		interval:   60 * time.Second,
+		flushN:     5,
+		stopCh:     make(chan struct{}),
+		stopped:    make(chan struct{}),
 	}
 }
 
@@ -118,6 +124,21 @@ func (c *UsageCollector) sample() {
 			SandboxID:    sb.ID,
 			GBSeconds:    gbSeconds,
 		})
+
+		// Emit a usage_tick event for the CF events-ingest pipeline. org_id
+		// is intentionally omitted here — the CP forwarder enriches the
+		// envelope via a PG lookup before shipping upstream.
+		if c.sandboxDBs != nil {
+			if sdb, err := c.sandboxDBs.Get(sb.ID); err == nil {
+				_ = sdb.LogEvent("usage_tick", map[string]interface{}{
+					"sandbox_id":   sb.ID,
+					"memory_mb":    sb.MemoryMB,
+					"memory_bytes": stats.MemUsage,
+					"pids":         stats.PIDs,
+					"wall_seconds": intervalSec,
+				})
+			}
+		}
 	}
 
 	if len(samples) == 0 {
