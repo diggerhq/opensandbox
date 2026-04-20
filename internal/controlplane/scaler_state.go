@@ -46,6 +46,12 @@ type ScalerStateStore interface {
 	// Rate-of-change tracking
 	GetLastSandboxCount(region string) (int, bool)
 	SetLastSandboxCount(region string, count int)
+
+	// Creation failure backoff
+	IncrCreationFailures(region string) int
+	ResetCreationFailures(region string)
+	GetCreationBackoffUntil(region string) (time.Time, bool)
+	SetCreationBackoffUntil(region string, until time.Time)
 }
 
 // RedisScalerState implements ScalerStateStore backed by Redis.
@@ -280,18 +286,60 @@ func (r *RedisScalerState) SetLastSandboxCount(region string, count int) {
 	r.rdb.Set(ctx, "scaler:sandboxcount:"+region, fmt.Sprintf("%d", count), 2*time.Minute)
 }
 
+// --- Creation failure backoff (Redis) ---
+
+func (r *RedisScalerState) IncrCreationFailures(region string) int {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	n, err := r.rdb.Incr(ctx, "scaler:createfail:"+region).Result()
+	if err != nil {
+		return 0
+	}
+	r.rdb.Expire(ctx, "scaler:createfail:"+region, 30*time.Minute)
+	return int(n)
+}
+
+func (r *RedisScalerState) ResetCreationFailures(region string) {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	r.rdb.Del(ctx, "scaler:createfail:"+region)
+	r.rdb.Del(ctx, "scaler:createbackoff:"+region)
+}
+
+func (r *RedisScalerState) GetCreationBackoffUntil(region string) (time.Time, bool) {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	val, err := r.rdb.Get(ctx, "scaler:createbackoff:"+region).Result()
+	if err != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, val)
+	if err != nil || time.Now().After(t) {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (r *RedisScalerState) SetCreationBackoffUntil(region string, until time.Time) {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	r.rdb.Set(ctx, "scaler:createbackoff:"+region, until.Format(time.RFC3339), time.Until(until))
+}
+
 // --- In-memory fallback (for dev/combined mode) ---
 
 // InMemoryScalerState provides the same interface backed by Go maps (current behavior).
 type InMemoryScalerState struct {
-	mu             sync.Mutex
-	lastScaleUp    map[string]time.Time
-	pending        map[string][]pendingLaunch
-	draining       map[string]*drainState
-	lastEvacuation map[string]time.Time
-	migrating      sync.Map
-	inFlight       map[string]int
-	sandboxCount   map[string]int
+	mu              sync.Mutex
+	lastScaleUp     map[string]time.Time
+	pending         map[string][]pendingLaunch
+	draining        map[string]*drainState
+	lastEvacuation  map[string]time.Time
+	migrating       sync.Map
+	inFlight        map[string]int
+	sandboxCount    map[string]int
+	createFailures  map[string]int
+	createBackoff   map[string]time.Time
 }
 
 // NewInMemoryScalerState creates an in-memory state store.
@@ -303,6 +351,8 @@ func NewInMemoryScalerState() *InMemoryScalerState {
 		lastEvacuation: make(map[string]time.Time),
 		inFlight:       make(map[string]int),
 		sandboxCount:   make(map[string]int),
+		createFailures: make(map[string]int),
+		createBackoff:  make(map[string]time.Time),
 	}
 }
 
@@ -420,6 +470,38 @@ func (m *InMemoryScalerState) SetLastSandboxCount(region string, count int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sandboxCount[region] = count
+}
+
+// --- Creation failure backoff (in-memory) ---
+
+func (m *InMemoryScalerState) IncrCreationFailures(region string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createFailures[region]++
+	return m.createFailures[region]
+}
+
+func (m *InMemoryScalerState) ResetCreationFailures(region string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.createFailures, region)
+	delete(m.createBackoff, region)
+}
+
+func (m *InMemoryScalerState) GetCreationBackoffUntil(region string) (time.Time, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.createBackoff[region]
+	if !ok || time.Now().After(t) {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func (m *InMemoryScalerState) SetCreationBackoffUntil(region string, until time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createBackoff[region] = until
 }
 
 // Ensure both implementations satisfy the interface.
