@@ -1190,6 +1190,12 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		if err := s.store.CompleteMigration(dbCtx, sandboxID, targetWorkerID); err != nil {
 			log.Printf("scaler: migrate %s: WARNING: CompleteMigration DB update failed: %v", sandboxID, err)
 		}
+		// Update golden version to target worker's — the rootfs was rebased
+		// to the target's base image during migration.
+		targetWorker := s.getWorkerInfo(targetWorkerID)
+		if targetWorker != nil && targetWorker.GoldenVersion != "" {
+			_ = s.store.SetSandboxGoldenVersion(dbCtx, sandboxID, targetWorker.GoldenVersion)
+		}
 		dbCancel()
 	}
 	migrationCompleted = true
