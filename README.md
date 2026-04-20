@@ -146,3 +146,7 @@ VMs hibernate instead of dying. State survives across sessions without manual sn
 - [Website](https://opencomputer.dev/)
 - [Guides](https://opencomputer.dev/guides)
 - [Talk to founders](https://cal.com/team/digger/opencomputer-founder-chat)
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
