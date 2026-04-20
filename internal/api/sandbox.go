@@ -1663,6 +1663,9 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	// Mark hibernation as restored, update session
 	_ = s.store.MarkHibernationRestored(c.Request().Context(), sandboxID)
 	_ = s.store.UpdateSandboxSessionForWake(c.Request().Context(), sandboxID, worker.ID)
+	if worker.GoldenVersion != "" {
+		_ = s.store.SetSandboxGoldenVersion(c.Request().Context(), sandboxID, worker.GoldenVersion)
+	}
 
 	// Refresh the proxy route cache with the new worker — wake may have moved
 	// the sandbox to a different worker than where it was hibernated, and any

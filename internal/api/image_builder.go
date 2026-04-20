@@ -442,6 +442,11 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 			workerID = "w-local-1"
 		}
 		_, _ = s.store.CreateSandboxSession(ctx, buildSandboxID, orgID, nil, cfg.Template, region, workerID, cfgJSON, []byte("{}"))
+		if s.workerRegistry != nil {
+			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {
+				_ = s.store.SetSandboxGoldenVersion(ctx, buildSandboxID, w.GoldenVersion)
+			}
+		}
 	}
 
 	// Emit build start log
