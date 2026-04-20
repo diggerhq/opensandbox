@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
@@ -42,6 +43,11 @@ func NewAgentClient(guestCID uint32) (*AgentClient, error) {
 				Jitter:     0.2,
 				MaxDelay:   1 * time.Second,
 			},
+		}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
 		}),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return dialVsock(ctx, guestCID, 1024)
@@ -487,6 +493,11 @@ func NewAgentClientSocket(socketPath string) (*AgentClient, error) {
 				Jitter:     0.2,
 				MaxDelay:   1 * time.Second,
 			},
+		}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                30 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
 		}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(256*1024*1024),

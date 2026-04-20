@@ -1299,6 +1299,7 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.goldenVersion, // set even on cold boot — VM uses the same base image
 	}
 
 	// Wait for agent via Unix socket
@@ -2805,6 +2806,7 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
 		agent:         agent,
+		goldenVersion: m.goldenVersion, // set on wake — VM uses the current base image
 	}
 
 	m.mu.Lock()

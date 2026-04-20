@@ -61,6 +61,11 @@ func NewRedisWorkerRegistry(redisURL string) (*RedisWorkerRegistry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid redis URL: %w", err)
 	}
+	opts.PoolSize = 10
+	opts.MinIdleConns = 2
+	opts.ConnMaxIdleTime = 5 * time.Minute
+	opts.ConnMaxLifetime = 30 * time.Minute
+	opts.MaxRetries = 3
 
 	rdb := redis.NewClient(opts)
 
@@ -393,13 +398,56 @@ func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry,
 
 // GetWorkerClient returns the gRPC client for a specific worker.
 func (r *RedisWorkerRegistry) GetWorkerClient(workerID string) (pb.SandboxWorkerClient, error) {
+	// Fast path: read lock, check connection state, return if healthy.
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	conn, hasConn := r.conns[workerID]
+	client, hasClient := r.clients[workerID]
+	var grpcAddr string
+	if w, ok := r.workers[workerID]; ok {
+		grpcAddr = w.GRPCAddr
+	}
+	r.mu.RUnlock()
 
-	client, ok := r.clients[workerID]
-	if !ok {
+	if !hasConn || !hasClient {
 		return nil, fmt.Errorf("no gRPC connection to worker %s", workerID)
 	}
+
+	state := conn.GetState()
+	switch {
+	case state == connectivity.Ready || state == connectivity.Connecting:
+		return client, nil
+
+	case state == connectivity.Idle:
+		// Nudge idle connections to reconnect proactively.
+		conn.ResetConnectBackoff()
+		conn.Connect()
+		return client, nil
+
+	case state == connectivity.TransientFailure || state == connectivity.Shutdown:
+		// Slow path: write lock, re-dial. Only blocks callers for THIS worker.
+		if grpcAddr == "" {
+			return nil, fmt.Errorf("gRPC connection to worker %s is %s (no addr to re-dial)", workerID, state)
+		}
+		r.mu.Lock()
+		// Double-check under write lock — another goroutine may have already re-dialed.
+		if c, ok := r.conns[workerID]; ok && c.GetState() != connectivity.TransientFailure && c.GetState() != connectivity.Shutdown {
+			client = r.clients[workerID]
+			r.mu.Unlock()
+			return client, nil
+		}
+		log.Printf("redis_registry: GetWorkerClient %s: conn in %s state, re-dialing", workerID, state)
+		conn.Close()
+		delete(r.conns, workerID)
+		delete(r.clients, workerID)
+		r.dialWorkerLocked(workerID, grpcAddr)
+		newClient, ok := r.clients[workerID]
+		r.mu.Unlock()
+		if ok {
+			return newClient, nil
+		}
+		return nil, fmt.Errorf("gRPC re-dial to worker %s failed", workerID)
+	}
+
 	return client, nil
 }
 

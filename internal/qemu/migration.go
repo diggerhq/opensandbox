@@ -110,27 +110,50 @@ func (mc *MigrationCoordinator) MigrateToS3(ctx context.Context, sandboxID strin
 	defer os.RemoveAll(stagingDir)
 
 	rootfsKey = fmt.Sprintf("migrations/%s/rootfs.qcow2", sandboxID)
-	workspaceKey = fmt.Sprintf("migrations/%s/workspace.qcow2", sandboxID)
+	workspaceKey = fmt.Sprintf("migrations/%s/workspace.qcow2.zst", sandboxID)
 
 	t0 := time.Now()
 
-	// Upload from staged copies — QEMU can continue running on originals
-	state.Phase = "upload-rootfs"
-	rootfsSize, err := mc.uploadFile(ctx, stagedRootfs, rootfsKey)
-	if err != nil {
-		return "", "", fmt.Errorf("upload rootfs: %w", err)
+	// Compress workspace with zstd before upload — typically 2-4x smaller,
+	// proportionally faster to upload/download over S3.
+	state.Phase = "compress-workspace"
+	compressedWorkspace := stagedWorkspace + ".zst"
+	compressCmd := exec.CommandContext(ctx, "zstd", "-1", "--rm", "-q", stagedWorkspace, "-o", compressedWorkspace)
+	if out, err := compressCmd.CombinedOutput(); err != nil {
+		return "", "", fmt.Errorf("compress workspace: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	state.Phase = "upload-workspace"
-	wsSize, err := mc.uploadFile(ctx, stagedWorkspace, workspaceKey)
-	if err != nil {
-		return "", "", fmt.Errorf("upload workspace: %w", err)
+	// Upload rootfs + compressed workspace in parallel
+	state.Phase = "upload"
+	type uploadResult struct {
+		size int64
+		err  error
+	}
+	rootfsCh := make(chan uploadResult, 1)
+	workspaceCh := make(chan uploadResult, 1)
+
+	go func() {
+		sz, err := mc.uploadFile(ctx, stagedRootfs, rootfsKey)
+		rootfsCh <- uploadResult{sz, err}
+	}()
+	go func() {
+		sz, err := mc.uploadFile(ctx, compressedWorkspace, workspaceKey)
+		workspaceCh <- uploadResult{sz, err}
+	}()
+
+	rRes := <-rootfsCh
+	wRes := <-workspaceCh
+	if rRes.err != nil {
+		return "", "", fmt.Errorf("upload rootfs: %w", rRes.err)
+	}
+	if wRes.err != nil {
+		return "", "", fmt.Errorf("upload workspace: %w", wRes.err)
 	}
 
-	log.Printf("qemu: migration pre-copy %s: rootfs=%.1fMB workspace=%.1fMB (%dms)",
+	log.Printf("qemu: migration pre-copy %s: rootfs=%.1fMB workspace=%.1fMB(compressed) (%dms)",
 		sandboxID,
-		float64(rootfsSize)/(1024*1024),
-		float64(wsSize)/(1024*1024),
+		float64(rRes.size)/(1024*1024),
+		float64(wRes.size)/(1024*1024),
 		time.Since(t0).Milliseconds())
 
 	return rootfsKey, workspaceKey, nil
@@ -548,15 +571,16 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 }
 
 // PreCopyDrives uploads a sandbox's drives to S3 for cross-worker migration.
-// If flatten is true, the rootfs qcow2 overlay is flattened (backing file merged)
-// before upload, making it self-contained for cross-golden-version migration.
-// Returns the S3 keys and the sandbox's golden version.
-func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore, flatten bool) (rootfsKey, workspaceKey, goldenVer string, err error) {
-	// Look up golden version from the VM
+// Always uploads the thin overlay (never flattens). The target worker rebases
+// to its own base image if golden versions differ.
+// Returns S3 keys, golden version, and base CPU/memory for QEMU matching.
+func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem int, err error) {
 	m.mu.RLock()
 	vm, exists := m.vms[sandboxID]
 	if exists {
 		goldenVer = vm.goldenVersion
+		baseCPU = vm.CpuCount
+		baseMem = vm.baseMemoryMB
 	}
 	m.mu.RUnlock()
 
@@ -566,49 +590,87 @@ func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpoin
 		migrations:      make(map[string]*MigrationState),
 	}
 
-	if flatten && goldenVer != "" {
-		// Flatten the rootfs before upload — merge backing file into overlay
-		rootfsKey, workspaceKey, err = mc.MigrateToS3Flatten(ctx, sandboxID)
-	} else {
-		rootfsKey, workspaceKey, err = mc.MigrateToS3(ctx, sandboxID)
-	}
-	return rootfsKey, workspaceKey, goldenVer, err
+	rootfsKey, workspaceKey, err = mc.MigrateToS3(ctx, sandboxID)
+	return
 }
 
 // PrepareIncomingMigrationWithS3 downloads drives from S3 then prepares incoming migration.
-// If overlayMode is true, the rootfs is a thin qcow2 overlay — rebase it to point to
-// the local base image instead of downloading a flattened file.
-func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool) (incomingAddr string, hostPort int, err error) {
+// If overlayMode is true, the rootfs is a thin qcow2 overlay. When sourceGoldenVersion
+// matches the target's current golden version, a fast metadata-only repoint is used.
+// When versions differ, a full rebase downloads the old base from S3 and migrates
+// the overlay to the current base — same logic as checkpoint fork rebase.
+func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error) {
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
 		return "", 0, fmt.Errorf("mkdir: %w", err)
 	}
 
-	// Download rootfs from S3
 	rootfsPath := filepath.Join(sandboxDir, "rootfs.qcow2")
-	if err := downloadS3ToFile(ctx, checkpointStore, rootfsS3Key, rootfsPath); err != nil {
-		return "", 0, fmt.Errorf("download rootfs from S3: %w", err)
-	}
-
-	// In overlay mode, the rootfs is a thin overlay backed by the base ext4 image.
-	// Rebase it to point to this worker's local base image path.
-	if overlayMode {
-		baseImage, resolveErr := ResolveBaseImage(m.cfg.ImagesDir, "default")
-		if resolveErr != nil {
-			return "", 0, fmt.Errorf("resolve base image for overlay rebase: %w", resolveErr)
-		}
-		absBase, _ := filepath.Abs(baseImage)
-		rebaseCmd := exec.Command("qemu-img", "rebase", "-u", "-b", absBase, "-F", "raw", rootfsPath)
-		if out, err := rebaseCmd.CombinedOutput(); err != nil {
-			return "", 0, fmt.Errorf("rebase rootfs to local base: %w (%s)", err, strings.TrimSpace(string(out)))
-		}
-		log.Printf("qemu: migration %s: rootfs rebased to local base image (overlay mode)", sandboxID)
-	}
-
-	// Download workspace from S3
 	workspacePath := filepath.Join(sandboxDir, "workspace.qcow2")
-	if err := downloadS3ToFile(ctx, checkpointStore, workspaceS3Key, workspacePath); err != nil {
-		return "", 0, fmt.Errorf("download workspace from S3: %w", err)
+
+	// Download rootfs + workspace in parallel. Workspace may be zstd-compressed.
+	// Rebase runs as soon as rootfs is ready (overlaps with workspace download).
+	type dlResult struct {
+		err error
+	}
+	rootfsCh := make(chan dlResult, 1)
+	workspaceCh := make(chan dlResult, 1)
+
+	go func() {
+		rootfsCh <- dlResult{downloadS3ToFile(ctx, checkpointStore, rootfsS3Key, rootfsPath)}
+	}()
+	go func() {
+		isCompressed := strings.HasSuffix(workspaceS3Key, ".zst")
+		dlPath := workspacePath
+		if isCompressed {
+			dlPath = workspacePath + ".zst"
+		}
+		if err := downloadS3ToFile(ctx, checkpointStore, workspaceS3Key, dlPath); err != nil {
+			workspaceCh <- dlResult{fmt.Errorf("download workspace: %w", err)}
+			return
+		}
+		if isCompressed {
+			decompressCmd := exec.CommandContext(ctx, "zstd", "-d", "--rm", "-q", dlPath, "-o", workspacePath)
+			if out, err := decompressCmd.CombinedOutput(); err != nil {
+				workspaceCh <- dlResult{fmt.Errorf("decompress workspace: %w (%s)", err, strings.TrimSpace(string(out)))}
+				return
+			}
+		}
+		workspaceCh <- dlResult{nil}
+	}()
+
+	// Wait for rootfs download, then rebase (workspace downloads in parallel)
+	if r := <-rootfsCh; r.err != nil {
+		return "", 0, fmt.Errorf("download rootfs from S3: %w", r.err)
+	}
+
+	if overlayMode {
+		currentGolden := m.GoldenVersion()
+		if sourceGoldenVersion != "" && sourceGoldenVersion != currentGolden {
+			if m.checkpointStore == nil && checkpointStore != nil {
+				m.SetCheckpointStore(checkpointStore)
+			}
+			if err := m.rebaseCheckpointToCurrentBase(ctx, sandboxDir, sourceGoldenVersion); err != nil {
+				return "", 0, fmt.Errorf("rebase rootfs across golden versions: %w", err)
+			}
+			log.Printf("qemu: migration %s: rootfs rebased from %s to %s (cross-version)", sandboxID, sourceGoldenVersion, currentGolden)
+		} else {
+			baseImage, resolveErr := ResolveBaseImage(m.cfg.ImagesDir, "default")
+			if resolveErr != nil {
+				return "", 0, fmt.Errorf("resolve base image for overlay rebase: %w", resolveErr)
+			}
+			absBase, _ := filepath.Abs(baseImage)
+			rebaseCmd := exec.Command("qemu-img", "rebase", "-u", "-b", absBase, "-F", "raw", rootfsPath)
+			if out, err := rebaseCmd.CombinedOutput(); err != nil {
+				return "", 0, fmt.Errorf("rebase rootfs to local base: %w (%s)", err, strings.TrimSpace(string(out)))
+			}
+			log.Printf("qemu: migration %s: rootfs rebased to local base (same version)", sandboxID)
+		}
+	}
+
+	// Wait for workspace download + decompress to finish
+	if r := <-workspaceCh; r.err != nil {
+		return "", 0, r.err
 	}
 
 	return m.PrepareIncomingMigration(ctx, sandboxID, rootfsPath, workspacePath, cpus, memMB, guestPort, template)

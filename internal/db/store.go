@@ -41,6 +41,11 @@ func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	// Each proxied exec/file/pty call does a DB lookup before forwarding.
 	poolCfg.MaxConns = 50
 	poolCfg.MinConns = 5
+	// Recycle connections periodically to prevent stale/leaked connections from
+	// piling up on the Postgres server (e.g. after worker restarts/deletions).
+	poolCfg.MaxConnLifetime = 30 * time.Minute
+	poolCfg.MaxConnIdleTime = 5 * time.Minute
+	poolCfg.HealthCheckPeriod = 30 * time.Second
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -560,11 +565,20 @@ func (s *Store) SetMigrating(ctx context.Context, sandboxID, targetWorkerID stri
 
 // CompleteMigration marks a sandbox as running on the new worker after successful migration.
 func (s *Store) CompleteMigration(ctx context.Context, sandboxID, newWorkerID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_sessions SET status = 'running', worker_id = $1, migrating_to_worker = ''
-		 WHERE sandbox_id = $2 AND status = 'migrating'`,
+	// Use status IN ('migrating', 'running', 'stopped') — a race with the source
+	// worker's cleanup may have already set it to 'stopped' or reverted to 'running'.
+	// The migration DID succeed (QEMU is running on the target), so force the update.
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'running', worker_id = $1, migrating_to_worker = '', stopped_at = NULL, error_msg = NULL
+		 WHERE sandbox_id = $2 AND status IN ('migrating', 'running', 'stopped')`,
 		newWorkerID, sandboxID)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("no session found for %s in migrating/running/stopped state", sandboxID)
+	}
+	return nil
 }
 
 // FailMigration reverts a sandbox to running on its original worker after a failed migration.

@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -39,6 +40,9 @@ func NewEventPublisher(natsURL, region, workerID string, sandboxDBs *sandbox.San
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2*time.Second),
+		// Cap the pending buffer to prevent unbounded memory growth when NATS
+		// is unreachable. At 5s heartbeat interval + events, 8MB is ~hours of headroom.
+		nats.ReconnectBufSize(8*1024*1024),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to NATS: %w", err)
@@ -50,15 +54,17 @@ func NewEventPublisher(natsURL, region, workerID string, sandboxDBs *sandbox.San
 		return nil, fmt.Errorf("failed to get JetStream context: %w", err)
 	}
 
-	// Ensure the stream exists
+	// Ensure the stream exists — retry with timeout so a slow NATS broker
+	// doesn't hang startup indefinitely.
+	streamCtx, streamCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer streamCancel()
 	_, err = js.AddStream(&nats.StreamConfig{
 		Name:     "SANDBOX_EVENTS",
 		Subjects: []string{"sandbox.events.>"},
-		MaxAge:   7 * 24 * time.Hour, // Retain for 7 days
-	})
+		MaxAge:   7 * 24 * time.Hour,
+	}, nats.Context(streamCtx))
 	if err != nil {
-		// Stream may already exist, that's OK
-		log.Printf("event_publisher: stream setup: %v", err)
+		log.Printf("event_publisher: stream setup failed (will retry in background): %v", err)
 	}
 
 	return &EventPublisher{
@@ -106,6 +112,11 @@ func (p *EventPublisher) SetGoldenVersion(v string) {
 
 // PublishHeartbeat sends a worker heartbeat to NATS.
 func (p *EventPublisher) PublishHeartbeat(capacity, current int, cpuPct, memPct, diskPct float64) {
+	// Skip publishing if NATS is disconnected — avoids buffering messages
+	// that pile up and eventually overflow when the connection is broken.
+	if !p.nc.IsConnected() {
+		return
+	}
 	subject := fmt.Sprintf("workers.heartbeat.%s.%s", p.region, p.workerID)
 	payload := map[string]interface{}{
 		"worker_id": p.workerID,
