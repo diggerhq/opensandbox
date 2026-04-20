@@ -29,13 +29,20 @@ type Config struct {
 	// Auth
 	JWTSecret string // Shared secret for sandbox-scoped JWTs
 
-	// NATS
-	NATSURL string // NATS server URL
-
-	// Worker identity
-	Region   string // Region identifier (e.g., "iad", "ams")
+	// Cell/worker identity
+	Region   string // Cloud region for compute pools (AWS/Azure/S3 region, e.g. "us-east-1")
+	CellID   string // Full deployment identifier, e.g. "dev-cell-a", "aws-useast1-cell-a".
+	                // Drives Redis stream key (events:{cell_id}), event envelope, CF routing.
 	WorkerID string // Unique worker ID (e.g., "w-iad-1")
 	HTTPAddr string // Public HTTP address for direct SDK access
+
+	// Cloudflare event forwarding (events-ingest Worker)
+	CFEventEndpoint string // e.g. "https://events.opencomputer.workers.dev/ingest"
+	CFEventSecret   string // HMAC secret shared with the events-ingest Worker
+
+	// Cloudflare admin callbacks (halt/resume + halt-list reconciler)
+	CFAdminSecret string // HMAC secret shared with api-edge Worker for /admin/* and /internal/halt-list
+	HaltListURL   string // e.g. "https://api.opencomputer.workers.dev/internal/halt-list"
 
 	// WorkOS
 	WorkOSAPIKey       string
@@ -141,10 +148,16 @@ func Load() (*Config, error) {
 		DatabaseURL: envOrDefault("OPENSANDBOX_DATABASE_URL", os.Getenv("DATABASE_URL")),
 		DataDir:     envOrDefault("OPENSANDBOX_DATA_DIR", "/data/sandboxes"),
 		JWTSecret:   os.Getenv("OPENSANDBOX_JWT_SECRET"),
-		NATSURL:     envOrDefault("OPENSANDBOX_NATS_URL", "nats://localhost:4222"),
 		Region:      envOrDefault("OPENSANDBOX_REGION", "local"),
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
+
+		CFEventEndpoint: os.Getenv("OPENSANDBOX_CF_EVENT_ENDPOINT"),
+		CFEventSecret:   os.Getenv("OPENSANDBOX_CF_EVENT_SECRET"),
+		CFAdminSecret:   os.Getenv("OPENSANDBOX_CF_ADMIN_SECRET"),
+		HaltListURL:     os.Getenv("OPENSANDBOX_HALT_LIST_URL"),
+
+		CellID: envOrDefault("OPENSANDBOX_CELL_ID", envOrDefault("OPENSANDBOX_REGION", "dev-cell-a")),
 
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
 		WorkOSClientID:     os.Getenv("WORKOS_CLIENT_ID"),

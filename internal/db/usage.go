@@ -86,6 +86,31 @@ func (s *Store) GetSandboxOrgID(ctx context.Context, sandboxID string) (string, 
 	return orgID.String(), nil
 }
 
+// BillingIdentity is the (org, plan) pair the CF event forwarder needs to
+// enrich envelope routing before shipping events upstream.
+type BillingIdentity struct {
+	OrgID string
+	Plan  string
+}
+
+// GetSandboxBillingIdentity joins sandbox_sessions → orgs to resolve the
+// billing identity for a sandbox in a single query.
+func (s *Store) GetSandboxBillingIdentity(ctx context.Context, sandboxID string) (BillingIdentity, error) {
+	var orgID uuid.UUID
+	var plan string
+	err := s.pool.QueryRow(ctx,
+		`SELECT s.org_id, o.plan
+		 FROM sandbox_sessions s
+		 JOIN orgs o ON o.id = s.org_id
+		 WHERE s.sandbox_id = $1
+		 ORDER BY s.started_at DESC LIMIT 1`,
+		sandboxID).Scan(&orgID, &plan)
+	if err != nil {
+		return BillingIdentity{}, err
+	}
+	return BillingIdentity{OrgID: orgID.String(), Plan: plan}, nil
+}
+
 // SandboxOwner holds the org and user details for a sandbox session.
 type SandboxOwner struct {
 	OrgID        string
