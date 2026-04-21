@@ -43,6 +43,7 @@ var secretMapping = map[string]string{
 	"server-cf-zone-id":             "OPENSANDBOX_CF_ZONE_ID",
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
+	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
 
 	// Worker secrets
 	"worker-jwt-secret":    "OPENSANDBOX_JWT_SECRET",
@@ -50,6 +51,7 @@ var secretMapping = map[string]string{
 	"worker-redis-url":     "OPENSANDBOX_REDIS_URL",
 	"worker-s3-access-key": "OPENSANDBOX_S3_ACCESS_KEY_ID",
 	"worker-s3-secret-key": "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
+	"worker-sentry-dsn":    "OPENSANDBOX_SENTRY_DSN",
 
 	// Shared
 	"pg-password": "OPENSANDBOX_PG_PASSWORD",
