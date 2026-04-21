@@ -21,10 +21,14 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
 )
+
+// ServerVersion is the control plane binary version, set at build time via -ldflags.
+var ServerVersion = "dev"
 
 func main() {
 	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
@@ -36,6 +40,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
+	flushSentry := observability.Init(cfg, "control-plane", ServerVersion)
+	defer flushSentry()
+	defer observability.Recover()
 
 	ctx := context.Background()
 

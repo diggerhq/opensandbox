@@ -18,6 +18,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/metrics"
+	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	qm "github.com/opensandbox/opensandbox/internal/qemu"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -44,6 +45,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
+	flushSentry := observability.Init(cfg, "worker", WorkerVersion)
+	defer flushSentry()
+	defer observability.Recover()
 
 	log.Printf("opensandbox-worker: starting (id=%s, region=%s, version=%s, backend=qemu)...", cfg.WorkerID, cfg.Region, WorkerVersion)
 

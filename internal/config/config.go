@@ -117,6 +117,13 @@ type Config struct {
 	// Secret encryption key (hex-encoded 32 bytes / 64 hex chars) for encrypting
 	// project secrets at rest in PostgreSQL. Required if using project secrets.
 	SecretEncryptionKey string
+
+	// Sentry error reporting. If SentryDSN is set, panics and captured errors
+	// are shipped to Sentry. Environment defaults to Region.
+	SentryDSN              string
+	SentryEnvironment      string
+	SentrySampleRate       float64 // 0.0–1.0, default 1.0 (capture every error)
+	SentryTracesSampleRate float64 // 0.0–1.0, default 0.0 (tracing off)
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -208,6 +215,15 @@ func Load() (*Config, error) {
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 
 		SecretEncryptionKey: os.Getenv("OPENSANDBOX_SECRET_ENCRYPTION_KEY"),
+
+		SentryDSN:              os.Getenv("OPENSANDBOX_SENTRY_DSN"),
+		SentryEnvironment:      os.Getenv("OPENSANDBOX_SENTRY_ENVIRONMENT"),
+		SentrySampleRate:       envOrDefaultFloat("OPENSANDBOX_SENTRY_SAMPLE_RATE", 1.0),
+		SentryTracesSampleRate: envOrDefaultFloat("OPENSANDBOX_SENTRY_TRACES_SAMPLE_RATE", 0.0),
+	}
+
+	if cfg.SentryEnvironment == "" {
+		cfg.SentryEnvironment = cfg.Region
 	}
 
 	// Default S3 region to worker region for same-region storage
@@ -237,6 +253,15 @@ func envOrDefaultInt(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envOrDefaultFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback
