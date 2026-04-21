@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -12,7 +13,8 @@ const identityTokenTTL = 10 * time.Minute
 
 // createAuthToken exchanges the current API key for a short-lived identity JWT.
 // Downstream services (sessions-api) use this to resolve key → owner without
-// calling back on every request.
+// calling back on every request. The token carries email + workos_user_id so
+// downstreams can emit analytics events consistently with opencomputer.
 func (s *Server) createAuthToken(c echo.Context) error {
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
@@ -27,14 +29,31 @@ func (s *Server) createAuthToken(c echo.Context) error {
 		})
 	}
 
-	orgStr := orgID.String()
-	var userStr *string
+	in := auth.IdentityTokenInput{OrgID: orgID.String()}
 	if userID := auth.GetUserID(c); userID != nil {
-		s := userID.String()
-		userStr = &s
+		userStr := userID.String()
+		in.UserID = &userStr
+
+		// Look up email + workos_user_id for downstream analytics identity.
+		// Soft failure: if the lookup fails, still issue a token (without
+		// those fields) rather than block the caller.
+		if s.store != nil {
+			user, err := s.store.GetUserByID(c.Request().Context(), *userID)
+			if err != nil {
+				log.Printf("identity: failed to load user %s: %v", userStr, err)
+			} else {
+				if user.Email != "" {
+					email := user.Email
+					in.Email = &email
+				}
+				if user.WorkOSUserID != nil && *user.WorkOSUserID != "" {
+					in.WorkOSUserID = user.WorkOSUserID
+				}
+			}
+		}
 	}
 
-	token, err := s.jwtIssuer.IssueIdentityToken(orgStr, userStr, identityTokenTTL)
+	token, err := s.jwtIssuer.IssueIdentityToken(in, identityTokenTTL)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to issue token",
