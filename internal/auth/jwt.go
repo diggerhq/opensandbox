@@ -47,25 +47,39 @@ func (j *JWTIssuer) IssueSandboxToken(orgID uuid.UUID, sandboxID, workerID strin
 
 // IdentityClaims are the JWT claims for identity tokens issued to downstream
 // services (e.g. sessions-api). They carry the caller's org and user identity
-// so the downstream can authorize without calling back to the control plane.
+// so the downstream can authorize and attribute analytics events without
+// calling back to the control plane.
 type IdentityClaims struct {
 	jwt.RegisteredClaims
-	OrgID  string  `json:"org_id"`
-	UserID *string `json:"user_id,omitempty"`
+	OrgID        string  `json:"org_id"`
+	UserID       *string `json:"user_id,omitempty"`
+	Email        *string `json:"email,omitempty"`
+	WorkOSUserID *string `json:"workos_user_id,omitempty"`
+}
+
+// IdentityTokenInput bundles the identity fields embedded in an identity JWT.
+// Nil pointers are omitted from the resulting token.
+type IdentityTokenInput struct {
+	OrgID        string
+	UserID       *string
+	Email        *string
+	WorkOSUserID *string
 }
 
 // IssueIdentityToken creates a short-lived JWT carrying the caller's identity.
-func (j *JWTIssuer) IssueIdentityToken(orgID string, userID *string, ttl time.Duration) (string, error) {
+func (j *JWTIssuer) IssueIdentityToken(in IdentityTokenInput, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := IdentityClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   orgID,
+			Subject:   in.OrgID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			Issuer:    "opensandbox",
 		},
-		OrgID:  orgID,
-		UserID: userID,
+		OrgID:        in.OrgID,
+		UserID:       in.UserID,
+		Email:        in.Email,
+		WorkOSUserID: in.WorkOSUserID,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

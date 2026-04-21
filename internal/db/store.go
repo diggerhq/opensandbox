@@ -372,6 +372,16 @@ func (s *Store) GetUserByEmail(ctx context.Context, email string) (*User, error)
 	return user, nil
 }
 
+func (s *Store) GetUserByID(ctx context.Context, userID uuid.UUID) (*User, error) {
+	user, err := scanUser(s.pool.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = $1`, userID,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("user not found: %w", err)
+	}
+	return user, nil
+}
+
 // --- API Key operations ---
 
 type APIKey struct {
