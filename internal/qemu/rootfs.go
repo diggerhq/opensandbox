@@ -32,13 +32,6 @@ func PrepareRootfs(baseImage, destPath string) error {
 		return fmt.Errorf("create qcow2 overlay: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 
-	// Expand the virtual size to 20 GB. The qcow2 is thin-provisioned so host
-	// disk usage stays proportional to actual writes, not virtual size.
-	resizeCmd := exec.Command("qemu-img", "resize", destPath, "20G")
-	if out, err := resizeCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("resize rootfs overlay: %w (%s)", err, strings.TrimSpace(string(out)))
-	}
-
 	return nil
 }
 
