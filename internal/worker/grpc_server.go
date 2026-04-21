@@ -21,6 +21,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -78,6 +79,8 @@ func NewGRPCServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 			Time:    30 * time.Second,
 			Timeout: 10 * time.Second,
 		}),
+		grpc.UnaryInterceptor(observability.UnaryServerInterceptor()),
+		grpc.StreamInterceptor(observability.StreamServerInterceptor()),
 	}
 
 	// Enable mTLS if configured
