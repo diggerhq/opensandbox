@@ -319,7 +319,7 @@ func main() {
 
 	// Background maintenance tasks
 	if opts.Store != nil && redisRegistry != nil {
-		go func() {
+		observability.Go("maintenance-loop", func() {
 			ticker := time.NewTicker(60 * time.Second)
 			defer ticker.Stop()
 			for range ticker.C {
@@ -329,6 +329,7 @@ func main() {
 				recovered, err := opts.Store.RecoverStaleMigrations(ctx, 60*time.Second)
 				if err != nil {
 					log.Printf("maintenance: stale migration recovery error: %v", err)
+					observability.CaptureError(err, "area", "maintenance", "op", "recover_stale_migrations")
 				} else if recovered > 0 {
 					log.Printf("maintenance: reverted %d stale migrations", recovered)
 				}
@@ -341,11 +342,12 @@ func main() {
 				orphaned, err := opts.Store.MarkOrphanedSandboxes(ctx, liveWorkers)
 				if err != nil {
 					log.Printf("maintenance: orphan reconciliation error: %v", err)
+					observability.CaptureError(err, "area", "maintenance", "op", "mark_orphaned_sandboxes")
 				} else if orphaned > 0 {
 					log.Printf("maintenance: marked %d sandboxes as error (worker lost)", orphaned)
 				}
 			}
-		}()
+		})
 	}
 
 	// Initialize control plane subdomain proxy (server mode only).

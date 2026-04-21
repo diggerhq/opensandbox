@@ -234,8 +234,8 @@ func main() {
 	// Wire checkpoint store into QEMU manager for base image archival + checkpoint rebasing
 	if checkpointStore != nil && qemuMgr != nil {
 		qemuMgr.SetCheckpointStore(checkpointStore)
-		go qemuMgr.UploadBaseImageIfNew()
-		go qemuMgr.MigrateStaleCheckpoints()
+		observability.Go("upload-base-image", qemuMgr.UploadBaseImageIfNew)
+		observability.Go("migrate-stale-checkpoints", qemuMgr.MigrateStaleCheckpoints)
 	}
 
 	// PostgreSQL store
@@ -306,7 +306,9 @@ func main() {
 	// Rolling agent upgrade: wake hibernated sandboxes with old agent, upgrade, re-hibernate.
 	// Runs in background so worker starts serving immediately.
 	if qemuMgr != nil && checkpointStore != nil {
-		go qemuMgr.RollingUpgradeHibernated(checkpointStore, 2)
+		observability.Go("rolling-upgrade-hibernated", func() {
+			qemuMgr.RollingUpgradeHibernated(checkpointStore, 2)
+		})
 	}
 
 	// Metrics

@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 )
@@ -40,7 +41,9 @@ func NewHTTPServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, execMgr *san
 		sandboxDomain:      sandboxDomain,
 	}
 
-	// Global middleware
+	// Global middleware. Sentry goes first so it can observe panics and
+	// attach request context before echo's Recover middleware handles them.
+	e.Use(observability.EchoMiddleware())
 	e.Use(middleware.Recover())
 	e.Use(middleware.Logger())
 	e.Use(middleware.CORS())
