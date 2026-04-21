@@ -1,6 +1,6 @@
 module github.com/opensandbox/opensandbox
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.0
@@ -17,6 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.68.4
 	github.com/creack/pty v1.1.24
+	github.com/getsentry/sentry-go v0.46.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
