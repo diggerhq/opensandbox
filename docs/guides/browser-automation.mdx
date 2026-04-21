@@ -1,0 +1,284 @@
+---
+title: "Browser Automation"
+description: "Run headless and headed browsers inside OpenComputer sandboxes — for scraping, logged-in workflows, and AI-driven automation."
+---
+
+OpenComputer sandboxes are full Linux VMs, which means you can run a real Chromium browser inside them the same way you would on a laptop. This guide walks through the setup that makes it *actually work*: the right Chromium flavor, the system libraries you need, the OpenComputer-specific networking quirks, and how to persist browser state across runs.
+
+The examples use [**libretto**](https://libretto.sh), an AI-friendly CLI + library on top of Playwright. Everything here applies equally to raw Playwright, Puppeteer, [browser-use](https://browser-use.com/), or [Browserbase](https://www.browserbase.com/) — libretto is just a convenient default.
+
+<CardGroup cols={2}>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/diggerhq/oc-browser-automation">
+    Runnable reference implementation of everything in this guide.
+  </Card>
+  <Card title="libretto Docs" icon="book" href="https://libretto.sh/docs">
+    CLI + library reference for the browser-automation tool used in the examples.
+  </Card>
+</CardGroup>
+
+---
+
+## When to reach for a browser (vs. an API)
+
+- The target has no API (flight aggregators, airline sites, most SaaS admin UIs).
+- The target needs a real logged-in session (cookies + localStorage + JS-challenge cookies).
+- You want **AI-driven interaction** — describe a task in English, let the agent figure out the clicks.
+- You need screenshots / visual artefacts for verification.
+
+If the site has a good API, use the API. A browser is slower, heavier, and flakier. But when you need it, OpenComputer gives you real VMs — not containers — so you can run full Chromium with no Docker-flavored limitations.
+
+---
+
+## Step 1: Build a snapshot with Chromium pre-installed
+
+Browser setup is heavy (apt packages + Chromium binary is ~500MB). Bake it into a [named snapshot](/sandboxes/snapshots) once, launch sandboxes from it in seconds.
+
+```typescript build-snapshot.ts
+import { Image, Snapshots } from "@opencomputer/sdk/node";
+
+// Runtime deps Chromium links against on Ubuntu 22.04. Matches Playwright's
+// published dependency list.
+const CHROMIUM_DEPS = [
+  "libnss3", "libnspr4", "libatk1.0-0", "libatk-bridge2.0-0", "libcups2",
+  "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1", "libxfixes3",
+  "libxrandr2", "libxext6", "libgbm1", "libpango-1.0-0", "libcairo2",
+  "libasound2", "fonts-liberation",
+  // libnss3-tools gives us `certutil` — needed at runtime to trust OC's
+  // egress-proxy CA in Chromium (Chromium ignores SSL_CERT_FILE).
+  "libnss3-tools",
+];
+
+const image = Image.base()
+  .aptInstall(CHROMIUM_DEPS)
+  .workdir("/home/sandbox")
+  .runCommands(
+    "cd /home/sandbox && npm init -y >/dev/null",
+    // Install libretto + AI adapter locally so `npx libretto` resolves without
+    // a cold npm fetch at runtime.
+    "cd /home/sandbox && npm install --no-audit --no-fund libretto @ai-sdk/anthropic",
+    // Playwright downloads its own Chromium build — we want headless-shell
+    // for lightweight scraping, or full chromium for headed/VNC scenarios.
+    "cd /home/sandbox && npx --yes playwright install chromium-headless-shell",
+  );
+
+const snapshots = new Snapshots();
+await snapshots.create({ name: "browser", image });
+```
+
+<Warning>
+**Don't apt-install `chromium-browser` on Ubuntu 22.04.** That package is a snap shim that won't run in a minimal VM. Either install Google Chrome via its apt repo (`google-chrome-stable`), or rely on Playwright's bundled Chromium (recommended — it's purpose-built for automation).
+</Warning>
+
+---
+
+## Step 2: Per-boot setup that can't be baked in
+
+A few things need to run at sandbox startup rather than during snapshot build, because they depend on per-sandbox state.
+
+```typescript launch.ts
+import { Sandbox, SecretStore } from "@opencomputer/sdk/node";
+
+const sandbox = await Sandbox.create({
+  snapshot: "browser",
+  envs: {
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY!,
+    // Keep Playwright/Chromium off the small tmpfs /dev/shm and /tmp —
+    // write profile dirs, cache, everything to the data disk.
+    TMPDIR: "/home/sandbox/tmp",
+  },
+  secretStore: "browser-egress",  // see "Networking" section below
+});
+
+// Populate /etc/hosts — the guest kernel sets up /etc/resolv.conf but not
+// /etc/hosts, and libretto's Playwright CDP client hardcodes http://localhost
+// which will ENOTFOUND without this.
+await sandbox.commands.run(
+  "grep -q 'localhost' /etc/hosts || " +
+    "(printf '127.0.0.1 localhost\\n::1 localhost\\n' | sudo tee -a /etc/hosts)",
+);
+
+// Trust OC's egress-proxy CA in Chromium's NSS store. Chromium ignores
+// SSL_CERT_FILE / NODE_EXTRA_CA_CERTS — the env vars OC sets for libraries
+// have no effect on the browser's TLS validation.
+await sandbox.commands.run(
+  [
+    "mkdir -p /home/sandbox/.pki/nssdb",
+    "certutil -d sql:/home/sandbox/.pki/nssdb -N --empty-password || true",
+    "certutil -d sql:/home/sandbox/.pki/nssdb -A -n opensandbox-proxy -t 'TC,C,T' " +
+      "-i /usr/local/share/ca-certificates/opensandbox-proxy.crt",
+  ].join(" && "),
+);
+
+await sandbox.commands.run("mkdir -p /home/sandbox/tmp && chmod 700 /home/sandbox/tmp");
+```
+
+---
+
+## Networking: the `secretStore` requirement
+
+<Warning>
+This is the single most common gotcha. A sandbox without a `secretStore` attached **has no outbound egress at all** — every HTTPS request gets a `407` from the internal proxy.
+</Warning>
+
+OpenComputer routes all outbound traffic through a secrets-injection proxy. The proxy only accepts traffic from sandboxes that have at least one sealed secret registered, because session registration happens as part of sealing secrets.
+
+The workaround is to create a `SecretStore` with a wildcard egress allowlist and at least one (possibly dummy) entry:
+
+```typescript
+import { SecretStore } from "@opencomputer/sdk/node";
+
+const stores = await SecretStore.list();
+let store = stores.find((s) => s.name === "browser-egress");
+if (!store) {
+  store = await SecretStore.create({
+    name: "browser-egress",
+    egressAllowlist: ["*"],  // wildcard — scope this down for production
+  });
+}
+await SecretStore.setSecret(store.id, "PLACEHOLDER", "not-used-just-triggers-session");
+
+const sandbox = await Sandbox.create({
+  snapshot: "browser",
+  secretStore: "browser-egress",
+});
+```
+
+With the store attached, outbound traffic flows normally and the `opensandbox-proxy.crt` we trusted earlier lets Chromium validate the MITM-rewritten certs.
+
+---
+
+## Step 3: Run a headless browser
+
+With the snapshot and per-boot setup in place, driving the browser is a normal libretto session:
+
+```typescript
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const run = promisify(execFile);
+
+// Open a page in a named session — libretto persists cookies/localStorage
+// per session name in .libretto/sessions/<name>/.
+await run("npx", ["libretto", "open", "https://example.com", "--session", "demo", "--headless"], {
+  cwd: "/home/sandbox",
+});
+
+// AI snapshot — Claude analyzes the page and returns a summary + selectors.
+const { stdout } = await run("npx", [
+  "libretto", "snapshot", "--session", "demo",
+  "--objective", "Describe the main content and interactive elements.",
+  "--context", "Freshly loaded page",
+], { cwd: "/home/sandbox", maxBuffer: 8 * 1024 * 1024 });
+
+console.log(stdout);
+```
+
+The `snapshot` command requires an `ANTHROPIC_API_KEY` (or an OpenAI / Gemini / Vertex key — configure via `.libretto/config.json`). It's the AI-driven feature that makes libretto different from raw Playwright.
+
+---
+
+## Step 4: Run a headed browser (for interactive login)
+
+For workflows where the user needs to log in themselves, you can render the browser to a virtual display and expose it via VNC. This lets you embed the running browser in a web UI.
+
+Install the VNC stack at runtime (same no-rebuild pattern as per-boot setup):
+
+```typescript
+await sandbox.commands.run(
+  "sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11vnc novnc websockify",
+);
+
+// Start Xvfb → x11vnc → websockify as long-lived exec sessions so they
+// persist across individual commands.
+const xvfb = await sandbox.exec.start("Xvfb", {
+  args: [":99", "-screen", "0", "1280x800x24", "-ac"],
+});
+await new Promise((r) => setTimeout(r, 1500));
+
+const x11vnc = await sandbox.exec.start("x11vnc", {
+  args: ["-display", ":99", "-forever", "-shared", "-nopw", "-rfbport", "5900", "-quiet"],
+});
+
+const websockify = await sandbox.exec.start("websockify", {
+  args: ["--web=/usr/share/novnc/", "6080", "localhost:5900"],
+});
+```
+
+Set `DISPLAY=:99` in the sandbox envs when you create it, then open with `--headed`:
+
+```typescript
+await run("npx", ["libretto", "open", "https://app.example.com", "--session", "login", "--headed"], {
+  cwd: "/home/sandbox",
+  env: { ...process.env, DISPLAY: ":99" },
+});
+```
+
+The VNC WebSocket is available on port 6080 — get its preview URL with `sandbox.getPreviewDomain(6080)` and embed `<iframe src="https://<id>-p6080.<domain>/vnc.html?autoconnect=true">` in your UI. Users click/type directly in the real browser.
+
+---
+
+## Step 5: Persist login across runs
+
+After the user logs in, save the auth state:
+
+```typescript
+await run("npx", ["libretto", "save", "app.example.com", "--session", "login"], {
+  cwd: "/home/sandbox",
+});
+// → writes /home/sandbox/.libretto/profiles/app.example.com.json
+```
+
+The profile lives on the data disk, which survives sandbox hibernation. For cross-sandbox persistence, [snapshot the sandbox](/sandboxes/snapshots) after login and launch future sandboxes from that warm snapshot — they'll boot already logged in.
+
+---
+
+## Resource and concurrency limits
+
+- **Memory per VM** — default is ~1GB. Each headless Chromium uses ~300-500MB; headed full Chromium uses ~500-800MB. Pass `memoryMB: 16384` to `Sandbox.create` for browser-heavy work.
+- **File descriptors** — the default `nofile` limit of 1024 is too low for Chromium (which opens hundreds of FDs). Launch the server process under `sudo bash -c "ulimit -n 65535 && exec ..."` to raise it.
+- **Concurrency** — with default memory, run 2-3 browsers concurrently per sandbox. With 16GB and proper limits, 5+ works cleanly.
+
+---
+
+## Choosing a browser automation library
+
+| Library | Best for | OC integration |
+|---|---|---|
+| **Playwright** (direct) | Scripted automation with known selectors | No special setup beyond this guide |
+| **libretto** | AI-agent-driven snapshots + interactive workflows | Shown above |
+| **browser-use** | End-to-end natural-language agents | Install via `pip install browser-use`; set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` |
+| **Browserbase** | Production-grade bot-detection bypass | Use libretto with `--provider browserbase` + API key |
+
+All four run inside OC sandboxes; the snapshot recipe above is compatible with all of them.
+
+---
+
+## Troubleshooting
+
+**`407 from proxy after CONNECT`**
+Your sandbox isn't registered with the secrets proxy. Attach a `secretStore` with at least one secret entry.
+
+**Chromium exits with status 1 on launch**
+Missing shared library. Check `.libretto/sessions/<name>/logs.jsonl` for the specific `.so` missing. Add it to `CHROMIUM_DEPS` in the snapshot or install at runtime.
+
+**`net::ERR_CERT_AUTHORITY_INVALID`**
+Chromium doesn't trust OC's egress-proxy CA. Run the `certutil` NSS-import step from "Per-boot setup".
+
+**`ENOTFOUND localhost`**
+The guest's `/etc/hosts` is missing the localhost entry. Run the `grep … /etc/hosts` step from "Per-boot setup".
+
+**`EAGAIN` / `uv_thread_create` / `Killed`**
+Out of memory or leaked browser processes from prior runs. Reap stale Chromium processes between sessions (`pkill -9 -f chrome-headless-shell`) and reduce `MAX_CONCURRENT_BROWSERS`.
+
+**Preview URL shows "Waiting for server"**
+Your server is bound to `127.0.0.1` instead of `0.0.0.0`. OC's edge forwards from the worker interface, not loopback. Set `hostname: "0.0.0.0"` when calling your web server's `listen()`.
+
+**SSE / streaming responses return 502**
+OC's preview-URL edge buffers response bodies — streaming chunks don't reach the client. Use short-polling (`POST /api/job` → `GET /api/job/:id`) instead of SSE or WebSockets for progress updates. WebSockets (for VNC, etc.) *do* pass through as upgrade connections; buffering only affects regular HTTP responses.
+
+---
+
+## Next steps
+
+- Read the [libretto docs](https://libretto.sh/docs) for the full CLI + library reference.
+- See [Snapshots](/sandboxes/snapshots) for how to checkpoint a warmed-up browser VM.
+- See [Secret Stores](/agents-api/secret-stores) for scoping egress and sealing real credentials.
