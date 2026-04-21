@@ -485,6 +485,26 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	}
 	log.Printf("qemu: golden: virtio_mem module loaded")
 
+	// Grow rootfs filesystem to fill the expanded virtual disk.
+	// The qcow2 overlay was resized to 20 GB but the ext4 filesystem still
+	// matches the smaller base image. resize2fs expands it in-place.
+	growCtx, growCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	growResp, growErr := agentClient.Exec(growCtx, &pb.ExecRequest{
+		Command:   "/bin/sh",
+		Args:      []string{"-c", "resize2fs /dev/vda"},
+		RunAsRoot: true,
+	})
+	growCancel()
+	if growErr != nil || (growResp != nil && growResp.ExitCode != 0) {
+		stderr := ""
+		if growResp != nil {
+			stderr = growResp.Stderr
+		}
+		log.Printf("qemu: golden: resize2fs /dev/vda failed (non-fatal): %v %s", growErr, stderr)
+	} else {
+		log.Printf("qemu: golden: rootfs expanded to 20GB")
+	}
+
 	// Unmount /home/sandbox and sync before snapshot — the golden migration state
 	// includes virtio-blk device state (ring buffers, pending I/O). If the data disk
 	// is mounted when we snapshot, those stale I/O ops will corrupt any fresh
@@ -1313,6 +1333,16 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 		return nil, fmt.Errorf("agent not ready: %w", err)
 	}
 	vm.agent = agentClient
+
+	// Grow rootfs filesystem if the disk is larger than the current ext4 fs.
+	// Golden-forked sandboxes already have the grown fs; this covers cold boot.
+	growCtx, growCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	agentClient.Exec(growCtx, &pb.ExecRequest{
+		Command:   "/bin/sh",
+		Args:      []string{"-c", "resize2fs /dev/vda 2>/dev/null"},
+		RunAsRoot: true,
+	})
+	growCancel()
 
 	envsToInject := m.sealSandboxEnvs(context.Background(), id, netCfg, agentClient, cfg)
 	if len(envsToInject) > 0 {
