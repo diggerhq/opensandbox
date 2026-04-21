@@ -430,6 +430,9 @@ func (p *SandboxAPIProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID s
 
 	_ = p.store.MarkHibernationRestored(ctx, sandboxID)
 	_ = p.store.UpdateSandboxSessionForWake(ctx, sandboxID, worker.ID)
+	if worker.GoldenVersion != "" {
+		_ = p.store.SetSandboxGoldenVersion(ctx, sandboxID, worker.GoldenVersion)
+	}
 
 	if worker.HTTPAddr == "" {
 		return nil, "", fmt.Errorf("worker %s has no HTTP address", worker.ID)

@@ -1097,13 +1097,28 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		return fmt.Errorf("pre-copy drives: %w", err)
 	}
 
-	// If the source has no goldenVersion, we can't safely rebase on the target.
-	// Fall back to hibernate → wake which handles legacy checkpoints.
-	if preCopyResp.GoldenVersion == "" {
-		return fmt.Errorf("source sandbox has no goldenVersion — cannot live migrate safely; use hibernate/wake instead")
+	// Resolve golden version with three-tier fallback:
+	// 1. PreCopyDrives response (worker in-memory)
+	// 2. PG sandbox_sessions.golden_version (durable, set at creation)
+	// 3. Worker heartbeat (all sandboxes on a worker share its golden base)
+	sourceGoldenVersion := preCopyResp.GoldenVersion
+	if sourceGoldenVersion == "" && s.store != nil {
+		if session, err := s.store.GetSandboxSession(ctx, sandboxID); err == nil && session.GoldenVersion != "" {
+			sourceGoldenVersion = session.GoldenVersion
+			log.Printf("scaler: migrate %s: goldenVersion from PG: %s", sandboxID, sourceGoldenVersion)
+		}
+	}
+	if sourceGoldenVersion == "" {
+		sourceWorker := s.getWorkerInfo(sourceWorkerID)
+		if sourceWorker != nil && sourceWorker.GoldenVersion != "" {
+			sourceGoldenVersion = sourceWorker.GoldenVersion
+			log.Printf("scaler: migrate %s: sandbox missing goldenVersion, using worker's: %s", sandboxID, sourceGoldenVersion)
+		} else {
+			return fmt.Errorf("source sandbox has no goldenVersion — not in gRPC response, PG, or worker heartbeat")
+		}
 	}
 
-	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, golden=%s)", sandboxID, time.Since(t0).Milliseconds(), preCopyResp.GoldenVersion)
+	log.Printf("scaler: migrate %s: drives pre-copied to S3 (%dms, golden=%s)", sandboxID, time.Since(t0).Milliseconds(), sourceGoldenVersion)
 
 	// Step 2: Prepare target (downloads thin overlay from S3, rebases if needed, starts QEMU -incoming)
 	// CPU and memory come from the source worker — must match exactly for QEMU migration.
@@ -1136,7 +1151,7 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		RootfsS3Key:         preCopyResp.RootfsKey,
 		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
 		OverlayMode:         true,
-		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		SourceGoldenVersion: sourceGoldenVersion,
 		TargetMemoryMb:      4096,
 	})
 	if err != nil {
@@ -1174,6 +1189,12 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := s.store.CompleteMigration(dbCtx, sandboxID, targetWorkerID); err != nil {
 			log.Printf("scaler: migrate %s: WARNING: CompleteMigration DB update failed: %v", sandboxID, err)
+		}
+		// Update golden version to target worker's — the rootfs was rebased
+		// to the target's base image during migration.
+		targetWorker := s.getWorkerInfo(targetWorkerID)
+		if targetWorker != nil && targetWorker.GoldenVersion != "" {
+			_ = s.store.SetSandboxGoldenVersion(dbCtx, sandboxID, targetWorker.GoldenVersion)
 		}
 		dbCancel()
 	}

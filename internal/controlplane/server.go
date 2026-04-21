@@ -211,6 +211,12 @@ func (s *Server) createSandbox(c echo.Context) error {
 	metadataJSON, _ := json.Marshal(req.Metadata)
 	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
 
+	// Persist golden version from worker heartbeat so the scaler can read it
+	// from PG instead of relying on in-memory state via gRPC.
+	if worker.GoldenVersion != "" {
+		_ = s.store.SetSandboxGoldenVersion(ctx, grpcResp.SandboxId, worker.GoldenVersion)
+	}
+
 	// Issue sandbox-scoped JWT (24h TTL — independent of sandbox idle timeout)
 	token, err := s.jwtIssuer.IssueSandboxToken(orgID, grpcResp.SandboxId, worker.ID, 24*time.Hour)
 	if err != nil {

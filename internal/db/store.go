@@ -118,6 +118,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{25, "migrations/023_checkpoints_public.up.sql"},
 		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
 		{27, "migrations/024_patch_error_tracking.up.sql"},
+		{28, "migrations/025_sandbox_golden_version.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -485,6 +486,7 @@ type SandboxSession struct {
 	LastPatchSequence    int             `json:"lastPatchSequence"`
 	MigratingToWorker    string          `json:"migratingToWorker,omitempty"`
 	PatchError           *string         `json:"patchError,omitempty"`
+	GoldenVersion        string          `json:"goldenVersion,omitempty"`
 }
 
 func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
@@ -496,11 +498,11 @@ func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID st
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error`,
+		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version`,
 		sandboxID, orgID, userID, template, region, workerID, config, metadata, status,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
-		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
+		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sandbox session: %w", err)
 	}
@@ -642,7 +644,7 @@ func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*Sandb
 		 FROM sandbox_sessions WHERE sandbox_id = $1 ORDER BY started_at DESC LIMIT 1`, sandboxID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
-		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError)
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox session not found: %w", err)
 	}
@@ -673,7 +675,7 @@ func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError, &sess.GoldenVersion); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)
@@ -1373,6 +1375,14 @@ func (s *Store) SetSandboxPatchError(ctx context.Context, sandboxID string, patc
 	return err
 }
 
+// SetSandboxGoldenVersion sets the golden_version on a sandbox session.
+func (s *Store) SetSandboxGoldenVersion(ctx context.Context, sandboxID, goldenVersion string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET golden_version = $1 WHERE sandbox_id = $2`,
+		goldenVersion, sandboxID)
+	return err
+}
+
 // SetSandboxCheckpointID sets the based_on_checkpoint_id for a sandbox session.
 func (s *Store) SetSandboxCheckpointID(ctx context.Context, sandboxID string, checkpointID uuid.UUID) error {
 	_, err := s.pool.Exec(ctx,
@@ -1397,7 +1407,7 @@ func (s *Store) ListSandboxesByCheckpoint(ctx context.Context, checkpointID uuid
 		var sess SandboxSession
 		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
 			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
-			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError); err != nil {
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError, &sess.GoldenVersion); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, sess)

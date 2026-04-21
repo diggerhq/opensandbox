@@ -225,6 +225,9 @@ func (p *ControlPlaneProxy) wakeHibernatedSandbox(ctx context.Context, sandboxID
 	// Update DB: mark hibernation restored, update session to running on new worker
 	_ = p.store.MarkHibernationRestored(ctx, sandboxID)
 	_ = p.store.UpdateSandboxSessionForWake(ctx, sandboxID, worker.ID)
+	if worker.GoldenVersion != "" {
+		_ = p.store.SetSandboxGoldenVersion(ctx, sandboxID, worker.GoldenVersion)
+	}
 
 	workerURL := worker.HTTPAddr
 	if workerURL == "" {

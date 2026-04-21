@@ -472,6 +472,9 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
 		metadataJSON, _ := json.Marshal(cfg.Metadata)
 		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, "pending")
+		if worker.GoldenVersion != "" {
+			_ = s.store.SetSandboxGoldenVersion(ctx, sandboxID, worker.GoldenVersion)
+		}
 		if templateID != nil {
 			_ = s.store.UpdateSandboxSessionTemplate(ctx, sandboxID, *templateID)
 		}
@@ -1660,6 +1663,9 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	// Mark hibernation as restored, update session
 	_ = s.store.MarkHibernationRestored(c.Request().Context(), sandboxID)
 	_ = s.store.UpdateSandboxSessionForWake(c.Request().Context(), sandboxID, worker.ID)
+	if worker.GoldenVersion != "" {
+		_ = s.store.SetSandboxGoldenVersion(c.Request().Context(), sandboxID, worker.GoldenVersion)
+	}
 
 	// Refresh the proxy route cache with the new worker — wake may have moved
 	// the sandbox to a different worker than where it was hibernated, and any
@@ -2251,6 +2257,12 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
 		metadataJSON, _ := json.Marshal(originalCfg.Metadata)
 		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
+		// Set golden version from worker heartbeat
+		if s.workerRegistry != nil {
+			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {
+				_ = s.store.SetSandboxGoldenVersion(ctx, sandboxID, w.GoldenVersion)
+			}
+		}
 		// Track checkpoint lineage for patch system
 		_ = s.store.SetSandboxCheckpointID(ctx, sandboxID, checkpointID)
 	}
