@@ -1103,8 +1103,8 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	// 3. Worker heartbeat (all sandboxes on a worker share its golden base)
 	sourceGoldenVersion := preCopyResp.GoldenVersion
 	if sourceGoldenVersion == "" && s.store != nil {
-		if session, err := s.store.GetSandboxSession(ctx, sandboxID); err == nil && session.GoldenVersion != "" {
-			sourceGoldenVersion = session.GoldenVersion
+		if session, err := s.store.GetSandboxSession(ctx, sandboxID); err == nil && session.GoldenVersion != nil && *session.GoldenVersion != "" {
+			sourceGoldenVersion = *session.GoldenVersion
 			log.Printf("scaler: migrate %s: goldenVersion from PG: %s", sandboxID, sourceGoldenVersion)
 		}
 	}

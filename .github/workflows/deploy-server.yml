@@ -167,16 +167,17 @@ jobs:
           fi
           echo "Created sandbox: $SB"
 
-          # Exec with retry
+          # Exec with retry — use -s (not -sf) so we see error responses
           RESULT=""
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
             sleep 5
-            RESULT=$(curl -sf --max-time 15 \
+            RAW=$(curl -s --max-time 15 \
               -H "Content-Type: application/json" \
               -H "X-API-Key: ${{ secrets.API_KEY }}" \
               -X POST "${API_URL}/api/sandboxes/$SB/exec/run" \
-              -d '{"cmd":"echo","args":["deploy-ok"],"timeout":10}' | jq -r .stdout 2>/dev/null || echo "")
-            echo "Attempt $attempt: '$RESULT'"
+              -d '{"cmd":"echo","args":["deploy-ok"],"timeout":10}')
+            RESULT=$(echo "$RAW" | jq -r .stdout 2>/dev/null || echo "")
+            echo "Attempt $attempt: stdout='$RESULT' raw='$RAW'"
             echo "$RESULT" | grep -q "deploy-ok" && break
           done
 
