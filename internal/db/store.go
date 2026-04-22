@@ -119,6 +119,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
 		{27, "migrations/024_patch_error_tracking.up.sql"},
 		{28, "migrations/025_sandbox_golden_version.up.sql"},
+		{29, "migrations/026_sandbox_tags.up.sql"},
 	}
 
 	for _, m := range migrations {
