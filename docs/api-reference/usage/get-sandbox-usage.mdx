@@ -1,0 +1,42 @@
+---
+title: 'Sandbox Usage Drilldown'
+api: 'GET /api/sandboxes/{id}/usage'
+---
+
+Per-sandbox GB-second spend over a window, plus tag set and
+lifetime bounds. Works for torn-down sandboxes — scale events and
+tags persist.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID.
+</ParamField>
+
+<ParamField query="from" type="string">
+  ISO-8601 lower bound. Default: now minus 30 days.
+</ParamField>
+
+<ParamField query="to" type="string">
+  ISO-8601 upper bound. Default: now. Window must be ≤ 90 days.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "sandboxId": "sb-abc",
+  "alias": "my-agent",
+  "status": "running",
+  "from": "2026-03-23T00:00:00Z",
+  "to":   "2026-04-22T00:00:00Z",
+  "memoryGbSeconds":      12345.6,
+  "diskOverageGbSeconds":   789.0,
+  "tags":                 { "env": "prod", "team": "payments" },
+  "tagsLastUpdatedAt":    "2026-04-19T14:02:00Z",
+  "firstStartedAt":       "2026-03-25T09:13:02Z",
+  "lastEndedAt":          null
+}
+```
+</ResponseExample>
+
+`firstStartedAt` / `lastEndedAt` come from session records clamped to
+the query window. `lastEndedAt` is `null` while any session for this
+sandbox is open.

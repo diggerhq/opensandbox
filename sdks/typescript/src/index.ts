@@ -5,6 +5,20 @@ export { Exec, type ProcessResult, type RunOpts, type ExecSession, type ExecSess
 export { Pty, type PtySession, type PtyOpts } from "./pty.js";
 export { Templates, type TemplateInfo } from "./template.js";
 export { SecretStore, type SecretStoreInfo, type SecretEntryInfo, type SecretStoreOpts, type CreateSecretStoreOpts, type UpdateSecretStoreOpts } from "./project.js";
+export {
+  Usage,
+  Tags,
+  type UsageSandboxItem,
+  type UsageTagItem,
+  type UsageTotals,
+  type UsageUntaggedBucket,
+  type UsageBySandboxResponse,
+  type UsageByTagResponse,
+  type UsageQueryOpts,
+  type UsageFilterMap,
+  type SandboxUsageResponse,
+  type TagKeyInfo,
+} from "./usage.js";
 // Node.js-only modules (use crypto, fs, path) — import via "@opencomputer/sdk/node".
 export type { ImageManifest, ImageStep } from "./image.js";
 export type { SnapshotInfo, CreateSnapshotOpts } from "./snapshot.js";

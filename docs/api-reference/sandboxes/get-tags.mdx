@@ -1,0 +1,22 @@
+---
+title: 'Get Sandbox Tags'
+api: 'GET /api/sandboxes/{id}/tags'
+---
+
+Read the current tag set for a sandbox.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "tags": { "env": "prod", "team": "payments" },
+  "tagsLastUpdatedAt": "2026-04-19T14:02:00Z"
+}
+```
+</ResponseExample>
+
+A sandbox with no tags returns `"tags": {}` and `"tagsLastUpdatedAt":
+null`.

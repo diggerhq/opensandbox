@@ -1,0 +1,92 @@
+---
+title: 'Usage Aggregator'
+api: 'GET /api/usage'
+---
+
+Aggregate GB-second spend grouped by sandbox or by tag. Dollars are
+not exposed — Stripe owns pricing, and this endpoint returns the same
+physical quantities the invoice is computed from.
+
+<Note>
+Freshness: accurate to the minute for cleanly-shutdown sandboxes.
+A silently-dead worker leaves scale events open until the worker
+restarts; until then, accrual keeps going. This is the same behavior
+as the Stripe pipeline.
+</Note>
+
+<ParamField query="groupBy" type="string" required>
+  `sandbox` for top sandboxes, or `tag:<key>` for spend by tag value.
+  Keys may contain `:` — everything after the first `:` is the tag
+  key (so `groupBy=tag:team:payments` groups by the key
+  `team:payments`).
+</ParamField>
+
+<ParamField query="from" type="string">
+  ISO-8601 inclusive lower bound. Default: now minus 30 days. Max
+  window: 90 days.
+</ParamField>
+
+<ParamField query="to" type="string">
+  ISO-8601 exclusive upper bound. Default: now.
+</ParamField>
+
+<ParamField query="filter[tag:<key>]" type="string">
+  One param per dimension. Comma-separated values are OR'd within
+  that dimension; different `filter[...]` params are AND'd across
+  dimensions. Passing the same `filter[...]` key twice returns 400 —
+  put multiple OR values in one comma-separated string instead. Empty
+  value (`filter[tag:team]=`) matches sandboxes without the `team`
+  key.
+</ParamField>
+
+<ParamField query="sort" type="string">
+  `-memoryGbSeconds` (default) or `-diskOverageGbSeconds`.
+</ParamField>
+
+<ParamField query="limit" type="integer">
+  Max items per page. Default 50, max 500.
+</ParamField>
+
+<ParamField query="cursor" type="string">
+  Opaque cursor from a prior response's `nextCursor`.
+</ParamField>
+
+<ResponseExample>
+```json groupBy=sandbox
+{
+  "from": "2026-03-23T00:00:00Z",
+  "to":   "2026-04-22T00:00:00Z",
+  "groupBy": "sandbox",
+  "total": { "memoryGbSeconds": 20000, "diskOverageGbSeconds": 360 },
+  "items": [
+    {
+      "sandboxId": "sb-abc",
+      "alias": "my-agent",
+      "status": "running",
+      "tags": { "env": "prod", "team": "payments" },
+      "tagsLastUpdatedAt": "2026-04-19T14:02:00Z",
+      "memoryGbSeconds": 8000,
+      "diskOverageGbSeconds": 120
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+```json groupBy=tag:team
+{
+  "from": "2026-03-23T00:00:00Z",
+  "to":   "2026-04-22T00:00:00Z",
+  "groupBy": "tag:team",
+  "total":    { "memoryGbSeconds": 19000, "diskOverageGbSeconds": 340 },
+  "untagged": { "memoryGbSeconds": 1000,  "diskOverageGbSeconds":  20, "sandboxCount": 2 },
+  "items": [
+    { "tagKey": "team", "tagValue": "payments",
+      "memoryGbSeconds": 8000, "diskOverageGbSeconds": 120, "sandboxCount": 12 },
+    { "tagKey": "team", "tagValue": "growth",
+      "memoryGbSeconds": 4000, "diskOverageGbSeconds":  50, "sandboxCount":  5 }
+  ],
+  "nextCursor": null
+}
+```
+</ResponseExample>

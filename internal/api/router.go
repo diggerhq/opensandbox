@@ -199,6 +199,13 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
 
+	// Usage + tags (design: .agents/design/sandbox-tags-and-usage.md)
+	api.GET("/usage", s.getUsage)
+	api.GET("/tags", s.listTags)
+	api.GET("/sandboxes/:id/usage", s.getSandboxUsage)
+	api.GET("/sandboxes/:id/tags", s.getSandboxTags)
+	api.PUT("/sandboxes/:id/tags", s.putSandboxTags)
+
 	// Hibernation
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)

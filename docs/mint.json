@@ -206,7 +206,17 @@
             "api-reference/sandboxes/delete",
             "api-reference/sandboxes/set-timeout",
             "api-reference/sandboxes/hibernate",
-            "api-reference/sandboxes/wake"
+            "api-reference/sandboxes/wake",
+            "api-reference/sandboxes/get-tags",
+            "api-reference/sandboxes/set-tags"
+          ]
+        },
+        {
+          "group": "Usage",
+          "pages": [
+            "api-reference/usage/get-usage",
+            "api-reference/usage/get-sandbox-usage",
+            "api-reference/usage/list-tags"
           ]
         },
         {

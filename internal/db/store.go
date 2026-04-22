@@ -119,6 +119,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{26, "migrations/023_free_credits_remaining_cents.up.sql"},
 		{27, "migrations/024_patch_error_tracking.up.sql"},
 		{28, "migrations/025_sandbox_golden_version.up.sql"},
+		{29, "migrations/026_sandbox_tags.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -659,6 +660,63 @@ func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*Sandb
 		return nil, fmt.Errorf("sandbox session not found: %w", err)
 	}
 	return session, nil
+}
+
+// GetSandboxSessionInOrg is the org-scoped variant of
+// GetSandboxSession — sandbox IDs are not globally unique, so every
+// read that is going to gate authorization or hydrate tenant-visible
+// fields must filter on (org_id, sandbox_id) not sandbox_id alone
+// (design F12). Returns the latest session for the (org, sandbox)
+// pair, or an error when no such session exists.
+func (s *Store) GetSandboxSessionInOrg(ctx context.Context, orgID uuid.UUID, sandboxID string) (*SandboxSession, error) {
+	session := &SandboxSession{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version
+		 FROM sandbox_sessions
+		 WHERE org_id = $1 AND sandbox_id = $2
+		 ORDER BY started_at DESC LIMIT 1`, orgID, sandboxID,
+	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
+		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox session not found: %w", err)
+	}
+	return session, nil
+}
+
+// GetLatestSandboxSessionsMulti returns the most recent session per
+// sandbox_id for an org — one row per ID, picked by MAX(started_at)
+// via DISTINCT ON. Used by the /usage groupBy=sandbox handler to
+// hydrate alias/status without issuing a GetSandboxSession per row
+// (design F11: 500-row × 10s budget rules out N+1). Sandboxes with
+// no session in the result map aren't included.
+func (s *Store) GetLatestSandboxSessionsMulti(ctx context.Context, orgID uuid.UUID, sandboxIDs []string) (map[string]*SandboxSession, error) {
+	if len(sandboxIDs) == 0 {
+		return map[string]*SandboxSession{}, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT ON (sandbox_id)
+		        id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version
+		 FROM sandbox_sessions
+		 WHERE org_id = $1 AND sandbox_id = ANY($2)
+		 ORDER BY sandbox_id, started_at DESC`,
+		orgID, sandboxIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to batch-load sandbox sessions: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]*SandboxSession{}
+	for rows.Next() {
+		sess := &SandboxSession{}
+		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
+			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError, &sess.GoldenVersion); err != nil {
+			return nil, err
+		}
+		out[sess.SandboxID] = sess
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListSandboxSessions(ctx context.Context, orgID uuid.UUID, status string, limit, offset int) ([]SandboxSession, error) {
