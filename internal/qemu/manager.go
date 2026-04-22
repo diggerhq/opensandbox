@@ -91,6 +91,7 @@ type VMInstance struct {
 	restoring     chan struct{}
 	opMu          sync.Mutex   // serializes destructive VM ops (checkpoint, restore, hibernate)
 	archiveDone   chan struct{} // closed when async hibernate archive completes (nil if no archive in flight)
+	memoryReady   chan struct{} // closed once virtio-mem hotplug has committed enough memory for user workloads (nil = pre-existing hotplug, treat as ready)
 	baseMemoryMB         int    // initial memory passed to -m (before virtio-mem)
 	virtioMemRequestedMB int    // additional memory via virtio-mem (beyond base)
 	goldenVersion        string // golden version this sandbox was created from (empty if cold-booted)
@@ -1839,14 +1840,74 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — returning insufficient capacity error", sandboxID, additionalMB, err)
 				return fmt.Errorf("insufficient_capacity: cannot hotplug %dMB on this worker: %w", additionalMB, err)
 			} else {
+				prevRequestedMB := vm.virtioMemRequestedMB
 				vm.virtioMemRequestedMB = additionalMB
 				vm.MemoryMB = vm.baseMemoryMB + additionalMB
 				log.Printf("qemu: virtio-mem %s: %dMB additional (total %dMB)", sandboxID, additionalMB, vm.MemoryMB)
+
+				// Scaling UP? Gate exec/write until enough memory is plugged in so
+				// user workloads (git clone, npm install, etc.) don't race the
+				// hotplug and crash trying to use memory that's allocated-but-not-backed.
+				// Remaining hotplug continues in the background after the gate opens.
+				if additionalMB > prevRequestedMB {
+					vm.memoryReady = make(chan struct{})
+					go m.watchMemoryHotplug(vm, additionalMB)
+				}
 			}
 		}
 	}
 
 	return vm.agent.SetResourceLimits(ctx, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
+}
+
+// watchMemoryHotplug polls the guest's /proc/meminfo until at least 1GB of
+// virtio-mem memory has been onlined (or target if smaller), then closes
+// vm.memoryReady to unblock getReadyVM. Bounded by a 10s timeout so the
+// channel always closes even if hotplug stalls.
+func (m *Manager) watchMemoryHotplug(vm *VMInstance, targetAdditionalMB int) {
+	defer func() {
+		if vm.memoryReady != nil {
+			select {
+			case <-vm.memoryReady:
+			default:
+				close(vm.memoryReady)
+			}
+		}
+	}()
+
+	// We only need ~1GB plugged for most workloads to have breathing room.
+	// The rest hotplugs in the background and is usually done within seconds.
+	readyThresholdMB := 1024
+	if targetAdditionalMB < readyThresholdMB {
+		readyThresholdMB = targetAdditionalMB
+	}
+	requiredTotalMB := vm.baseMemoryMB + readyThresholdMB
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if vm.agent == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := vm.agent.Exec(ctx, &pb.ExecRequest{
+			Command:        "/bin/sh",
+			Args:           []string{"-c", "awk '/MemTotal/ {print $2}' /proc/meminfo"},
+			TimeoutSeconds: 2,
+		})
+		cancel()
+		if err == nil && resp != nil {
+			// MemTotal is in kB
+			var kB int
+			fmt.Sscanf(string(resp.Stdout), "%d", &kB)
+			if kB/1024 >= requiredTotalMB {
+				log.Printf("qemu: virtio-mem %s: hotplug gate opened (%dMB onlined, needed %dMB)",
+					vm.ID, kB/1024, requiredTotalMB)
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Printf("qemu: virtio-mem %s: hotplug gate timed out after 10s, unblocking anyway", vm.ID)
 }
 
 // TotalCommittedMemoryMB returns the sum of MemoryMB (base + virtio-mem) across all running VMs.
@@ -2860,6 +2921,21 @@ func (m *Manager) getReadyVM(ctx context.Context, id string) (*VMInstance, error
 			}
 		case <-ctx.Done():
 			return nil, fmt.Errorf("sandbox %s: timed out waiting for restore", id)
+		}
+	}
+
+	// Block until virtio-mem has plugged in enough memory for user workloads.
+	// Sandbox is marked "running" as soon as QEMU boots, but the scaler's
+	// SetResourceLimits kicks off hotplug async — user code (e.g. git clone)
+	// running immediately can hit memory that's allocated-but-not-backed.
+	// Bounded wait so we never hang if hotplug stalls.
+	if vm.memoryReady != nil {
+		select {
+		case <-vm.memoryReady:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			log.Printf("qemu: sandbox %s: memory hotplug wait exceeded 5s, proceeding anyway", id)
 		}
 	}
 
