@@ -89,7 +89,8 @@ func (s *Server) getSandboxTags(c echo.Context) error {
 	if err := s.ownsSandbox(c, sandboxID); err != nil {
 		return err
 	}
-	set, err := s.store.GetSandboxTags(c.Request().Context(), sandboxID)
+	orgID, _ := auth.GetOrgID(c)
+	set, err := s.store.GetSandboxTags(c.Request().Context(), orgID, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -136,7 +137,7 @@ func (s *Server) putSandboxTags(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 	// Re-read to return the canonical state + fresh tagsLastUpdatedAt.
-	set, err := s.store.GetSandboxTags(c.Request().Context(), sandboxID)
+	set, err := s.store.GetSandboxTags(c.Request().Context(), orgID, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}

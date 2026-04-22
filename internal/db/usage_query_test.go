@@ -199,6 +199,36 @@ func TestCursorRoundTrip(t *testing.T) {
 	}
 }
 
+// Pins the tenancy boundary: every sandbox_tags join must scope on
+// org_id, not just sandbox_id. Sandbox IDs are not schema-unique
+// across orgs, so a sandbox_id-only join could alias tag state across
+// tenants on collision. Migration 026 reflects the same decision in
+// the PK.
+func TestBuildUsageQuery_JoinsIncludeOrgID(t *testing.T) {
+	q := baseQuery()
+	q.GroupBy = "tag:team"
+	q.Filters = []UsageFilter{
+		{TagKey: "env", Values: []string{"prod"}},
+		{TagKey: "region", Values: nil}, // key-absent
+	}
+	sql, _, err := BuildUsageQuery(q)
+	if err != nil {
+		t.Fatalf("BuildUsageQuery: %v", err)
+	}
+	// Every sandbox_tags alias — gt, ft0, ft1 — must constrain
+	// ON org_id.
+	expects := []string{
+		"gt.org_id = e.org_id",
+		"ft0.org_id = e.org_id",
+		"ft1.org_id = e.org_id",
+	}
+	for _, want := range expects {
+		if !strings.Contains(sql, want) {
+			t.Errorf("missing org-scoped join predicate %q:\n%s", want, sql)
+		}
+	}
+}
+
 func TestBuildUntaggedTotals(t *testing.T) {
 	q := baseQuery()
 	q.GroupBy = "tag:env"

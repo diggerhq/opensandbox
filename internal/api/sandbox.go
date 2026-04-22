@@ -631,7 +631,7 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		if s.sandboxDomain != "" {
 			resp["sandboxDomain"] = s.sandboxDomain
 		}
-		s.mergeTagsInto(c.Request().Context(), resp, sandboxID)
+		s.mergeTagsInto(c.Request().Context(), orgID, resp, sandboxID)
 		return c.JSON(http.StatusOK, resp)
 	}
 
@@ -660,7 +660,7 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		resp["patchError"] = *session.PatchError
 	}
 
-	s.mergeTagsInto(c.Request().Context(), resp, sandboxID)
+	s.mergeTagsInto(c.Request().Context(), orgID, resp, sandboxID)
 	return c.JSON(http.StatusOK, resp)
 }
 
@@ -820,7 +820,7 @@ func (s *Server) listSandboxesRemote(c echo.Context) error {
 	// is unreachable, list still returns without tag fields rather
 	// than 500.
 	if s.store != nil {
-		if sets, err := s.store.GetSandboxTagsMulti(c.Request().Context(), ids); err == nil {
+		if sets, err := s.store.GetSandboxTagsMulti(c.Request().Context(), orgID, ids); err == nil {
 			for _, entry := range result {
 				sid, _ := entry["sandboxID"].(string)
 				set := sets[sid]

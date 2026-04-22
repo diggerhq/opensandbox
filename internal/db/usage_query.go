@@ -136,7 +136,11 @@ func (b *builderState) windowWhere(orgArg, fromArg, toArg string) string {
 }
 
 // filterJoins emits JOIN clauses that restrict `e.sandbox_id` to the
-// filter set. Non-empty value slice → INNER JOIN on matching rows.
+// filter set. All joins scope on (org_id, sandbox_id) — sandbox_tags
+// is keyed on both (see migration 026) because sandbox IDs are not
+// schema-unique across orgs.
+//
+// Non-empty value slice → INNER JOIN on matching rows.
 // Empty slice → LEFT JOIN + IS NULL, meaning "key absent."
 func (b *builderState) filterJoins(filters []UsageFilter) string {
 	if len(filters) == 0 {
@@ -147,15 +151,14 @@ func (b *builderState) filterJoins(filters []UsageFilter) string {
 		alias := fmt.Sprintf("ft%d", i)
 		keyArg := b.arg(f.TagKey)
 		if len(f.Values) == 0 {
-			// key-absent
 			sb.WriteString(fmt.Sprintf(
-				" LEFT JOIN sandbox_tags %s ON %s.sandbox_id = e.sandbox_id AND %s.key = %s",
-				alias, alias, alias, keyArg))
+				" LEFT JOIN sandbox_tags %s ON %s.org_id = e.org_id AND %s.sandbox_id = e.sandbox_id AND %s.key = %s",
+				alias, alias, alias, alias, keyArg))
 		} else {
 			valArg := b.arg(f.Values)
 			sb.WriteString(fmt.Sprintf(
-				" INNER JOIN sandbox_tags %s ON %s.sandbox_id = e.sandbox_id AND %s.key = %s AND %s.value = ANY(%s)",
-				alias, alias, alias, keyArg, alias, valArg))
+				" INNER JOIN sandbox_tags %s ON %s.org_id = e.org_id AND %s.sandbox_id = e.sandbox_id AND %s.key = %s AND %s.value = ANY(%s)",
+				alias, alias, alias, alias, keyArg, alias, valArg))
 		}
 	}
 	return sb.String()
@@ -230,7 +233,7 @@ func BuildUsageQuery(q UsageQuery) (sqlText string, args []any, err error) {
 	case "tag":
 		tagKeyArg := b.arg(tagKey)
 		groupJoin = fmt.Sprintf(
-			" LEFT JOIN sandbox_tags gt ON gt.sandbox_id = e.sandbox_id AND gt.key = %s",
+			" LEFT JOIN sandbox_tags gt ON gt.org_id = e.org_id AND gt.sandbox_id = e.sandbox_id AND gt.key = %s",
 			tagKeyArg)
 		// Only rows with a value go in items; untagged is queried separately.
 		extra += " AND gt.value IS NOT NULL"
@@ -321,7 +324,7 @@ SELECT
   COALESCE(SUM(GREATEST(e.disk_mb - %d, 0)::float / 1024.0 * %s), 0) AS disk_overage_gb_seconds,
   COUNT(DISTINCT e.sandbox_id) AS sandbox_count
 FROM sandbox_scale_events e%s
-LEFT JOIN sandbox_tags gt ON gt.sandbox_id = e.sandbox_id AND gt.key = %s
+LEFT JOIN sandbox_tags gt ON gt.org_id = e.org_id AND gt.sandbox_id = e.sandbox_id AND gt.key = %s
 WHERE %s%s AND gt.sandbox_id IS NULL`,
 		dur,
 		20480, dur,
@@ -455,6 +458,11 @@ func (s *Store) ExecuteOrgTotals(ctx context.Context, q UsageQuery) (UsageTotals
 // GET /sandboxes/{id}/usage: GB-second numbers plus first/last session
 // timestamps clamped to the query window. Tag hydration is left to
 // the handler (which calls GetSandboxTags).
+//
+// Timestamps are explicitly clamped into [from, to] (design F9):
+// without the clamp, long-lived sandboxes leak endpoints outside the
+// requested window. The SQL uses GREATEST(MIN(started_at), from) and
+// LEAST(MAX(...), to).
 func (s *Store) SandboxUsageWindow(ctx context.Context, orgID uuid.UUID, sandboxID string, from, to time.Time) (mem, disk float64, firstStartedAt *time.Time, lastEndedAt *time.Time, err error) {
 	// Usage numbers from scale events, identical math to GetOrgUsage.
 	err = s.pool.QueryRow(ctx, `
@@ -469,17 +477,18 @@ WHERE e.org_id = $1 AND e.sandbox_id = $4
 		return 0, 0, nil, nil, fmt.Errorf("sandbox usage query: %w", err)
 	}
 
-	// Lifetime bounds from sandbox_sessions (see design: session-level
-	// is more intuitive than scale-event edges for "when did this
-	// sandbox exist").
+	// Lifetime bounds from sandbox_sessions, clamped into [from, to].
+	// Session-level MIN/MAX is more intuitive than scale-event edges
+	// for "when did this sandbox exist" and is stable across scale
+	// churn — see design D1.
 	var minStart *time.Time
 	var anyOpen bool
 	var maxEnd *time.Time
 	row := s.pool.QueryRow(ctx, `
 SELECT
-  MIN(started_at),
+  GREATEST(MIN(started_at), $3),
   BOOL_OR(stopped_at IS NULL AND status IN ('running', 'hibernated')),
-  MAX(COALESCE(stopped_at, now()))
+  LEAST(MAX(COALESCE(stopped_at, now())), $4)
 FROM sandbox_sessions
 WHERE org_id = $1 AND sandbox_id = $2
   AND started_at < $4

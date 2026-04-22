@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+
+	"github.com/opensandbox/opensandbox/internal/auth"
 )
 
 // Tag hydration helpers for the GET /sandboxes* response additions.
@@ -16,15 +19,18 @@ import (
 // Fail-soft: if the store isn't configured or the tag query errors,
 // the sandbox response is returned as-is rather than 500. Tags are
 // purely additive and should never break the primary sandbox read.
+//
+// Every call takes orgID so the (org_id, sandbox_id) lookup scope
+// from migration 026 is preserved end-to-end.
 
 // mergeTagsInto mutates a response map, adding `tags` (always, even
 // if empty) and `tagsLastUpdatedAt` (nil when the sandbox has no
 // tags). Intended for the remote paths, which already build maps.
-func (s *Server) mergeTagsInto(ctx context.Context, resp map[string]interface{}, sandboxID string) {
+func (s *Server) mergeTagsInto(ctx context.Context, orgID uuid.UUID, resp map[string]interface{}, sandboxID string) {
 	if s.store == nil {
 		return
 	}
-	set, err := s.store.GetSandboxTags(ctx, sandboxID)
+	set, err := s.store.GetSandboxTags(ctx, orgID, sandboxID)
 	if err != nil {
 		return
 	}
@@ -48,6 +54,10 @@ func (s *Server) withTagsHydrated(c echo.Context, sb interface{}, sandboxID stri
 	if s.store == nil {
 		return sb
 	}
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return sb
+	}
 	buf, err := json.Marshal(sb)
 	if err != nil {
 		return sb
@@ -56,7 +66,7 @@ func (s *Server) withTagsHydrated(c echo.Context, sb interface{}, sandboxID stri
 	if err := json.Unmarshal(buf, &m); err != nil {
 		return sb
 	}
-	s.mergeTagsInto(c.Request().Context(), m, sandboxID)
+	s.mergeTagsInto(c.Request().Context(), orgID, m, sandboxID)
 	return m
 }
 
@@ -64,6 +74,10 @@ func (s *Server) withTagsHydrated(c echo.Context, sb interface{}, sandboxID stri
 // tag fetch for the whole page; per-item lookup inside the loop.
 func (s *Server) withTagsHydratedList(c echo.Context, sandboxes interface{}) interface{} {
 	if s.store == nil {
+		return sandboxes
+	}
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
 		return sandboxes
 	}
 	buf, err := json.Marshal(sandboxes)
@@ -81,7 +95,7 @@ func (s *Server) withTagsHydratedList(c echo.Context, sandboxes interface{}) int
 			ids = append(ids, id)
 		}
 	}
-	sets, err := s.store.GetSandboxTagsMulti(c.Request().Context(), ids)
+	sets, err := s.store.GetSandboxTagsMulti(c.Request().Context(), orgID, ids)
 	if err != nil {
 		return sandboxes
 	}
@@ -100,3 +114,4 @@ func (s *Server) withTagsHydratedList(c echo.Context, sandboxes interface{}) int
 	}
 	return arr
 }
+

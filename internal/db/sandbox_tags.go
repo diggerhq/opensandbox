@@ -21,13 +21,20 @@ type TagKeyStats struct {
 	ValueCount   int
 }
 
+// All tag methods take an org_id. The PK on sandbox_tags is (org_id,
+// sandbox_id, key) because sandbox IDs are short `sb-xxxxxxxx` strings
+// with no schema-enforced cross-org uniqueness. Keying the table and
+// every read/write path on (org_id, sandbox_id) is the tenancy
+// boundary — handler ownership checks are belt-and-suspenders on top.
+
 // GetSandboxTags returns the tag map plus the latest updated_at across
 // rows for one sandbox. Returns an empty map and nil timestamp when the
 // sandbox has no tags.
-func (s *Store) GetSandboxTags(ctx context.Context, sandboxID string) (SandboxTagSet, error) {
+func (s *Store) GetSandboxTags(ctx context.Context, orgID uuid.UUID, sandboxID string) (SandboxTagSet, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT key, value, updated_at FROM sandbox_tags WHERE sandbox_id = $1`,
-		sandboxID)
+		`SELECT key, value, updated_at FROM sandbox_tags
+		 WHERE org_id = $1 AND sandbox_id = $2`,
+		orgID, sandboxID)
 	if err != nil {
 		return SandboxTagSet{}, fmt.Errorf("query sandbox tags: %w", err)
 	}
@@ -50,15 +57,17 @@ func (s *Store) GetSandboxTags(ctx context.Context, sandboxID string) (SandboxTa
 }
 
 // GetSandboxTagsMulti returns tag sets keyed by sandbox_id for a batch of
-// sandboxes — used to hydrate GET /sandboxes and /sandboxes/{id} without
-// N+1 queries. Sandboxes with no tags are absent from the result map.
-func (s *Store) GetSandboxTagsMulti(ctx context.Context, sandboxIDs []string) (map[string]SandboxTagSet, error) {
+// sandboxes within one org — used to hydrate GET /sandboxes and
+// /sandboxes/{id} without N+1 queries. Sandboxes with no tags are
+// absent from the result map.
+func (s *Store) GetSandboxTagsMulti(ctx context.Context, orgID uuid.UUID, sandboxIDs []string) (map[string]SandboxTagSet, error) {
 	if len(sandboxIDs) == 0 {
 		return map[string]SandboxTagSet{}, nil
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT sandbox_id, key, value, updated_at FROM sandbox_tags
-		 WHERE sandbox_id = ANY($1)`, sandboxIDs)
+		 WHERE org_id = $1 AND sandbox_id = ANY($2)`,
+		orgID, sandboxIDs)
 	if err != nil {
 		return nil, fmt.Errorf("query multi sandbox tags: %w", err)
 	}
@@ -85,9 +94,11 @@ func (s *Store) GetSandboxTagsMulti(ctx context.Context, sandboxIDs []string) (m
 	return out, rows.Err()
 }
 
-// ReplaceSandboxTags atomically replaces the full tag set for a sandbox.
-// An empty map clears all tags. updated_at on retained rows is refreshed
-// only if the value changed — idempotent PUTs don't bump the timestamp.
+// ReplaceSandboxTags atomically replaces the full tag set for a sandbox
+// within the caller's org. An empty map clears all tags. updated_at is
+// only refreshed on rows whose value actually changed — idempotent
+// PUTs don't bump the timestamp, which would otherwise confuse the
+// tagsLastUpdatedAt signal that dashboards rely on.
 func (s *Store) ReplaceSandboxTags(ctx context.Context, orgID uuid.UUID, sandboxID string, tags map[string]string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -95,12 +106,10 @@ func (s *Store) ReplaceSandboxTags(ctx context.Context, orgID uuid.UUID, sandbox
 	}
 	defer tx.Rollback(ctx)
 
-	// Diff against current state so we only bump updated_at when something
-	// actually changed. Retagging is supposed to rewrite attribution going
-	// forward (see design), and tagsLastUpdatedAt is the signal dashboards
-	// rely on — so we must not bump it on no-op PUTs.
 	curRows, err := tx.Query(ctx,
-		`SELECT key, value FROM sandbox_tags WHERE sandbox_id = $1`, sandboxID)
+		`SELECT key, value FROM sandbox_tags
+		 WHERE org_id = $1 AND sandbox_id = $2`,
+		orgID, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -118,17 +127,16 @@ func (s *Store) ReplaceSandboxTags(ctx context.Context, orgID uuid.UUID, sandbox
 		return err
 	}
 
-	// Delete keys that are no longer present.
 	for k := range current {
 		if _, keep := tags[k]; !keep {
 			if _, err := tx.Exec(ctx,
-				`DELETE FROM sandbox_tags WHERE sandbox_id = $1 AND key = $2`,
-				sandboxID, k); err != nil {
+				`DELETE FROM sandbox_tags
+				 WHERE org_id = $1 AND sandbox_id = $2 AND key = $3`,
+				orgID, sandboxID, k); err != nil {
 				return err
 			}
 		}
 	}
-	// Upsert changed or new keys.
 	for k, v := range tags {
 		if cur, ok := current[k]; ok && cur == v {
 			continue
@@ -136,8 +144,8 @@ func (s *Store) ReplaceSandboxTags(ctx context.Context, orgID uuid.UUID, sandbox
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO sandbox_tags (org_id, sandbox_id, key, value, updated_at)
 			 VALUES ($1, $2, $3, $4, now())
-			 ON CONFLICT (sandbox_id, key) DO UPDATE
-			   SET value = EXCLUDED.value, updated_at = now(), org_id = EXCLUDED.org_id`,
+			 ON CONFLICT (org_id, sandbox_id, key) DO UPDATE
+			   SET value = EXCLUDED.value, updated_at = now()`,
 			orgID, sandboxID, k, v); err != nil {
 			return err
 		}

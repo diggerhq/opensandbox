@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
@@ -81,11 +82,19 @@ func parseUsageQuery(c echo.Context) (db.UsageQuery, error) {
 		q.Limit = 50
 	}
 
-	// filter[tag:<key>]=v1,v2 — repeatable.  filter[tag:<key>]= (empty)
-	// means the sandbox lacks that tag key.
+	// filter[tag:<key>]=v1,v2 — one param per dimension. Comma-
+	// separated values are OR-ed within the dimension; different
+	// dimensions are AND-ed across. Repeating the same `filter[...]`
+	// key is explicitly rejected (design F10) — the SDK's natural
+	// shape is a map, and accepting repeats would diverge SDK
+	// semantics from HTTP semantics.  `filter[tag:<key>]=` (empty)
+	// means "sandbox lacks that tag key."
 	for rawKey, vals := range c.QueryParams() {
 		if !strings.HasPrefix(rawKey, "filter[") || !strings.HasSuffix(rawKey, "]") {
 			continue
+		}
+		if len(vals) > 1 {
+			return q, fmt.Errorf("filter %q was passed more than once; use comma-separated values within one param", rawKey)
 		}
 		dim := strings.TrimSuffix(strings.TrimPrefix(rawKey, "filter["), "]")
 		if !strings.HasPrefix(dim, "tag:") {
@@ -182,7 +191,7 @@ func (s *Server) getUsage(c echo.Context) error {
 	}
 
 	// groupBy=sandbox — hydrate alias/status/tags on each row.
-	items, err := s.hydrateSandboxUsageItems(ctx, rows)
+	items, err := s.hydrateSandboxUsageItems(ctx, q.OrgID, rows)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -193,22 +202,23 @@ func (s *Server) getUsage(c echo.Context) error {
 // hydrateSandboxUsageItems enriches the minimal scale-event rows with
 // fields the handler is responsible for: alias (from
 // sandbox_sessions.config JSONB — design F1), status, tag set,
-// tagsLastUpdatedAt.
-func (s *Server) hydrateSandboxUsageItems(ctx context.Context, rows []db.UsageRow) ([]map[string]interface{}, error) {
+// tagsLastUpdatedAt. Both the tag fetch and the session fetch are
+// batched — the 500-row × 10s-handler budget rules out N+1 lookups
+// (design F11).
+func (s *Server) hydrateSandboxUsageItems(ctx context.Context, orgID uuid.UUID, rows []db.UsageRow) ([]map[string]interface{}, error) {
 	ids := make([]string, 0, len(rows))
 	for _, r := range rows {
 		ids = append(ids, r.SandboxID)
 	}
-	// Single batched tag fetch.
-	tagSets, err := s.store.GetSandboxTagsMulti(ctx, ids)
+	tagSets, err := s.store.GetSandboxTagsMulti(ctx, orgID, ids)
+	if err != nil {
+		return nil, err
+	}
+	sessions, err := s.store.GetLatestSandboxSessionsMulti(ctx, orgID, ids)
 	if err != nil {
 		return nil, err
 	}
 
-	// Per-sandbox session lookup for alias + status. The store doesn't
-	// yet have a batched-by-id variant; N+1 is tolerable in v1 given
-	// the 500-row limit and the 10s handler budget. If this shows up
-	// hot, promote to a batched GetSandboxSessionsMulti.
 	out := make([]map[string]interface{}, 0, len(rows))
 	for _, r := range rows {
 		item := map[string]interface{}{
@@ -216,7 +226,7 @@ func (s *Server) hydrateSandboxUsageItems(ctx context.Context, rows []db.UsageRo
 			"memoryGbSeconds":      r.MemoryGbSeconds,
 			"diskOverageGbSeconds": r.DiskOverageGbSeconds,
 		}
-		if sess, err := s.store.GetSandboxSession(ctx, r.SandboxID); err == nil {
+		if sess, ok := sessions[r.SandboxID]; ok {
 			item["status"] = sess.Status
 			if alias := aliasFromConfig(sess.Config); alias != "" {
 				item["alias"] = alias
@@ -303,6 +313,9 @@ func (s *Server) getSandboxUsage(c echo.Context) error {
 		}
 		to = t
 	}
+	if !to.After(from) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "`to` must be after `from`"})
+	}
 	if to.Sub(from) > 90*24*time.Hour {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "query window must be <= 90 days"})
 	}
@@ -316,7 +329,7 @@ func (s *Server) getSandboxUsage(c echo.Context) error {
 	}
 
 	sess, _ := s.store.GetSandboxSession(ctx, sandboxID)
-	tagSet, err := s.store.GetSandboxTags(ctx, sandboxID)
+	tagSet, err := s.store.GetSandboxTags(ctx, orgID, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
