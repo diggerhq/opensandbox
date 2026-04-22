@@ -598,7 +598,7 @@ func (s *Server) getSandbox(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, sb)
+	return c.JSON(http.StatusOK, s.withTagsHydrated(c, sb, id))
 }
 
 // getSandboxRemote looks up a sandbox via the PG session record and returns
@@ -631,6 +631,7 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		if s.sandboxDomain != "" {
 			resp["sandboxDomain"] = s.sandboxDomain
 		}
+		s.mergeTagsInto(c.Request().Context(), resp, sandboxID)
 		return c.JSON(http.StatusOK, resp)
 	}
 
@@ -659,6 +660,7 @@ func (s *Server) getSandboxRemote(c echo.Context, sandboxID string) error {
 		resp["patchError"] = *session.PatchError
 	}
 
+	s.mergeTagsInto(c.Request().Context(), resp, sandboxID)
 	return c.JSON(http.StatusOK, resp)
 }
 
@@ -763,7 +765,7 @@ func (s *Server) listSandboxes(c echo.Context) error {
 		})
 	}
 
-	return c.JSON(http.StatusOK, sandboxes)
+	return c.JSON(http.StatusOK, s.withTagsHydratedList(c, sandboxes))
 }
 
 // listSandboxesRemote queries PG for the org's running sandboxes and returns
@@ -790,6 +792,7 @@ func (s *Server) listSandboxesRemote(c echo.Context) error {
 	}
 
 	result := make([]map[string]interface{}, 0, len(sessions))
+	ids := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
 		entry := map[string]interface{}{
 			"sandboxID": sess.SandboxID,
@@ -809,6 +812,29 @@ func (s *Server) listSandboxesRemote(c echo.Context) error {
 		}
 
 		result = append(result, entry)
+		ids = append(ids, sess.SandboxID)
+	}
+
+	// One batched tag fetch for all sandboxes in the page — cheaper
+	// than N GetSandboxTags round-trips. Fail-soft: if the tag table
+	// is unreachable, list still returns without tag fields rather
+	// than 500.
+	if s.store != nil {
+		if sets, err := s.store.GetSandboxTagsMulti(c.Request().Context(), ids); err == nil {
+			for _, entry := range result {
+				sid, _ := entry["sandboxID"].(string)
+				set := sets[sid]
+				if set.Tags == nil {
+					set.Tags = map[string]string{}
+				}
+				entry["tags"] = set.Tags
+				if set.LastUpdatedAt != nil {
+					entry["tagsLastUpdatedAt"] = set.LastUpdatedAt.UTC().Format(time.RFC3339)
+				} else {
+					entry["tagsLastUpdatedAt"] = nil
+				}
+			}
+		}
 	}
 
 	return c.JSON(http.StatusOK, result)
