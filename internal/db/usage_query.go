@@ -481,23 +481,25 @@ WHERE e.org_id = $1 AND e.sandbox_id = $4
 	// Session-level MIN/MAX is more intuitive than scale-event edges
 	// for "when did this sandbox exist" and is stable across scale
 	// churn — see design D1.
-	var minStart *time.Time
+	//
+	// "No session in the window" is expressed as NULL aggregates, not
+	// as a scan error — *time.Time handles NULL via nil, and BOOL_OR
+	// is COALESCE'd to false so scan never fails on empty input
+	// (design F13). A scan error here therefore means a real DB /
+	// context failure and is returned up the stack.
+	var minStart, maxEnd *time.Time
 	var anyOpen bool
-	var maxEnd *time.Time
-	row := s.pool.QueryRow(ctx, `
+	if err := s.pool.QueryRow(ctx, `
 SELECT
   GREATEST(MIN(started_at), $3),
-  BOOL_OR(stopped_at IS NULL AND status IN ('running', 'hibernated')),
+  COALESCE(BOOL_OR(stopped_at IS NULL AND status IN ('running', 'hibernated')), false),
   LEAST(MAX(COALESCE(stopped_at, now())), $4)
 FROM sandbox_sessions
 WHERE org_id = $1 AND sandbox_id = $2
   AND started_at < $4
   AND (stopped_at IS NULL OR stopped_at > $3)`,
-		orgID, sandboxID, from, to)
-	if err := row.Scan(&minStart, &anyOpen, &maxEnd); err != nil {
-		// No session in the window is OK — the sandbox may have been
-		// created then torn down before `from`. Leave first/last nil.
-		return mem, disk, nil, nil, nil
+		orgID, sandboxID, from, to).Scan(&minStart, &anyOpen, &maxEnd); err != nil {
+		return 0, 0, nil, nil, fmt.Errorf("sandbox session bounds query: %w", err)
 	}
 	firstStartedAt = minStart
 	if !anyOpen {

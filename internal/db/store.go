@@ -662,6 +662,28 @@ func (s *Store) GetSandboxSession(ctx context.Context, sandboxID string) (*Sandb
 	return session, nil
 }
 
+// GetSandboxSessionInOrg is the org-scoped variant of
+// GetSandboxSession — sandbox IDs are not globally unique, so every
+// read that is going to gate authorization or hydrate tenant-visible
+// fields must filter on (org_id, sandbox_id) not sandbox_id alone
+// (design F12). Returns the latest session for the (org, sandbox)
+// pair, or an error when no such session exists.
+func (s *Store) GetSandboxSessionInOrg(ctx context.Context, orgID uuid.UUID, sandboxID string) (*SandboxSession, error) {
+	session := &SandboxSession{}
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version
+		 FROM sandbox_sessions
+		 WHERE org_id = $1 AND sandbox_id = $2
+		 ORDER BY started_at DESC LIMIT 1`, orgID, sandboxID,
+	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
+		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata,
+		&session.StartedAt, &session.StoppedAt, &session.ErrorMsg, &session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox session not found: %w", err)
+	}
+	return session, nil
+}
+
 // GetLatestSandboxSessionsMulti returns the most recent session per
 // sandbox_id for an org — one row per ID, picked by MAX(started_at)
 // via DISTINCT ON. Used by the /usage groupBy=sandbox handler to

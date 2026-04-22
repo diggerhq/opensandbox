@@ -98,9 +98,14 @@ def _build_params(
     cursor: str | None = None,
     filter: dict[str, str] | None = None,
 ) -> list[tuple[str, str]]:
-    """Build a flat list of (key, value) query params. httpx preserves
-    duplicate keys when passed as a list of tuples, which is what
-    `filter[tag:<key>]=...` with multiple keys expects."""
+    """Build a flat list of (key, value) query params.
+
+    v1 filter contract: one ``filter[tag:<key>]`` param per dimension.
+    Comma-separated values within a param are OR'd; different dimension
+    params are AND'd. The server rejects repeating the same
+    ``filter[...]`` key — which is naturally prevented here because the
+    ``filter`` argument is a ``dict[str, str]``.
+    """
     params: list[tuple[str, str]] = []
     if group_by is not None:
         params.append(("groupBy", group_by))

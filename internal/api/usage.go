@@ -328,7 +328,7 @@ func (s *Server) getSandboxUsage(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	sess, _ := s.store.GetSandboxSession(ctx, sandboxID)
+	sess, _ := s.store.GetSandboxSessionInOrg(ctx, orgID, sandboxID)
 	tagSet, err := s.store.GetSandboxTags(ctx, orgID, sandboxID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})

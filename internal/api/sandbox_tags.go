@@ -51,9 +51,13 @@ func validateTags(tags map[string]string) error {
 	return nil
 }
 
-// ownsSandbox returns a typed 404 when the sandbox is missing and a
-// typed 403 when it belongs to another org. It does not leak the
-// existence of sandboxes across orgs — both cases read 404.
+// ownsSandbox returns nil when the caller's org has a session for the
+// given sandbox ID, otherwise returns a 404 response. Uses the
+// org-scoped session lookup (design F12) — querying by sandbox_id
+// alone could return another org's row on an ID collision, which
+// would cause the rightful owner to be denied access to their own
+// sandbox. 404 in both "doesn't exist" and "not your org" paths so
+// we don't leak cross-tenant existence.
 func (s *Server) ownsSandbox(c echo.Context, sandboxID string) error {
 	if s.store == nil {
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{
@@ -64,8 +68,7 @@ func (s *Server) ownsSandbox(c echo.Context, sandboxID string) error {
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
 	}
-	sess, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
-	if err != nil || sess.OrgID != orgID {
+	if _, err := s.store.GetSandboxSessionInOrg(c.Request().Context(), orgID, sandboxID); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
 	}
 	return nil
