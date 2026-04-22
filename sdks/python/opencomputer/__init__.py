@@ -9,6 +9,18 @@ from opencomputer.pty import Pty, PtySession
 from opencomputer.template import Template
 from opencomputer.project import SecretStore
 from opencomputer.snapshot import Snapshots
+from opencomputer.usage import (
+    Usage,
+    Tags,
+    UsageSandboxItem,
+    UsageTagItem,
+    UsageTotals,
+    UsageUntaggedBucket,
+    UsageBySandboxResponse,
+    UsageByTagResponse,
+    SandboxUsageResponse,
+    TagKeyInfo,
+)
 
 __all__ = [
     "Sandbox",
@@ -26,6 +38,16 @@ __all__ = [
     "Template",
     "SecretStore",
     "Snapshots",
+    "Usage",
+    "Tags",
+    "UsageSandboxItem",
+    "UsageTagItem",
+    "UsageTotals",
+    "UsageUntaggedBucket",
+    "UsageBySandboxResponse",
+    "UsageByTagResponse",
+    "SandboxUsageResponse",
+    "TagKeyInfo",
 ]
 
 __version__ = "0.5.2"
