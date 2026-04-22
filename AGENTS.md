@@ -49,6 +49,12 @@ instead.
 **NEVER push to main.** Always create a feature branch and open a pull request.
 Direct pushes to `main` are not allowed in this repo.
 
+**Branch naming.** Prefix branches by intent: `feat/<kebab-name>` for new
+functionality, `fix/<kebab-name>` for bug fixes, `docs/<kebab-name>` for
+docs-only changes. These are the dominant patterns on `origin` and should be
+preferred for any new branch. Don't use personal-initials prefixes (`ig/...`,
+etc.) — they make it harder for others to find in-flight work by topic.
+
 **Confirm pushes, with one exception.** Pushing to a branch the agent itself
 just created in this session does not require a fresh confirmation each time
 once the initial push is authorized. Pushing to any branch that existed before
