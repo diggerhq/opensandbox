@@ -206,9 +206,12 @@ func (s *Scaler) evaluate() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Refresh AMI from SSM every ~60s (every 2nd tick at 30s interval)
+	// Refresh AMI from SSM/KV every ~60s. Also force a refresh on the very first
+	// evaluate tick (refreshCount == 0) so targetWorkerVersion is known before
+	// any scale-down decision — prevents the rolling-replace target from being
+	// mistakenly drained when utilization is low.
 	s.refreshCount++
-	if s.refreshCount%2 == 0 {
+	if s.refreshCount == 1 || s.refreshCount%2 == 0 {
 		if refresher, ok := s.pool.(AMIRefresher); ok {
 			if _, version, err := refresher.RefreshAMI(ctx); err != nil {
 				log.Printf("scaler: AMI refresh failed: %v", err)
@@ -664,8 +667,19 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 		return
 	}
 
-	// Don't scale down while a rolling replace is in progress
-	if s.targetWorkerVersion != "" {
+	// If workers report a WorkerVersion but our target version isn't known yet
+	// (first boot, before the initial AMI/KV refresh), don't scale down — we
+	// can't tell stale from current, and blindly picking the least-loaded
+	// worker will happily delete a rolling-replace target that just launched
+	// empty.
+	if s.targetWorkerVersion == "" {
+		for _, w := range workers {
+			if w.WorkerVersion != "" {
+				return
+			}
+		}
+	} else {
+		// Target version known: ensure no stale workers remain before scaling down.
 		for _, w := range workers {
 			if w.WorkerVersion != s.targetWorkerVersion && w.WorkerVersion != "" {
 				return // stale workers still exist, let rolling replace handle it
@@ -1173,8 +1187,13 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 
 	log.Printf("scaler: migrate %s: QMP migration complete (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
-	// Step 4: Complete on target (reconnect agent, patch network)
-	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	// Step 4: Complete on target (reconnect agent, patch network).
+	// Agent socket reconnect is bounded to 10s and patchGuestNetwork runs
+	// several guest-side exec commands that can be slow on a freshly resumed
+	// VM (especially post-rebase). 30s was too tight — a 3min window is
+	// generous but still bounded so we eventually fail loud if something is
+	// truly stuck.
+	completeCtx, completeCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer completeCancel()
 	_, err = targetClient.CompleteMigrationIncoming(completeCtx, &pb.CompleteMigrationIncomingRequest{
 		SandboxId: sandboxID,

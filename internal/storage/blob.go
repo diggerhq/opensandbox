@@ -10,10 +10,17 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 )
+
+// ErrNotFound is returned by Head / Download when the object does not exist.
+// Callers should use errors.Is(err, ErrNotFound) — other errors (auth, network,
+// etc.) must not be treated as "not found" to avoid triggering spurious
+// uploads/retries on real outages.
+var ErrNotFound = errors.New("blob: object not found")
 
 // BlobClient abstracts remote object storage operations.
 // Implementations: azureBlobClient (Azure Blob Storage), s3BlobClient (AWS S3).
