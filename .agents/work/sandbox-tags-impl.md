@@ -33,15 +33,19 @@ as "reconciliation-lagged (minutes)," which is not accurate. Either
 behavior as the Stripe rollup"), or (b) accept the inaccuracy. Zero
 code impact. **Recommendation: (a).**
 
-**F3. Tenancy PK on `sandbox_tags`.** Design uses
-`PRIMARY KEY (sandbox_id, key)`. Sandbox IDs look globally unique
-(`sb-...`), but nothing in the schema enforces that across orgs, and
-`sandbox_sessions` deliberately allows multiple rows per sandbox_id
-(session history). Recommendation: **keep the PK as designed** — the
-PUT handler must still verify `sandbox_sessions.org_id = caller_org`
-before mutating, which closes the cross-tenant write path. Leave
-`org_id` in the row as a denormalization for the indexed lookup in
-`GET /tags` (which filters on `org_id`). Noted for the reviewer.
+**F3. `org_id` must be in the keyspace, not just in a lookup index.**
+The signed-off design used `PRIMARY KEY (sandbox_id, key)`. Fresh
+review says that is unsafe in this repo. Sandbox IDs are currently
+generated as `sb-` plus 8 hex chars in multiple create paths
+(`internal/api/sandbox.go`, `internal/qemu/manager.go`,
+`internal/firecracker/manager.go`) — a short 32-bit space, not a
+schema-enforced globally unique namespace. With a `(sandbox_id, key)`
+PK and store methods that read/write by `sandbox_id` alone, a single
+cross-org ID collision aliases tag state across tenants. Recommendation:
+**change the schema and all store/query paths to key on
+`(org_id, sandbox_id, key)` and join on both `org_id` and
+`sandbox_id`.** The handler ownership check remains necessary, but it is
+not sufficient.
 
 **F4. Key-namespace parsing with `:` in keys.** Validation allows `:`
 in keys. That collides with the `tag:<key>` syntax in
@@ -50,16 +54,16 @@ in keys. That collides with the `tag:<key>` syntax in
 `SplitN(s, ":", 2)`. Doable — just document the rule ("after the
 first `:`, everything is the tag key") and SplitN. No design change.
 
-**F5. Reconciliation test needs a live Postgres fixture we don't
-have.** `internal/api/sandbox_test.go` explicitly notes the repo has
-no PG fixture yet. Options: (a) build the query builder as a pure Go
-function returning `(sql, args)` and assert SQL text/args — no DB
-needed — **plus** a separate `go test -tags=pgfixture` test that hits
-a real Postgres if `TEST_DATABASE_URL` is set, and the reconciliation
-assertion lives there. (b) Add the PG fixture to the repo in this PR
-(scope explosion). **Recommendation: (a).** Call out the
-tags/scope-limit gap in the PR body and flag it as the missing piece
-to revisit with the broader test-infra work.
+**F5. The reconciliation invariant needs a real Postgres merge gate.**
+`internal/api/sandbox_test.go` explicitly notes the repo has no PG
+fixture yet. Pure SQL-builder tests are still useful, but they do not
+prove the load-bearing claim that
+`Σ by-sandbox = Σ by-tag + untagged = GetOrgUsage(org)`. Recommendation:
+keep the pure-Go builder tests **and** add a
+`go test -tags=pgfixture` reconciliation test that runs against real
+Postgres when `TEST_DATABASE_URL` is available. If CI cannot run that
+path yet, treat the gap as release-blocking and call it out plainly in
+the PR.
 
 **F6. Empty-tag response shape.** Design shows `"tags": {...}` but is
 silent on sandboxes with no tags. Emit `"tags": {}` (not null), and
@@ -78,8 +82,36 @@ lands in three places, not two.** `GET /sandboxes/{id}` has both a
 local branch (`getSandbox` in worker mode) and a remote branch
 (`getSandboxRemote` in server mode). `GET /sandboxes` has `listSandboxes`
 and `listSandboxesRemote`. The design says "additive" — make sure the
-PR touches all four code paths, not just the server ones. Minor but
-easy to miss.
+PR touches all four code paths, not just three of them. `listSandboxesRemote`
+is the easy miss because it still assembles the old response shape by
+hand. Minor in code size, not minor in contract impact.
+
+**F9. Drilldown timestamps need explicit clamping and invalid-window
+rejection.** The design says `GET /sandboxes/{id}/usage` returns
+`firstStartedAt` / `lastEndedAt` clamped to the query window. Saying
+"use `sandbox_sessions` MIN/MAX" is not enough; without an explicit
+clamp, long-lived sandboxes will leak timestamps outside `[from, to]`.
+Likewise `to <= from` should be a 400, same as the aggregate path.
+Recommendation: clamp in the store layer and validate the window in the
+handler.
+
+**F10. "Repeatable filters" conflicts with the natural SDK shape.**
+The earlier draft said `filter[...]` was repeatable and AND-ed. In
+practice, the SDK wants a map from dimension → value string, and the
+useful v1 case is one param per dimension with comma-separated OR values
+inside it. A true "repeat the same key multiple times" contract
+complicates both the SDK and handler parsing for little gain.
+Recommendation: narrow v1 to:
+one filter param per dimension, comma-separated OR values within that
+dimension, AND across dimensions.
+
+**F11. `groupBy=sandbox` should not rely on per-row session lookups.**
+The design promises up to 500 rows and a 10s handler timeout. Tag
+hydration can batch cleanly; alias/status hydration should too. Doing
+`GetSandboxSession` once per returned row is exactly the kind of
+non-obvious latency multiplier that turns a good query surface into a
+slow one. Recommendation: batch latest-session reads for the result set,
+or fold alias/status into the aggregate query.
 
 ## Decisions on the design's three open questions
 
@@ -88,10 +120,10 @@ cites the rationale.
 
 **D1. `firstStartedAt` / `lastEndedAt` source** — use
 `sandbox_sessions` (`MIN(started_at)` / `MAX(COALESCE(stopped_at,
-now()))`), scoped to the query window. Matches user intent of "when
-did this sandbox exist" rather than "when was it actively billed."
-Session-level is also stable across scale events, which can churn
-every time memory changes.
+now()))`), then clamp the resulting timestamps into the query window.
+Matches user intent of "when did this sandbox exist" rather than "when
+was it actively billed." Session-level is also stable across scale
+events, which can churn every time memory changes.
 
 **D2. Tag rows on sandbox destroy** — leave. Preserves drilldown for
 historical reports. Minor overstatement of `/tags` key counts is
@@ -109,16 +141,19 @@ New files / edits, in planned commit order:
    Append to the migration list in `internal/db/store.go:121`
    (becomes `{29, "migrations/026_sandbox_tags.up.sql"}`).
 2. **Store layer** `internal/db/sandbox_tags.go` —
-   `ListSandboxTags`, `ReplaceSandboxTags` (transactional
-   delete-then-insert), `ListTagsForSandboxes` (bulk for list
-   responses), `GetTagsLastUpdatedAt`, `ListOrgTagKeys`.
+   org-scoped tag methods:
+   `GetSandboxTags(ctx, orgID, sandboxID)`,
+   `GetSandboxTagsMulti(ctx, orgID, sandboxIDs)`,
+   `ReplaceSandboxTags` (transactional replace),
+   `ListOrgTagKeys`.
 3. **Usage query builder** `internal/db/usage_query.go` — single
    pure function `BuildUsageQuery(orgID, window, groupBy, filters,
    sort, cursor, limit) (sql string, args []any)`. Reuses the
    `COALESCE(ended_at, LEAST(now(), $to)) - GREATEST(started_at, $from)`
    idiom from `GetOrgUsage`. Disk overage computed inline with the
    same `max(0, disk_mb - 20480) / 1024 * duration` formula from
-   `DiskOverageGBSeconds`.
+   `DiskOverageGBSeconds`. All tag joins key on both `org_id` and
+   `sandbox_id`.
 4. **Handlers**
    - `internal/api/usage.go` — `GET /usage`, `GET /tags`,
      `GET /sandboxes/:id/usage`.
@@ -128,8 +163,9 @@ New files / edits, in planned commit order:
    `api := e.Group("/api")` block.
 6. **Additive responses** — touch all four sandbox-read paths:
    `getSandbox`, `getSandboxRemote`, `listSandboxes`,
-   `listSandboxesRemote`. Hydrate tags with `ListTagsForSandboxes`
-   (one batched DB call per list response).
+   `listSandboxesRemote`. `listSandboxesRemote` is the likely miss.
+   Hydrate tags with one batched DB call per list response, and keep
+   alias/status hydration batched too.
 7. **Tests**
    - Pure-Go query-builder tests for each `groupBy × filter × sort`
      combination (snapshot SQL + args).
@@ -138,16 +174,18 @@ New files / edits, in planned commit order:
    - Integration reconciliation test behind a `pgfixture` build tag
      gated on `TEST_DATABASE_URL` — asserts
      `Σ by-sandbox = Σ by-tag + untagged = GetOrgUsage(org)` within
-     float epsilon. Skipped by default; documented in PR.
+     float epsilon. Not optional for sign-off; wire it into CI if a
+     test DB is available.
 8. **SDKs** — TS (`sdks/typescript/src/`) and Python
    (`sdks/python/opencomputer/`): usage and tags stubs. Convenience
    wrappers (`usage.byTag`, `usage.bySandbox`) designed in the SDK,
-   not the server.
+   not the server. Do not call the surface complete with TS-only parity.
 9. **Docs** — new pages under `docs/api-reference/sandboxes/` for
    tags endpoints and `docs/api-reference/usage.mdx` for the
    aggregator. Wire into the existing "Sandboxes" navigation group in
    `docs/mint.json`, plus a new "Usage" entry at the right spot.
-10. **PR ready-for-review** after CI green. Draft → ready.
+10. **PR ready-for-review** only after CI is green **and** the
+    reconciliation path, SDK parity, and docs surface are all present.
 
 Commit boundaries are each of the above; never amend previous commits.
 
@@ -164,6 +202,7 @@ Commit boundaries are each of the above; never amend previous commits.
 ## Guardrails on `/usage`
 
 - `to - from > 90d` → 400.
+- `to <= from` → 400.
 - `limit > 500` → 400.
 - Handler-level timeout of 10s on `/usage`.
 - Cursor is opaque base64 of `(sortValue, tiebreaker)` — standard
@@ -180,9 +219,12 @@ All tracked as additive follow-ups.
 - **Test coverage for the reconciliation invariant is behind a
   pgfixture tag.** If we lose the invariant silently because the
   fixture isn't wired into CI, billing diverges. Mitigation: wire the
-  tag to CI if a `TEST_DATABASE_URL` is available, otherwise call out
-  the gap in the PR body so a reviewer signs off on the gap.
+  tag to CI if a `TEST_DATABASE_URL` is available. If that cannot
+  happen in this PR, leave the feature explicitly short of final
+  sign-off.
 - **`ReconcileWorkerSessions` staleness (F2)** is inherited, not
   introduced. Document and move on.
 - **`alias` coupling to config JSON (F1)** is a one-line SQL concern
   but worth a second look in review.
+- **Sandbox ID shortness makes org-scoped keying load-bearing.** The
+  schema/store fix in F3 is not polish; it is the tenancy boundary.

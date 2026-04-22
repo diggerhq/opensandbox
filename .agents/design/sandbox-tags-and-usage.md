@@ -36,15 +36,22 @@ CREATE TABLE sandbox_tags (
   key         TEXT        NOT NULL,
   value       TEXT        NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (sandbox_id, key)
+  PRIMARY KEY (org_id, sandbox_id, key)
 );
 CREATE INDEX ON sandbox_tags (org_id, key, value);
 ```
 
 Row-per-tag keeps grouping SQL clean (`LEFT JOIN sandbox_tags t ON
-t.sandbox_id = e.sandbox_id AND t.key = 'team' GROUP BY t.value`),
+t.org_id = e.org_id AND t.sandbox_id = e.sandbox_id AND t.key = 'team'
+GROUP BY t.value`),
 makes tag-count limits trivial to enforce, and cleanly separates
 "current tags" (mutable) from session metadata (historical snapshot).
+
+`org_id` belongs in the key, not just as a filter column. Sandbox IDs
+are short `sb-xxxxxxxx` strings today, and the schema does not enforce
+cross-org uniqueness. A `(sandbox_id, key)` PK would therefore let an
+ID collision alias tag state across tenants. Every read, join, and
+write should scope on `(org_id, sandbox_id)`.
 
 `sandbox_sessions.metadata` is left intact — still captured at create
 time, still unread, still round-trips. No SDK surface for it changes.
@@ -135,7 +142,7 @@ Query parameters:
 | Param | Values | Notes |
 |---|---|---|
 | `groupBy` | `sandbox`, `tag:<key>` | Required. |
-| `filter[<dim>]` | any | Repeatable, AND-ed. `filter[tag:team]=` (empty) = "key absent". |
+| `filter[<dim>]` | any | One param per dimension. Comma-separated values are OR-ed within that dimension; different dimensions are AND-ed. `filter[tag:team]=` (empty) = "key absent". |
 | `from`, `to` | ISO8601 | Default: last 30 days. Max window: 90 days. |
 | `sort` | `-memoryGbSeconds` (default), `-diskOverageGbSeconds` | Secondary sort by `sandboxId` / `tagValue` for cursor determinism. |
 | `limit`, `cursor` | default 50, max 500 | Opaque cursor. |
@@ -213,10 +220,12 @@ key`, org-scoped.
 ```
 
 `firstStartedAt` / `lastEndedAt` are sourced from `sandbox_sessions`
-(`MIN(started_at)` / `MAX(COALESCE(stopped_at, now()))`) clamped to
-the query window — stable across scale-event churn and matches user
-intent of "when did this sandbox exist," not "when was it billed."
-`lastEndedAt` is `null` while any session for the sandbox is open.
+(`MIN(started_at)` / `MAX(COALESCE(stopped_at, now()))`) and then
+clamped into the query window (`max(minStart, from)`,
+`min(maxEnd, to)`). This is stable across scale-event churn and
+matches user intent of "when did this sandbox exist," not "when was it
+billed." `lastEndedAt` is `null` while any session for the sandbox is
+open.
 
 Works for torn-down sandboxes — `sandbox_scale_events` and
 `sandbox_tags` persist. Tag rows are left in place on destroy so
@@ -282,21 +291,32 @@ issues. Scoping to `/tags` keeps that door shut.
   to SQL joining `sandbox_scale_events` to `sandbox_tags`. Reuse the
   duration / GB-second math from `GetOrgUsage` /
   `DiskOverageGBSeconds` — do not reimplement.
+- **Tag joins are org-scoped, not sandbox-id-scoped.** Join on both
+  `org_id` and `sandbox_id`; do not rely on sandbox IDs being globally
+  unique.
 - **Handlers**: new `internal/api/usage.go` (`/usage`, `/tags`,
   `/sandboxes/{id}/usage`); new `internal/api/sandbox_tags.go` (GET
   and PUT on `/sandboxes/{id}/tags`). Wire in
   `internal/api/router.go` inside the authed group.
 - **Response additions**: `GET /sandboxes` list and `GET
-  /sandboxes/{id}` gain `tags` + `tagsLastUpdatedAt`. Additive.
+  /sandboxes/{id}` gain `tags` + `tagsLastUpdatedAt`. Additive. This
+  applies to all four read paths (local + remote, get + list).
 - **Tenancy**: every query scopes on `auth.GetOrgID(c)` — same as
-  every existing handler. No sub-org visibility; an org-scoped API
-  key sees the whole org's spend (pre-existing model).
-- **Query guardrails**: reject `to - from > 90d`; reject `limit >
-  500`; handler-level timeout on `/usage` (10s suggested).
+  every existing handler, and the store/query layer carries that scope
+  all the way down into tag reads and joins. No sub-org visibility; an
+  org-scoped API key sees the whole org's spend (pre-existing model).
+- **`groupBy=sandbox` hydration stays batched.** Tag hydration is one
+  batch call per page; alias/status should also be fetched in batch or
+  folded into the SQL. Do not issue one session lookup per row under a
+  500-row, 10s handler budget.
+- **Query guardrails**: reject `to - from > 90d`; reject `to <= from`;
+  reject `limit > 500`; handler-level timeout on `/usage` (10s
+  suggested).
 - **Tests**:
   - Query builder across each `groupBy × filter` combination.
   - **Reconciliation test**: assert `Σ by-sandbox = Σ by-tag +
-    untagged = GetOrgUsage(org)` within float epsilon.
+    untagged = GetOrgUsage(org)` within float epsilon against a real
+    Postgres instance. Pure SQL-shape tests are not enough.
   - Integration tests for top-N sandboxes, group-by-team,
     drilldown.
   - PUT validation tests (size limits, reserved prefix, malformed
@@ -306,4 +326,3 @@ issues. Scoping to `/tags` keeps that door shut.
   layer, not the server.
 - **Docs**: reference entries under `docs/api-reference/` per
   endpoint; wire into `docs/mint.json`.
-
