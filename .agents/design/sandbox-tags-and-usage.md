@@ -87,18 +87,22 @@ A reconciliation test (see Implementation notes) asserts
 epsilon. If `GetOrgUsage` math ever changes, this code changes in
 lockstep.
 
-## Data freshness: fresh on clean shutdown, reconciled otherwise
+## Data freshness: fresh on clean shutdown, lagged until worker restart
 
 Scale events close on two paths:
 
 - **Clean transitions** via `UpdateSandboxSessionStatus` — immediate.
-- **Worker heartbeat reconciliation** via `ReconcileWorkerSessions`
-  — closes zombie rows on worker crash or sandbox death.
+- **Worker-startup reconciliation** via `ReconcileWorkerSessions` —
+  closes zombie rows when a worker restarts.
 
-So "fresh to the minute" holds for clean shutdowns; worst case is
-reconciliation-lagged (sandbox dies, usage keeps accruing until the
-next heartbeat sweep closes the row). Call it out on the endpoint
-reference.
+"Fresh to the minute" holds for clean shutdowns. For a silently-dead
+worker that never restarts, scale events stay open and
+`COALESCE(ended_at, now())` keeps accruing — indefinitely, not until
+the "next heartbeat." There is no periodic reconciliation sweep.
+This is the same behavior as `GetOrgUsage` today: the Stripe pipeline
+inherits the identical staleness window and has lived with it. We
+surface the existing risk through new endpoints rather than
+introducing a new one. Call it out on the endpoint reference.
 
 ## Surface
 
@@ -208,8 +212,17 @@ key`, org-scoped.
 }
 ```
 
+`firstStartedAt` / `lastEndedAt` are sourced from `sandbox_sessions`
+(`MIN(started_at)` / `MAX(COALESCE(stopped_at, now()))`) clamped to
+the query window — stable across scale-event churn and matches user
+intent of "when did this sandbox exist," not "when was it billed."
+`lastEndedAt` is `null` while any session for the sandbox is open.
+
 Works for torn-down sandboxes — `sandbox_scale_events` and
-`sandbox_tags` persist.
+`sandbox_tags` persist. Tag rows are left in place on destroy so
+historical drilldowns keep resolving; the minor overstatement in
+`/tags` key counts is acceptable and revisitable if it becomes a
+complaint.
 
 ### `GET /sandboxes/{id}/tags`, `PUT /sandboxes/{id}/tags`
 
@@ -220,6 +233,13 @@ GET → { "tags": { "env": "prod", "team": "payments" },
 PUT body: { "env": "staging", "team": "growth" }
 → full replace, returns new state. `{}` clears all tags.
 ```
+
+For a sandbox with no tags, `tags` is `{}` (not `null`) and
+`tagsLastUpdatedAt` is `null` — typed SDKs avoid a null-check on the
+map.
+
+Full-replace only — no `?mode=merge` variant. Partial updates go
+GET+PUT. One semantic per verb; atomicity stays simple.
 
 Deliberately narrow. A broader `PATCH /sandboxes/{id}` would invite
 feature creep (alias, memory, etc.), each with its own semantic
@@ -232,6 +252,10 @@ issues. Scoping to `/tags` keeps that door shut.
 - Value: 0–256 chars, UTF-8.
 - `oc:` key prefix reserved for future system-set tags — PUT with
   such keys returns 400.
+- Parsing `tag:<key>` in `groupBy` / `filter[...]`: split on the
+  first `:` only (`SplitN(s, ":", 2)`). A key of `team:payments`
+  appears as `groupBy=tag:team:payments`; the tag key is everything
+  after the first `:`.
 
 ## Explicit non-goals for v1
 
@@ -283,15 +307,3 @@ issues. Scoping to `/tags` keeps that door shut.
 - **Docs**: reference entries under `docs/api-reference/` per
   endpoint; wire into `docs/mint.json`.
 
-## Open questions for implementation
-
-- `firstStartedAt` / `lastEndedAt` on single-sandbox response: derive
-  from first/last scale event, or from `sandbox_sessions.started_at`?
-  Session-level is probably more intuitive but needs a check for
-  sandboxes with multiple sessions.
-- Sandbox-destroy behavior for tag rows: tombstone or leave. Leaving
-  preserves the drilldown for historical reports but slightly
-  overstates `/tags` counts; tombstoning flips the trade-off. Lean
-  leave; revisit if orgs complain.
-- Whether to support a merge-mode (`PUT ...?mode=merge`) or keep
-  strict full-replace and force GET+PUT for partial updates.
