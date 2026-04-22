@@ -601,6 +601,13 @@ func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpoin
 // the overlay to the current base — same logic as checkpoint fork rebase.
 func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error) {
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
+	// Clean any leftover state from a prior failed prepare attempt. Without this,
+	// zstd refuses to overwrite an existing workspace.qcow2 and the retry fails
+	// with "already exists; not overwritten". The incoming sandbox must not be
+	// running on this worker yet, so removing is safe — drives come from S3.
+	if err := os.RemoveAll(sandboxDir); err != nil {
+		log.Printf("qemu: migration %s: cleanup stale sandbox dir: %v", sandboxID, err)
+	}
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
 		return "", 0, fmt.Errorf("mkdir: %w", err)
 	}

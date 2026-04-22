@@ -845,12 +845,24 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 			return
 		}
 
-		// If too many migration failures, fall back to natural expiry
+		// If too many migration failures, back off and retry rather than falling
+		// into forever-wait. Drains still bound by drainTimeout (45 min). The
+		// failure cause is often transient — target worker just came up, old
+		// base only just got uploaded, a previous attempt left stale files —
+		// and a periodic reset lets us succeed once the transient clears. If
+		// migration genuinely can't complete, drainTimeout terminates the loop
+		// and the next eval tick takes over.
 		if migrationFailures >= maxMigrationFailures {
-			log.Printf("scaler: drain: %d migration failures on %s, waiting for %d sandboxes to expire naturally",
+			log.Printf("scaler: drain: %d migration failures on %s, backing off 5min before retry (%d sandboxes remaining)",
 				migrationFailures, workerID, len(running))
-			s.waitForNaturalDrain(ctx, workerID)
-			return
+			select {
+			case <-ctx.Done():
+				log.Printf("scaler: drain: timeout reached for worker %s", workerID)
+				return
+			case <-time.After(5 * time.Minute):
+			}
+			migrationFailures = 0
+			continue
 		}
 
 		// Find target for this batch
