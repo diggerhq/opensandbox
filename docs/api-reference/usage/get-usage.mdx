@@ -31,9 +31,12 @@ as the Stripe pipeline.
 </ParamField>
 
 <ParamField query="filter[tag:<key>]" type="string">
-  Repeatable. Comma-separated values OR within a key; multiple
-  `filter[...]` params AND across keys. Empty value (`filter[tag:team]=`)
-  matches sandboxes without the `team` key.
+  One param per dimension. Comma-separated values are OR'd within
+  that dimension; different `filter[...]` params are AND'd across
+  dimensions. Passing the same `filter[...]` key twice returns 400 —
+  put multiple OR values in one comma-separated string instead. Empty
+  value (`filter[tag:team]=`) matches sandboxes without the `team`
+  key.
 </ParamField>
 
 <ParamField query="sort" type="string">

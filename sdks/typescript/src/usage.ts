@@ -51,7 +51,12 @@ export interface UsageByTagResponse {
 }
 
 export interface UsageFilterMap {
-  /** `filter[tag:<key>]=v1,v2` — repeatable, AND'd. Empty string = "key absent." */
+  /**
+   * One entry per dimension. Comma-separated values within an entry are
+   * OR'd; entries across different dimensions are AND'd. Empty string
+   * matches "key absent." Repeating the same dimension is rejected by
+   * the server — put multiple values in one comma-separated string.
+   */
   [tagFilter: string]: string;
 }
 
