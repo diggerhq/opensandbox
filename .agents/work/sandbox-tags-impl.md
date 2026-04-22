@@ -4,6 +4,58 @@ Working doc. Design is at `.agents/design/sandbox-tags-and-usage.md`,
 signed off. This doc is the delivery plan + a flag list of weak or
 fuzzy spots in the design that surfaced during code exploration.
 
+## Latest review of the implementation branch
+
+The first review pass drove F3/F8/F9/F10/F11 changes, and those are now
+landed on branch: tag storage is org-scoped, all sandbox read paths
+hydrate tags, drilldown windows reject `to <= from` and clamp
+timestamps, filter semantics are narrowed to one param per dimension,
+and `groupBy=sandbox` session hydration is batched.
+
+What still looks outstanding before merge:
+
+**F12. Session lookups are still keyed by `sandbox_id` alone.**
+The new tag store/query paths are keyed on `(org_id, sandbox_id)`, but
+the feature's ownership and drilldown session reads still call the old
+`GetSandboxSession(ctx, sandboxID)` helper from
+`internal/api/sandbox_tags.go` and `internal/api/usage.go`. That helper
+queries `sandbox_sessions` by `sandbox_id` alone, and this repo still
+does not enforce global sandbox-ID uniqueness. Sandbox IDs are generated
+as short `sb-xxxxxxxx` strings in multiple create paths. Result: on a
+cross-org ID collision, one org can fail `ownsSandbox` for its own
+sandbox and `/sandboxes/{id}/usage` can hydrate alias/status from the
+wrong org's latest session. Recommendation: add an org-scoped latest
+session lookup and use it everywhere this feature touches session state.
+
+**F13. `SandboxUsageWindow` hides real errors from the session-bounds
+query.** The first query correctly returns usage numbers or an error.
+The second query (session MIN/MAX bounds) currently treats any
+`row.Scan(...)` error as "no sessions in window" and returns nil
+timestamps. That is too broad: a real DB/context failure on that query
+would be downgraded into a partial `200` response with missing
+`firstStartedAt` / `lastEndedAt`. Recommendation: only special-case the
+empty-window case; surface real scan/query failures normally. A clean
+way is to `COALESCE(BOOL_OR(...), false)` and scan into non-pointer
+state instead of using scan failure as control flow.
+
+**F14. The reconciliation invariant still lacks an execution-level
+test.** `internal/db/usage_query_test.go` now covers builder shape and
+some tenancy predicates, but it still does not prove the load-bearing
+claim against real Postgres:
+`Σ by-sandbox = Σ by-tag + untagged = ExecuteOrgTotals / GetOrgUsage`.
+This remains the main safety gap for billing-adjacent math. The
+`pgfixture` reconciliation test called out below is still not optional
+for sign-off.
+
+**F15. The Python SDK still documents the old duplicate-filter
+contract.** The API and TS SDK now agree on "one filter param per
+dimension, comma-separated OR values, reject repeated same-key params."
+But `sdks/python/opencomputer/usage.py` still says duplicate keys are
+preserved and expected. The runtime surface already takes a
+`dict[str, str]`, so this is a reader-facing mismatch rather than a
+server bug. Recommendation: update the Python helper docstring/comments
+to match the narrowed v1 contract before merge.
+
 ## Issues flagged from fresh code reading
 
 Listed in rough order of "needs a decision before merge." Numbers are
