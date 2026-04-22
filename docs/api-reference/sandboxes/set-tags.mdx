@@ -1,0 +1,41 @@
+---
+title: 'Set Sandbox Tags'
+api: 'PUT /api/sandboxes/{id}/tags'
+---
+
+Replace the full tag set for a sandbox. Partial updates are not
+supported — GET, modify, PUT. `{}` clears all tags.
+
+<ParamField path="id" type="string" required>
+  Sandbox ID.
+</ParamField>
+
+<ParamField body="<tagKey>" type="string">
+  Each top-level key in the body is a tag name; the value is a
+  string. Flat map only — nested objects are rejected.
+</ParamField>
+
+### Validation
+
+- At most 50 tag keys per sandbox.
+- Keys: 1–128 characters, `A–Z a–z 0–9 _ . - :`. `:` is allowed as
+  a user namespace separator.
+- Values: 0–256 UTF-8 characters.
+- The `oc:` key prefix is reserved for future system-set tags.
+
+<ResponseExample>
+```json 200
+{
+  "tags": { "env": "staging", "team": "growth" },
+  "tagsLastUpdatedAt": "2026-04-22T20:31:14Z"
+}
+```
+</ResponseExample>
+
+<Note>
+Retagging rewrites attribution going forward: a sandbox re-tagged
+from `team=payments` to `team=growth` will appear under `growth` in
+every subsequent /usage query, including for time before the retag.
+Surface `tagsLastUpdatedAt` alongside spend in dashboards so readers
+can see when tags changed.
+</Note>
