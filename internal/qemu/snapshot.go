@@ -527,11 +527,9 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 	vm.agent = agentClient
 
-	// Agent upgrade runs in the background — a running (even older-version)
-	// agent is fine for callers, and pushing a 12MB binary over virtio-serial
-	// during resume thrash can poison the gRPC connection via keepalive miss.
-	// If upgrade fails, upgradeAgentIfNeeded's reconnect logic restores vm.agent.
-	go m.upgradeAgentIfNeeded(context.Background(), vm)
+	// Agent binary updates happen via qemu-img rebase of the rootfs, not via
+	// runtime re-exec. See the "Runtime agent upgrade" comment in manager.go
+	// for the rationale.
 
 	m.mu.Lock()
 	m.vms[sandboxID] = vm
