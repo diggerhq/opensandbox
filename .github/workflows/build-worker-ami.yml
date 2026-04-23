@@ -54,6 +54,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history required so AGENT_VERSION below can find the most
+          # recent commit that touched cmd/agent / internal/agent / proto/agent
+          # — without it, actions/checkout does a shallow clone (depth 1) and
+          # git log only sees HEAD.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
