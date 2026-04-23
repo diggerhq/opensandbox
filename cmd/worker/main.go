@@ -36,6 +36,26 @@ var AgentVersion = "dev"
 var WorkerVersion = "dev"
 
 func main() {
+	// Subcommands that don't need config/secrets. Must short-circuit before
+	// LoadSecretsFromKeyVault, which is slow and would fail outside Azure.
+	//
+	// "golden-version <path>" prints the full-file hash used for golden-image
+	// archive keys. Packer invokes this so the archive key matches what
+	// ensureCheckpointRebased looks up at runtime.
+	if len(os.Args) >= 2 && os.Args[1] == "golden-version" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: opensandbox-worker golden-version <path-to-base-image>")
+			os.Exit(2)
+		}
+		ver, err := qm.ComputeGoldenVersion(os.Args[2])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println(ver)
+		return
+	}
+
 	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
 	if err := config.LoadSecretsFromKeyVault(); err != nil {
 		log.Fatalf("failed to load secrets from Key Vault: %v", err)

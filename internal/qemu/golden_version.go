@@ -30,3 +30,10 @@ func computeGoldenVersion(baseImagePath string) (string, error) {
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))[:16], nil
 }
+
+// ComputeGoldenVersion is the exported entry point used by cmd/worker's
+// "golden-version" subcommand so Packer invokes the same hash function
+// the runtime uses for archive-key lookups.
+func ComputeGoldenVersion(baseImagePath string) (string, error) {
+	return computeGoldenVersion(baseImagePath)
+}
