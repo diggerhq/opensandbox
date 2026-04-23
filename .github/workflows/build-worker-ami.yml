@@ -64,12 +64,23 @@ jobs:
           VERSION=$(git rev-parse --short HEAD)
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
+          # Agent version bumps only when actual agent code changes. Using the
+          # repo-level HEAD SHA would mark every AMI build as a new agent, causing
+          # spurious in-place upgrades on every rolling replace — a known source
+          # of fragility during wake (keepalive misses during 12MB transfer poison
+          # the virtio-serial gRPC connection).
+          AGENT_VERSION=$(git log -1 --pretty=format:%h -- cmd/agent internal/agent proto/agent)
+          if [ -z "$AGENT_VERSION" ]; then
+            AGENT_VERSION=$VERSION
+          fi
+          echo "AGENT_VERSION=$AGENT_VERSION"
+
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.WorkerVersion=$VERSION -X main.AgentVersion=$VERSION" \
+            -ldflags "-X main.WorkerVersion=$VERSION -X main.AgentVersion=$AGENT_VERSION" \
             -o bin/opensandbox-worker ./cmd/worker/
 
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.Version=$VERSION" \
+            -ldflags "-X main.Version=$AGENT_VERSION" \
             -o bin/osb-agent ./cmd/agent/
 
       - name: Package rootfs context

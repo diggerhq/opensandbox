@@ -3036,6 +3036,35 @@ func (m *Manager) RecoverLocalSandboxes() []LocalRecovery {
 	return recoveries
 }
 
+// waitAgentStable polls the agent with tight-deadline Ping calls until three
+// consecutive pings succeed quickly — indicating the guest is past its
+// post-resume disk I/O / scheduler thrash and can sustain the keepalive cadence
+// without dropping ACKs mid-transfer. Returns false if stability isn't reached
+// before the deadline; caller should defer the upgrade rather than risk
+// poisoning vm.agent.
+func (m *Manager) waitAgentStable(vm *VMInstance, timeout time.Duration) bool {
+	if vm.agent == nil {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	consecutiveOK := 0
+	for time.Now().Before(deadline) {
+		pingCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, err := vm.agent.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			consecutiveOK++
+			if consecutiveOK >= 3 {
+				return true
+			}
+		} else {
+			consecutiveOK = 0
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return false
+}
+
 // upgradeAgentIfNeeded checks the agent version inside a running VM and
 // hot-upgrades it if the version doesn't match. Transfers the binary in
 // 256KB chunks, then tells the agent to re-exec. Blocks until complete.
@@ -3055,6 +3084,17 @@ func (m *Manager) upgradeAgentIfNeeded(ctx context.Context, vm *VMInstance) {
 		return
 	}
 	log.Printf("qemu: agent %s: version mismatch (agent=%s, expected=%s), upgrading", vm.ID, agentVersion, m.cfg.AgentVersion)
+
+	// Wait for agent to be stably responsive before starting the 12MB transfer.
+	// Right after wake/fork, guest disk I/O and scheduler recovery can stretch
+	// individual RPCs to hundreds of milliseconds — long enough for gRPC
+	// keepalive to miss its ACK and tear down the connection mid-chunk.
+	// Since agent upgrades only fire on real code changes (rare), a multi-second
+	// stability wait here is cheap compared to a poisoned connection.
+	if !m.waitAgentStable(vm, 30*time.Second) {
+		log.Printf("qemu: agent %s: stability wait timed out, deferring upgrade (agent will keep running old version)", vm.ID)
+		return
+	}
 
 	agentData, err := os.ReadFile(m.cfg.AgentBinaryPath)
 	if err != nil {
@@ -3081,13 +3121,19 @@ func (m *Manager) upgradeAgentIfNeeded(ctx context.Context, vm *VMInstance) {
 		chunkCancel()
 		if err != nil {
 			log.Printf("qemu: agent %s: upgrade aborted (chunk at %d): %v", vm.ID, offset, err)
-			cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			vm.agent.Exec(cleanCtx, &pb.ExecRequest{
-				Command:   "/bin/sh",
-				Args:      []string{"-c", fmt.Sprintf("rm -f %s %s.chunk", tmpPath, tmpPath)},
-				RunAsRoot: true,
-			})
-			cleanCancel()
+			// The gRPC connection is now in a degraded state — the chunk write
+			// timed out or got a keepalive failure, leaving a poisoned conn.
+			// Reconnect so subsequent callers get a working client instead of
+			// "use of closed network connection" on every RPC.
+			_ = vm.agent.Close()
+			newAgent, reconnErr := m.waitForAgentSocket(context.Background(), vm.agentSockPath, 15*time.Second)
+			if reconnErr != nil {
+				log.Printf("qemu: agent %s: reconnect after upgrade-abort failed: %v (marking agent unavailable)", vm.ID, reconnErr)
+				vm.agent = nil
+				return
+			}
+			vm.agent = newAgent
+			log.Printf("qemu: agent %s: reconnected after upgrade-abort", vm.ID)
 			return
 		}
 
