@@ -574,15 +574,21 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 // Always uploads the thin overlay (never flattens). The target worker rebases
 // to its own base image if golden versions differ.
 // Returns S3 keys, golden version, and base CPU/memory for QEMU matching.
-func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem int, err error) {
+func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem, actualMem int, err error) {
 	m.mu.RLock()
 	vm, exists := m.vms[sandboxID]
+	var pid int
 	if exists {
 		goldenVer = vm.goldenVersion
 		baseCPU = vm.CpuCount
 		baseMem = vm.baseMemoryMB
+		pid = vm.pid
 	}
 	m.mu.RUnlock()
+
+	if pid > 0 {
+		actualMem = readProcRSSMB(pid)
+	}
 
 	mc := &MigrationCoordinator{
 		manager:         m,

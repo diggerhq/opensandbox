@@ -1905,6 +1905,71 @@ func (m *Manager) hostMemoryMB() int {
 	return 64 * 1024
 }
 
+// hostUsedMemoryMB returns actual host memory in use (MemTotal − MemAvailable).
+// MemAvailable already discounts reclaimable caches/buffers, so this is the
+// honest number for "RAM the kernel really can't hand out without reclaiming."
+// Used for actual-memory-based migration scheduling in place of committed
+// tracking (which over-reserves for idle sandboxes with large maxmem).
+func (m *Manager) hostUsedMemoryMB() int {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var totalKB, availKB int
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			totalKB, _ = strconv.Atoi(fields[1])
+		case "MemAvailable:":
+			availKB, _ = strconv.Atoi(fields[1])
+		}
+	}
+	if totalKB == 0 {
+		return 0
+	}
+	return (totalKB - availKB) / 1024
+}
+
+// HostUsedMemoryMB exposes used memory for the capacity checker interface.
+func (m *Manager) HostUsedMemoryMB() int {
+	return m.hostUsedMemoryMB()
+}
+
+// VMActualMemoryMB returns the QEMU process RSS for a sandbox — true physical
+// memory the host kernel has backed with RAM. Includes QEMU overhead plus
+// faulted-in guest pages. Scaler passes this value to PrepareMigrationIncoming
+// so the target reserves what will really land, not the configured maximum.
+func (m *Manager) VMActualMemoryMB(sandboxID string) int {
+	m.mu.RLock()
+	vm, ok := m.vms[sandboxID]
+	m.mu.RUnlock()
+	if !ok || vm.pid == 0 {
+		return 0
+	}
+	return readProcRSSMB(vm.pid)
+}
+
+func readProcRSSMB(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "VmRSS:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, _ := strconv.Atoi(fields[1])
+				return kb / 1024
+			}
+		}
+	}
+	return 0
+}
+
 // Stats returns live resource usage from the VM.
 func (m *Manager) Stats(ctx context.Context, sandboxID string) (*sandbox.SandboxStats, error) {
 	vm, err := m.getReadyVM(ctx, sandboxID)
