@@ -2226,6 +2226,29 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	metaJSON, _ := json.Marshal(meta)
 	_ = os.WriteFile(filepath.Join(stagingDir, "snapshot", "snapshot-meta.json"), metaJSON, 0644)
 
+	// Extract memory into an external mem.zst and strip the internal savevm
+	// snapshot from the staging qcow2s. This converts the checkpoint into a
+	// format fork restore prefers (-incoming exec:zstdcat over loadvm) and
+	// that qemu-img rebase composes cleanly with for cross-golden forks.
+	// Done before the rename so the local cache never exposes a
+	// half-converted state to concurrent fork readers.
+	//
+	// Best-effort: on failure, leave the savevm-based layout in place. Fork
+	// restore still works via loadvm for same-golden forks; cross-golden
+	// will fail the same way it does without this step, so we're no worse
+	// off than before.
+	extractCtx, extractCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Pass baseMemoryMB (initial -m value), not MemoryMB (which reflects the
+	// current virtio-mem balloon). The extract QEMU's cmdline must match the
+	// original VM's -m for loadvm to restore correctly; virtio-mem state
+	// inside the snapshot replays the balloon up to the ballooned size.
+	if extractErr := m.extractCheckpointMemory(extractCtx, stagingDir, snapshotName, vm.baseMemoryMB, vm.CpuCount); extractErr != nil {
+		log.Printf("qemu: checkpoint %s: memory extract failed (falling back to savevm format): %v", checkpointID, extractErr)
+	} else {
+		log.Printf("qemu: checkpoint %s: memory extracted to mem.zst (%dms total)", checkpointID, time.Since(t0).Milliseconds())
+	}
+	extractCancel()
+
 	// Atomic rename into cache under write lock.
 	m.checkpointCacheMu.Lock()
 	os.RemoveAll(cacheDir)
