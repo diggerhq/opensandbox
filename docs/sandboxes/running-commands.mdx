@@ -3,11 +3,21 @@ title: "Running Commands"
 description: "Execute shell commands inside a sandbox"
 ---
 
-Three primitives:
+Three primitives, each tuned for a different shape of work:
 
-- `exec.run()` — fire-and-wait; returns once the command exits.
-- `exec.start()` (alias `exec.background()`) — fire-and-observe; returns a session handle for streaming long-running processes.
-- `exec.shell()` — stateful shell session whose `cwd`, exported env vars, and shell functions persist across `.run()` calls (the ergonomics of a terminal tab).
+| Use                                       | Primitive                            | Why                                                                                                                                     |
+| ----------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| One-shot command, wait for the result     | `exec.run()`                         | Simplest call. Returns once the command exits. Each call is isolated — no state carries between calls.                                  |
+| Long-running / streaming process          | `exec.start()` / `exec.background()` | Returns a session handle you can stream from, send stdin to, or reattach to later. Use for servers, builds, and any job you need to observe live. |
+| Multi-step workflow, state must persist   | `exec.shell()`                       | Opens a long-lived `bash` whose `cwd`, exported env, and shell functions persist across `.run()` calls — the ergonomics of a terminal tab. Reconnectable via `exec.reattachShell(sessionId)`. |
+
+Rules of thumb:
+
+- Need a return value and don't care about streaming? → **`run()`**.
+- Starting something that outlives the call (a server, a log tailer, a slow build)? → **`start()` / `background()`**.
+- Doing a sequence of commands where one step's state (directory, env var, activated venv) affects the next? → **`shell()`**.
+
+Under the hood `shell()` *is* an exec session — its `sessionId` shows up in `exec.list()` next to anything started via `start()`. The difference is purely how the SDK frames commands on top: a sentinel protocol per `.run()` call so you can treat one long-lived bash as many discrete calls.
 
 <CodeGroup>
 
@@ -148,7 +158,7 @@ await session.kill()
 
 ## Stateful Shell: `exec.shell()`
 
-Open a long-lived `bash` session whose state (`cwd`, exported env vars, shell functions) persists across `.run()` calls. Foreground-only: concurrent `.run()` rejects.
+Open a long-lived `bash` session whose state (`cwd`, exported env vars, shell functions) persists across `.run()` calls. Foreground-only: concurrent `.run()` rejects with `ShellBusyError`.
 
 <CodeGroup>
 
@@ -177,6 +187,55 @@ await sh.close()
 ```
 
 </CodeGroup>
+
+### Reattaching to an open shell
+
+The shell is just an exec session, so its `sessionId` is stable across SDK invocations. Keep the id and revisit the same shell later — cwd, env, and shell functions are still there because the bash process never went anywhere.
+
+<CodeGroup>
+
+```typescript TypeScript
+const sh = await sandbox.exec.shell();
+await sh.run("cd /srv && export DEPLOY=canary");
+const id = sh.sessionId; // persist this somewhere
+
+// ...later, possibly a different process...
+
+const sh2 = await sandbox.exec.reattachShell(id);
+const r = await sh2.run("pwd; echo $DEPLOY");
+// → "/srv\ncanary\n"
+```
+
+```python Python
+sh = await sandbox.exec.shell()
+await sh.run("cd /srv && export DEPLOY=canary")
+sid = sh.session_id  # persist this somewhere
+
+# ...later, possibly a different process...
+
+sh2 = await sandbox.exec.reattach_shell(sid)
+r = await sh2.run("pwd; echo $DEPLOY")
+# → "/srv\ncanary\n"
+```
+
+</CodeGroup>
+
+<Note>
+  Reattach assumes the shell is idle (no in-flight `.run()` from another client). If two clients try to drive the same shell concurrently, their output will interleave — coordinate at the application level.
+</Note>
+
+### Terminal-tab semantics
+
+Running `exit` (or `exit N`) inside `sh.run()` closes the shell — same as closing a terminal tab. The pending `.run()` rejects with `ShellClosedError` and any subsequent `.run()` on the same `Shell` also rejects. Start a fresh `shell()` if you need another one.
+
+### Streaming output
+
+Pass `onStdout`/`onStderr` to `sh.run()` and they fire as bytes arrive, before the promise resolves. Two caveats worth knowing:
+
+- **bash builtin output is block-buffered.** `echo`, `printf`, and other builtins go through glibc `stdio`, which only flushes when the buffer fills (~4 KB) or bash exits. If you want live output from a simple loop, use an external binary (`/bin/echo`) or a tool that flushes explicitly (`python -u`, `stdbuf -oL <cmd>`).
+- **Upstream hops may coalesce small frames.** Chunks travel bash → agent → worker (gRPC) → WS → CDN → client. Any of those hops is allowed to combine small frames under light load, so a short command may arrive as one chunk even if its output was produced incrementally. Real workloads (builds, installs, servers) produce enough output that streaming is visible in practice.
+
+See `sdks/typescript/examples/stream-demo.ts` / `sdks/python/examples/stream_demo.py` for a ~6-second apt-install simulation that prints per-chunk arrival timestamps — a good way to eyeball streaming behavior against your deployment.
 
 <Note>
   Per-call `cwd`, `env`, and `timeout` are intentionally not supported in v1. Use inline shell syntax (`cd /x && cmd`, `FOO=bar cmd`) — the shell state carries across calls. Use `exec.background()` for fire-and-forget processes.
