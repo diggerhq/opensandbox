@@ -294,9 +294,9 @@ Run a command synchronously via `sh -c`.
 result = await sandbox.exec.run("npm test", cwd="/app")
 ```
 
-### `await sandbox.exec.start(command, ...): str`
+### `await sandbox.exec.start(command, ...): ExecSession`
 
-Start a long-running command. Returns the **session ID** (not a session object).
+Start a long-running command with streaming I/O. Returns an `ExecSession` — see the [full reference](/reference/python-sdk/exec#await-sandbox-exec-start-command).
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -305,14 +305,37 @@ Start a long-running command. Returns the **session ID** (not a session object).
 | `env` | dict[str, str] | None | Environment variables |
 | `cwd` | str | None | Working directory |
 | `timeout` | int | None | Timeout in seconds |
+| `max_run_after_disconnect` | int | None | Seconds to keep running after disconnect |
+| `on_stdout` | Callable[[bytes], None] | None | Stdout callback |
+| `on_stderr` | Callable[[bytes], None] | None | Stderr callback |
+| `on_exit` | Callable[[int], None] | None | Exit callback |
 
 ```python
-session_id = await sandbox.exec.start("node server.js", cwd="/app")
+session = await sandbox.exec.start(
+    "node", args=["server.js"], cwd="/app",
+    on_stdout=lambda b: print(b.decode(), end=""),
+)
+exit_code = await session.done
 ```
 
-<Note>
-  Python `exec.start()` returns a session ID string. There are no streaming callbacks, `ExecSession` object, or `maxRunAfterDisconnect`. For streaming, use the [WebSocket binary protocol](/reference/api#websocket-binary-protocol).
-</Note>
+### `await sandbox.exec.background(command, ...): ExecSession`
+
+Alias for `start`. Same signature and return type.
+
+### `await sandbox.exec.shell(cwd=None, env=None): Shell`
+
+Open a stateful shell session whose `cwd`, env vars, and shell functions persist across `.run()` calls. Foreground-only. See the [full reference](/reference/python-sdk/exec#await-sandbox-exec-shell).
+
+```python
+sh = await sandbox.exec.shell(cwd="/app")
+await sh.run("export NODE_ENV=test")
+r = await sh.run("npm test")
+await sh.close()
+```
+
+### `await sandbox.exec.attach(session_id, ...): ExecSession`
+
+Reconnect to a running exec session over WebSocket, with the same streaming callbacks as `start`.
 
 ### `await sandbox.exec.list(): list[ExecSessionInfo]`
 
@@ -321,13 +344,6 @@ List all exec sessions.
 ### `await sandbox.exec.kill(session_id, signal=9): None`
 
 Kill an exec session.
-
-### Not Available in Python
-
-- `exec.attach()` — reconnect to running session
-- Streaming callbacks (`on_stdout`, `on_stderr`, `on_exit`)
-- `ExecSession` object with `send_stdin()` and `done`
-- `max_run_after_disconnect`
 
 ### ProcessResult
 

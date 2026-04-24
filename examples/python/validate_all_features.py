@@ -123,22 +123,24 @@ async def main():
         # ─── 3. EXEC.START (long-running sessions) ─────────────────
         print("▸ 3. Exec Sessions")
 
-        # Start returns session ID (Python SDK doesn't have WebSocket streaming)
-        sess_id = await sb.exec.start(
+        # start() returns an ExecSession with streaming + done future (matches TS SDK).
+        sess = await sb.exec.start(
             "python3",
             args=["-c", "import time\nfor i in range(3): print(f'line-{i}', flush=True); time.sleep(0.2)"],
         )
-        ok(f"start session: {sess_id}") if sess_id else fail(f"start: {sess_id}")
-        await asyncio.sleep(2)
+        ok(f"start session: {sess.session_id}") if sess.session_id else fail(f"start: {sess.session_id}")
+        await sess.done
+        await sess.close()
 
         # List sessions
         sessions = await sb.exec.list()
         ok(f"list sessions: {len(sessions)}") if len(sessions) >= 1 else fail(f"list: {sessions}")
 
         # Start + kill
-        long_id = await sb.exec.start("sleep", args=["300"])
+        long_sess = await sb.exec.start("sleep", args=["300"])
         await asyncio.sleep(0.5)
-        await sb.exec.kill(long_id)
+        await long_sess.kill()
+        await long_sess.close()
         ok("kill session")
         print()
 

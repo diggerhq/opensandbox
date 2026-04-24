@@ -271,7 +271,26 @@ class Sandbox:
     @property
     def exec(self) -> Exec:
         """Access session-based command execution."""
-        return Exec(self._ops_client, self.sandbox_id, self._connect_url, self._token)
+        # Pair URL + credential: direct-worker URL uses the sandbox JWT,
+        # control-plane fallback uses the API key. The control-plane routes
+        # live under `/api/…`; worker routes don't — so add the prefix only
+        # when falling back.
+        if self._connect_url and self._token:
+            exec_url, exec_token, exec_key = self._connect_url, self._token, ""
+        else:
+            api_base = (
+                self._api_url
+                if self._api_url.endswith("/api")
+                else f"{self._api_url}/api"
+            )
+            exec_url, exec_token, exec_key = api_base, "", self._api_key
+        return Exec(
+            self._ops_client,
+            self.sandbox_id,
+            exec_url,
+            exec_token,
+            api_key=exec_key,
+        )
 
     @property
     def commands(self) -> Exec:

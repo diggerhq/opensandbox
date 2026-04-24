@@ -1,3 +1,5 @@
+import { ShellImpl, type Shell, type ShellOpts } from "./shell.js";
+
 export interface ProcessResult {
   exitCode: number;
   stdout: string;
@@ -19,6 +21,7 @@ export interface ExecStartOpts {
   onStdout?: (data: Uint8Array) => void;
   onStderr?: (data: Uint8Array) => void;
   onExit?: (exitCode: number) => void;
+  onScrollbackEnd?: () => void;
 }
 
 export interface ExecAttachOpts {
@@ -92,6 +95,7 @@ export class Exec {
       onStdout: opts.onStdout,
       onStderr: opts.onStderr,
       onExit: opts.onExit,
+      onScrollbackEnd: opts.onScrollbackEnd,
     });
   }
 
@@ -112,8 +116,22 @@ export class Exec {
     ws.binaryType = "arraybuffer";
 
     let gotExit = false;
+    let opened = false;
     let resolveDone: (code: number) => void;
     const done = new Promise<number>((resolve) => { resolveDone = resolve; });
+
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => {
+        opened = true;
+        resolve();
+      };
+      ws.onerror = () => {
+        if (!opened) reject(new Error(`WebSocket connection failed: ${wsEndpoint}`));
+      };
+      ws.onclose = () => {
+        if (!opened) reject(new Error(`WebSocket closed before opening: ${wsEndpoint}`));
+      };
+    });
 
     ws.onmessage = (event) => {
       const buf = new Uint8Array(event.data as ArrayBuffer);
@@ -155,10 +173,7 @@ export class Exec {
     };
 
     ws.onerror = () => {
-      if (!gotExit) {
-        opts.onExit?.(-1);
-        resolveDone(-1);
-      }
+      // Post-open errors are followed by onclose, which handles exit.
     };
 
     const exec = this;
@@ -211,6 +226,59 @@ export class Exec {
       const text = await resp.text();
       throw new Error(`Failed to kill exec session: ${resp.status} ${text}`);
     }
+  }
+
+  /**
+   * Alias for {@link start}. Use when the intent is "run this command in the
+   * background and observe it" rather than the more ambiguous "start". Same
+   * options, same return type.
+   */
+  async background(command: string, opts: ExecStartOpts = {}): Promise<ExecSession> {
+    return this.start(command, opts);
+  }
+
+  /**
+   * Open a stateful shell session. Subsequent `.run()` calls share the same
+   * bash process, so `cwd`, exported env vars, and shell functions persist
+   * across calls — the ergonomics of a terminal tab.
+   *
+   * Backed by a long-running exec session running `bash --noprofile --norc`.
+   * Foreground-only: concurrent `.run()` rejects. Use `exec.background()` for
+   * fire-and-forget processes. If the user command calls `exit`, the shell
+   * closes (same as closing a terminal tab) and subsequent `.run()` rejects.
+   */
+  async shell(opts: ShellOpts = {}): Promise<Shell> {
+    let impl: ShellImpl | null = null;
+    const session = await this.start("bash", {
+      args: ["--noprofile", "--norc", "+m"],
+      env: opts.env,
+      cwd: opts.cwd,
+      onStdout: (chunk) => impl?.onStdoutChunk(chunk),
+      onStderr: (chunk) => impl?.onStderrChunk(chunk),
+      onScrollbackEnd: () => impl?.onScrollbackEnd(),
+    });
+    impl = new ShellImpl(session);
+    return impl;
+  }
+
+  /**
+   * Re-attach to a shell session that was previously opened by `shell()` and
+   * whose sessionId you've kept. Useful for revisiting a long-lived terminal
+   * tab from a different process invocation.
+   *
+   * Assumes the shell is idle (no in-flight `.run()` from another client).
+   * If another client has a run in flight, output will interleave and the
+   * results are undefined — coordinate at the application level.
+   */
+  async reattachShell(sessionId: string): Promise<Shell> {
+    let impl: ShellImpl | null = null;
+    const session = await this.attach(sessionId, {
+      onStdout: (chunk) => impl?.onStdoutChunk(chunk),
+      onStderr: (chunk) => impl?.onStderrChunk(chunk),
+      onScrollbackEnd: () => impl?.onScrollbackEnd(),
+    });
+    impl = new ShellImpl(session);
+    return impl;
   }
 
   async run(command: string, opts: RunOpts = {}): Promise<ProcessResult> {
