@@ -226,11 +226,21 @@ docker create --name osb-rootfs-tmp "osb-rootfs-${IMAGE_NAME}:build" /bin/true
 docker export osb-rootfs-tmp -o "$TMPDIR/rootfs.tar"
 docker rm -f osb-rootfs-tmp
 
-# Convert tar to ext4
+# Convert tar to ext4. When ROOTFS_UUID is set (by caller), stamp that UUID into
+# the filesystem so identical inputs produce byte-identical ext4 output — the
+# goldenVersion (sha256 of the file) then stays stable across builds that
+# didn't actually change the rootfs content. When unset, mkfs generates a
+# random UUID (previous behaviour), which makes every build produce a new
+# goldenVersion even for identical inputs.
 log "Converting to ext4 (${EXT4_SIZE_MB}MB sparse)..."
 EXT4_PATH="$TMPDIR/rootfs.ext4"
 truncate -s "${EXT4_SIZE_MB}M" "$EXT4_PATH"
-mkfs.ext4 -q -F -L rootfs "$EXT4_PATH"
+if [ -n "${ROOTFS_UUID:-}" ]; then
+    log "Using deterministic UUID: $ROOTFS_UUID"
+    mkfs.ext4 -q -F -L rootfs -U "$ROOTFS_UUID" -E hash_seed="$ROOTFS_UUID" "$EXT4_PATH"
+else
+    mkfs.ext4 -q -F -L rootfs "$EXT4_PATH"
+fi
 
 MNT_DIR="$TMPDIR/mnt"
 mkdir -p "$MNT_DIR"

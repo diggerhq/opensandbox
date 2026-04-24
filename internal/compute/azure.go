@@ -568,6 +568,14 @@ func (p *AzurePool) buildUserData(opts MachineOpts) string {
 	sb.WriteString("if [ -d /opt/opensandbox/images ] && [ ! -f /data/firecracker/images/default.ext4 ]; then\n")
 	sb.WriteString("  cp /opt/opensandbox/images/*.ext4 /data/firecracker/images/ 2>/dev/null || true\n")
 	sb.WriteString("  echo 'Copied rootfs images from /opt/opensandbox/images to /data/firecracker/images'\n")
+	sb.WriteString("fi\n")
+	// Retained previous-golden bases (baked into AMI by Packer) live at
+	// /opt/opensandbox/images/bases/{goldenVersion}/default.ext4. The
+	// worker looks for them under /data/firecracker/images/bases/ so cross-
+	// golden forks skip the runtime blob download.
+	sb.WriteString("if [ -d /opt/opensandbox/images/bases ] && [ ! -d /data/firecracker/images/bases ]; then\n")
+	sb.WriteString("  cp -r /opt/opensandbox/images/bases /data/firecracker/images/\n")
+	sb.WriteString("  echo 'Copied retained bases from /opt/opensandbox/images/bases to /data/firecracker/images/bases'\n")
 	sb.WriteString("fi\n\n")
 
 	// Write worker env file from base64-encoded config

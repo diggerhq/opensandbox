@@ -665,27 +665,25 @@ func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID,
 	}
 
 	if overlayMode {
-		currentGolden := m.GoldenVersion()
-		if sourceGoldenVersion != "" && sourceGoldenVersion != currentGolden {
-			if m.checkpointStore == nil && checkpointStore != nil {
-				m.SetCheckpointStore(checkpointStore)
-			}
-			if err := m.rebaseCheckpointToCurrentBase(ctx, sandboxDir, sourceGoldenVersion); err != nil {
-				return "", 0, fmt.Errorf("rebase rootfs across golden versions: %w", err)
-			}
-			log.Printf("qemu: migration %s: rootfs rebased from %s to %s (cross-version)", sandboxID, sourceGoldenVersion, currentGolden)
-		} else {
-			baseImage, resolveErr := ResolveBaseImage(m.cfg.ImagesDir, "default")
-			if resolveErr != nil {
-				return "", 0, fmt.Errorf("resolve base image for overlay rebase: %w", resolveErr)
-			}
-			absBase, _ := filepath.Abs(baseImage)
-			rebaseCmd := exec.Command("qemu-img", "rebase", "-u", "-b", absBase, "-F", "raw", rootfsPath)
-			if out, err := rebaseCmd.CombinedOutput(); err != nil {
-				return "", 0, fmt.Errorf("rebase rootfs to local base: %w (%s)", err, strings.TrimSpace(string(out)))
-			}
-			log.Printf("qemu: migration %s: rootfs rebased to local base (same version)", sandboxID)
+		if m.checkpointStore == nil && checkpointStore != nil {
+			m.SetCheckpointStore(checkpointStore)
 		}
+		// Resolve the base file for the source's pinned goldenVersion:
+		// current worker default if it matches, otherwise a retained or
+		// on-demand-downloaded copy. Then metadata-repoint the overlay.
+		resolveVer := sourceGoldenVersion
+		if resolveVer == "" {
+			resolveVer = m.GoldenVersion()
+		}
+		basePath, err := m.resolveBaseForVersion(ctx, resolveVer)
+		if err != nil {
+			return "", 0, fmt.Errorf("resolve base %s: %w", resolveVer, err)
+		}
+		absBase, _ := filepath.Abs(basePath)
+		if err := rebaseMetadataOnly(ctx, rootfsPath, absBase); err != nil {
+			return "", 0, fmt.Errorf("rebase rootfs to local base %s: %w", resolveVer, err)
+		}
+		log.Printf("qemu: migration %s: rootfs pinned to base %s", sandboxID, resolveVer)
 	}
 
 	// Wait for workspace download + decompress to finish
