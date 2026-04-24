@@ -34,10 +34,18 @@ func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snaps
 	}
 
 	memFile := filepath.Join(stagingDir, "mem")
-	qmpSock := filepath.Join(stagingDir, "extract-qmp.sock")
+	// Linux UNIX socket paths max 108 bytes. Staging dir
+	// (/data/sandboxes/checkpoint-snapshots/<uuid>.staging/...) is already
+	// over the limit with a reasonable filename, so put the throwaway
+	// sockets in /tmp. "osb-ex" keeps the prefix short enough that even
+	// with a full UUID we stay well under the limit.
+	shortID := fmt.Sprintf("osb-ex-%d", time.Now().UnixNano())
+	qmpSock := filepath.Join("/tmp", shortID+".qmp")
+	agentSock := filepath.Join("/tmp", shortID+".ag")
 	logFile := filepath.Join(stagingDir, "extract-qemu.log")
 	os.Remove(memFile)
 	os.Remove(qmpSock)
+	os.Remove(agentSock)
 
 	// Minimal QEMU args matching the original sandbox topology so loadvm's
 	// device-state restoration finds the exact same device layout. A no-op
@@ -66,7 +74,7 @@ func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snaps
 		"-netdev", "user,id=net0",
 		"-device", "virtio-net-pci,netdev=net0",
 		"-device", "virtio-serial-pci-non-transitional",
-		"-chardev", fmt.Sprintf("socket,id=agent,path=%s-agent.sock,server=on,wait=off", qmpSock),
+		"-chardev", fmt.Sprintf("socket,id=agent,path=%s,server=on,wait=off", agentSock),
 		"-device", "virtserialport,chardev=agent,name=agent",
 		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSock),
 		"-nographic", "-nodefaults",
@@ -124,7 +132,7 @@ func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snaps
 		killQEMU()
 	}
 	os.Remove(qmpSock)
-	os.Remove(qmpSock + "-agent.sock")
+	os.Remove(agentSock)
 
 	// Compress memory file with zstd -3 (same level golden uses). -3 on an
 	// uncompressed VM memory dump typically achieves 3-5x reduction at
