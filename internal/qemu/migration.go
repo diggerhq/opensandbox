@@ -477,7 +477,13 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 		return "", 0, fmt.Errorf("QMP connect: %w", err)
 	}
 
-	// Store the VM (will be completed after migration arrives)
+	// Store the VM (will be completed after migration arrives).
+	// goldenVersion is set to this worker's current golden — after migration,
+	// PrepareIncomingMigrationWithS3 rebased the overlay to point at this
+	// worker's base, so the VM is effectively running against that golden.
+	// Without this, any checkpoint taken after migration would record an
+	// empty goldenVersion and subsequent cross-golden forks of that
+	// checkpoint can't locate the correct old base to rebase from.
 	now := time.Now()
 	vm := &VMInstance{
 		ID:            sandboxID,
@@ -500,6 +506,7 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.GoldenVersion(),
 	}
 
 	m.mu.Lock()

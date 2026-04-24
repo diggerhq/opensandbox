@@ -524,6 +524,7 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.goldenVersion, // set on wake — VM runs on the current worker's base
 	}
 	vm.agent = agentClient
 
@@ -689,6 +690,7 @@ func (m *Manager) coldBootLocal(ctx context.Context, sandboxID string, timeout i
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.goldenVersion, // cold boot: VM runs on the current worker's base
 	}
 
 	agentClient, err := m.waitForAgentSocket(context.Background(), agentSockPath, 30*time.Second)
