@@ -3,9 +3,10 @@
 from opencomputer.sandbox import Sandbox
 from opencomputer.agent import Agent, AgentEvent, AgentSession, AgentSessionInfo
 from opencomputer.filesystem import Filesystem
-from opencomputer.exec import Exec, ProcessResult, ExecSessionInfo
+from opencomputer.exec import Exec, ProcessResult, ExecSession, ExecSessionInfo
 from opencomputer.image import Image
 from opencomputer.pty import Pty, PtySession
+from opencomputer.shell import Shell, ShellBusyError, ShellClosedError
 from opencomputer.template import Template
 from opencomputer.project import SecretStore
 from opencomputer.snapshot import Snapshots
@@ -31,10 +32,14 @@ __all__ = [
     "Filesystem",
     "Exec",
     "ProcessResult",
+    "ExecSession",
     "ExecSessionInfo",
     "Image",
     "Pty",
     "PtySession",
+    "Shell",
+    "ShellBusyError",
+    "ShellClosedError",
     "Template",
     "SecretStore",
     "Snapshots",

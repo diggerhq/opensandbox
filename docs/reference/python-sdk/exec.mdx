@@ -35,7 +35,7 @@ result = await sandbox.exec.run("npm test", cwd="/app")
 
 ## `await sandbox.exec.start(command, ...)`
 
-Start a long-running command. Returns the **session ID** (not a session object). [HTTP API →](/api-reference/exec/create-session)
+Start a long-running command with streaming I/O. [HTTP API →](/api-reference/exec/create-session)
 
 <ParamField body="command" type="str" required>
   Command
@@ -57,15 +57,115 @@ Start a long-running command. Returns the **session ID** (not a session object).
   Timeout in seconds
 </ParamField>
 
-**Returns:** `str` (session ID)
+<ParamField body="max_run_after_disconnect" type="int">
+  Seconds to keep running after disconnect
+</ParamField>
+
+<ParamField body="on_stdout" type="Callable[[bytes], None]">
+  Stdout callback
+</ParamField>
+
+<ParamField body="on_stderr" type="Callable[[bytes], None]">
+  Stderr callback
+</ParamField>
+
+<ParamField body="on_exit" type="Callable[[int], None]">
+  Exit callback
+</ParamField>
+
+**Returns:** `ExecSession`
 
 ```python
-session_id = await sandbox.exec.start("node server.js", cwd="/app")
+session = await sandbox.exec.start(
+    "node", args=["server.js"], cwd="/app",
+    on_stdout=lambda b: print(b.decode(), end=""),
+    on_exit=lambda code: print(f"exited {code}"),
+)
+exit_code = await session.done
 ```
 
+---
+
+## `await sandbox.exec.background(command, ...)`
+
+Alias for [`start`](#await-sandbox-exec-start-command). Same signature, same return type. Use when the intent is "run this in the background and observe it".
+
+```python
+server = await sandbox.exec.background("npm", args=["run", "dev"])
+```
+
+---
+
+## `await sandbox.exec.shell(...)`
+
+Open a stateful shell session. Subsequent `.run()` calls share the same bash process, so `cwd`, exported env vars, and shell functions persist — the ergonomics of a terminal tab.
+
+Backed by a long-running `bash --noprofile --norc` session. Foreground-only: concurrent `.run()` raises `ShellBusyError`.
+
+<ParamField body="cwd" type="str">
+  Initial working directory
+</ParamField>
+
+<ParamField body="env" type="dict[str, str]">
+  Initial environment variables
+</ParamField>
+
+**Returns:** `Shell`
+
+```python
+sh = await sandbox.exec.shell(cwd="/app")
+
+await sh.run("npm install")
+await sh.run("export NODE_ENV=test")
+r = await sh.run("npm test", on_stdout=lambda b: print(b.decode(), end=""))
+print(r.exit_code)
+
+await sh.close()
+```
+
+### Shell
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | `str` | Underlying exec session ID |
+| `run(cmd, on_stdout=?, on_stderr=?)` | `ProcessResult` | Run a command, blocking until it exits |
+| `close()` | `None` | Write `exit` and wait for bash to terminate |
+
 <Note>
-  Python `exec.start()` returns a session ID string. There are no streaming callbacks, `ExecSession` object, or `max_run_after_disconnect`. For streaming, use the [WebSocket binary protocol](/reference/api#websocket-binary-protocol).
+  Per-call `cwd`, `env`, and `timeout` are intentionally not supported in v1. Use inline shell syntax (`cd /x && cmd`, `FOO=bar cmd`) — the shell state carries across calls.
 </Note>
+
+Errors:
+- `ShellBusyError` — another `run()` is in flight (shell is foreground-only).
+- `ShellClosedError` — bash has exited (explicit `close()`, a command ran `exit`, or the session dropped).
+
+---
+
+## `await sandbox.exec.attach(session_id, ...)`
+
+Reconnect to a running exec session over WebSocket.
+
+<ParamField body="session_id" type="str" required>
+  Session ID
+</ParamField>
+
+<ParamField body="on_stdout" type="Callable[[bytes], None]">
+  Stdout callback
+</ParamField>
+
+<ParamField body="on_stderr" type="Callable[[bytes], None]">
+  Stderr callback
+</ParamField>
+
+<ParamField body="on_exit" type="Callable[[int], None]">
+  Exit callback
+</ParamField>
+
+<ParamField body="on_scrollback_end" type="Callable[[], None]">
+  Scrollback replay done
+</ParamField>
+
+**Returns:** `ExecSession`
 
 ---
 
@@ -85,12 +185,15 @@ Kill an exec session. [HTTP API →](/api-reference/exec/kill-session)
 
 ---
 
-## Not Available in Python
+## ExecSession
 
-- `exec.attach()` — reconnect to running session
-- Streaming callbacks (`on_stdout`, `on_stderr`, `on_exit`)
-- `ExecSession` object with `send_stdin()` and `done`
-- `max_run_after_disconnect`
+| Member | Type | Description |
+| --- | --- | --- |
+| `session_id` | `str` | Session ID |
+| `done` | `asyncio.Future[int]` | Resolves with exit code |
+| `send_stdin(data)` | coroutine | Send input (`str` or `bytes`) |
+| `kill(signal=9)` | coroutine | Kill process |
+| `close()` | coroutine | Detach WebSocket (process keeps running) |
 
 ---
 
