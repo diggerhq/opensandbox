@@ -26,7 +26,7 @@ import (
 // latency is unchanged. On failure, the staging directory is left in its
 // savevm-only state — fork restore falls back to loadvm, which still works
 // for same-golden forks.
-func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snapshotName string, memMB, cpuCount int) error {
+func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snapshotName, guestMAC string, memMB, cpuCount int) error {
 	rootfs := filepath.Join(stagingDir, "rootfs.qcow2")
 	workspace := filepath.Join(stagingDir, "workspace.qcow2")
 	if !fileExists(rootfs) || !fileExists(workspace) {
@@ -37,8 +37,7 @@ func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snaps
 	// Linux UNIX socket paths max 108 bytes. Staging dir
 	// (/data/sandboxes/checkpoint-snapshots/<uuid>.staging/...) is already
 	// over the limit with a reasonable filename, so put the throwaway
-	// sockets in /tmp. "osb-ex" keeps the prefix short enough that even
-	// with a full UUID we stay well under the limit.
+	// sockets in /tmp.
 	shortID := fmt.Sprintf("osb-ex-%d", time.Now().UnixNano())
 	qmpSock := filepath.Join("/tmp", shortID+".qmp")
 	agentSock := filepath.Join("/tmp", shortID+".ag")
@@ -47,40 +46,32 @@ func (m *Manager) extractCheckpointMemory(ctx context.Context, stagingDir, snaps
 	os.Remove(qmpSock)
 	os.Remove(agentSock)
 
-	// Minimal QEMU args matching the original sandbox topology so loadvm's
-	// device-state restoration finds the exact same device layout. A no-op
-	// tap via "script=no,downscript=no,ifname=dummy" would be rejected by
-	// the kernel, so we leave out -netdev/-device net entirely and rely on
-	// the fact that loadvm's virtio-net state can be discarded (the extract
-	// run never resumes the VM, only reads its memory).
-	virtioMemPoolMB := ((16384 - memMB + 127) / 128) * 128
-	if virtioMemPoolMB < 1024 {
-		virtioMemPoolMB = 1024
+	// loadvm requires the runtime device layout to match what savevm recorded
+	// byte-for-byte (device IDs, order, -serial stdio, even virtio-mem pool
+	// size). Reuse buildQEMUArgs — same function the live VM was started with
+	// — plus -S and -loadvm to hold the restored state paused so we can
+	// migrate the memory out of it.
+	//
+	// A temporary TAP is allocated because the virtio-net device in the
+	// savevm stream expects a netdev backend, and "-netdev user" is a
+	// different backend type that QEMU rejects during loadvm.
+	netCfg, err := m.subnets.Allocate()
+	if err != nil {
+		return fmt.Errorf("allocate tap: %w", err)
 	}
-	maxMemMB := memMB + virtioMemPoolMB
-	args := []string{
-		"-machine", "q35,accel=kvm",
-		"-cpu", "host",
-		"-m", fmt.Sprintf("%dM,slots=1,maxmem=%dM", memMB, maxMemMB),
-		"-object", fmt.Sprintf("memory-backend-ram,id=vmem0,size=%dM", virtioMemPoolMB),
-		"-device", "virtio-mem-pci,memdev=vmem0,id=vm0,block-size=128M,requested-size=0",
-		"-smp", fmt.Sprintf("%d", cpuCount),
-		"-kernel", m.cfg.KernelPath,
-		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio,cache=writethrough", rootfs),
-		"-drive", fmt.Sprintf("file=%s,format=qcow2,if=virtio,cache=writethrough", workspace),
-		// Match the live VM's network + virtio-serial devices so device state
-		// IDs line up for loadvm. Netdev is "user" (no external reachability)
-		// since the extract VM never sees packets — it only reads memory.
-		"-netdev", "user,id=net0",
-		"-device", "virtio-net-pci,netdev=net0",
-		"-device", "virtio-serial-pci-non-transitional",
-		"-chardev", fmt.Sprintf("socket,id=agent,path=%s,server=on,wait=off", agentSock),
-		"-device", "virtserialport,chardev=agent,name=agent",
-		"-qmp", fmt.Sprintf("unix:%s,server,nowait", qmpSock),
-		"-nographic", "-nodefaults",
-		"-S",
-		"-loadvm", snapshotName,
+	if err := CreateTAP(netCfg); err != nil {
+		m.subnets.Release(netCfg.TAPName)
+		return fmt.Errorf("create tap: %w", err)
 	}
+	defer func() {
+		DeleteTAP(netCfg.TAPName)
+		m.subnets.Release(netCfg.TAPName)
+	}()
+
+	// bootArgs don't matter for loadvm — the guest doesn't actually boot,
+	// we only load the snapshot's memory+device state and migrate out.
+	args := m.buildQEMUArgs(cpuCount, memMB, rootfs, workspace, netCfg.TAPName, guestMAC, agentSock, qmpSock, "")
+	args = append(args, "-S", "-loadvm", snapshotName)
 
 	logf, err := os.Create(logFile)
 	if err != nil {

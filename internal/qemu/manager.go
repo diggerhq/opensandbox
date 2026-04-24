@@ -2242,7 +2242,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// current virtio-mem balloon). The extract QEMU's cmdline must match the
 	// original VM's -m for loadvm to restore correctly; virtio-mem state
 	// inside the snapshot replays the balloon up to the ballooned size.
-	if extractErr := m.extractCheckpointMemory(extractCtx, stagingDir, snapshotName, vm.baseMemoryMB, vm.CpuCount); extractErr != nil {
+	if extractErr := m.extractCheckpointMemory(extractCtx, stagingDir, snapshotName, vm.guestMAC, vm.baseMemoryMB, vm.CpuCount); extractErr != nil {
 		log.Printf("qemu: checkpoint %s: memory extract failed (falling back to savevm format): %v", checkpointID, extractErr)
 	} else {
 		log.Printf("qemu: checkpoint %s: memory extracted to mem.zst (%dms total)", checkpointID, time.Since(t0).Milliseconds())
