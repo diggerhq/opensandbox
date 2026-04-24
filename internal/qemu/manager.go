@@ -1022,12 +1022,25 @@ func maskToPrefixLen(mask string) int {
 // state, indicating that the incoming migration has finished loading.
 func (m *Manager) waitForMigrationReady(qmp *QMPClient, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	lastLog := time.Now()
+	lastStatus := ""
 	for time.Now().Before(deadline) {
 		status, err := qmp.QueryStatus()
 		if err != nil {
 			// QEMU might not be ready to respond yet during migration load
+			if time.Since(lastLog) > 2*time.Second {
+				log.Printf("qemu: waitForMigrationReady: QueryStatus err=%v (elapsed=%.1fs)", err, time.Since(start).Seconds())
+				lastLog = time.Now()
+			}
 			time.Sleep(200 * time.Millisecond)
 			continue
+		}
+		// Log status transitions + every 2s for diagnosis of slow/stuck loads.
+		if status.Status != lastStatus || time.Since(lastLog) > 2*time.Second {
+			log.Printf("qemu: waitForMigrationReady: status=%s (elapsed=%.1fs)", status.Status, time.Since(start).Seconds())
+			lastStatus = status.Status
+			lastLog = time.Now()
 		}
 		// "paused" = migration loaded, waiting for cont
 		// "postmigrate" = also valid (some QEMU versions)
@@ -1045,7 +1058,7 @@ func (m *Manager) waitForMigrationReady(qmp *QMPClient, timeout time.Duration) e
 			continue
 		}
 	}
-	return fmt.Errorf("migration not ready after %v", timeout)
+	return fmt.Errorf("migration not ready after %v (last status: %s)", timeout, lastStatus)
 }
 
 // allocateCID returns a unique guest CID for a new VM.
@@ -2764,7 +2777,12 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 		}
 
 		if incomingURI != "" {
-			if err := m.waitForMigrationReady(qmpClient, 30*time.Second); err != nil {
+			// 5-minute ceiling. Typical migration loads finish in <10s, but
+			// rebased overlays may be slower due to extra COW cluster I/O
+			// the first time blocks are read through the new backing chain.
+			// Generous upper bound prevents false negatives while we
+			// diagnose cross-golden fork load times.
+			if err := m.waitForMigrationReady(qmpClient, 5*time.Minute); err != nil {
 				qmpClient.Close()
 				cmd.Process.Kill()
 				cmd.Wait()
