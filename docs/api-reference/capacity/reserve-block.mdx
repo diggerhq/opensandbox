@@ -1,0 +1,57 @@
+---
+title: 'Reserve Block'
+api: 'PUT /api/capacity/blocks/{blockId}'
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. See the
+  [Reserved Capacity overview](/reserved-capacity/overview).
+</Info>
+
+Reserve exactly one 1 GB block with a caller-chosen UUID. Equivalent to a
+one-block `POST /api/capacity/reservations` call. Because the ID is
+caller-supplied, replaying the same request body is naturally idempotent.
+
+Block IDs are never recycled: once a block is cancelled or settled, its ID
+cannot be reused.
+
+<ParamField path="blockId" type="string" required>
+  Caller-generated UUID. Must be a valid v4 UUID. Org-scoped — the same
+  UUID used by another org is a different block.
+</ParamField>
+
+<ParamField body="startsAt" type="string" required>
+  Interval start. RFC 3339, UTC, aligned to 15 minutes.
+</ParamField>
+
+<ParamField body="endsAt" type="string" required>
+  Must equal `startsAt + 15 minutes`.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+  "startsAt": "2026-04-25T09:00:00Z",
+  "endsAt":   "2026-04-25T09:15:00Z",
+  "isCancellable": true,
+  "cancellableUntil": "2026-04-24T15:00:00Z"
+}
+```
+
+```json 409 block_id_conflict
+{
+  "error": "block_id_conflict",
+  "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+  "reason": "existing_block_has_different_interval"
+}
+```
+
+```json 409 block_id_not_reusable
+{
+  "error": "block_id_not_reusable",
+  "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+  "reason": "previously_cancelled"
+}
+```
+</ResponseExample>

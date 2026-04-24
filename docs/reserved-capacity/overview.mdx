@@ -1,0 +1,154 @@
+---
+title: "Reserved Capacity"
+description: "Commit to future compute capacity in 15-minute blocks and pay less for what you run inside them"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. These pages describe
+  the forthcoming v1 API. The contract may change before launch. [Book a
+  call](https://cal.com/team/digger/opencomputer-founder-chat) to be notified
+  when it ships or to influence the design.
+</Info>
+
+Reserved capacity lets you pre-commit to compute you will use later, so
+OpenComputer can plan for it instead of holding a margin against uncertain
+demand. In exchange for telling us what you need and when, you get lower
+effective pricing on that usage and a predictable ceiling on what you can run.
+
+Pure on-demand usage is still fine — reserve only what you already know you
+need. Reservations are additive to on-demand: reserved capacity is consumed
+first, and any usage above it falls back to on-demand rates.
+
+## The unit is one GB for fifteen minutes
+
+Everything in the API is built from a single atomic unit:
+
+```text
+1 block = 1 GB of memory for one 15-minute UTC interval
+```
+
+Intervals start on the quarter-hour in UTC: `:00`, `:15`, `:30`, `:45`. A
+two-hour, 16 GB reservation is `2 × 4 × 16 = 128` blocks. You don't address
+that as one multi-hour object — it's 128 concrete, individually-cancellable
+blocks.
+
+This looks like a lot of rows for a small reservation, and that's
+intentional: every block has its own identity, its own cancellation deadline,
+and its own lifecycle. There are no hidden compound objects.
+
+## A small example
+
+Reserve 2 GB from 9:00 to 9:15 UTC tomorrow:
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/capacity/reservations \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Idempotency-Key: demo-reservation-1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "intervals": [
+      {
+        "startsAt": "2026-04-25T09:00:00Z",
+        "endsAt":   "2026-04-25T09:15:00Z",
+        "capacityGb": 2
+      }
+    ]
+  }'
+```
+
+The response is two block rows, each with its own `blockId` and its own
+`cancellableUntil` deadline:
+
+```json
+{
+  "status": "applied",
+  "reservedBlocks": 2,
+  "blocks": [
+    {
+      "blockId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+      "startsAt": "2026-04-25T09:00:00Z",
+      "endsAt":   "2026-04-25T09:15:00Z",
+      "isCancellable": true,
+      "cancellableUntil": "2026-04-24T21:00:00Z"
+    },
+    {
+      "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+      "startsAt": "2026-04-25T09:00:00Z",
+      "endsAt":   "2026-04-25T09:15:00Z",
+      "isCancellable": true,
+      "cancellableUntil": "2026-04-24T15:00:00Z"
+    }
+  ]
+}
+```
+
+Cancel one of them later:
+
+```bash curl
+curl -X DELETE \
+  https://app.opencomputer.dev/api/capacity/blocks/9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562 \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+That's the whole model. Everything else in these pages is detail on *when*
+you can cancel, *how* you preview available capacity, and *how* usage is
+allocated against the blocks you hold.
+
+## Why reserve instead of running on-demand?
+
+Reservations and on-demand capacity solve different problems:
+
+| | On-demand | Reserved |
+| --- | --- | --- |
+| Cost per GB-minute | Higher (includes reserve-margin premium) | Lower |
+| Commitment | None | Progressive — closer to the interval, less cancellable |
+| Availability | Subject to platform headroom | Guaranteed for the interval you booked |
+| Best for | Unpredictable or bursty workloads | Nightly batch jobs, scheduled runs, known traffic patterns |
+
+If you already know you will run 50 GB of agents at 3am every night, tell us
+the day before, and you get better pricing plus a guarantee the capacity is
+there. If your workload is "whatever users ask for," stay on-demand.
+
+## Cancellation gets stricter as the interval approaches
+
+Each block has a `cancellableUntil` timestamp, set at the moment you reserve.
+As the reservation window gets closer, a larger fraction of any *new*
+reservation becomes non-cancellable immediately. Policy details:
+
+| Lead time from reservation to `startsAt` | Portion of a new reservation locked immediately |
+| --- | --- |
+| ≥ 24 hours | Small (e.g. 0%) |
+| 12–24 hours | Moderate (e.g. 25%) |
+| 6–12 hours | Larger (e.g. 50%) |
+| < 6 hours | Full — entire reservation locked immediately |
+
+The exact ladder is a policy, not an API shape. Read the calendar to see what
+fraction of a new reservation would lock right now.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="shapes" href="/reserved-capacity/concepts">
+    The vocabulary: blocks, intervals, calendar, policy ladder.
+  </Card>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    Plan reservations before you write.
+  </Card>
+  <Card title="Reserving and cancelling" icon="lock" href="/reserved-capacity/reserving-and-cancelling">
+    The write flows, idempotency, atomicity, retries.
+  </Card>
+  <Card title="Usage and overage" icon="gauge" href="/reserved-capacity/usage-and-overage">
+    How reserved capacity consumes actual sandbox usage.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Full endpoint reference: [`/api/capacity/*`](/api-reference/capacity/get-calendar).
+  Design doc: [`001-reserved-capacity-squares.md`](https://github.com/diggerhq/ws-pricing/blob/main/design/001-reserved-capacity-squares.md).
+</Tip>
+
+<Note>
+  **Pricing is intentionally out of scope here.** This API manages capacity
+  rights only. Prices, invoices, and recurring discounts will be announced
+  separately before launch.
+</Note>

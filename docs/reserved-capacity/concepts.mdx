@@ -1,0 +1,167 @@
+---
+title: "Concepts"
+description: "Blocks, intervals, the calendar, and the cancellability ladder"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+A small vocabulary carries the whole API. Learn these five terms and the rest
+reads itself.
+
+## Block
+
+A **block** is one GB of reserved memory for one 15-minute UTC interval. It is
+the atomic unit: there is no "half-block," no "multi-hour block," no "flexible
+block." Every reservation is a whole number of blocks.
+
+Each block is a first-class resource with its own UUID:
+
+```json
+{
+  "blockId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "startsAt": "2026-04-25T09:00:00Z",
+  "endsAt":   "2026-04-25T09:15:00Z",
+  "isCancellable": true,
+  "cancellableUntil": "2026-04-24T21:00:00Z"
+}
+```
+
+You can read, cancel, and reserve individual blocks by ID. A bigger
+reservation is just more blocks.
+
+## Interval
+
+An **interval** is a 15-minute window on the UTC quarter-hour grid.
+
+| Field | Meaning |
+| --- | --- |
+| `startsAt` | Inclusive start. Always ends in `:00`, `:15`, `:30`, or `:45` with zero seconds. |
+| `endsAt` | Exclusive end. Always `startsAt + 15 minutes`. |
+
+Half-open intervals (`[startsAt, endsAt)`) mean two adjacent reservations
+never overlap and never leave gaps:
+
+```text
+09:00 ────────────── 09:15 ────────────── 09:30
+   interval A            interval B
+   startsAt: 09:00       startsAt: 09:15
+   endsAt:   09:15       endsAt:   09:30
+```
+
+A reservation that spans multiple intervals is a list of adjacent interval
+entries, not a single range. The API accepts this explicitly:
+
+```json
+{
+  "intervals": [
+    { "startsAt": "2026-04-25T09:00:00Z", "endsAt": "2026-04-25T09:15:00Z", "capacityGb": 4 },
+    { "startsAt": "2026-04-25T09:15:00Z", "endsAt": "2026-04-25T09:30:00Z", "capacityGb": 4 },
+    { "startsAt": "2026-04-25T09:30:00Z", "endsAt": "2026-04-25T09:45:00Z", "capacityGb": 4 }
+  ]
+}
+```
+
+## Calendar
+
+The **calendar** is the planning read model. Given a time range, it returns
+one row per 15-minute interval with the numbers you need to decide what to
+reserve:
+
+| Field | Meaning |
+| --- | --- |
+| `reservableGb` | GB you could add to this interval right now. |
+| `reservationLimitGb` | The policy cap on how much you can hold in this interval. |
+| `reservedGb` | What you already hold in this interval. |
+| `cancellableGb` | Of `reservedGb`, how much you can still cancel now. |
+| `nonCancellableGb` | Of `reservedGb`, how much is already locked. |
+| `newReservationNonCancellableRatio` | Fraction of a new reservation that would lock immediately. |
+| `usableGb` | Reserved capacity available for usage in this interval. |
+
+The calendar does not hold capacity — it's a snapshot. See
+[Reading the calendar](/reserved-capacity/calendar) for the full shape and
+planning patterns.
+
+## Cancellability ladder
+
+**Cancellability** is assigned at booking time, per block, from a policy
+ladder. It looks roughly like this:
+
+| Lead time | Fraction of new reservation locked | Fraction cancellable |
+| --- | --- | --- |
+| ≥ 24h before `startsAt` | 0% | 100% |
+| 12h – 24h | 25% | 75% |
+| 6h – 12h | 50% | 50% |
+| < 6h | 100% | 0% |
+
+The exact numbers are a server-side policy and may evolve. What's invariant:
+
+1. Every block gets a `cancellableUntil` timestamp when it's created. It
+   never changes afterwards.
+2. A later policy change **does not** mutate existing blocks. The terms you
+   booked under are the terms you keep.
+3. The ratio is computed per interval at reservation time — closer
+   intervals produce stricter terms automatically.
+
+The calendar shows the *aggregate* ratio for a new reservation. To see the
+exact per-block `cancellableUntil` values after booking, read the blocks:
+
+```bash curl
+curl https://app.opencomputer.dev/api/capacity/blocks?from=...&to=... \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+## Reservation and cancellation (operations, not objects)
+
+There is no public "reservation" or "cancellation" object. Those are
+*operations* that create or retire blocks.
+
+```text
+POST /api/capacity/reservations   → creates N blocks
+POST /api/capacity/cancellations  → retires N blocks
+```
+
+This means:
+
+- There's no `reservationId` to look up later.
+- There's no "edit this reservation" endpoint — cancel the specific blocks
+  you want to remove.
+- There's no "cancel a whole reservation" endpoint — you cancel by block ID.
+
+If you need to track that a group of blocks came from one write, store the
+block IDs client-side. The server does not keep that grouping.
+
+## Usage allocation
+
+Reserved capacity is **pooled** by `(org, memory resource, 15-minute
+interval)`. In each interval:
+
+```text
+overageGb = max(usedGb - reservedGb, 0)
+```
+
+There is no per-sandbox attribution. If two sandboxes run together and
+consume 14 GB against 10 reserved, 10 GB count as reserved and 4 GB as
+overage — it doesn't matter which sandbox "used" which.
+
+Unused reserved capacity inside its interval is not refunded. Cancel blocks
+*before* their `cancellableUntil` expires if you decide you don't need them.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    How to plan reservations before you write.
+  </Card>
+  <Card title="Reserving and cancelling" icon="lock" href="/reserved-capacity/reserving-and-cancelling">
+    Write flows, idempotency, atomicity.
+  </Card>
+  <Card title="Usage and overage" icon="gauge" href="/reserved-capacity/usage-and-overage">
+    How reserved capacity consumes actual usage.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/capacity/get-calendar">
+    Every endpoint with full request/response shapes.
+  </Card>
+</CardGroup>

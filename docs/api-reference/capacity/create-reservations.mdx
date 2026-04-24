@@ -1,0 +1,75 @@
+---
+title: 'Create Reservations'
+api: 'POST /api/capacity/reservations'
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. See the
+  [Reserved Capacity overview](/reserved-capacity/overview).
+</Info>
+
+Reserve capacity across one or more 15-minute UTC intervals. Atomic across
+the request — either every interval is booked or nothing is. See
+[Reserving and cancelling](/reserved-capacity/reserving-and-cancelling) for
+the full write contract.
+
+Send an `Idempotency-Key` header so retries return the original result. Same
+key with a different body returns `idempotency_key_conflict`.
+
+<ParamField body="intervals" type="array" required>
+  One entry per 15-minute interval to reserve.
+</ParamField>
+
+<ParamField body="intervals[].startsAt" type="string" required>
+  Interval start. RFC 3339, UTC, aligned to 15 minutes (`:00`, `:15`, `:30`, `:45`).
+</ParamField>
+
+<ParamField body="intervals[].endsAt" type="string" required>
+  Interval end. Must equal `startsAt + 15 minutes`. Multi-interval spans are rejected.
+</ParamField>
+
+<ParamField body="intervals[].capacityGb" type="integer" required>
+  Positive integer. Number of 1 GB blocks to create for this interval.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "status": "applied",
+  "blockDuration": "PT15M",
+  "reservedBlocks": 2,
+  "cancellableBlocks": 1,
+  "nonCancellableBlocks": 1,
+  "blocks": [
+    {
+      "blockId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+      "startsAt": "2026-04-25T09:00:00Z",
+      "endsAt":   "2026-04-25T09:15:00Z",
+      "isCancellable": false,
+      "cancellableUntil": null
+    },
+    {
+      "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+      "startsAt": "2026-04-25T09:00:00Z",
+      "endsAt":   "2026-04-25T09:15:00Z",
+      "isCancellable": true,
+      "cancellableUntil": "2026-04-24T15:00:00Z"
+    }
+  ]
+}
+```
+
+```json 409 capacity_not_available
+{
+  "error": "capacity_not_available",
+  "intervals": [
+    {
+      "startsAt": "2026-04-25T09:00:00Z",
+      "requestedGb": 80,
+      "reservableGb": 30,
+      "reason": "insufficient_capacity"
+    }
+  ]
+}
+```
+</ResponseExample>

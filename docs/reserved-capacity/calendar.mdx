@@ -1,0 +1,194 @@
+---
+title: "Reading the Calendar"
+description: "Preview reservable capacity, planned terms, and what you already hold"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+The calendar is how you plan. It answers three questions at once, per
+15-minute interval:
+
+1. How much GB can I still reserve here?
+2. If I reserved right now, how much of that new reservation would lock
+   immediately?
+3. How much do I already hold here, and how much of it can I still cancel?
+
+The calendar never holds capacity. It's a snapshot read; write validation is
+always authoritative.
+
+## Request
+
+```bash curl
+curl "https://app.opencomputer.dev/api/capacity/calendar?from=2026-04-25T09:00:00Z&to=2026-04-25T12:00:00Z" \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+| Query param | Required | Notes |
+| --- | --- | --- |
+| `from` | yes | Window start, aligned to 15 minutes, UTC. |
+| `to` | yes | Window end, aligned to 15 minutes, UTC. |
+
+## Response
+
+```json
+{
+  "generatedAt": "2026-04-24T12:00:00Z",
+  "staleAt":     "2026-04-24T12:00:10Z",
+  "blockDuration": "PT15M",
+  "timezone": "UTC",
+  "earliestReservableStart": "2026-04-24T12:30:00Z",
+  "intervals": [
+    {
+      "startsAt": "2026-04-25T09:00:00Z",
+      "endsAt":   "2026-04-25T09:15:00Z",
+      "reservationLimitGb": 300,
+      "reservedGb": 80,
+      "reservableGb": 220,
+      "newReservationNonCancellableRatio": "0.25",
+      "cancellableGb": 55,
+      "nonCancellableGb": 25,
+      "usableGb": 120
+    }
+  ]
+}
+```
+
+### Top-level fields
+
+| Field | Meaning |
+| --- | --- |
+| `generatedAt` | When the server computed this snapshot. |
+| `staleAt` | After this, refresh before using the snapshot for planning. |
+| `blockDuration` | Always `PT15M` in v1. |
+| `timezone` | Always `UTC` in v1. |
+| `earliestReservableStart` | First interval currently eligible for new reservations. Reservations before this time are rejected. |
+
+### Per-interval fields
+
+| Field | Meaning |
+| --- | --- |
+| `startsAt`, `endsAt` | The 15-minute UTC interval. |
+| `reservationLimitGb` | Maximum GB this org may hold in this interval under policy. |
+| `reservedGb` | Total GB this org already has reserved in this interval. |
+| `reservableGb` | Additional GB the server would currently accept. **This is the number to plan against.** |
+| `newReservationNonCancellableRatio` | Decimal string in `[0, 1]`: fraction of a *new* reservation that would lock immediately. |
+| `cancellableGb` | Already-reserved GB this org can still cancel at `generatedAt`. |
+| `nonCancellableGb` | Already-reserved GB this org can no longer cancel at `generatedAt`. |
+| `usableGb` | Reserved capacity available for actual usage in this interval. |
+
+Invariant: `reservedGb == cancellableGb + nonCancellableGb`.
+
+## `reservableGb` is the planning field
+
+Everything you need to decide "can I reserve 50 GB at 9am?" is in
+`reservableGb`. The other fields are context:
+
+- `reservationLimitGb` explains the policy cap behind `reservableGb`.
+- `reservedGb` tells you how much you already have.
+- The limit minus `reservedGb` gives your remaining headroom under the
+  policy cap. The server may still reduce `reservableGb` below that headroom
+  because of platform capacity.
+
+## `newReservationNonCancellableRatio` is planning-only
+
+This field describes what would happen if you made a new reservation against
+this snapshot right now. It is not a property of any individual block.
+
+The cancellable portion is `1 - newReservationNonCancellableRatio`.
+
+Example: you reserve 80 GB at `09:00` with ratio `0.25`:
+
+```text
+20 GB locked immediately (cancellableUntil = null)
+60 GB cancellable until assigned expiries
+```
+
+The exact `cancellableUntil` on each of those 60 GB comes from the policy
+ladder applied at booking time. You can read the assigned values per block
+via [`GET /api/capacity/blocks`](/api-reference/capacity/list-blocks).
+
+## `staleAt` is a freshness marker, not a hold
+
+The calendar snapshot is cheap and immediate. `staleAt` tells clients when to
+refresh before planning again, but capacity can change at any moment — another
+tenant (or you, in another tab) may reserve or cancel between
+`generatedAt` and your write.
+
+This is fine. Writes are atomic and validation is authoritative: if capacity
+moved out from under you, the write returns `capacity_not_available` and you
+re-read and retry.
+
+## Race patterns
+
+### Plan then write
+
+```text
+GET  /api/capacity/calendar                       → reservableGb: 220
+POST /api/capacity/reservations  capacityGb: 80   → applied
+```
+
+### Plan then write, lost race
+
+```text
+GET  /api/capacity/calendar                       → reservableGb: 50
+POST /api/capacity/reservations  capacityGb: 80   → rejected with reservableGb: 30
+```
+
+On rejection, read the calendar again and either:
+
+- Re-submit with the actual current `reservableGb`, or
+- Accept the smaller amount via multiple writes at different intervals, or
+- Bail out — not all demand fits.
+
+V1 does not accept a "reserve up to N, at least M" shape. Keep retries
+explicit in client code.
+
+### Multi-interval request, partial conflict
+
+```text
+POST /api/capacity/reservations
+  intervals: [
+    09:00 → 09:15, 80 GB
+    09:15 → 09:30, 80 GB    # only 30 available
+  ]
+→ rejected; no blocks created
+```
+
+Multi-interval writes are atomic. If any interval fails, none are booked.
+Split your request if you want partial success.
+
+## Choosing the window
+
+The calendar supports arbitrary `from`–`to` ranges aligned to the 15-minute
+grid. Practical guidance:
+
+- For interactive planning UIs, pull a day or a week at a time; render a
+  heatmap of `reservableGb`.
+- For scheduled reservation scripts, query just the intervals you're about
+  to write — don't pull a week if you only need two hours.
+- For large time ranges, expect the response to scale linearly (`4 × hours`
+  rows). Paginate or chunk your own queries if you need months.
+
+## What the calendar does *not* tell you
+
+- Exact `cancellableUntil` per block. Those are assigned at booking time
+  from the policy ladder. Read blocks after you reserve.
+- What other customers hold. Numbers are org-scoped.
+- Future policy changes. Terms you book under are frozen on your blocks.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reserving and cancelling" icon="lock" href="/reserved-capacity/reserving-and-cancelling">
+    The write flows, idempotency, atomicity.
+  </Card>
+  <Card title="Concepts" icon="shapes" href="/reserved-capacity/concepts">
+    Vocabulary: blocks, intervals, ladder.
+  </Card>
+  <Card title="Get calendar endpoint" icon="code" href="/api-reference/capacity/get-calendar">
+    Full request/response reference.
+  </Card>
+</CardGroup>

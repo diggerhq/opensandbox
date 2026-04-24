@@ -1,0 +1,161 @@
+---
+title: "Usage and Overage"
+description: "How reserved capacity consumes actual sandbox usage, and what counts as overage"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+Reserved capacity and actual sandbox execution are independent flows.
+Reserving blocks does not start sandboxes. Starting sandboxes does not
+reserve blocks. At the end of each 15-minute interval, the server reconciles
+what was used against what was reserved and computes overage.
+
+## The allocation identity
+
+For each 15-minute interval, per `(org, memory resource)`:
+
+```text
+overageGb = max(usedGb - reservedGb, 0)
+```
+
+That's it. Three numbers and a `max`. No per-sandbox attribution, no
+proration beyond the 15-minute boundary, no priority rules.
+
+| Variable | Source |
+| --- | --- |
+| `usedGb` | Sum of actual sandbox memory tiers over this interval, weighted by seconds, divided by 900. |
+| `reservedGb` | Sum of live, non-cancelled blocks this org holds in this interval. |
+| `overageGb` | Whatever `usedGb` exceeds `reservedGb` by. |
+
+Unused reserved capacity (`reservedGb > usedGb`) is still committed — you
+booked it and it was held for you. Cancel blocks before their
+`cancellableUntil` if you decide you don't need them.
+
+## Reserved capacity is pooled, not assigned to specific sandboxes
+
+If you reserve 10 GB at `09:00` and run two sandboxes in that interval
+(say, 6 GB each), the math runs at the pool level:
+
+```text
+reservedGb = 10
+usedGb     = 12
+overageGb  = max(12 - 10, 0) = 2
+```
+
+It doesn't matter which sandbox "used the reserved capacity" — they both
+ran, the sum was 12, the overage was 2. You can't (and don't need to) tag
+sandboxes as "reserved" vs "on-demand."
+
+## Starting and stopping sandboxes is unaffected
+
+Reserved capacity is not a gate. Having a reservation does not:
+
+- Change how you start sandboxes — same `POST /api/sandboxes` flow.
+- Pre-warm or pre-allocate compute — blocks are an accounting construct, not
+  a physical resource.
+- Hold capacity open across restarts — capacity is tied to wall-clock
+  intervals, not sandbox lifecycles.
+
+Conversely, not having a reservation does not block you — on-demand capacity
+continues to be available, subject to platform admission limits.
+
+## Overage falls back to on-demand terms
+
+Usage above `reservedGb` in an interval is treated as on-demand. It is
+subject to the same admission controls, limits, and pricing as any other
+on-demand usage.
+
+<Note>
+  **Pricing is intentionally out of scope for this API.** The on-demand fallback
+  is an accounting statement ("overage counts as on-demand usage"), not a
+  pricing statement. Dollar amounts for both reserved and on-demand usage will
+  be announced separately before launch.
+</Note>
+
+## Cancellation before interval start releases the block
+
+If you cancel a block before `cancellableUntil` and before `startsAt`, it
+disappears from the allocation math for that interval. The capacity returns
+to `reservableGb` for the platform and for other orgs.
+
+If you cancel between `cancellableUntil` and `startsAt`, the block is
+already locked — cancellation is rejected.
+
+Once `startsAt` passes, the block is settled. Whether usage consumed it or
+not is recorded in the allocation output, but the block itself is no longer
+cancellable.
+
+## Intervals settle after they end
+
+Allocation is computed after an interval closes. Sandbox scale events
+settle eventually-consistently across workers, so a brief delay is normal.
+The server waits until usage data for the interval is stable before writing
+the final allocation record.
+
+Practical implication: don't expect an allocation number the instant
+`09:15` ticks over. Expect it a few minutes later.
+
+## Visual model
+
+Blocks are squares on a grid; rows are GB, columns are 15-minute intervals.
+Actual usage is a line drawn over the grid.
+
+```text
+GB
+ │
+ │         ███▒▒▒▒▒▒
+ │     ███████▒▒▒▒▒▒       ← reserved blocks (▒ cancellable, █ locked)
+ │ ███████████████▒▒
+ │ ─── usage ────
+ │
+ └─────────────────────── time (15-min intervals)
+
+   overage when the usage line is above the block stack for an interval
+```
+
+The squares are the reserved capacity you hold. The line is what you
+actually ran. Overage is where the line pokes above the squares.
+
+## Reading past allocation
+
+Per-interval allocation is computed server-side and will be readable through
+a billing/usage endpoint — the shape of that endpoint is part of a separate
+billing surface design, not part of this API.
+
+For now, the visible surface is:
+
+- The calendar, which shows `reservedGb` and `usableGb` for any interval in
+  its window.
+- Block reads, which show what you hold and whether it's still cancellable.
+- The existing [`/api/usage`](/api-reference/usage/get-usage) endpoint for
+  actual sandbox usage quantities.
+
+When reserved-capacity billing ships, the allocation read model will be
+documented alongside it.
+
+## Edge cases
+
+| Case | Behavior |
+| --- | --- |
+| You hold reservations but run nothing | Reserved capacity is still committed for the interval. No overage. |
+| You run workloads but have no reservations | `reservedGb = 0`, so `overageGb = usedGb`. All usage is on-demand. |
+| You hold reservations in one interval and run in another | No carryover. Allocation is strictly per interval. |
+| You cancel a block mid-interval | Cannot — `cancellableUntil` always precedes `startsAt`. Once the interval begins, blocks are settled. |
+| A sandbox crashes and hibernates inside an interval | Usage before the crash counts; usage after hibernation does not. Standard scale-event math. |
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reserving and cancelling" icon="lock" href="/reserved-capacity/reserving-and-cancelling">
+    How blocks are created and retired.
+  </Card>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    Plan capacity you'll actually use.
+  </Card>
+  <Card title="Sandboxes overview" icon="cube" href="/sandboxes/overview">
+    How sandbox memory tiers work today.
+  </Card>
+</CardGroup>

@@ -1,0 +1,28 @@
+---
+title: 'Get Block'
+api: 'GET /api/capacity/blocks/{blockId}'
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. See the
+  [Reserved Capacity overview](/reserved-capacity/overview).
+</Info>
+
+Read one capacity block by ID. Block identity is scoped by org — the same
+UUID in another org is a different block and is invisible to this caller.
+
+<ParamField path="blockId" type="string" required>
+  Block UUID.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
+  "startsAt": "2026-04-25T09:00:00Z",
+  "endsAt":   "2026-04-25T09:15:00Z",
+  "isCancellable": true,
+  "cancellableUntil": "2026-04-24T15:00:00Z"
+}
+```
+</ResponseExample>
