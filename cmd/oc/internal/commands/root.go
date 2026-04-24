@@ -39,6 +39,17 @@ var rootCmd = &cobra.Command{
 		printer = output.New(jsonOutput)
 		return nil
 	},
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		// One-line nag to stderr when a newer release is available. Skip
+		// for `oc update` itself, help, and completion scaffolding — see
+		// maybePromptUpdate for the full skip list (dev build, non-TTY,
+		// OC_NO_UPDATE_CHECK).
+		switch cmd.Name() {
+		case "update", "help", "completion", "__complete":
+			return
+		}
+		maybePromptUpdate()
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
