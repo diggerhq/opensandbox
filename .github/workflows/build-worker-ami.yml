@@ -15,10 +15,15 @@ on:
     # worker-binary-only change. The narrowing here is just about avoiding
     # wasted CI minutes on pushes that don't affect the worker binary
     # (e.g. cmd/server/**, web/**, docs/**).
+    # GitHub only permits one of `paths` / `paths-ignore` per event — we use
+    # `paths` with `!` negation patterns to exclude control-plane-only dirs
+    # that would otherwise match `internal/**`.
     paths:
       - 'cmd/worker/**'
       - 'cmd/agent/**'
       - 'internal/**'
+      - '!internal/api/**'
+      - '!internal/billing/**'
       - 'pkg/**'
       - 'proto/agent/**'
       - 'proto/worker/**'
@@ -30,15 +35,6 @@ on:
       - 'go.mod'
       - 'go.sum'
       - '.github/workflows/build-worker-ami.yml'
-    paths-ignore:
-      # Control-plane-only packages (shipped via deploy-server.yml).
-      # NOTE: internal/observability stays IN — cmd/worker imports it.
-      - 'internal/api/**'
-      - 'internal/billing/**'
-      - 'cmd/server/**'
-      - 'web/**'
-      - 'docs/**'
-      - '**.md'
   workflow_dispatch:
 
 env:
