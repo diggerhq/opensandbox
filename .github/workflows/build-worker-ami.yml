@@ -113,10 +113,13 @@ jobs:
           # Previous successful build wrote its goldenVersion here; the
           # NEW AMI bakes that base in so customers pinned to the last
           # golden skip a runtime blob download on first fork.
-          PREV=$(az keyvault secret show \
+          # `az` may inject ANSI color codes even with -o tsv, so extract
+          # just the 16-char hex hash from the output.
+          RAW=$(az keyvault secret show \
             --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
             --name "golden-version" \
             --query value -o tsv 2>/dev/null || echo "")
+          PREV=$(echo "$RAW" | grep -oE '[0-9a-f]{16}' | head -1)
           echo "prev=$PREV" >> $GITHUB_OUTPUT
           echo "Previous golden version: ${PREV:-<none>}"
 
