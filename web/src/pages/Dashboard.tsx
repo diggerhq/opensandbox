@@ -199,16 +199,17 @@ function GettingStarted() {
 
         {createdKey && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <CommandRow
-              command={createdKey}
+            <SecretRow
+              secret={createdKey}
               copied={copied === 'key'}
               onCopy={() => copy(createdKey, 'key')}
             />
             <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
               Then run this in your terminal to configure the CLI:
             </div>
-            <CommandRow
-              command={`oc config set api-key ${createdKey}`}
+            <SecretRow
+              secret={createdKey}
+              wrap={(s) => `oc config set api-key ${s}`}
               copied={copied === 'cmd'}
               onCopy={() => copy(`oc config set api-key ${createdKey}`, 'cmd')}
             />
@@ -296,6 +297,51 @@ function CommandRow({ command, copied, onCopy }: {
       }}>
         {command}
       </code>
+      <button
+        onClick={onCopy}
+        className="btn-ghost"
+        style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  )
+}
+
+function SecretRow({ secret, wrap, copied, onCopy }: {
+  secret: string
+  wrap?: (s: string) => string
+  copied: boolean
+  onCopy: () => void
+}) {
+  const [revealed, setRevealed] = useState(false)
+  const masked = '•'.repeat(Math.min(secret.length, 32))
+  const display = revealed ? secret : masked
+  const text = wrap ? wrap(display) : display
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      background: 'var(--bg-deep)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--radius-sm)',
+      padding: '10px 12px',
+    }}>
+      <code style={{
+        flex: 1, fontFamily: 'var(--font-mono)', fontSize: 13,
+        color: 'var(--text-accent)', wordBreak: 'break-all',
+        letterSpacing: revealed ? 'normal' : '0.05em',
+      }}>
+        {text}
+      </code>
+      <button
+        onClick={() => setRevealed(r => !r)}
+        className="btn-ghost"
+        style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+        aria-label={revealed ? 'Hide secret' : 'Reveal secret'}
+      >
+        {revealed ? 'Hide' : 'Reveal'}
+      </button>
       <button
         onClick={onCopy}
         className="btn-ghost"
