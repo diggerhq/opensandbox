@@ -24,7 +24,7 @@ func main() {
 	// profile to source, so PATH may be empty or minimal.
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
-	log.Printf("osb-agent %s starting", Version)
+	log.Printf("osb-agent %s starting (build=pin-to-base)", Version)
 
 	// Listen on vsock port 1024 (inside Firecracker) or Unix socket (testing).
 	lis, err := listenVsock()
