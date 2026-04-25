@@ -12,7 +12,8 @@
       "perplexity",
       "cursor",
       "vscode"
-    ]
+    ],
+    "display": "header"
   },
   "colors": {
     "primary": "#131311",
