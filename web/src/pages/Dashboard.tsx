@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, Link } from 'react-router-dom'
 import { getSessions, getAPIKeys, createAPIKey, type Session } from '../api/client'
@@ -144,9 +144,10 @@ export default function Dashboard() {
 /* ── Getting Started (first-run onboarding) ───────────────── */
 function GettingStarted() {
   const queryClient = useQueryClient()
-  const { data: keys } = useQuery({ queryKey: ['api-keys'], queryFn: getAPIKeys })
+  const { data: keys, isLoading: loadingKeys } = useQuery({ queryKey: ['api-keys'], queryFn: getAPIKeys })
   const [copied, setCopied] = useState<string | null>(null)
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const autoCreateRef = useRef(false)
 
   const createMutation = useMutation({
     mutationFn: () => createAPIKey('Default'),
@@ -157,6 +158,16 @@ function GettingStarted() {
   })
 
   const hasKeys = (keys?.length ?? 0) > 0
+
+  // On first signup (no keys exist), auto-create a Default key so the user
+  // sees their key immediately without having to click anything.
+  useEffect(() => {
+    if (loadingKeys || autoCreateRef.current) return
+    if (!hasKeys && !createdKey && !createMutation.isPending) {
+      autoCreateRef.current = true
+      createMutation.mutate()
+    }
+  }, [loadingKeys, hasKeys, createdKey, createMutation])
 
   const copy = (text: string, id: string) => {
     navigator.clipboard.writeText(text)
@@ -176,32 +187,18 @@ function GettingStarted() {
 
       <StepCard
         index={2}
-        title="Generate an API key"
-        description="The skill uses this key to authenticate with OpenComputer. We'll create one named 'Default' — you can rotate it later from API Keys."
+        title="Your API key"
+        description="The skill uses this key to authenticate with OpenComputer. We've created a Default key for you — copy it now, you won't be able to see it again."
       >
-        {!createdKey && !hasKeys && (
-          <button
-            className="btn-primary"
-            onClick={() => createMutation.mutate()}
-            disabled={createMutation.isPending}
-            style={{ alignSelf: 'flex-start' }}
-          >
-            {createMutation.isPending ? 'Generating…' : 'Generate API Key'}
-          </button>
-        )}
-
-        {!createdKey && hasKeys && (
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-            You already have {keys!.length} API key{keys!.length === 1 ? '' : 's'}.{' '}
-            <Link to="/api-keys" style={{ color: 'var(--accent-indigo)' }}>Manage keys</Link>
+        {(loadingKeys || createMutation.isPending) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-tertiary)', fontSize: 13 }}>
+            <div className="loading-spinner" style={{ width: 14, height: 14 }} />
+            Preparing your API key…
           </div>
         )}
 
         {createdKey && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-              Copy this key now — you won&apos;t be able to see it again.
-            </div>
             <CommandRow
               command={createdKey}
               copied={copied === 'key'}
@@ -218,9 +215,26 @@ function GettingStarted() {
           </div>
         )}
 
+        {!createdKey && !createMutation.isPending && hasKeys && (
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            You already have {keys!.length} API key{keys!.length === 1 ? '' : 's'} from a previous session.
+            For security, existing key values can&apos;t be re-displayed.{' '}
+            <Link to="/api-keys" style={{ color: 'var(--accent-indigo)' }}>Manage keys</Link> to rotate.
+          </div>
+        )}
+
         {createMutation.isError && (
-          <div style={{ fontSize: 12, color: 'var(--accent-rose, #fb7185)', marginTop: 8 }}>
-            Failed to generate key. Please try again.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--accent-rose, #fb7185)' }}>
+              Failed to create your API key.
+            </span>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 12 }}
+              onClick={() => createMutation.mutate()}
+            >
+              Retry
+            </button>
           </div>
         )}
       </StepCard>
