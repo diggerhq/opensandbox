@@ -2,6 +2,18 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { getAPIKeys, createAPIKey, deleteAPIKey, type APIKey } from '../api/client'
 
+function defaultKeyName(existing: APIKey[]): string {
+  const today = new Date().toISOString().slice(0, 10)
+  const base = `Key ${today}`
+  const taken = new Set(existing.map(k => k.name))
+  if (!taken.has(base)) return base
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${base} (${i})`
+    if (!taken.has(candidate)) return candidate
+  }
+  return `${base} (${Date.now()})`
+}
+
 export default function APIKeys() {
   const queryClient = useQueryClient()
   const { data: keys, isLoading } = useQuery({
@@ -9,19 +21,24 @@ export default function APIKeys() {
     queryFn: getAPIKeys,
   })
 
-  const [showCreate, setShowCreate] = useState(false)
-  const [newKeyName, setNewKeyName] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const createMutation = useMutation({
     mutationFn: (name: string) => createAPIKey(name),
     onSuccess: (data) => {
       setCreatedKey(data.key)
-      setShowCreate(false)
-      setNewKeyName('')
+      setCopied(false)
       queryClient.invalidateQueries({ queryKey: ['api-keys'] })
     },
   })
+
+  const copyKey = () => {
+    if (!createdKey) return
+    navigator.clipboard.writeText(createdKey)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => deleteAPIKey(id),
@@ -38,11 +55,15 @@ export default function APIKeys() {
           <h1 className="page-title">API Keys</h1>
           <p className="page-subtitle">Manage authentication tokens for your integrations</p>
         </div>
-        <button className="btn-primary" onClick={() => setShowCreate(true)}>
+        <button
+          className="btn-primary"
+          onClick={() => createMutation.mutate(defaultKeyName(keys ?? []))}
+          disabled={createMutation.isPending}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          Create Key
+          {createMutation.isPending ? 'Creating\u2026' : 'Create Key'}
         </button>
       </div>
 
@@ -59,17 +80,26 @@ export default function APIKeys() {
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
             Copy this key now. You won&apos;t be able to see it again.
           </div>
-          <code style={{
-            display: 'block',
-            background: 'var(--bg-deep)',
-            color: 'var(--text-accent)',
-            padding: 14,
-            borderRadius: 'var(--radius-sm)',
-            fontSize: 13,
-            fontFamily: 'var(--font-mono)',
-            wordBreak: 'break-all',
-            border: '1px solid var(--border-subtle)',
-          }}>{createdKey}</code>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <code style={{
+              flex: 1,
+              background: 'var(--bg-deep)',
+              color: 'var(--text-accent)',
+              padding: 14,
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 13,
+              fontFamily: 'var(--font-mono)',
+              wordBreak: 'break-all',
+              border: '1px solid var(--border-subtle)',
+            }}>{createdKey}</code>
+            <button
+              onClick={copyKey}
+              className="btn-ghost"
+              style={{ flexShrink: 0 }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
           <button
             onClick={() => setCreatedKey(null)}
             style={{
@@ -83,34 +113,15 @@ export default function APIKeys() {
         </div>
       )}
 
-      {/* Create Dialog */}
-      {showCreate && (
-        <div className="glass-card animate-in" style={{ padding: 22, marginBottom: 20 }}>
-          <div style={{ marginBottom: 14 }}>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
-              Key Name
-            </label>
-            <input
-              type="text"
-              value={newKeyName}
-              onChange={e => setNewKeyName(e.target.value)}
-              placeholder="e.g. Production Key"
-              className="input"
-              autoFocus
-            />
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button
-              className="btn-primary"
-              onClick={() => createMutation.mutate(newKeyName)}
-              disabled={createMutation.isPending || !newKeyName.trim()}
-            >
-              {createMutation.isPending ? 'Creating\u2026' : 'Create'}
-            </button>
-            <button className="btn-ghost" onClick={() => { setShowCreate(false); setNewKeyName('') }}>
-              Cancel
-            </button>
-          </div>
+      {createMutation.isError && (
+        <div className="animate-in" style={{
+          background: 'rgba(251,113,133,0.06)',
+          border: '1px solid rgba(251,113,133,0.2)',
+          borderRadius: 'var(--radius-lg)',
+          padding: 14, marginBottom: 20,
+          fontSize: 13, color: 'var(--accent-rose, #fb7185)',
+        }}>
+          Failed to create key. Please try again.
         </div>
       )}
 
