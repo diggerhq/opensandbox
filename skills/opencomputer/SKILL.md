@@ -1,38 +1,54 @@
 ---
 name: opencomputer
 description: Manage OpenComputer cloud sandboxes. Use when the user wants to create, run commands in, checkpoint, or manage sandbox environments. Auto-invokes when sandboxes, remote environments, or the oc CLI are mentioned.
-allowed-tools: Bash(oc *), Bash(which oc), Read, Grep, Glob
+allowed-tools: Bash(oc *), Bash(which oc), Bash(curl *), Bash(open *), Bash(xdg-open *), Bash(chmod *), Read, Grep, Glob
 ---
 
 You have access to the `oc` CLI for managing OpenComputer cloud sandboxes. Use it to create sandboxes, execute commands, manage checkpoints, and more.
 
-## Prerequisites
+## First-time setup (run this BEFORE any other `oc` command)
 
-The `oc` CLI must be installed and configured. Check with:
-```
+Before running any sandbox command, make sure the user is set up. Do these checks in order, only fixing what's broken:
+
+### 1. Is the `oc` CLI installed?
+
+```bash
 which oc
 ```
 
-If not installed, download the latest binary from GitHub Releases:
+If it returns a path → installed, skip to step 2.
+
+If it returns nothing / non-zero exit → install it with the official one-liner:
+
 ```bash
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# macOS (Intel)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# Linux (x86_64)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# Linux (ARM64)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+curl -fsSL https://raw.githubusercontent.com/diggerhq/opencomputer/main/scripts/install.sh | bash
 ```
 
-Configuration requires an API key. Set it via:
+This installs `oc` to `~/.local/bin/oc`. If `~/.local/bin` is not on the user's PATH, tell them to add `export PATH="$HOME/.local/bin:$PATH"` to their shell rc file, and use the full path `~/.local/bin/oc` for the rest of this session.
+
+### 2. Is the user logged in (API key configured)?
+
+```bash
+oc config show
 ```
-oc config set api-key <key>
-```
-Or pass `--api-key` on every command. The API URL defaults to `https://app.opencomputer.dev`.
+
+If `API Key` is shown (even masked) → logged in, you're done.
+
+If no API key is set, OR a sandbox command fails with an auth error (`401`, "unauthorized", "missing API key"):
+
+1. Open the OpenComputer dashboard in the user's browser so they can create a key:
+   - macOS: `open https://app.opencomputer.dev`
+   - Linux: `xdg-open https://app.opencomputer.dev`
+2. Tell the user (in chat) to:
+   - Sign in / sign up at the page that just opened
+   - Create an API key
+   - Run this command in their terminal once they have the key:
+     ```bash
+     oc config set api-key YOUR_API_KEY
+     ```
+3. Wait for the user to confirm they've set the key before proceeding.
+
+Do **not** prompt them for the key in the chat — they should paste it into their own terminal so it never leaves their machine.
 
 ## CLI Reference
 
@@ -40,8 +56,9 @@ Or pass `--api-key` on every command. The API URL defaults to `https://app.openc
 
 ```bash
 # Create a sandbox (returns sandbox ID)
-oc sandbox create --template base --timeout 300 --cpu 1 --memory 512
+oc sandbox create --timeout 300 --cpu 1 --memory 512
 oc sandbox create --env KEY=VALUE --env KEY2=VALUE2
+oc sandbox create --secret-store my-secrets --metadata project=demo
 oc create  # shortcut
 
 # List running sandboxes
@@ -66,15 +83,25 @@ oc sandbox set-timeout <sandbox-id> <seconds>
 
 ### Execute Commands
 
+`oc exec` streams stdout/stderr live by default and exits with the remote process's exit code. Use `--wait` for buffered/synchronous execution (needed for `--json`), or `--detach` to fire-and-forget.
+
 ```bash
-# Run a command in a sandbox
+# Stream live (default)
 oc exec <sandbox-id> -- echo hello
 oc exec <sandbox-id> --cwd /app -- npm install
 oc exec <sandbox-id> --timeout 120 -- make build
 oc exec <sandbox-id> --env NODE_ENV=production -- node server.js
 
-# JSON output includes exitCode, stdout, stderr
-oc exec <sandbox-id> --json -- whoami
+# Buffered + JSON envelope (exitCode, stdout, stderr) — required for scripting
+oc exec <sandbox-id> --wait --json -- whoami
+
+# Fire-and-forget; prints the session id so you can re-attach later
+oc exec <sandbox-id> --detach -- long-running-job
+
+# Manage exec sessions
+oc exec list <sandbox-id>
+oc exec attach <sandbox-id> <session-id>
+oc exec kill <sandbox-id> <session-id>
 ```
 
 ### Checkpoints
@@ -152,7 +179,8 @@ All commands support:
 ### Create and use a sandbox
 ```bash
 ID=$(oc create --json | jq -r '.sandboxID')
-oc exec $ID -- apt update && apt install -y nodejs
+oc exec $ID --wait -- apt update
+oc exec $ID --wait -- apt install -y nodejs
 oc exec $ID -- node -e "console.log('hello')"
 oc sandbox kill $ID
 ```
@@ -161,8 +189,9 @@ oc sandbox kill $ID
 ```bash
 # Create base environment
 ID=$(oc create --json | jq -r '.sandboxID')
-oc exec $ID -- apt update && apt install -y python3 pip
-oc exec $ID -- pip install flask
+oc exec $ID --wait -- apt update
+oc exec $ID --wait -- apt install -y python3 pip
+oc exec $ID --wait -- pip install flask
 
 # Checkpoint it
 CP=$(oc checkpoint create $ID --name "python-flask" --json | jq -r '.id')
