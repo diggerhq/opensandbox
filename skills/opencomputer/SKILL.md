@@ -1,38 +1,54 @@
 ---
 name: opencomputer
 description: Manage OpenComputer cloud sandboxes. Use when the user wants to create, run commands in, checkpoint, or manage sandbox environments. Auto-invokes when sandboxes, remote environments, or the oc CLI are mentioned.
-allowed-tools: Bash(oc *), Bash(which oc), Read, Grep, Glob
+allowed-tools: Bash(oc *), Bash(which oc), Bash(curl *), Bash(open *), Bash(xdg-open *), Bash(chmod *), Read, Grep, Glob
 ---
 
 You have access to the `oc` CLI for managing OpenComputer cloud sandboxes. Use it to create sandboxes, execute commands, manage checkpoints, and more.
 
-## Prerequisites
+## First-time setup (run this BEFORE any other `oc` command)
 
-The `oc` CLI must be installed and configured. Check with:
-```
+Before running any sandbox command, make sure the user is set up. Do these checks in order, only fixing what's broken:
+
+### 1. Is the `oc` CLI installed?
+
+```bash
 which oc
 ```
 
-If not installed, download the latest binary from GitHub Releases:
+If it returns a path → installed, skip to step 2.
+
+If it returns nothing / non-zero exit → install it with the official one-liner:
+
 ```bash
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# macOS (Intel)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-darwin-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# Linux (x86_64)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-amd64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
-
-# Linux (ARM64)
-curl -fsSL https://github.com/diggerhq/opencomputer/releases/latest/download/oc-linux-arm64 -o /usr/local/bin/oc && chmod +x /usr/local/bin/oc
+curl -fsSL https://raw.githubusercontent.com/diggerhq/opencomputer/main/scripts/install.sh | bash
 ```
 
-Configuration requires an API key. Set it via:
+This installs `oc` to `~/.local/bin/oc`. If `~/.local/bin` is not on the user's PATH, tell them to add `export PATH="$HOME/.local/bin:$PATH"` to their shell rc file, and use the full path `~/.local/bin/oc` for the rest of this session.
+
+### 2. Is the user logged in (API key configured)?
+
+```bash
+oc config show
 ```
-oc config set api-key <key>
-```
-Or pass `--api-key` on every command. The API URL defaults to `https://app.opencomputer.dev`.
+
+If `API Key` is shown (even masked) → logged in, you're done.
+
+If no API key is set, OR a sandbox command fails with an auth error (`401`, "unauthorized", "missing API key"):
+
+1. Open the OpenComputer dashboard in the user's browser so they can create a key:
+   - macOS: `open https://app.opencomputer.dev`
+   - Linux: `xdg-open https://app.opencomputer.dev`
+2. Tell the user (in chat) to:
+   - Sign in / sign up at the page that just opened
+   - Create an API key
+   - Run this command in their terminal once they have the key:
+     ```bash
+     oc config set api-key YOUR_API_KEY
+     ```
+3. Wait for the user to confirm they've set the key before proceeding.
+
+Do **not** prompt them for the key in the chat — they should paste it into their own terminal so it never leaves their machine.
 
 ## CLI Reference
 
