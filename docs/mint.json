@@ -3,6 +3,17 @@
   "theme": "quill",
   "name": "OpenComputer",
   "description": "Cloud sandboxes for running AI agents",
+  "contextual": {
+    "options": [
+      "copy",
+      "view",
+      "chatgpt",
+      "claude",
+      "perplexity",
+      "cursor",
+      "vscode"
+    ]
+  },
   "colors": {
     "primary": "#131311",
     "light": "#dfdfdf",
