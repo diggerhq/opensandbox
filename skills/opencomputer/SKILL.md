@@ -56,8 +56,9 @@ Do **not** prompt them for the key in the chat — they should paste it into the
 
 ```bash
 # Create a sandbox (returns sandbox ID)
-oc sandbox create --template base --timeout 300 --cpu 1 --memory 512
+oc sandbox create --timeout 300 --cpu 1 --memory 512
 oc sandbox create --env KEY=VALUE --env KEY2=VALUE2
+oc sandbox create --secret-store my-secrets --metadata project=demo
 oc create  # shortcut
 
 # List running sandboxes
@@ -82,15 +83,25 @@ oc sandbox set-timeout <sandbox-id> <seconds>
 
 ### Execute Commands
 
+`oc exec` streams stdout/stderr live by default and exits with the remote process's exit code. Use `--wait` for buffered/synchronous execution (needed for `--json`), or `--detach` to fire-and-forget.
+
 ```bash
-# Run a command in a sandbox
+# Stream live (default)
 oc exec <sandbox-id> -- echo hello
 oc exec <sandbox-id> --cwd /app -- npm install
 oc exec <sandbox-id> --timeout 120 -- make build
 oc exec <sandbox-id> --env NODE_ENV=production -- node server.js
 
-# JSON output includes exitCode, stdout, stderr
-oc exec <sandbox-id> --json -- whoami
+# Buffered + JSON envelope (exitCode, stdout, stderr) — required for scripting
+oc exec <sandbox-id> --wait --json -- whoami
+
+# Fire-and-forget; prints the session id so you can re-attach later
+oc exec <sandbox-id> --detach -- long-running-job
+
+# Manage exec sessions
+oc exec list <sandbox-id>
+oc exec attach <sandbox-id> <session-id>
+oc exec kill <sandbox-id> <session-id>
 ```
 
 ### Checkpoints
@@ -168,7 +179,8 @@ All commands support:
 ### Create and use a sandbox
 ```bash
 ID=$(oc create --json | jq -r '.sandboxID')
-oc exec $ID -- apt update && apt install -y nodejs
+oc exec $ID --wait -- apt update
+oc exec $ID --wait -- apt install -y nodejs
 oc exec $ID -- node -e "console.log('hello')"
 oc sandbox kill $ID
 ```
@@ -177,8 +189,9 @@ oc sandbox kill $ID
 ```bash
 # Create base environment
 ID=$(oc create --json | jq -r '.sandboxID')
-oc exec $ID -- apt update && apt install -y python3 pip
-oc exec $ID -- pip install flask
+oc exec $ID --wait -- apt update
+oc exec $ID --wait -- apt install -y python3 pip
+oc exec $ID --wait -- pip install flask
 
 # Checkpoint it
 CP=$(oc checkpoint create $ID --name "python-flask" --json | jq -r '.id')
