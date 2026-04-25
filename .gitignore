@@ -10,6 +10,10 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Claude Code session state — never check in
+.claude/*.lock
+.claude/settings.local.json
+
 # Environment files
 .env
 .env.*

@@ -348,7 +348,6 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 			}
 			log.Printf("qemu: golden snapshot already exists at %s (CID=%d, guestIP=%s, version=%s)", goldenDir, m.goldenCID, m.goldenGuestIP, m.goldenVersion)
 			go m.uploadBaseImageIfNew(m.goldenVersion)
-			go m.migrateStaleCheckpoints()
 			return nil
 		}
 
@@ -580,7 +579,6 @@ func (m *Manager) PrepareGoldenSnapshot() error {
 	log.Printf("qemu: golden snapshot ready (%dms total, mem=%s, CID=%d, guestIP=%s, version=%s)",
 		time.Since(t0).Milliseconds(), memFile, goldenCID, netCfg.GuestIP, m.goldenVersion)
 	go m.uploadBaseImageIfNew(m.goldenVersion)
-	go m.migrateStaleCheckpoints()
 	return nil
 }
 

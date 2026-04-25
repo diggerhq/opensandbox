@@ -251,11 +251,10 @@ func main() {
 		}
 	}
 
-	// Wire checkpoint store into QEMU manager for base image archival + checkpoint rebasing
+	// Wire checkpoint store into QEMU manager for base image archival.
 	if checkpointStore != nil && qemuMgr != nil {
 		qemuMgr.SetCheckpointStore(checkpointStore)
 		observability.Go("upload-base-image", qemuMgr.UploadBaseImageIfNew)
-		observability.Go("migrate-stale-checkpoints", qemuMgr.MigrateStaleCheckpoints)
 	}
 
 	// PostgreSQL store

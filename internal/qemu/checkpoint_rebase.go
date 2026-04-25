@@ -233,9 +233,3 @@ func (m *Manager) checkLegacyCheckpoint(checkpointID string, meta SnapshotMeta) 
 		baseInstalled.Format(time.RFC3339))
 }
 
-// MigrateStaleCheckpoints is a no-op under pin-to-base; kept for call-site
-// compatibility. Checkpoints no longer need background migration — their
-// backing file is resolved on-demand at fork time.
-func (m *Manager) MigrateStaleCheckpoints() {}
-
-func (m *Manager) migrateStaleCheckpoints() {}
