@@ -134,6 +134,15 @@
         ]
       },
       {
+        "group": "Rust SDK",
+        "pages": [
+          "reference/rust-sdk/overview",
+          "reference/rust-sdk/sandbox",
+          "reference/rust-sdk/exec",
+          "reference/rust-sdk/filesystem"
+        ]
+      },
+      {
         "group": "CLI Reference",
         "pages": [
           "reference/cli/overview",

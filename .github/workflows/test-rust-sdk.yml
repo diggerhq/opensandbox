@@ -5,16 +5,14 @@ on:
     branches: [main]
     paths:
       - 'sdks/rust/**'
+      - 'examples/rust/**'
       - '.github/workflows/test-rust-sdk.yml'
   pull_request:
     paths:
       - 'sdks/rust/**'
+      - 'examples/rust/**'
       - '.github/workflows/test-rust-sdk.yml'
   workflow_dispatch:
-
-defaults:
-  run:
-    working-directory: sdks/rust
 
 jobs:
   build-and-test:
@@ -29,16 +27,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: sdks/rust
+          workspaces: |
+            sdks/rust
+            examples/rust
 
-      - name: Format check
+      - name: Format check (SDK)
+        working-directory: sdks/rust
+        run: cargo fmt --all -- --check
+
+      - name: Format check (examples)
+        working-directory: examples/rust
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        working-directory: sdks/rust
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Build (lib + examples)
+      - name: Build SDK (lib + examples + tests)
+        working-directory: sdks/rust
         run: cargo build --all-targets
 
+      - name: Build examples/rust
+        working-directory: examples/rust
+        run: cargo build
+
       - name: Offline tests
+        working-directory: sdks/rust
         run: cargo test --tests

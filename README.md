@@ -38,11 +38,9 @@ oc config set api-key YOUR_API_KEY
 Install the SDK:
 
 ```bash
-npm install @opencomputer/sdk
-# or
-pip install opencomputer-sdk
-# or, in Cargo.toml
-# opencomputer = "0.1"
+npm install @opencomputer/sdk      # TypeScript
+pip install opencomputer-sdk        # Python
+cargo add opencomputer tokio --features tokio/full   # Rust
 ```
 
 ```typescript
@@ -62,6 +60,34 @@ console.log(output.stdout); // hello
 
 // Clean up
 await sandbox.kill();
+```
+
+```rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+
+#[tokio::main]
+async fn main() -> opencomputer::Result<()> {
+    let sandbox = Sandbox::create(SandboxOpts::new().template("default")).await?;
+
+    let result = sandbox
+        .commands()
+        .run("node --version", RunOpts::new())
+        .await?;
+    println!("{}", result.stdout);
+
+    sandbox
+        .files()
+        .write("/app/index.js", "console.log(\"hello\")")
+        .await?;
+    let output = sandbox
+        .commands()
+        .run("node /app/index.js", RunOpts::new())
+        .await?;
+    println!("{}", output.stdout); // hello
+
+    sandbox.kill().await?;
+    Ok(())
+}
 ```
 
 ### Agent SDK

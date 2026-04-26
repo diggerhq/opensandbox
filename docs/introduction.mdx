@@ -32,6 +32,12 @@ npm install @opencomputer/sdk
 pip install opencomputer-sdk
 ```
 
+```toml cargo
+# In Cargo.toml
+opencomputer = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
 ```bash CLI
 # Installs to ~/.local/bin (no sudo). See cli/overview for manual install.
 curl -fsSL https://raw.githubusercontent.com/diggerhq/opencomputer/main/scripts/install.sh | bash
@@ -69,6 +75,22 @@ async def main():
     await sandbox.kill()
 
 asyncio.run(main())
+```
+
+```rust Rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+
+#[tokio::main]
+async fn main() -> opencomputer::Result<()> {
+    let sandbox = Sandbox::create(SandboxOpts::new()).await?;
+    let result = sandbox
+        .commands()
+        .run("echo 'Hello World from OpenSandbox!'", RunOpts::new())
+        .await?;
+    println!("{}", result.stdout);
+    sandbox.kill().await?;
+    Ok(())
+}
 ```
 
 </CodeGroup>

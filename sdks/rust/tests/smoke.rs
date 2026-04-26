@@ -4,7 +4,7 @@
 //! types, builders, and url-resolution logic behave as expected. The full
 //! integration tests live in `examples/` and require a real backend.
 
-use opencomputer::{ExecSessionInfo, RunOpts, SandboxOpts};
+use opencomputer::{ExecSessionInfo, ExecStartOpts, RunOpts, SandboxOpts, StreamEvent};
 
 #[test]
 fn sandbox_opts_builder_threads_values() {
@@ -44,6 +44,28 @@ fn run_opts_builder_threads_values() {
     let env = opts.env.unwrap();
     assert_eq!(env.get("A").map(String::as_str), Some("1"));
     assert_eq!(env.get("B").map(String::as_str), Some("2"));
+}
+
+#[test]
+fn exec_start_opts_and_stream_event_are_public() {
+    // Compile-time proof that the public surface advertised in the docs
+    // (and used by the streaming examples) is actually exported.
+    let _ = ExecStartOpts::new()
+        .args(vec!["-c".into(), "echo hi".into()])
+        .env("FOO", "bar")
+        .cwd("/tmp")
+        .timeout(10);
+
+    fn classify(e: StreamEvent) -> &'static str {
+        match e {
+            StreamEvent::Stdout(_) => "stdout",
+            StreamEvent::Stderr(_) => "stderr",
+            StreamEvent::ScrollbackEnd => "scrollback_end",
+            StreamEvent::Exit(_) => "exit",
+        }
+    }
+    assert_eq!(classify(StreamEvent::Stdout(vec![1, 2, 3])), "stdout");
+    assert_eq!(classify(StreamEvent::Exit(42)), "exit");
 }
 
 #[test]

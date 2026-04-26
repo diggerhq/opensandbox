@@ -24,7 +24,9 @@ mod sandbox;
 mod template;
 
 pub use error::{Error, Result};
-pub use exec::{Exec, ExecSessionInfo, ProcessResult, RunOpts};
+pub use exec::{
+    Exec, ExecSession, ExecSessionInfo, ExecStartOpts, ProcessResult, RunOpts, StreamEvent,
+};
 pub use filesystem::{EntryInfo, Filesystem};
 pub use sandbox::{CheckpointInfo, PatchInfo, PatchResult, PreviewURLResult, Sandbox, SandboxOpts};
 pub use template::{Template, TemplateInfo};

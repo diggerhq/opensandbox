@@ -43,6 +43,31 @@ async fn main() -> opencomputer::Result<()> {
 | `.api_url(..)` | `OPENCOMPUTER_API_URL` | `https://app.opencomputer.dev`   |
 | `.api_key(..)` | `OPENCOMPUTER_API_KEY` | (none)                           |
 
+## Streaming output
+
+```rust
+use opencomputer::{ExecStartOpts, StreamEvent};
+
+let (session, mut events) = sandbox
+    .exec()
+    .start("node", ExecStartOpts::new().args(vec!["server.js".into()]))
+    .await?;
+
+while let Some(ev) = events.recv().await {
+    match ev {
+        StreamEvent::Stdout(b) => print!("{}", String::from_utf8_lossy(&b)),
+        StreamEvent::Stderr(b) => eprint!("{}", String::from_utf8_lossy(&b)),
+        StreamEvent::Exit(code) => {
+            println!("exited: {code}");
+            break;
+        }
+        StreamEvent::ScrollbackEnd => {}
+    }
+}
+
+let _ = session.done().await;
+```
+
 ## Examples
 
 The `examples/` directory mirrors the test scripts in the Python and TypeScript SDKs:

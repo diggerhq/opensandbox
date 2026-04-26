@@ -1,0 +1,103 @@
+---
+title: "Sandbox"
+description: "Create, connect, and manage sandbox lifecycle"
+---
+
+## Construction
+
+### `Sandbox::create(opts: SandboxOpts) -> Result<Sandbox>`
+
+Create a new sandbox. [HTTP API →](/api-reference/sandboxes/create)
+
+`SandboxOpts` is a builder. All fields are optional; defaults match the
+TypeScript and Python SDKs.
+
+| Builder method                   | Type                          | Default | Description                                              |
+| -------------------------------- | ----------------------------- | ------- | -------------------------------------------------------- |
+| `.template(name)`                | `&str` / `String`             | `"base"`| Template name                                            |
+| `.timeout(secs)`                 | `u64`                         | `0`     | Idle timeout. `0` = persistent, never auto-hibernates    |
+| `.api_key(key)`                  | `&str` / `String`             | env     | Falls back to `OPENCOMPUTER_API_KEY`                     |
+| `.api_url(url)`                  | `&str` / `String`             | env     | Falls back to `OPENCOMPUTER_API_URL`                     |
+| `.env(key, value)`               | `&str`, `&str`                | —       | Inject one env var; chainable                            |
+| `.envs(map)`                     | `HashMap<String, String>`     | —       | Replace the env-var map                                  |
+| `.metadata(map)`                 | `HashMap<String, String>`     | —       | Arbitrary metadata                                       |
+| `.cpu_count(n)`                  | `u32`                         | —       | CPU cores                                                |
+| `.memory_mb(mb)`                 | `u64`                         | —       | Memory in MB                                             |
+| `.disk_mb(mb)`                   | `u64`                         | —       | Workspace disk size in MB                                |
+| `.secret_store(name)`            | `&str` / `String`             | —       | Secret store — resolves encrypted secrets + allowlist    |
+| `.snapshot(name)`                | `&str` / `String`             | —       | Pre-built snapshot to fork from                          |
+
+```rust
+use opencomputer::{Sandbox, SandboxOpts};
+
+let sandbox = Sandbox::create(
+    SandboxOpts::new()
+        .template("base")
+        .timeout(120)
+        .env("FOO", "bar"),
+).await?;
+```
+
+### `Sandbox::connect(sandbox_id, opts: SandboxOpts) -> Result<Sandbox>`
+
+Re-attach to an existing sandbox. Only `api_key` / `api_url` are read from
+`opts`.
+
+```rust
+let sandbox = Sandbox::connect("sb_abc123", SandboxOpts::new()).await?;
+```
+
+## Accessors
+
+| Method               | Returns       | Description                                |
+| -------------------- | ------------- | ------------------------------------------ |
+| `.sandbox_id()`      | `&str`        | Sandbox ID                                 |
+| `.template()`        | `&str`        | Template ID                                |
+| `.status()`          | `String`      | Current cached status                      |
+| `.domain()`          | `String`      | Preview URL domain for port 80 (or empty)  |
+| `.preview_domain(port)` | `String`   | Preview URL domain for a specific port     |
+| `.files()`           | `Filesystem`  | See [Filesystem](/reference/rust-sdk/filesystem) |
+| `.exec()`            | `Exec`        | See [Exec](/reference/rust-sdk/exec)       |
+| `.commands()`        | `Exec`        | Alias for `.exec()` (parity with TS/Py)    |
+
+## Lifecycle
+
+| Method                                    | Description                                                  |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| `.kill() -> Result<()>`                   | Delete the sandbox                                           |
+| `.is_running() -> bool`                   | Refresh and report status                                    |
+| `.hibernate() -> Result<()>`              | Hibernate the VM                                             |
+| `.wake(timeout) -> Result<()>`            | Wake from hibernation. `timeout: Option<u64>` (`None` = 0)   |
+| `.set_timeout(secs) -> Result<()>`        | Update the idle timeout                                      |
+
+## Checkpoints
+
+| Method                                                  | Description                                |
+| ------------------------------------------------------- | ------------------------------------------ |
+| `.create_checkpoint(name) -> Result<CheckpointInfo>`    | Snapshot the running VM                    |
+| `.list_checkpoints() -> Result<Vec<CheckpointInfo>>`    | List all checkpoints for this sandbox      |
+| `.restore_checkpoint(id) -> Result<()>`                 | Roll back in place                         |
+| `.delete_checkpoint(id) -> Result<()>`                  | Delete (404 is treated as success)         |
+
+## Preview URLs
+
+| Method                                                      | Description                                |
+| ----------------------------------------------------------- | ------------------------------------------ |
+| `.create_preview_url(port, domain) -> Result<PreviewURLResult>` | Expose `port` externally                |
+| `.list_preview_urls() -> Result<Vec<PreviewURLResult>>`     | All preview URLs for this sandbox          |
+| `.delete_preview_url(port) -> Result<()>`                   | Remove the preview URL                     |
+
+## Signed URLs
+
+| Method                                                    | Description                              |
+| --------------------------------------------------------- | ---------------------------------------- |
+| `.download_url(path, expires_in) -> Result<String>`       | Public signed download URL               |
+| `.upload_url(path, expires_in) -> Result<String>`         | Public signed upload URL (PUT)           |
+
+`expires_in: Option<u64>` — `None` defaults to 3600 seconds (max 86400).
+
+## Errors
+
+All fallible methods return `opencomputer::Result<T>` (alias for
+`Result<T, opencomputer::Error>`). The `Error` enum covers HTTP, WebSocket,
+JSON, URL, and API-status errors.
