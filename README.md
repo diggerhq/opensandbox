@@ -41,6 +41,8 @@ Install the SDK:
 npm install @opencomputer/sdk
 # or
 pip install opencomputer-sdk
+# or, in Cargo.toml
+# opencomputer = "0.1"
 ```
 
 ```typescript
