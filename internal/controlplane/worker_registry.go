@@ -23,6 +23,8 @@ type WorkerInfo struct {
 	CPUPct       float64   `json:"cpu_pct"`
 	MemPct       float64   `json:"mem_pct"`
 	DiskPct       float64   `json:"disk_pct"`
+	TotalMemoryMB     int  `json:"total_memory_mb,omitempty"`
+	CommittedMemoryMB int  `json:"committed_memory_mb,omitempty"`
 	GoldenVersion string    `json:"golden_version,omitempty"`
 	WorkerVersion string    `json:"worker_version,omitempty"`
 	LastSeen      time.Time `json:"-"`

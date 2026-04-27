@@ -34,15 +34,21 @@ import (
 type LiveMigrator interface {
 	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
 	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error)
-	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem int, err error)
+	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, err error)
 	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
 	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
 }
 
 // CapacityChecker is implemented by VM managers that can report memory capacity.
+// HostUsedMemoryMB reflects actual RAM pressure on the host (MemTotal−MemAvailable)
+// and is the basis for migration admission control. TotalCommittedMemoryMB is kept
+// for observability but is NOT used to gate scheduling any longer — committed
+// over-reserves for idle sandboxes with large maxmem ceilings, forcing the
+// cluster to over-provision workers for the same real workload.
 type CapacityChecker interface {
 	TotalCommittedMemoryMB() int
 	HostMemoryMB() int
+	HostUsedMemoryMB() int
 }
 
 // GoldenRebuilder is implemented by VM managers that support golden snapshot rebuild.
@@ -966,16 +972,17 @@ func (s *GRPCServer) PreCopyDrives(ctx context.Context, req *pb.PreCopyDrivesReq
 	if s.migrator == nil {
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
-	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
+	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("pre-copy drives: %w", err)
 	}
 	return &pb.PreCopyDrivesResponse{
-		RootfsKey:     rootfsKey,
-		WorkspaceKey:  workspaceKey,
-		GoldenVersion: goldenVersion,
-		BaseMemoryMb:  int32(baseMem),
-		BaseCpuCount:  int32(baseCPU),
+		RootfsKey:      rootfsKey,
+		WorkspaceKey:   workspaceKey,
+		GoldenVersion:  goldenVersion,
+		BaseMemoryMb:   int32(baseMem),
+		BaseCpuCount:   int32(baseCPU),
+		ActualMemoryMb: int32(actualMem),
 	}, nil
 }
 
@@ -984,17 +991,22 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
 
-	// If target_memory_mb is set, check capacity before creating the target QEMU.
-	// This prevents multiple concurrent migrations from overcommitting this worker.
+	// Capacity guard — actual-memory-based. The caller passes the source VM's
+	// current RSS as TargetMemoryMb (i.e., the physical RAM the migration will
+	// really land on this host). We admit if that fits inside free host
+	// memory after a 10% safety margin. This replaces committed-memory
+	// admission: committed over-reserved for idle sandboxes with large
+	// maxmem ceilings, which caused drains to stall on workers that had
+	// plenty of real headroom.
 	if req.TargetMemoryMb > 0 {
 		if cc, ok := s.manager.(CapacityChecker); ok {
-			committedMB := cc.TotalCommittedMemoryMB()
 			hostTotalMB := cc.HostMemoryMB()
-			reserveMB := hostTotalMB / 5
-			availableMB := hostTotalMB - committedMB - reserveMB
+			hostUsedMB := cc.HostUsedMemoryMB()
+			reserveMB := hostTotalMB / 10
+			availableMB := hostTotalMB - hostUsedMB - reserveMB
 			if int(req.TargetMemoryMb) > availableMB {
-				return nil, fmt.Errorf("insufficient_capacity: migration target needs %dMB but only %dMB available (committed=%dMB/%dMB)",
-					req.TargetMemoryMb, availableMB, committedMB, hostTotalMB)
+				return nil, fmt.Errorf("insufficient_capacity: migration target needs %dMB but only %dMB actual available (used=%dMB/%dMB)",
+					req.TargetMemoryMb, availableMB, hostUsedMB, hostTotalMB)
 			}
 		}
 	}

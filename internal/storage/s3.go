@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -106,10 +107,13 @@ func (s *CheckpointStore) CacheHit(key string) bool {
 // Exists checks whether an object exists in S3/blob storage.
 func (s *CheckpointStore) Exists(ctx context.Context, key string) (bool, error) {
 	_, err := s.blob.Head(ctx, s.bucket, key)
-	if err != nil {
-		return false, err
+	if err == nil {
+		return true, nil
 	}
-	return true, nil
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 func (s *CheckpointStore) Upload(ctx context.Context, key, localPath string) (int64, error) {

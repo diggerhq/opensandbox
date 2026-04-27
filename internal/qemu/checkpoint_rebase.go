@@ -11,193 +11,169 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/opensandbox/opensandbox/internal/storage"
 )
 
-// rebaseCheckpointToCurrentBase migrates a checkpoint's rootfs.qcow2 from an old
-// golden version to the current base image. Uses qemu-img rebase to copy only the
-// blocks that differ between the old and new base into the overlay — the rest is
-// resolved via the new base's backing file reference. Result: thin overlay against
-// the current base, with size = original overlay + delta between bases.
-func (m *Manager) rebaseCheckpointToCurrentBase(ctx context.Context, checkpointDir, oldGoldenVersion string) error {
-	rootfs := filepath.Join(checkpointDir, "rootfs.qcow2")
-	if !fileExists(rootfs) {
-		return fmt.Errorf("rootfs.qcow2 not found in %s", checkpointDir)
+// Pin-to-base: checkpoints stay tied to the exact goldenVersion they were
+// created against. On fork/restore we ensure that base is available locally
+// (either as the current default.ext4, a retained previous base on disk, or
+// an on-demand blob download) and do a metadata-only qemu-img rebase -u to
+// point the overlay's backing_file field at it. No block copying ever.
+//
+// Earlier attempts to rebase overlays across goldens (Variants A, B, C) all
+// produced subtle corruption: memory dumps reference disk content from the
+// old base, so swapping in new-base content under them breaks consistency.
+
+// ensureCheckpointRebased ensures the checkpoint's rootfs.qcow2 backing file
+// points at the correct base for its pinned goldenVersion. Name kept for
+// call-site stability.
+func (m *Manager) ensureCheckpointRebased(ctx context.Context, checkpointID string) error {
+	if m.checkpointStore == nil {
+		return nil
 	}
 
-	oldBasePath, release, err := acquireOldBase(ctx, m.checkpointStore, oldGoldenVersion)
+	cacheDir := filepath.Join(m.cfg.DataDir, "checkpoint-snapshots", checkpointID)
+	metaPath := filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")
+
+	m.checkpointCacheMu.RLock()
+	data, err := os.ReadFile(metaPath)
+	m.checkpointCacheMu.RUnlock()
 	if err != nil {
-		return fmt.Errorf("download old base %s: %w", oldGoldenVersion, err)
-	}
-	defer release()
-
-	// Step 1: point overlay at the downloaded old base (metadata-only repoint).
-	rebaseCmd := exec.CommandContext(ctx, "qemu-img", "rebase", "-u", "-b", oldBasePath, "-F", "raw", rootfs)
-	if out, err := rebaseCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("rebase to old base: %w (%s)", err, strings.TrimSpace(string(out)))
+		return nil
 	}
 
-	// Step 2: rebase to the new base. qemu-img compares old_base with new_base block
-	// by block; blocks that differ get copied into the overlay so it reads correctly
-	// on top of the new base. Preserves internal savevm snapshots.
-	newBasePath := filepath.Join(m.cfg.ImagesDir, "default.ext4")
-	if !fileExists(newBasePath) {
-		return fmt.Errorf("current base %s not found on disk", newBasePath)
-	}
-	rebaseToCurrent := exec.CommandContext(ctx, "qemu-img", "rebase", "-b", newBasePath, "-F", "raw", rootfs)
-	if out, err := rebaseToCurrent.CombinedOutput(); err != nil {
-		return fmt.Errorf("rebase to current base: %w (%s)", err, strings.TrimSpace(string(out)))
+	var meta SnapshotMeta
+	if json.Unmarshal(data, &meta) != nil {
+		return nil
 	}
 
+	if meta.GoldenVersion == "" {
+		return m.checkLegacyCheckpoint(checkpointID, meta)
+	}
+
+	basePath, err := m.resolveBaseForVersion(ctx, meta.GoldenVersion)
+	if err != nil {
+		return fmt.Errorf("resolve base %s: %w", meta.GoldenVersion, err)
+	}
+
+	rootfs := filepath.Join(cacheDir, "rootfs.qcow2")
+	if !fileExists(rootfs) {
+		return nil
+	}
+
+	m.checkpointCacheMu.Lock()
+	defer m.checkpointCacheMu.Unlock()
+
+	return rebaseMetadataOnly(ctx, rootfs, basePath)
+}
+
+// rebaseMetadataOnly runs qemu-img rebase -u to repoint an overlay's backing
+// file without touching data clusters.
+func rebaseMetadataOnly(ctx context.Context, overlayPath, newBasePath string) error {
+	cmd := exec.CommandContext(ctx, "qemu-img", "rebase", "-u", "-b", newBasePath, "-F", "raw", overlayPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("qemu-img rebase -u: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
-// oldBaseCache coordinates downloads of old base images, preventing duplicate
-// concurrent downloads and tracking reference counts for cleanup.
-var (
-	oldBaseMu     sync.Mutex
-	oldBaseCache  = map[string]string{}        // goldenVersion → local temp path
-	oldBaseRefs   = map[string]int{}           // goldenVersion → active reference count
-	oldBaseFlight = map[string]chan struct{}{}  // goldenVersion → closed when download completes
-)
+// resolveBaseForVersion returns a local path to the base image matching the
+// given goldenVersion, downloading from blob storage if needed. Downloaded
+// bases are cached persistently at ImagesDir/bases/{version}/default.ext4.
+func (m *Manager) resolveBaseForVersion(ctx context.Context, goldenVersion string) (string, error) {
+	if goldenVersion == "" {
+		return "", fmt.Errorf("empty goldenVersion")
+	}
+	if goldenVersion == m.GoldenVersion() {
+		return filepath.Join(m.cfg.ImagesDir, "default.ext4"), nil
+	}
 
-// acquireOldBase returns the path to a cached (or freshly downloaded) old base
-// image, incrementing its reference count. Caller MUST call the returned release
-// function when done — the file is deleted from /tmp when refs drop to zero.
-// Concurrent callers for the same version share a single download.
-func acquireOldBase(ctx context.Context, store *storage.CheckpointStore, goldenVersion string) (path string, release func(), err error) {
-	for {
-		oldBaseMu.Lock()
+	retained := filepath.Join(m.cfg.ImagesDir, "bases", goldenVersion, "default.ext4")
+	if fileExists(retained) {
+		return retained, nil
+	}
 
-		// Already cached and on disk — bump ref and return.
-		if p, ok := oldBaseCache[goldenVersion]; ok {
-			if fileExists(p) {
-				oldBaseRefs[goldenVersion]++
-				oldBaseMu.Unlock()
-				return p, makeRelease(goldenVersion), nil
+	if err := m.downloadBaseToLocal(ctx, goldenVersion, retained); err != nil {
+		return "", err
+	}
+	return retained, nil
+}
+
+// downloadBaseToLocal fetches bases/{goldenVersion}/default.ext4 from blob
+// storage. Concurrent callers share one download through an in-flight map.
+func (m *Manager) downloadBaseToLocal(ctx context.Context, goldenVersion, destPath string) error {
+	flightMu.Lock()
+	if ch, downloading := downloadFlight[goldenVersion]; downloading {
+		flightMu.Unlock()
+		select {
+		case <-ch:
+			if fileExists(destPath) {
+				return nil
 			}
-			delete(oldBaseCache, goldenVersion)
-			delete(oldBaseRefs, goldenVersion)
+			return m.downloadBaseToLocal(ctx, goldenVersion, destPath)
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-
-		// Another goroutine is downloading — wait for it.
-		if ch, downloading := oldBaseFlight[goldenVersion]; downloading {
-			oldBaseMu.Unlock()
-			select {
-			case <-ch:
-				continue // loop back to check cache
-			case <-ctx.Done():
-				return "", nil, ctx.Err()
-			}
-		}
-
-		// We own the download.
-		ch := make(chan struct{})
-		oldBaseFlight[goldenVersion] = ch
-		oldBaseMu.Unlock()
-
-		p, dlErr := doDownloadOldBase(ctx, store, goldenVersion)
-
-		oldBaseMu.Lock()
-		delete(oldBaseFlight, goldenVersion)
-		if dlErr == nil {
-			oldBaseCache[goldenVersion] = p
-			oldBaseRefs[goldenVersion] = 1
-		}
-		oldBaseMu.Unlock()
+	}
+	ch := make(chan struct{})
+	downloadFlight[goldenVersion] = ch
+	flightMu.Unlock()
+	defer func() {
+		flightMu.Lock()
+		delete(downloadFlight, goldenVersion)
+		flightMu.Unlock()
 		close(ch)
+	}()
 
-		if dlErr != nil {
-			return "", nil, dlErr
-		}
-		return p, makeRelease(goldenVersion), nil
+	if fileExists(destPath) {
+		return nil
 	}
-}
-
-func makeRelease(goldenVersion string) func() {
-	return func() {
-		oldBaseMu.Lock()
-		defer oldBaseMu.Unlock()
-		oldBaseRefs[goldenVersion]--
-		if oldBaseRefs[goldenVersion] <= 0 {
-			if p, ok := oldBaseCache[goldenVersion]; ok {
-				os.Remove(p)
-				delete(oldBaseCache, goldenVersion)
-			}
-			delete(oldBaseRefs, goldenVersion)
-		}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return fmt.Errorf("mkdir base cache: %w", err)
 	}
-}
 
-func doDownloadOldBase(ctx context.Context, store *storage.CheckpointStore, goldenVersion string) (string, error) {
+	log.Printf("qemu: downloading base %s from blob storage", goldenVersion)
+	t0 := time.Now()
+
 	key := fmt.Sprintf("bases/%s/default.ext4", goldenVersion)
-	finalPath := filepath.Join(os.TempDir(), fmt.Sprintf("old-base-%s.ext4", goldenVersion))
-
-	reader, err := store.Download(ctx, key)
+	reader, err := m.checkpointStore.Download(ctx, key)
 	if err != nil {
-		return "", fmt.Errorf("download %s: %w", key, err)
+		return fmt.Errorf("download %s: %w", key, err)
 	}
 	defer reader.Close()
 
-	tmpFile, err := os.CreateTemp(os.TempDir(), "old-base-dl-*.ext4")
+	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "default-dl-*.ext4")
 	if err != nil {
-		return "", fmt.Errorf("create temp file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
 
 	if _, err := io.Copy(tmpFile, reader); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("write base image: %w", err)
+		return fmt.Errorf("write base image: %w", err)
 	}
-	tmpFile.Close()
-
-	if err := os.Rename(tmpPath, finalPath); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("rename: %w", err)
+		return err
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename: %w", err)
 	}
 
-	return finalPath, nil
+	log.Printf("qemu: base %s cached at %s (%dms)", goldenVersion, destPath, time.Since(t0).Milliseconds())
+	return nil
 }
 
-// cleanupOldBases force-removes all cached old base images from /tmp,
-// regardless of refcount. Only safe when no rebases are in flight.
-func cleanupOldBases() {
-	oldBaseMu.Lock()
-	defer oldBaseMu.Unlock()
-	for ver, path := range oldBaseCache {
-		os.Remove(path)
-		delete(oldBaseCache, ver)
-		delete(oldBaseRefs, ver)
-	}
-}
+var (
+	flightMu       sync.Mutex
+	downloadFlight = map[string]chan struct{}{}
+)
 
-// updateCheckpointGoldenVersion rewrites snapshot-meta.json with the new golden version.
-func updateCheckpointGoldenVersion(checkpointDir, newGoldenVersion string) error {
-	metaPath := filepath.Join(checkpointDir, "snapshot", "snapshot-meta.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		return fmt.Errorf("read metadata: %w", err)
-	}
-	var meta SnapshotMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
-	}
-	meta.GoldenVersion = newGoldenVersion
-	updated, err := json.Marshal(meta)
-	if err != nil {
-		return fmt.Errorf("marshal metadata: %w", err)
-	}
-	return os.WriteFile(metaPath, updated, 0644)
-}
-
-// uploadBaseImageIfNew uploads the base ext4 image to S3 if this golden version
-// hasn't been archived yet. Enables old checkpoints to be rebased when the base
-// image changes across Packer builds.
-// UploadBaseImageIfNew archives the current base image to S3 if not already stored.
+// UploadBaseImageIfNew archives the current base to blob storage if this
+// golden version hasn't been stored yet. Lets workers rolled up later pull
+// back checkpoints pinned to earlier goldens.
 func (m *Manager) UploadBaseImageIfNew() {
 	m.uploadBaseImageIfNew(m.GoldenVersion())
 }
@@ -234,347 +210,26 @@ func (m *Manager) uploadBaseImageIfNew(goldenVersion string) {
 	log.Printf("qemu: base image archived for golden version %s", goldenVersion)
 }
 
-// ensureCheckpointRebased checks if a cached checkpoint was created against a
-// different golden version and rebases it to the current base if needed.
-// Safe to call from the fork hot path — returns immediately if versions match.
-func (m *Manager) ensureCheckpointRebased(ctx context.Context, checkpointID string) error {
-	if m.checkpointStore == nil {
-		return nil
-	}
-
-	cacheDir := filepath.Join(m.cfg.DataDir, "checkpoint-snapshots", checkpointID)
-	metaPath := filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")
-
-	m.checkpointCacheMu.RLock()
-	data, err := os.ReadFile(metaPath)
-	m.checkpointCacheMu.RUnlock()
-	if err != nil {
-		return nil
-	}
-
-	var meta SnapshotMeta
-	if json.Unmarshal(data, &meta) != nil {
-		return nil
-	}
-
-	currentVersion := m.GoldenVersion()
-	if meta.GoldenVersion == "" {
-		return m.checkLegacyCheckpoint(checkpointID, meta)
-	}
-	if meta.GoldenVersion == currentVersion {
-		return nil
-	}
-
-	m.checkpointCacheMu.Lock()
-	defer m.checkpointCacheMu.Unlock()
-
-	// Re-check under write lock — background goroutine may have already migrated.
-	data, err = os.ReadFile(metaPath)
-	if err == nil {
-		var fresh SnapshotMeta
-		if json.Unmarshal(data, &fresh) == nil && fresh.GoldenVersion == currentVersion {
-			return nil
-		}
-	}
-
-	log.Printf("qemu: rebasing checkpoint %s from golden %s to %s", checkpointID, meta.GoldenVersion, currentVersion)
-	t0 := time.Now()
-
-	if err := m.rebaseCheckpointToCurrentBase(ctx, cacheDir, meta.GoldenVersion); err != nil {
-		return err
-	}
-	if err := updateCheckpointGoldenVersion(cacheDir, currentVersion); err != nil {
-		return err
-	}
-
-	log.Printf("qemu: checkpoint %s rebased (%dms)", checkpointID, time.Since(t0).Milliseconds())
-	return nil
-}
-
-// migrateStaleCheckpoints scans the local checkpoint cache and rebases any
-// checkLegacyCheckpoint handles checkpoints that predate goldenVersion tracking.
-// If the checkpoint was created after the current base image was installed on
-// this worker, it's compatible with the current base and safe to fork.
-// If it was created before, we can't verify compatibility — return a clear
-// error so the caller knows to recreate the checkpoint rather than hang on
-// agent timeout.
+// checkLegacyCheckpoint handles checkpoints that predate goldenVersion
+// tracking. If snapshot-at time is after the current base install, we trust
+// the current base is compatible. Otherwise we can't prove compatibility.
 func (m *Manager) checkLegacyCheckpoint(checkpointID string, meta SnapshotMeta) error {
 	baseImage := filepath.Join(m.cfg.ImagesDir, "default.ext4")
 	stat, err := os.Stat(baseImage)
 	if err != nil {
-		return nil // can't check, let it proceed (best-effort)
+		return nil
 	}
 	baseInstalled := stat.ModTime()
 
 	if meta.SnapshotedAt.IsZero() || meta.SnapshotedAt.After(baseInstalled) {
-		return nil // created after base was installed, safe to fork
+		return nil
 	}
-
 	return fmt.Errorf(
 		"checkpoint %s predates current base image (checkpoint created %s, "+
 			"base installed %s) and has no goldenVersion recorded. "+
-			"Cannot migrate automatically — destroy this checkpoint and recreate it",
+			"Destroy this checkpoint and recreate it",
 		checkpointID,
 		meta.SnapshotedAt.Format(time.RFC3339),
 		baseInstalled.Format(time.RFC3339))
 }
 
-// backfillGoldenVersions labels pre-existing cached checkpoints that predate
-// goldenVersion tracking but were created against the current base. Uses the
-// default.ext4 mtime as the cutoff — any checkpoint created after it was
-// necessarily made against the current base.
-func (m *Manager) backfillGoldenVersions() {
-	if m.checkpointStore == nil {
-		return
-	}
-	currentVersion := m.GoldenVersion()
-	if currentVersion == "" {
-		return
-	}
-
-	baseImage := filepath.Join(m.cfg.ImagesDir, "default.ext4")
-	stat, err := os.Stat(baseImage)
-	if err != nil {
-		return
-	}
-	baseInstalled := stat.ModTime()
-
-	cacheBase := filepath.Join(m.cfg.DataDir, "checkpoint-snapshots")
-	entries, err := os.ReadDir(cacheBase)
-	if err != nil {
-		return
-	}
-
-	var labeled int
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		cpDir := filepath.Join(cacheBase, e.Name())
-		metaPath := filepath.Join(cpDir, "snapshot", "snapshot-meta.json")
-		data, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue
-		}
-		var meta SnapshotMeta
-		if json.Unmarshal(data, &meta) != nil {
-			continue
-		}
-		if meta.GoldenVersion != "" {
-			continue // already labeled
-		}
-		if meta.SnapshotedAt.IsZero() || !meta.SnapshotedAt.After(baseInstalled) {
-			continue // too old to safely label
-		}
-
-		meta.GoldenVersion = currentVersion
-		updated, err := json.Marshal(meta)
-		if err != nil {
-			continue
-		}
-		if err := os.WriteFile(metaPath, updated, 0644); err != nil {
-			log.Printf("qemu: backfill: failed to update %s: %v", e.Name(), err)
-			continue
-		}
-
-		// Re-upload so S3 copy also has the label.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		if err := m.reuploadCheckpoint(ctx, e.Name(), cpDir); err != nil {
-			log.Printf("qemu: backfill: %s re-upload failed: %v", e.Name(), err)
-		}
-		cancel()
-
-		labeled++
-	}
-
-	if labeled > 0 {
-		log.Printf("qemu: backfill: labeled %d checkpoints with goldenVersion=%s", labeled, currentVersion)
-	}
-}
-
-// checkpoints created against a different golden version. Runs in background
-// with bounded concurrency.
-// MigrateStaleCheckpoints scans the local cache and rebases stale checkpoints.
-func (m *Manager) MigrateStaleCheckpoints() {
-	m.migrateStaleCheckpoints()
-}
-
-func (m *Manager) migrateStaleCheckpoints() {
-	if m.checkpointStore == nil {
-		return
-	}
-
-	// First pass: label pre-goldenVersion checkpoints that were made against the current base.
-	m.backfillGoldenVersions()
-
-	cacheBase := filepath.Join(m.cfg.DataDir, "checkpoint-snapshots")
-	entries, err := os.ReadDir(cacheBase)
-	if err != nil {
-		return
-	}
-
-	currentVersion := m.GoldenVersion()
-	if currentVersion == "" {
-		return
-	}
-
-	type staleCP struct {
-		id, dir, version string
-	}
-	var stale []staleCP
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		cpDir := filepath.Join(cacheBase, e.Name())
-		data, err := os.ReadFile(filepath.Join(cpDir, "snapshot", "snapshot-meta.json"))
-		if err != nil {
-			continue
-		}
-		var meta SnapshotMeta
-		if json.Unmarshal(data, &meta) != nil {
-			continue
-		}
-		if meta.GoldenVersion != "" && meta.GoldenVersion != currentVersion {
-			stale = append(stale, staleCP{id: e.Name(), dir: cpDir, version: meta.GoldenVersion})
-		}
-	}
-
-	if len(stale) == 0 {
-		return
-	}
-
-	log.Printf("qemu: checkpoint migration: %d stale checkpoints to migrate", len(stale))
-
-	// Track old versions so we can evict their bases after migration
-	oldVersions := make(map[string]struct{})
-	for _, cp := range stale {
-		oldVersions[cp.version] = struct{}{}
-	}
-
-	sem := make(chan struct{}, 2)
-	var wg sync.WaitGroup
-	migrated := int64(0)
-
-	for _, cp := range stale {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(cp staleCP) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-			defer cancel()
-
-			if err := m.ensureCheckpointRebased(ctx, cp.id); err != nil {
-				log.Printf("qemu: checkpoint migration: %s failed: %v", cp.id, err)
-				return
-			}
-
-			// Re-upload flattened checkpoint to S3 so other workers get the migrated version
-			if err := m.reuploadCheckpoint(ctx, cp.id, cp.dir); err != nil {
-				log.Printf("qemu: checkpoint migration: %s re-upload failed: %v", cp.id, err)
-			}
-
-			atomic.AddInt64(&migrated, 1)
-			log.Printf("qemu: checkpoint migration: %s complete (rebased + re-uploaded)", cp.id)
-		}(cp)
-	}
-
-	wg.Wait()
-	cleanupOldBases()
-
-	// Note: archived bases in S3 (bases/{version}/default.ext4) are kept forever
-	// so month-old checkpoints in S3 that aren't cached on any worker can still
-	// be rebased on demand. Storage cost is small (~4GB per Packer build).
-	// The `evictOldBase` function exists for future CP-orchestrated cleanup.
-	_ = oldVersions
-
-	log.Printf("qemu: checkpoint migration: done (%d/%d migrated)", migrated, len(stale))
-}
-
-// reuploadCheckpoint re-archives and re-uploads a migrated checkpoint to S3,
-// replacing the old thin overlay (referencing a prior base) with the new thin
-// overlay (referencing the current base, including any inter-base diff blocks).
-func (m *Manager) reuploadCheckpoint(ctx context.Context, checkpointID, cacheDir string) error {
-	if m.checkpointStore == nil {
-		return nil
-	}
-
-	// Read metadata to get the sandbox ID for the S3 key
-	metaPath := filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		return fmt.Errorf("read metadata: %w", err)
-	}
-	var meta SnapshotMeta
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
-	}
-
-	// Build list of files to archive
-	var archiveFiles []string
-	archiveFiles = append(archiveFiles, "rootfs.qcow2", "workspace.qcow2")
-	if fileExists(filepath.Join(cacheDir, "snapshot-name")) {
-		archiveFiles = append(archiveFiles, "snapshot-name")
-	}
-	if fileExists(filepath.Join(cacheDir, "mem.zst")) {
-		archiveFiles = append(archiveFiles, "mem.zst")
-	} else if fileExists(filepath.Join(cacheDir, "mem")) {
-		archiveFiles = append(archiveFiles, "mem")
-	}
-	if fileExists(filepath.Join(cacheDir, "snapshot", "snapshot-meta.json")) {
-		archiveFiles = append(archiveFiles, filepath.Join("snapshot", "snapshot-meta.json"))
-	}
-
-	archivePath := filepath.Join(cacheDir, "migrated.tar.zst")
-	if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
-		return fmt.Errorf("archive: %w", err)
-	}
-	defer os.Remove(archivePath)
-
-	s3Key := fmt.Sprintf("checkpoints/%s/%s/rootfs.tar.zst", meta.SandboxID, checkpointID)
-	if _, err := m.checkpointStore.Upload(ctx, s3Key, archivePath); err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-
-	log.Printf("qemu: checkpoint %s re-uploaded to S3 (flattened)", checkpointID)
-	return nil
-}
-
-// evictOldBase removes an archived base image from S3 after all local checkpoints
-// referencing it have been migrated.
-func (m *Manager) evictOldBase(goldenVersion string) {
-	if m.checkpointStore == nil || goldenVersion == "" {
-		return
-	}
-
-	// Verify no local checkpoints still reference this version
-	cacheBase := filepath.Join(m.cfg.DataDir, "checkpoint-snapshots")
-	entries, _ := os.ReadDir(cacheBase)
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(cacheBase, e.Name(), "snapshot", "snapshot-meta.json"))
-		if err != nil {
-			continue
-		}
-		var meta SnapshotMeta
-		if json.Unmarshal(data, &meta) == nil && meta.GoldenVersion == goldenVersion {
-			log.Printf("qemu: skipping eviction of base %s — checkpoint %s still references it", goldenVersion, e.Name())
-			return
-		}
-	}
-
-	key := fmt.Sprintf("bases/%s/default.ext4", goldenVersion)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := m.checkpointStore.Delete(ctx, key); err != nil {
-		log.Printf("qemu: failed to evict old base %s: %v", goldenVersion, err)
-		return
-	}
-	log.Printf("qemu: evicted old base image %s from S3", goldenVersion)
-}

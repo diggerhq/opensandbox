@@ -331,6 +331,11 @@ message PreCopyDrivesResponse {
   string golden_version = 3;   // golden version the sandbox was created from
   int32 base_memory_mb = 4;    // QEMU -m value from source (target must match for migration)
   int32 base_cpu_count = 5;    // QEMU -smp value from source (target must match for migration)
+  // actual_memory_mb is the source QEMU process's current RSS in MB — a true
+  // measure of how much host RAM the migration will land on the target.
+  // Used for actual-memory-based scheduling instead of committed/configured
+  // memory (which over-reserves on idle sandboxes).
+  int32 actual_memory_mb = 6;
 }
 
 message PrepareMigrationIncomingRequest {

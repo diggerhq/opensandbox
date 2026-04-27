@@ -2780,8 +2780,13 @@ type PreCopyDrivesResponse struct {
 	GoldenVersion string                 `protobuf:"bytes,3,opt,name=golden_version,json=goldenVersion,proto3" json:"golden_version,omitempty"` // golden version the sandbox was created from
 	BaseMemoryMb  int32                  `protobuf:"varint,4,opt,name=base_memory_mb,json=baseMemoryMb,proto3" json:"base_memory_mb,omitempty"` // QEMU -m value from source (target must match for migration)
 	BaseCpuCount  int32                  `protobuf:"varint,5,opt,name=base_cpu_count,json=baseCpuCount,proto3" json:"base_cpu_count,omitempty"` // QEMU -smp value from source (target must match for migration)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// actual_memory_mb is the source QEMU process's current RSS in MB — a true
+	// measure of how much host RAM the migration will land on the target.
+	// Used for actual-memory-based scheduling instead of committed/configured
+	// memory (which over-reserves on idle sandboxes).
+	ActualMemoryMb int32 `protobuf:"varint,6,opt,name=actual_memory_mb,json=actualMemoryMb,proto3" json:"actual_memory_mb,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PreCopyDrivesResponse) Reset() {
@@ -2845,6 +2850,13 @@ func (x *PreCopyDrivesResponse) GetBaseMemoryMb() int32 {
 func (x *PreCopyDrivesResponse) GetBaseCpuCount() int32 {
 	if x != nil {
 		return x.BaseCpuCount
+	}
+	return 0
+}
+
+func (x *PreCopyDrivesResponse) GetActualMemoryMb() int32 {
+	if x != nil {
+		return x.ActualMemoryMb
 	}
 	return 0
 }
@@ -3524,14 +3536,15 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\x18SetSandboxLimitsResponse\";\n" +
 	"\x14PreCopyDrivesRequest\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\x01 \x01(\tR\tsandboxIdJ\x04\b\x02\x10\x03\"\xce\x01\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxIdJ\x04\b\x02\x10\x03\"\xf8\x01\n" +
 	"\x15PreCopyDrivesResponse\x12\x1d\n" +
 	"\n" +
 	"rootfs_key\x18\x01 \x01(\tR\trootfsKey\x12#\n" +
 	"\rworkspace_key\x18\x02 \x01(\tR\fworkspaceKey\x12%\n" +
 	"\x0egolden_version\x18\x03 \x01(\tR\rgoldenVersion\x12$\n" +
 	"\x0ebase_memory_mb\x18\x04 \x01(\x05R\fbaseMemoryMb\x12$\n" +
-	"\x0ebase_cpu_count\x18\x05 \x01(\x05R\fbaseCpuCount\"\xcc\x03\n" +
+	"\x0ebase_cpu_count\x18\x05 \x01(\x05R\fbaseCpuCount\x12(\n" +
+	"\x10actual_memory_mb\x18\x06 \x01(\x05R\x0eactualMemoryMb\"\xcc\x03\n" +
 	"\x1fPrepareMigrationIncomingRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +

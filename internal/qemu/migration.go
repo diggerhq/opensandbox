@@ -477,7 +477,13 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 		return "", 0, fmt.Errorf("QMP connect: %w", err)
 	}
 
-	// Store the VM (will be completed after migration arrives)
+	// Store the VM (will be completed after migration arrives).
+	// goldenVersion is set to this worker's current golden — after migration,
+	// PrepareIncomingMigrationWithS3 rebased the overlay to point at this
+	// worker's base, so the VM is effectively running against that golden.
+	// Without this, any checkpoint taken after migration would record an
+	// empty goldenVersion and subsequent cross-golden forks of that
+	// checkpoint can't locate the correct old base to rebase from.
 	now := time.Now()
 	vm := &VMInstance{
 		ID:            sandboxID,
@@ -500,6 +506,7 @@ func (m *Manager) PrepareIncomingMigration(ctx context.Context, sandboxID, rootf
 		guestMAC:      guestMAC,
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
+		goldenVersion: m.GoldenVersion(),
 	}
 
 	m.mu.Lock()
@@ -574,15 +581,21 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 // Always uploads the thin overlay (never flattens). The target worker rebases
 // to its own base image if golden versions differ.
 // Returns S3 keys, golden version, and base CPU/memory for QEMU matching.
-func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem int, err error) {
+func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem, actualMem int, err error) {
 	m.mu.RLock()
 	vm, exists := m.vms[sandboxID]
+	var pid int
 	if exists {
 		goldenVer = vm.goldenVersion
 		baseCPU = vm.CpuCount
 		baseMem = vm.baseMemoryMB
+		pid = vm.pid
 	}
 	m.mu.RUnlock()
+
+	if pid > 0 {
+		actualMem = readProcRSSMB(pid)
+	}
 
 	mc := &MigrationCoordinator{
 		manager:         m,
@@ -601,6 +614,13 @@ func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpoin
 // the overlay to the current base — same logic as checkpoint fork rebase.
 func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error) {
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
+	// Clean any leftover state from a prior failed prepare attempt. Without this,
+	// zstd refuses to overwrite an existing workspace.qcow2 and the retry fails
+	// with "already exists; not overwritten". The incoming sandbox must not be
+	// running on this worker yet, so removing is safe — drives come from S3.
+	if err := os.RemoveAll(sandboxDir); err != nil {
+		log.Printf("qemu: migration %s: cleanup stale sandbox dir: %v", sandboxID, err)
+	}
 	if err := os.MkdirAll(sandboxDir, 0755); err != nil {
 		return "", 0, fmt.Errorf("mkdir: %w", err)
 	}
@@ -645,27 +665,25 @@ func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID,
 	}
 
 	if overlayMode {
-		currentGolden := m.GoldenVersion()
-		if sourceGoldenVersion != "" && sourceGoldenVersion != currentGolden {
-			if m.checkpointStore == nil && checkpointStore != nil {
-				m.SetCheckpointStore(checkpointStore)
-			}
-			if err := m.rebaseCheckpointToCurrentBase(ctx, sandboxDir, sourceGoldenVersion); err != nil {
-				return "", 0, fmt.Errorf("rebase rootfs across golden versions: %w", err)
-			}
-			log.Printf("qemu: migration %s: rootfs rebased from %s to %s (cross-version)", sandboxID, sourceGoldenVersion, currentGolden)
-		} else {
-			baseImage, resolveErr := ResolveBaseImage(m.cfg.ImagesDir, "default")
-			if resolveErr != nil {
-				return "", 0, fmt.Errorf("resolve base image for overlay rebase: %w", resolveErr)
-			}
-			absBase, _ := filepath.Abs(baseImage)
-			rebaseCmd := exec.Command("qemu-img", "rebase", "-u", "-b", absBase, "-F", "raw", rootfsPath)
-			if out, err := rebaseCmd.CombinedOutput(); err != nil {
-				return "", 0, fmt.Errorf("rebase rootfs to local base: %w (%s)", err, strings.TrimSpace(string(out)))
-			}
-			log.Printf("qemu: migration %s: rootfs rebased to local base (same version)", sandboxID)
+		if m.checkpointStore == nil && checkpointStore != nil {
+			m.SetCheckpointStore(checkpointStore)
 		}
+		// Resolve the base file for the source's pinned goldenVersion:
+		// current worker default if it matches, otherwise a retained or
+		// on-demand-downloaded copy. Then metadata-repoint the overlay.
+		resolveVer := sourceGoldenVersion
+		if resolveVer == "" {
+			resolveVer = m.GoldenVersion()
+		}
+		basePath, err := m.resolveBaseForVersion(ctx, resolveVer)
+		if err != nil {
+			return "", 0, fmt.Errorf("resolve base %s: %w", resolveVer, err)
+		}
+		absBase, _ := filepath.Abs(basePath)
+		if err := rebaseMetadataOnly(ctx, rootfsPath, absBase); err != nil {
+			return "", 0, fmt.Errorf("rebase rootfs to local base %s: %w", resolveVer, err)
+		}
+		log.Printf("qemu: migration %s: rootfs pinned to base %s", sandboxID, resolveVer)
 	}
 
 	// Wait for workspace download + decompress to finish
