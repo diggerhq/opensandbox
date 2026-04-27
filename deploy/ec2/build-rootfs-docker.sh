@@ -164,10 +164,15 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
     # Create sandbox cgroup
     mkdir -p /sys/fs/cgroup/sandbox
-    # Defaults: 256 pids, 90% of total memory, 90% of CPUs
+    # Defaults: 4096 pids, 90% of total memory, 90% of CPUs.
+    # 4096 is enough headroom for typical dev tooling (npm install, go test,
+    # multi-process build systems) while still bounding fork-bomb damage.
+    # The previous default of 128 was below an interactive shell + LSP +
+    # build agent working set, and customers hit "fork failed: resource
+    # temporarily unavailable" inside otherwise-idle sandboxes.
     # CPU limit reserves 10% for the agent (PID 1) so it stays responsive
     # even under fork bomb / CPU exhaustion attacks.
-    echo 128 > /sys/fs/cgroup/sandbox/pids.max
+    echo 4096 > /sys/fs/cgroup/sandbox/pids.max
     SANDBOX_MEM=$(awk '/MemTotal/{printf "%.0f", $2 * 1024 * 0.9}' /proc/meminfo)
     echo "$SANDBOX_MEM" > /sys/fs/cgroup/sandbox/memory.max 2>/dev/null
     # cpu.max: limit user processes to 80% of available CPUs.
@@ -178,7 +183,7 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     echo "$CPU_MAX 100000" > /sys/fs/cgroup/sandbox/cpu.max 2>/dev/null
     # cpu.weight: lower priority than agent
     echo 50 > /sys/fs/cgroup/sandbox/cpu.weight 2>/dev/null
-    echo "init: cgroup sandbox ready (pids=128, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
+    echo "init: cgroup sandbox ready (pids=4096, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
 else
     echo "init: warning: cgroup v2 not available"
 fi
