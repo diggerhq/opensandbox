@@ -633,6 +633,23 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	}, nil
 }
 
+func (s *GRPCServer) RebootSandbox(ctx context.Context, req *pb.RebootSandboxRequest) (*pb.RebootSandboxResponse, error) {
+	if err := s.manager.RebootSandbox(ctx, req.SandboxId); err != nil {
+		return nil, fmt.Errorf("reboot sandbox: %w", err)
+	}
+	return &pb.RebootSandboxResponse{}, nil
+}
+
+func (s *GRPCServer) PowerCycleSandbox(ctx context.Context, req *pb.PowerCycleSandboxRequest) (*pb.PowerCycleSandboxResponse, error) {
+	port, err := s.manager.PowerCycleSandbox(ctx, req.SandboxId)
+	if err != nil {
+		return nil, fmt.Errorf("power-cycle sandbox: %w", err)
+	}
+	return &pb.PowerCycleSandboxResponse{
+		HostPort: int32(port),
+	}, nil
+}
+
 func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateRequest) (*pb.BuildTemplateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "deprecated")
 }

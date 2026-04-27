@@ -205,6 +205,35 @@ class Sandbox:
         resp.raise_for_status()
         self.status = "stopped"
 
+    async def reboot(self) -> None:
+        """Soft restart the running sandbox.
+
+        Resets the guest CPU and reboots the kernel — equivalent to running
+        ``reboot`` inside the sandbox. The QEMU process, network mapping,
+        and persistent disks all stay; only in-memory state (running
+        processes, page caches) is wiped.
+
+        Use to recover from in-guest wedges: zombie pile-ups, OOM-killed
+        agents, runaway processes, broken-but-isolated systemd state.
+
+        For the rare case where the VMM itself is wedged (e.g. QMP
+        unresponsive), use :meth:`power_cycle` instead.
+        """
+        resp = await self._client.post(f"/sandboxes/{self.sandbox_id}/reboot")
+        resp.raise_for_status()
+
+    async def power_cycle(self) -> None:
+        """Hard restart the sandbox.
+
+        The QEMU process is killed and a fresh one is started with the
+        same on-disk drives. Sandbox keeps its ID, project, secrets, env,
+        and persistent workspace data; gets a new external host port and
+        TAP. Use when the VMM itself is wedged or :meth:`reboot` doesn't
+        recover.
+        """
+        resp = await self._client.post(f"/sandboxes/{self.sandbox_id}/power-cycle")
+        resp.raise_for_status()
+
     async def is_running(self) -> bool:
         """Check if the sandbox is still running."""
         try:

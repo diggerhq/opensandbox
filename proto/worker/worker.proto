@@ -27,6 +27,19 @@ service SandboxWorker {
   rpc HibernateSandbox(HibernateSandboxRequest) returns (HibernateSandboxResponse);
   rpc WakeSandbox(WakeSandboxRequest) returns (WakeSandboxResponse);
 
+  // Reboot performs a soft, in-place guest reset (QMP system_reset). The
+  // QEMU process, network, and workspace stay in place; only the guest
+  // kernel and processes are reset. Recovers from in-guest wedges (zombie
+  // pile, OOM-killed agent, runaway process).
+  rpc RebootSandbox(RebootSandboxRequest) returns (RebootSandboxResponse);
+
+  // PowerCycle does a hard reset: tears down the QEMU process and
+  // cold-boots a fresh VM with the existing workspace.qcow2. Use when the
+  // VMM itself is wedged (QMP unresponsive) or a soft reboot didn't
+  // recover. Sandbox keeps its ID, project, secrets, and persistent data;
+  // it gets a new TAP, host port, and PID.
+  rpc PowerCycleSandbox(PowerCycleSandboxRequest) returns (PowerCycleSandboxResponse);
+
   rpc SaveAsTemplate(SaveAsTemplateRequest) returns (SaveAsTemplateResponse);
 
   rpc CreateCheckpoint(CreateCheckpointRequest) returns (CreateCheckpointResponse);
@@ -84,6 +97,24 @@ message DestroySandboxRequest {
 }
 
 message DestroySandboxResponse {}
+
+message RebootSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message RebootSandboxResponse {}
+
+message PowerCycleSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message PowerCycleSandboxResponse {
+  // host_port is the new external port the sandbox is reachable on after
+  // power-cycle. Power-cycle re-allocates the TAP and DNAT mapping, so the
+  // port may differ from the original. Control plane uses this to update
+  // its routing record.
+  int32 host_port = 1;
+}
 
 message GetSandboxRequest {
   string sandbox_id = 1;

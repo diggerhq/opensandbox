@@ -210,6 +210,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
 
+	// Reset operations: reboot is a soft, in-place guest restart; power-cycle
+	// is a hard restart that re-creates the QEMU process. Both preserve the
+	// sandbox's identity and persistent data.
+	api.POST("/sandboxes/:id/reboot", s.rebootSandbox)
+	api.POST("/sandboxes/:id/power-cycle", s.powerCycleSandbox)
+
 	// Live migration
 	api.POST("/sandboxes/:id/migrate", s.migrateSandbox)
 

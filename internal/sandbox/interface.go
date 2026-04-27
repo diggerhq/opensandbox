@@ -68,6 +68,13 @@ type Manager interface {
 	Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (*HibernateResult, error)
 	Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (*types.Sandbox, error)
 
+	// Reset operations. RebootSandbox is a soft, in-place guest restart;
+	// PowerCycleSandbox is a hard restart that re-creates the QEMU process
+	// with the same on-disk drives. Both preserve the sandbox's identity
+	// and persistent data; power-cycle returns a new external host port.
+	RebootSandbox(ctx context.Context, sandboxID string) error
+	PowerCycleSandbox(ctx context.Context, sandboxID string) (newHostPort int, err error)
+
 	// TemplateCachePath returns the local path to a cached template drive file (e.g., "rootfs.ext4"),
 	// or "" if the template is not cached locally. Used to skip S3 download when creating from template.
 	TemplateCachePath(templateID, filename string) string

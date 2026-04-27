@@ -277,6 +277,55 @@ export class Sandbox {
     (this as any).pty = new Pty(this.apiUrl, this.apiKey, this.sandboxId, "");
   }
 
+  /**
+   * Soft restart of the running sandbox. The guest CPU is reset and the
+   * kernel reboots — equivalent to running `reboot` inside the box. The
+   * QEMU process, network mapping, and persistent disks all stay; only
+   * in-memory state (running processes, page caches) is wiped.
+   *
+   * Use to recover from in-guest wedges: zombie pile-ups, OOM-killed
+   * agents, runaway processes, broken-but-isolated systemd state.
+   *
+   * For the rare case where the VMM itself is wedged (e.g. QMP
+   * unresponsive), use `powerCycle()` instead.
+   */
+  async reboot(): Promise<void> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/reboot`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to reboot sandbox: ${resp.status} ${text}`);
+    }
+  }
+
+  /**
+   * Hard restart of the sandbox. The QEMU process is killed and a fresh
+   * one is started with the same on-disk drives. Sandbox keeps its ID,
+   * project, secrets, env, and persistent workspace data; gets a new
+   * external host port and TAP. Use when the VMM itself is wedged or a
+   * `reboot()` doesn't recover.
+   */
+  async powerCycle(): Promise<void> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/power-cycle`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to power-cycle sandbox: ${resp.status} ${text}`);
+    }
+  }
+
   async setTimeout(timeout: number): Promise<void> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.apiKey) {
