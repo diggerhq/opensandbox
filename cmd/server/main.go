@@ -396,10 +396,11 @@ func main() {
 		log.Println("opensandbox: usage reporter started (interval=5m)")
 	}
 
-	// Phase-2 capacity allocator (shadow mode). Off by default; enable
-	// per-env to write reserved/overage rows to the billable_events
-	// outbox without delivering to Stripe. Phase 3 turns on the sender.
-	if opts.Store != nil && os.Getenv("CAPACITY_ALLOCATOR_ENABLED") == "true" {
+	// Phase-2 capacity allocator (shadow mode). Writes reserved/overage
+	// rows to the billable_events outbox after each settled bucket;
+	// Stripe delivery is not enabled until phase 3. Tunable via env;
+	// rollback is by reverting the deploy.
+	if opts.Store != nil {
 		allocOpts := billing.CapacityReconcilerOpts{
 			Interval: getDurationEnv("CAPACITY_ALLOCATOR_INTERVAL", 5*time.Minute),
 			Settle:   getDurationEnv("CAPACITY_ALLOCATOR_SETTLE", 30*time.Minute),
