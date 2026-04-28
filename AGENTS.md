@@ -44,10 +44,10 @@ Managed-agent product behavior is mostly **not** implemented here:
 
 **⚠️ PRODUCTION DATABASE IS EFFECTIVELY READ-ONLY.** This is the most
 load-bearing safety rule in this repo. Any Postgres connection that reaches the
-production DB (via the Azure bastion `oc-bastion` / `20.65.57.133` to host
-`10.200.1.8`, or any non-localhost host using credentials from
-`~/Digger/gstack/opencomputer/.env`) is governed by two tiers, both stricter
-than normal collaboration:
+production DB — i.e. anything other than a developer's `localhost` Postgres,
+including connections via the Azure bastion or using credentials sourced from
+the production environment — is governed by two tiers, both stricter than
+normal collaboration:
 
 - **Modifying SQL** (`INSERT`, `UPDATE`, `DELETE` with WHERE, `COPY` into a
   table, mutating function calls, manual migrations, `cmd/migrate-prices`-style
