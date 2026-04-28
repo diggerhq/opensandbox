@@ -9,8 +9,9 @@ api: 'GET /api/capacity/calendar'
 </Info>
 
 Return a planning snapshot of 15-minute UTC intervals in the requested window.
-One row per interval, with reservable, already-reserved, and policy fields.
-See [Reading the calendar](/reserved-capacity/calendar) for field semantics.
+One row per interval with current `reservedGb`, `reservableGb`, and the
+per-org `reservationLimitGb`. See
+[Reading the calendar](/reserved-capacity/calendar) for field semantics.
 
 <ParamField query="from" type="string" required>
   Window start. RFC 3339, aligned to 15 minutes, UTC.
@@ -23,22 +24,18 @@ See [Reading the calendar](/reserved-capacity/calendar) for field semantics.
 <ResponseExample>
 ```json 200
 {
-  "generatedAt": "2026-04-24T12:00:00Z",
-  "staleAt":     "2026-04-24T12:00:10Z",
-  "blockDuration": "PT15M",
+  "generatedAt": "2026-04-28T18:00:00Z",
+  "staleAt":     "2026-04-28T18:00:10Z",
+  "intervalDuration": "PT15M",
   "timezone": "UTC",
-  "earliestReservableStart": "2026-04-24T12:30:00Z",
+  "earliestReservableStart": "2026-04-28T18:30:00Z",
   "intervals": [
     {
-      "startsAt": "2026-04-25T09:00:00Z",
-      "endsAt":   "2026-04-25T09:15:00Z",
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
       "reservationLimitGb": 300,
       "reservedGb": 80,
-      "reservableGb": 220,
-      "newReservationNonCancellableRatio": "0.25",
-      "cancellableGb": 55,
-      "nonCancellableGb": 25,
-      "usableGb": 120
+      "reservableGb": 220
     }
   ]
 }

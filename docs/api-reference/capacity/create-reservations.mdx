@@ -1,5 +1,5 @@
 ---
-title: 'Create Reservations'
+title: 'Create Reservation'
 api: 'POST /api/capacity/reservations'
 ---
 
@@ -8,13 +8,17 @@ api: 'POST /api/capacity/reservations'
   [Reserved Capacity overview](/reserved-capacity/overview).
 </Info>
 
-Reserve capacity across one or more 15-minute UTC intervals. Atomic across
-the request — either every interval is booked or nothing is. See
-[Reserving and cancelling](/reserved-capacity/reserving-and-cancelling) for
-the full write contract.
+Commit capacity across one or more 15-minute UTC intervals in a single
+atomic write. The result is one reservation event with a server-generated
+`reservationId` covering all intervals in the request. See
+[Reserving capacity](/reserved-capacity/reserving) for the full write
+contract.
 
-Send an `Idempotency-Key` header so retries return the original result. Same
-key with a different body returns `idempotency_key_conflict`.
+Send an `Idempotency-Key` header so retries return the original result.
+Same key with a different body returns `idempotency_key_conflict`.
+
+Reservations are non-refundable — there is no cancellation, modification,
+or transfer.
 
 <ParamField body="intervals" type="array" required>
   One entry per 15-minute interval to reserve.
@@ -29,31 +33,24 @@ key with a different body returns `idempotency_key_conflict`.
 </ParamField>
 
 <ParamField body="intervals[].capacityGb" type="integer" required>
-  Positive integer. Number of 1 GB blocks to create for this interval.
+  Positive integer. GB to add to this interval's reserved capacity.
 </ParamField>
 
 <ResponseExample>
 ```json 200
 {
-  "status": "applied",
-  "blockDuration": "PT15M",
-  "reservedBlocks": 2,
-  "cancellableBlocks": 1,
-  "nonCancellableBlocks": 1,
-  "blocks": [
+  "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "createdAt": "2026-04-28T18:00:05Z",
+  "intervals": [
     {
-      "blockId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
-      "startsAt": "2026-04-25T09:00:00Z",
-      "endsAt":   "2026-04-25T09:15:00Z",
-      "isCancellable": false,
-      "cancellableUntil": null
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
+      "capacityGb": 16
     },
     {
-      "blockId": "3a94b5e6-2e4f-4a2b-b58a-53c41d61d9bd",
-      "startsAt": "2026-04-25T09:00:00Z",
-      "endsAt":   "2026-04-25T09:15:00Z",
-      "isCancellable": true,
-      "cancellableUntil": "2026-04-24T15:00:00Z"
+      "startsAt": "2026-04-29T02:15:00Z",
+      "endsAt":   "2026-04-29T02:30:00Z",
+      "capacityGb": 16
     }
   ]
 }
@@ -64,7 +61,7 @@ key with a different body returns `idempotency_key_conflict`.
   "error": "capacity_not_available",
   "intervals": [
     {
-      "startsAt": "2026-04-25T09:00:00Z",
+      "startsAt": "2026-04-29T02:00:00Z",
       "requestedGb": 80,
       "reservableGb": 30,
       "reason": "insufficient_capacity"
