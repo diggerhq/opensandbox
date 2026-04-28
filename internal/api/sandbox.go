@@ -52,25 +52,6 @@ func (s *Server) createSandbox(c echo.Context) error {
 				})
 			}
 
-			// Memory cap (orgs.max_memory_gb). Same field is used as the
-			// reservationLimitGb in the capacity calendar — the cap and the
-			// reservation ceiling are the same number by design.
-			if org.MaxMemoryGB > 0 {
-				running, err := s.store.GetOrgRunningMemoryMB(ctx, orgID)
-				if err == nil {
-					requestedMB := cfg.MemoryMB
-					if requestedMB == 0 {
-						requestedMB = 4096 // matches the default applied below
-					}
-					maxMB := org.MaxMemoryGB * 1024
-					if running+requestedMB > maxMB {
-						return c.JSON(http.StatusForbidden, map[string]string{
-							"error": fmt.Sprintf("memory cap exceeded: %d MB running + %d MB requested > %d MB org limit", running, requestedMB, maxMB),
-						})
-					}
-				}
-			}
-
 			// Free-tier: trial credits gate + machine-size restriction.
 			if org.Plan == "free" {
 				if org.FreeCreditsRemainingCents <= 0 {
@@ -1590,27 +1571,13 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 	var req types.WakeRequest
 	_ = c.Bind(&req)
 
-	// Free-tier credits gate + memory cap admission. Wake admits the sandbox
-	// back into the running set, so it consumes against orgs.max_memory_gb
-	// just like a fresh create.
+	// Free-tier credits gate: refuse to wake if trial credits are exhausted.
 	if orgID, ok := auth.GetOrgID(c); ok && s.store != nil {
 		if org, err := s.store.GetOrg(ctx, orgID); err == nil {
 			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
 				return c.JSON(http.StatusPaymentRequired, map[string]string{
 					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
 				})
-			}
-			if org.MaxMemoryGB > 0 {
-				wakeMB, err := s.store.GetSandboxLatestMemoryMB(ctx, id)
-				if err == nil {
-					running, rerr := s.store.GetOrgRunningMemoryMB(ctx, orgID)
-					maxMB := org.MaxMemoryGB * 1024
-					if rerr == nil && running+wakeMB > maxMB {
-						return c.JSON(http.StatusForbidden, map[string]string{
-							"error": fmt.Sprintf("memory cap exceeded: %d MB running + %d MB wake > %d MB org limit", running, wakeMB, maxMB),
-						})
-					}
-				}
 			}
 		}
 	}

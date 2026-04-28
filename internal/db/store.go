@@ -793,37 +793,6 @@ func (s *Store) CountActiveSandboxes(ctx context.Context, orgID uuid.UUID) (int,
 	return count, err
 }
 
-// GetOrgRunningMemoryMB sums memory_mb of currently-open scale events for
-// the org's running sandboxes. Used to enforce orgs.max_memory_gb at create
-// and wake admission. Hibernated sandboxes are excluded — their memory is
-// only "spent" when they're running.
-func (s *Store) GetOrgRunningMemoryMB(ctx context.Context, orgID uuid.UUID) (int, error) {
-	var total int
-	err := s.pool.QueryRow(ctx,
-		`SELECT COALESCE(SUM(e.memory_mb), 0)::int
-		 FROM sandbox_scale_events e
-		 INNER JOIN sandbox_sessions s ON s.sandbox_id = e.sandbox_id
-		 WHERE e.org_id = $1
-		   AND e.ended_at IS NULL
-		   AND s.status = 'running'`, orgID,
-	).Scan(&total)
-	return total, err
-}
-
-// GetSandboxLatestMemoryMB returns the memory_mb of the sandbox's most
-// recent scale event (open or closed). Used at wake time to size the
-// admission check before transitioning the sandbox back to running.
-func (s *Store) GetSandboxLatestMemoryMB(ctx context.Context, sandboxID string) (int, error) {
-	var mem int
-	err := s.pool.QueryRow(ctx,
-		`SELECT memory_mb FROM sandbox_scale_events
-		 WHERE sandbox_id = $1
-		 ORDER BY started_at DESC
-		 LIMIT 1`, sandboxID,
-	).Scan(&mem)
-	return mem, err
-}
-
 // --- Command Log operations (for NATS sync consumer) ---
 
 type CommandLog struct {
