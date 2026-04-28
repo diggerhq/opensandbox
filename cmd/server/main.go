@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"os/signal"
 	"syscall"
@@ -395,6 +396,23 @@ func main() {
 		log.Println("opensandbox: usage reporter started (interval=5m)")
 	}
 
+	// Phase-2 capacity allocator (shadow mode). Off by default; enable
+	// per-env to write reserved/overage rows to the billable_events
+	// outbox without delivering to Stripe. Phase 3 turns on the sender.
+	if opts.Store != nil && os.Getenv("CAPACITY_ALLOCATOR_ENABLED") == "true" {
+		allocOpts := billing.CapacityReconcilerOpts{
+			Interval: getDurationEnv("CAPACITY_ALLOCATOR_INTERVAL", 5*time.Minute),
+			Settle:   getDurationEnv("CAPACITY_ALLOCATOR_SETTLE", 30*time.Minute),
+			Lookback: getDurationEnv("CAPACITY_ALLOCATOR_LOOKBACK", 24*time.Hour),
+			Limit:    getIntEnv("CAPACITY_ALLOCATOR_BATCH_LIMIT", 500),
+		}
+		allocator := billing.NewCapacityReconciler(opts.Store, allocOpts)
+		allocator.Start()
+		defer allocator.Stop()
+		log.Printf("opensandbox: capacity allocator started (interval=%s, settle=%s, lookback=%s)",
+			allocOpts.Interval, allocOpts.Settle, allocOpts.Lookback)
+	}
+
 	// Start NATS sync consumer if both PG and NATS are configured
 	if opts.Store != nil && cfg.NATSURL != "" {
 		consumer, err := db.NewSyncConsumer(opts.Store, cfg.NATSURL)
@@ -443,4 +461,27 @@ func main() {
 		server.Close()
 	}
 	log.Println("opensandbox: server stopped")
+}
+
+// getDurationEnv reads a Go duration string (e.g. "5m", "30m", "24h")
+// from env or returns the default. Used for the capacity allocator
+// knobs which are off the hot path of config.Load().
+func getDurationEnv(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("opensandbox: invalid duration in %s=%q, using default %s", key, v, def)
+	}
+	return def
+}
+
+func getIntEnv(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("opensandbox: invalid int in %s=%q, using default %d", key, v, def)
+	}
+	return def
 }

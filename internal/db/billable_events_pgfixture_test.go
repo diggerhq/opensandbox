@@ -155,6 +155,126 @@ func TestBillableEvents_listPendingOrder_pgfixture(t *testing.T) {
 	}
 }
 
+func TestBillableEvents_allocatorCandidates_pgfixture(t *testing.T) {
+	ctx := context.Background()
+	store := openPgStore(t)
+	orgID := seedOrgWithCap(t, store, 64)
+
+	// Use a far-future window so we don't intersect with state from
+	// other tests in the same DB.
+	bucket := time.Date(2031, 1, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := bucket.Add(15 * time.Minute) // bucket end = candidate window end
+	lookbackStart := bucket.Add(-1 * time.Hour)
+
+	// Seed one scale event covering the bucket and one reservation
+	// for the same bucket.
+	end := bucket.Add(15 * time.Minute)
+	if _, err := store.pool.Exec(ctx,
+		`INSERT INTO sandbox_scale_events (sandbox_id, org_id, memory_mb, cpu_percent, disk_mb, started_at, ended_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		"sbx-alloc", orgID, 8192, 200, 20480, bucket, &end); err != nil {
+		t.Fatalf("seed scale event: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO capacity_reservation_intervals
+		    (reservation_id, org_id, resource, starts_at, ends_at, capacity_gb)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, uuid.New(), orgID, ResourceMemoryGB, bucket, end, 4); err != nil {
+		t.Fatalf("seed reservation: %v", err)
+	}
+
+	cands, err := store.ListAllocatorCandidates(ctx, lookbackStart, cutoff, 100)
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.OrgID == orgID && c.BucketStart.Equal(bucket) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected candidate (orgID=%s, bucket=%s) in result, got %d candidates", orgID, bucket, len(cands))
+	}
+
+	// Now emit a row for that bucket and confirm the candidate
+	// disappears (NOT EXISTS clause).
+	ev := makeBucketEvent(orgID, BillableEventReservedUsage, 0, 4*900, bucket, 0)
+	if _, err := store.UpsertBillableEvent(ctx, ev); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	cands, err = store.ListAllocatorCandidates(ctx, lookbackStart, cutoff, 100)
+	if err != nil {
+		t.Fatalf("list candidates 2: %v", err)
+	}
+	for _, c := range cands {
+		if c.OrgID == orgID && c.BucketStart.Equal(bucket) {
+			t.Fatalf("expected candidate to be excluded after emission, got it back")
+		}
+	}
+}
+
+func TestBillableEvents_reservedAndScaleHelpers_pgfixture(t *testing.T) {
+	ctx := context.Background()
+	store := openPgStore(t)
+	orgID := seedOrgWithCap(t, store, 64)
+
+	bucket := time.Date(2031, 2, 1, 12, 0, 0, 0, time.UTC)
+	end := bucket.Add(15 * time.Minute)
+
+	// Two reservations (4 GB + 8 GB) on the same bucket → SUM = 12.
+	for _, gb := range []int{4, 8} {
+		if _, err := store.pool.Exec(ctx, `
+			INSERT INTO capacity_reservation_intervals
+			    (reservation_id, org_id, resource, starts_at, ends_at, capacity_gb)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, uuid.New(), orgID, ResourceMemoryGB, bucket, end, gb); err != nil {
+			t.Fatalf("seed reservation %dGB: %v", gb, err)
+		}
+	}
+	got, err := store.GetReservedGBForBucket(ctx, orgID, bucket)
+	if err != nil {
+		t.Fatalf("get reserved gb: %v", err)
+	}
+	if got != 12 {
+		t.Errorf("reserved gb: got %d, want 12", got)
+	}
+
+	// Scale events: one fully inside, one straddling the start, one
+	// straddling the end, and one completely outside (must not be
+	// returned).
+	insertSE := func(sandboxID string, memMB, diskMB int, started time.Time, ended *time.Time) {
+		if _, err := store.pool.Exec(ctx,
+			`INSERT INTO sandbox_scale_events (sandbox_id, org_id, memory_mb, cpu_percent, disk_mb, started_at, ended_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			sandboxID, orgID, memMB, memMB/40, diskMB, started, ended); err != nil {
+			t.Fatalf("seed scale event %s: %v", sandboxID, err)
+		}
+	}
+	preEnd := bucket.Add(5 * time.Minute)
+	postStart := bucket.Add(10 * time.Minute)
+	farPast := bucket.Add(-2 * time.Hour)
+	farPastEnd := bucket.Add(-1 * time.Hour)
+	insertSE("sbx-inside", 4096, 20480, bucket.Add(2*time.Minute), &preEnd)
+	insertSE("sbx-pre", 8192, 20480, bucket.Add(-3*time.Minute), &postStart)
+	insertSE("sbx-post", 16384, 20480, postStart, nil) // open
+	insertSE("sbx-outside", 1024, 20480, farPast, &farPastEnd)
+
+	events, err := store.GetScaleEventsForBucket(ctx, orgID, bucket, end)
+	if err != nil {
+		t.Fatalf("get scale events: %v", err)
+	}
+	if len(events) != 3 {
+		t.Errorf("expected 3 in-window events, got %d", len(events))
+	}
+	for _, e := range events {
+		if e.SandboxID == "sbx-outside" {
+			t.Errorf("expected sbx-outside excluded, got it")
+		}
+	}
+}
+
 func TestBillableEvents_validation_pgfixture(t *testing.T) {
 	ctx := context.Background()
 	store := openPgStore(t)
