@@ -31,6 +31,12 @@ Reservations are made against 15-minute UTC intervals on the quarter-hour
 grid: `:00`, `:15`, `:30`, `:45`. Within each interval, you commit an
 integer number of GB. A two-hour reservation of 16 GB is 8 intervals × 16 GB.
 
+The 15-minute grain is deliberate. Reserve the slots you'll actually run
+in — you aren't pushed into a long contiguous block and asked to pay for
+the troughs in between. A nightly batch reserves the eight intervals it
+occupies; a weekday workload reserves working hours and skips evenings
+and weekends. The reserved rate applies whatever shape your demand takes.
+
 You don't book individual blocks or get block IDs back. You just tell the
 API "for this interval, add this many GB to my reserved capacity," and the
 calendar shows you the new total.
@@ -86,7 +92,10 @@ that interval falls back to on-demand rates.
 
 If you already know you'll run 50 GB of agents at 3am every night, reserve
 the day before, get the lower rate, get the guarantee. If your workload is
-"whatever users ask for," stay on-demand.
+"whatever users ask for," stay on-demand. And because the granularity is
+15 minutes, you can be precise — reserve the peaks, leave the troughs to
+on-demand, and don't commit to capacity outside your actual workload
+window.
 
 ## Where to go next
 

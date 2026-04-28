@@ -12,6 +12,12 @@ There are two write-side endpoints: `POST` to commit, `GET` to audit. Both
 work in terms of intervals and integer GB; there are no individual blocks
 or unit IDs.
 
+Reservations compose at 15-minute granularity, so a multi-hour or
+multi-day commitment is just a list of contiguous (or non-contiguous)
+intervals. Reserve precisely the windows your workload occupies — there's
+no minimum block size beyond the interval itself, and no requirement to
+reserve continuously through periods you won't use.
+
 ## Make a reservation
 
 One call commits capacity to one or more 15-minute intervals. Atomic across

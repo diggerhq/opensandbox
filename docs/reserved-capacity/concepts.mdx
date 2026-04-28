@@ -19,6 +19,11 @@ A 15-minute window on the UTC quarter-hour grid.
 | `startsAt` | Inclusive start. Always ends in `:00`, `:15`, `:30`, or `:45` with zero seconds. |
 | `endsAt` | Exclusive end. Always `startsAt + 15 minutes`. |
 
+The 15-minute grain is the smallest commitment unit and that's the point.
+You can shape a reservation to the exact contour of your workload — a
+nightly window, working-hour blocks, an hourly cron — without paying for
+idle slots outside it.
+
 Half-open intervals (`[startsAt, endsAt)`) mean two adjacent reservations
 never overlap and never leave gaps.
 
