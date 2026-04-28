@@ -203,6 +203,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
 	api.POST("/capacity/reservations", s.createCapacityReservation)
 	api.GET("/capacity/reservations", s.listCapacityReservations)
+	// Internal/undocumented — phase-2 outbox inspection. See note in
+	// getCapacityBillableEvents handler.
+	api.GET("/capacity/billable-events", s.getCapacityBillableEvents)
 
 	// Usage + tags (design: .agents/design/sandbox-tags-and-usage.md)
 	api.GET("/usage", s.getUsage)

@@ -237,6 +237,56 @@ func (s *Store) GetScaleEventsForBucket(ctx context.Context, orgID uuid.UUID, bu
 	return out, nil
 }
 
+// ListBillableEventsForOrg returns rows for one org in
+// `[from, to)` ordered by `(bucket_start, event_type, memory_mb)`.
+// `eventType` is optional — empty string returns all types.
+// Used only by the org-scoped debugging endpoint
+// `GET /api/capacity/billable-events`; not part of the public spec.
+func (s *Store) ListBillableEventsForOrg(ctx context.Context, orgID uuid.UUID, from, to time.Time, eventType string, limit int) ([]BillableEvent, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	args := []any{orgID, from, to, limit}
+	typeFilter := ""
+	if eventType != "" {
+		typeFilter = "AND event_type = $5"
+		args = append(args, eventType)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, org_id, event_type, memory_mb, gb_seconds,
+		       bucket_start, bucket_end, delivery_state,
+		       stripe_event_id, created_at, delivered_at
+		FROM billable_events
+		WHERE org_id = $1
+		  AND bucket_start >= $2
+		  AND bucket_start < $3
+		  `+typeFilter+`
+		ORDER BY bucket_start, event_type, memory_mb
+		LIMIT $4
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list billable events for org: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]BillableEvent, 0, limit)
+	for rows.Next() {
+		var e BillableEvent
+		if err := rows.Scan(
+			&e.ID, &e.OrgID, &e.EventType, &e.MemoryMB, &e.GBSeconds,
+			&e.BucketStart, &e.BucketEnd, &e.DeliveryState,
+			&e.StripeEventID, &e.CreatedAt, &e.DeliveredAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan billable event: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("billable events rows: %w", err)
+	}
+	return out, nil
+}
+
 // ListBillableEventsForBucket returns every emitted row for a single
 // (org, bucket) pair across all event types. Used by the shadow-verify
 // script and the dashboard breakdown view to reconcile against
