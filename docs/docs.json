@@ -49,6 +49,16 @@
         ]
       },
       {
+        "group": "Reserved Capacity",
+        "pages": [
+          "reserved-capacity/overview",
+          "reserved-capacity/concepts",
+          "reserved-capacity/calendar",
+          "reserved-capacity/reserving",
+          "reserved-capacity/usage-and-overage"
+        ]
+      },
+      {
         "group": "Agents",
         "pages": [
           "agents-api/overview",
@@ -209,6 +219,14 @@
               "api-reference/usage/get-usage",
               "api-reference/usage/get-sandbox-usage",
               "api-reference/usage/list-tags"
+            ]
+          },
+          {
+            "group": "Reserved Capacity",
+            "pages": [
+              "api-reference/capacity/get-calendar",
+              "api-reference/capacity/create-reservations",
+              "api-reference/capacity/list-reservations"
             ]
           },
           {

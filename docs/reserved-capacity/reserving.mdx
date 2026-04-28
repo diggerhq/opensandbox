@@ -1,0 +1,175 @@
+---
+title: "Reserving Capacity"
+description: "Write flow, idempotency, atomicity, and the audit list"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+There are two write-side endpoints: `POST` to commit, `GET` to audit. Both
+work in terms of intervals and integer GB; there are no individual blocks
+or unit IDs.
+
+Reservations compose at 15-minute granularity, so a multi-hour or
+multi-day commitment is just a list of contiguous (or non-contiguous)
+intervals. Reserve precisely the windows your workload occupies — there's
+no minimum block size beyond the interval itself, and no requirement to
+reserve continuously through periods you won't use.
+
+## Make a reservation
+
+One call commits capacity to one or more 15-minute intervals. Atomic across
+the whole request — either every interval is reserved, or nothing is.
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/capacity/reservations \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Idempotency-Key: nightly-batch-2026-04-29" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "intervals": [
+      { "startsAt": "2026-04-29T02:00:00Z", "endsAt": "2026-04-29T02:15:00Z", "capacityGb": 16 },
+      { "startsAt": "2026-04-29T02:15:00Z", "endsAt": "2026-04-29T02:30:00Z", "capacityGb": 16 }
+    ]
+  }'
+```
+
+Response (success):
+
+```json
+{
+  "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "createdAt": "2026-04-28T18:00:05Z",
+  "intervals": [
+    { "startsAt": "2026-04-29T02:00:00Z", "endsAt": "2026-04-29T02:15:00Z", "capacityGb": 16 },
+    { "startsAt": "2026-04-29T02:15:00Z", "endsAt": "2026-04-29T02:30:00Z", "capacityGb": 16 }
+  ]
+}
+```
+
+### Validation
+
+| Rule | Behavior |
+| --- | --- |
+| `startsAt` and `endsAt` UTC and 15-minute aligned | Reject misaligned. |
+| `endsAt == startsAt + 15 minutes` | Reject longer spans; enumerate intervals. |
+| `capacityGb` is a positive multiple of 4 | Reject anything else. The grain is 1 GB-hour (= 4 GB × 15 min). |
+| `startsAt >= earliestReservableStart` | Reject intervals too soon. |
+| Requested capacity fits current `reservableGb` | Reject instead of overbooking. |
+| `Idempotency-Key` stable on retry | Replaying same key + body returns original result. |
+
+### Rejected write
+
+```json
+{
+  "error": "capacity_not_available",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "requestedGb": 80,
+      "reservableGb": 28,
+      "reason": "insufficient_capacity"
+    }
+  ]
+}
+```
+
+The response lists every problematic interval, so the client can retry
+with adjusted numbers in a single round-trip.
+
+| `reason` | Meaning |
+| --- | --- |
+| `insufficient_capacity` | Request exceeds current `reservableGb` (platform-side). |
+| `reservation_limit_exceeded` | Would exceed your org's `max_memory_gb` for the interval. |
+| `too_soon` | `startsAt` is before `earliestReservableStart`. |
+| `misaligned` | `startsAt`/`endsAt` not on the 15-minute grid. |
+| `capacity_grain` | `capacityGb` is not a positive multiple of 4. |
+
+## Idempotency
+
+Both reservation writes accept an `Idempotency-Key` header. The server
+stores the key with a hash of the request body and the response. Retries
+return the cached response, even if the original write succeeded.
+
+| Behavior | Response |
+| --- | --- |
+| Same key, same body | Cached response from the first call. |
+| Same key, different body | `409 idempotency_key_conflict`. |
+| No key | Request processed normally; retries are the client's problem. |
+
+Build keys from a deterministic name for the operation, e.g.
+`reserve-nightly-2026-04-29`, so a client retry sends the same key.
+
+## Cancellation does not exist
+
+Reservations are non-refundable. Once committed, capacity is permanent for
+that interval. There is no `DELETE`, no cancel endpoint, no transfer to a
+different interval.
+
+The hedge: book conservatively, only what you're confident you'll run, and
+let on-demand absorb the variability above.
+
+## List your reservations
+
+The audit list. Returns every reservation event you've made in the time
+window, in reverse-chronological order.
+
+```bash curl
+curl "https://app.opencomputer.dev/api/capacity/reservations?from=2026-04-01T00:00:00Z&to=2026-05-01T00:00:00Z" \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+Response:
+
+```json
+{
+  "reservations": [
+    {
+      "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+      "createdAt": "2026-04-28T18:00:05Z",
+      "intervals": [
+        { "startsAt": "2026-04-29T02:00:00Z", "endsAt": "2026-04-29T02:15:00Z", "capacityGb": 16 },
+        { "startsAt": "2026-04-29T02:15:00Z", "endsAt": "2026-04-29T02:30:00Z", "capacityGb": 16 }
+      ]
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+| Query param | Meaning |
+| --- | --- |
+| `from` | Return reservations whose `createdAt >= from`. |
+| `to` | Return reservations whose `createdAt < to`. |
+| `cursor` | Pagination cursor from a previous response. |
+| `limit` | Max reservations per page. |
+
+For end-of-month reconciliation, list reservations and group totals by
+interval. The calendar gives you the current per-interval state; the list
+gives you the history of how it got there.
+
+## Concurrency and atomicity
+
+| Operation | Atomic across | On failure |
+| --- | --- | --- |
+| `POST /reservations` | All intervals in the request | Nothing reserved. |
+
+Parallel writes to the same interval from the same org serialize on the
+server. Whichever request commits first claims the remaining capacity;
+later requests see the updated `reservableGb` in their validation error.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Usage and overage" icon="gauge" href="/reserved-capacity/usage-and-overage">
+    How reserved capacity consumes actual usage.
+  </Card>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    Plan before you commit.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/capacity/create-reservations">
+    Every endpoint with full request/response shapes.
+  </Card>
+</CardGroup>

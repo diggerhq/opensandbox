@@ -1,0 +1,1 @@
+ALTER TABLE orgs DROP COLUMN IF EXISTS max_memory_gb;

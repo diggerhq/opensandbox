@@ -1,0 +1,73 @@
+---
+title: 'Create Reservation'
+api: 'POST /api/capacity/reservations'
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. See the
+  [Reserved Capacity overview](/reserved-capacity/overview).
+</Info>
+
+Commit capacity across one or more 15-minute UTC intervals in a single
+atomic write. The result is one reservation event with a server-generated
+`reservationId` covering all intervals in the request. See
+[Reserving capacity](/reserved-capacity/reserving) for the full write
+contract.
+
+Send an `Idempotency-Key` header so retries return the original result.
+Same key with a different body returns `idempotency_key_conflict`.
+
+Reservations are non-refundable — there is no cancellation, modification,
+or transfer.
+
+<ParamField body="intervals" type="array" required>
+  One entry per 15-minute interval to reserve.
+</ParamField>
+
+<ParamField body="intervals[].startsAt" type="string" required>
+  Interval start. RFC 3339, UTC, aligned to 15 minutes (`:00`, `:15`, `:30`, `:45`).
+</ParamField>
+
+<ParamField body="intervals[].endsAt" type="string" required>
+  Interval end. Must equal `startsAt + 15 minutes`. Multi-interval spans are rejected.
+</ParamField>
+
+<ParamField body="intervals[].capacityGb" type="integer" required>
+  Positive multiple of 4 (the grain is 1 GB-hour = 4 GB × 15 min). Other
+  values are rejected.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "createdAt": "2026-04-28T18:00:05Z",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
+      "capacityGb": 16
+    },
+    {
+      "startsAt": "2026-04-29T02:15:00Z",
+      "endsAt":   "2026-04-29T02:30:00Z",
+      "capacityGb": 16
+    }
+  ]
+}
+```
+
+```json 409 capacity_not_available
+{
+  "error": "capacity_not_available",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "requestedGb": 80,
+      "reservableGb": 28,
+      "reason": "insufficient_capacity"
+    }
+  ]
+}
+```
+</ResponseExample>

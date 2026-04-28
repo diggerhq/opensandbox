@@ -1,0 +1,43 @@
+---
+title: 'Get Calendar'
+api: 'GET /api/capacity/calendar'
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. See the
+  [Reserved Capacity overview](/reserved-capacity/overview).
+</Info>
+
+Return a planning snapshot of 15-minute UTC intervals in the requested window.
+One row per interval with current `reservedGb`, `reservableGb`, and the
+per-org `reservationLimitGb`. See
+[Reading the calendar](/reserved-capacity/calendar) for field semantics.
+
+<ParamField query="from" type="string" required>
+  Window start. RFC 3339, aligned to 15 minutes, UTC.
+</ParamField>
+
+<ParamField query="to" type="string" required>
+  Window end. RFC 3339, aligned to 15 minutes, UTC.
+</ParamField>
+
+<ResponseExample>
+```json 200
+{
+  "generatedAt": "2026-04-28T18:00:00Z",
+  "staleAt":     "2026-04-28T18:00:10Z",
+  "intervalDuration": "PT15M",
+  "timezone": "UTC",
+  "earliestReservableStart": "2026-04-28T18:30:00Z",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
+      "reservationLimitGb": 300,
+      "reservedGb": 80,
+      "reservableGb": 220
+    }
+  ]
+}
+```
+</ResponseExample>

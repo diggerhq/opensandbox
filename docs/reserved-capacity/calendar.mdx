@@ -1,0 +1,164 @@
+---
+title: "Reading the Calendar"
+description: "Preview reservable capacity and existing commitments per 15-minute interval"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+The calendar is how you plan. It answers, per 15-minute interval:
+
+1. How much GB can I still reserve here?
+2. How much do I already hold here?
+3. What's the policy cap I'm working under?
+
+The calendar never holds capacity — it's a snapshot. Write validation is
+always authoritative.
+
+## Request
+
+```bash curl
+curl "https://app.opencomputer.dev/api/capacity/calendar?from=2026-04-29T02:00:00Z&to=2026-04-29T04:00:00Z" \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY"
+```
+
+| Query param | Required | Notes |
+| --- | --- | --- |
+| `from` | yes | Window start, aligned to 15 minutes, UTC. |
+| `to` | yes | Window end, aligned to 15 minutes, UTC. |
+
+## Response
+
+```json
+{
+  "generatedAt": "2026-04-28T18:00:00Z",
+  "staleAt":     "2026-04-28T18:00:10Z",
+  "intervalDuration": "PT15M",
+  "timezone": "UTC",
+  "earliestReservableStart": "2026-04-28T18:30:00Z",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
+      "reservationLimitGb": 300,
+      "reservedGb": 80,
+      "reservableGb": 220
+    }
+  ]
+}
+```
+
+### Top-level fields
+
+| Field | Meaning |
+| --- | --- |
+| `generatedAt` | When the server computed this snapshot. |
+| `staleAt` | After this, refresh before using the snapshot for planning. |
+| `intervalDuration` | Always `PT15M` in v1. |
+| `timezone` | Always `UTC` in v1. |
+| `earliestReservableStart` | First interval currently eligible for new reservations. The server enforces a minimum lead time between `now` and a bookable `startsAt`. |
+
+### Per-interval fields
+
+| Field | Meaning |
+| --- | --- |
+| `startsAt`, `endsAt` | The 15-minute UTC interval. |
+| `reservationLimitGb` | Maximum GB this org may commit in this interval (your `max_memory_gb`). |
+| `reservedGb` | Total GB this org already has reserved in this interval. |
+| `reservableGb` | Additional GB the server would currently accept. **This is the number to plan against.** |
+
+## `reservableGb` is the planning field
+
+Everything you need to decide "can I reserve 50 GB at 02:00?" is in
+`reservableGb`. The other fields are context:
+
+- `reservationLimitGb` minus `reservedGb` is your remaining headroom under
+  your org's per-interval cap. The server may still reduce `reservableGb`
+  below that headroom because of platform-level capacity.
+- `reservedGb` lets you confirm what you already hold without a separate
+  call to `GET /api/capacity/reservations`.
+
+## `staleAt` is a freshness marker, not a hold
+
+The calendar snapshot is cheap and immediate. `staleAt` tells you when to
+refresh, but capacity can change at any moment — another tenant (or you,
+in another tab) may reserve between `generatedAt` and your write.
+
+This is fine. Writes are atomic and validation is authoritative: if
+capacity moved, the write returns `capacity_not_available` and you read
+again.
+
+## Race patterns
+
+### Plan then write
+
+```text
+GET  /api/capacity/calendar                       → reservableGb: 220
+POST /api/capacity/reservations  capacityGb: 80   → applied
+```
+
+### Plan then write, lost race
+
+```text
+GET  /api/capacity/calendar                       → reservableGb: 48
+POST /api/capacity/reservations  capacityGb: 80   → rejected with reservableGb: 28
+```
+
+On rejection, read the calendar again and either:
+
+- Re-submit with the actual current `reservableGb`, or
+- Accept a smaller amount via multiple writes at different intervals, or
+- Bail out — not all demand fits.
+
+V1 does not accept a "reserve up to N, at least M" shape. Keep retries
+explicit in client code.
+
+### Multi-interval request, partial conflict
+
+```text
+POST /api/capacity/reservations
+  intervals: [
+    02:00 → 02:15, 80 GB
+    02:15 → 02:30, 80 GB    # only 30 available
+  ]
+→ rejected; nothing reserved
+```
+
+Multi-interval writes are atomic. If any interval fails, none are
+reserved. Split your request if you want partial success.
+
+## Choosing the window
+
+The calendar accepts arbitrary `from`–`to` ranges aligned to the 15-minute
+grid. Practical guidance:
+
+- For interactive planning UIs, pull a day or a week at a time; render a
+  heatmap of `reservableGb`.
+- For scheduled reservation scripts, query just the intervals you're about
+  to write — don't pull a week if you only need two hours.
+- For large time ranges, expect the response to scale linearly (`4 ×
+  hours` rows). Chunk your queries if you need months.
+
+## What the calendar does *not* tell you
+
+- **Past reservation events.** Use `GET /api/capacity/reservations` for
+  the audit log.
+- **Other customers' commitments.** Numbers are org-scoped.
+- **Future limit changes.** Your `reservationLimitGb` reflects current
+  policy.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reserving capacity" icon="lock" href="/reserved-capacity/reserving">
+    The write flow, idempotency, atomicity.
+  </Card>
+  <Card title="Concepts" icon="shapes" href="/reserved-capacity/concepts">
+    Vocabulary: intervals, reservations, the log.
+  </Card>
+  <Card title="Get calendar endpoint" icon="code" href="/api-reference/capacity/get-calendar">
+    Full request/response reference.
+  </Card>
+</CardGroup>

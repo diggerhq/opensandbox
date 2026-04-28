@@ -199,6 +199,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
 
+	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
+	api.GET("/capacity/calendar", s.getCapacityCalendar)
+	api.POST("/capacity/reservations", s.createCapacityReservation)
+	api.GET("/capacity/reservations", s.listCapacityReservations)
+
 	// Usage + tags (design: .agents/design/sandbox-tags-and-usage.md)
 	api.GET("/usage", s.getUsage)
 	api.GET("/tags", s.listTags)

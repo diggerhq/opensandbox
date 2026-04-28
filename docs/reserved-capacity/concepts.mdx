@@ -1,0 +1,150 @@
+---
+title: "Concepts"
+description: "Intervals, reservations, the reservation log, and the per-org cap"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. The contract below
+  may change before launch.
+</Info>
+
+A small vocabulary. Learn these and the rest of the API reads itself.
+
+## Interval
+
+A 15-minute window on the UTC quarter-hour grid.
+
+| Field | Meaning |
+| --- | --- |
+| `startsAt` | Inclusive start. Always ends in `:00`, `:15`, `:30`, or `:45` with zero seconds. |
+| `endsAt` | Exclusive end. Always `startsAt + 15 minutes`. |
+
+The 15-minute grain is the smallest commitment unit and that's the point.
+You can shape a reservation to the exact contour of your workload — a
+nightly window, working-hour blocks, an hourly cron — without paying for
+idle slots outside it.
+
+Half-open intervals (`[startsAt, endsAt)`) mean two adjacent reservations
+never overlap and never leave gaps.
+
+```text
+02:00 ────────────── 02:15 ────────────── 02:30
+   interval A            interval B
+```
+
+A reservation that spans multiple intervals is a list of adjacent interval
+entries, not a single range:
+
+```json
+{
+  "intervals": [
+    { "startsAt": "2026-04-29T02:00:00Z", "endsAt": "2026-04-29T02:15:00Z", "capacityGb": 16 },
+    { "startsAt": "2026-04-29T02:15:00Z", "endsAt": "2026-04-29T02:30:00Z", "capacityGb": 16 }
+  ]
+}
+```
+
+## Reservation
+
+A commitment event. Each `POST /api/capacity/reservations` creates one
+reservation: a server-generated UUID, a `createdAt` timestamp, and one or
+more `(interval, capacityGb)` line items. `capacityGb` must be a positive
+multiple of 4 (= 1 GB-hour over the 15-minute interval); single-GB
+reservations aren't accepted.
+
+```json
+{
+  "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "createdAt": "2026-04-28T18:00:05Z",
+  "intervals": [
+    { "startsAt": "2026-04-29T02:00:00Z", "endsAt": "2026-04-29T02:15:00Z", "capacityGb": 16 }
+  ]
+}
+```
+
+Reservations are **append-only**. Once created, a reservation cannot be
+cancelled, modified, or transferred. To add more capacity to an interval,
+post another reservation; the totals add up at the interval level.
+
+## The reservation log
+
+The list of all your reservations is the durable, auditable record of your
+commitments over time. `GET /api/capacity/reservations` returns it in
+reverse-chronological order.
+
+This is also how the calendar is computed internally: at any moment,
+`reservedGb` for an interval is just the sum of `capacityGb` across all
+your reservations covering that interval.
+
+## Calendar
+
+The planning read model. Given a time range, returns one row per interval
+with the numbers you need to plan:
+
+| Field | Meaning |
+| --- | --- |
+| `reservableGb` | Additional GB you could add to this interval right now. |
+| `reservationLimitGb` | The policy cap on how much you can hold in this interval (your org's `max_memory_gb`). |
+| `reservedGb` | What you already hold in this interval (sum of all your reservations covering it). |
+
+The calendar **previews availability** but never holds capacity. Capacity
+can change between when you read the calendar and when you submit a
+reservation; if it does, the write returns `capacity_not_available` and you
+re-read.
+
+See [Reading the calendar](/reserved-capacity/calendar) for the full shape.
+
+## Per-org capacity cap
+
+Your org has a single configured ceiling: `max_memory_gb`. It applies in
+two places:
+
+| Where | What it limits |
+| --- | --- |
+| Reservations | Across any single interval, your `reservedGb` cannot exceed `max_memory_gb`. |
+| Runtime | Your concurrent running memory across all sandboxes cannot exceed `max_memory_gb` either. |
+
+Same number, two enforcement points. The mental model: "I can have up to
+N GB of memory in flight at once, whether reserved or running." If you
+need to reserve more than your current limit allows, ask to have the
+limit raised.
+
+This appears as `reservationLimitGb` in calendar interval rows.
+
+## Usage and overage
+
+Starting and stopping sandboxes is independent of reserving capacity.
+Reservations don't pre-warm or pre-allocate compute; they're an
+accounting commitment.
+
+For each 15-minute interval, at every instant:
+
+- If your concurrent memory ≤ `reservedGb` → you're inside your reserved
+  capacity. That portion of the interval is billed at the reserved rate.
+- If your concurrent memory > `reservedGb` → the excess is overage,
+  billed at the on-demand rate.
+
+Reserved capacity is a flat ceiling at any instant, not a GB-second budget
+that averages out over the interval. A brief spike above the ceiling
+produces overage during those seconds, even if your average usage was
+below it.
+
+You also pay for the **full reservation** regardless of actual usage.
+That's the commitment; it's why reserved rates are lower.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    Plan reservations before you commit.
+  </Card>
+  <Card title="Reserving capacity" icon="lock" href="/reserved-capacity/reserving">
+    The write flow, idempotency, atomicity.
+  </Card>
+  <Card title="Usage and overage" icon="gauge" href="/reserved-capacity/usage-and-overage">
+    How reserved capacity is consumed.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/capacity/get-calendar">
+    Every endpoint with full request/response shapes.
+  </Card>
+</CardGroup>

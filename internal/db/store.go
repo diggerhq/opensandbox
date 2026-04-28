@@ -120,6 +120,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{27, "migrations/024_patch_error_tracking.up.sql"},
 		{28, "migrations/025_sandbox_golden_version.up.sql"},
 		{29, "migrations/026_sandbox_tags.up.sql"},
+		{30, "migrations/027_capacity_reservation_intervals.up.sql"},
+		{31, "migrations/028_capacity_idempotency_keys.up.sql"},
+		{32, "migrations/029_orgs_max_memory_gb.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -160,6 +163,7 @@ type Org struct {
 	MaxConcurrentSandboxes int       `json:"maxConcurrentSandboxes"`
 	MaxSandboxTimeoutSec   int       `json:"maxSandboxTimeoutSec"`
 	MaxDiskMB              int       `json:"maxDiskMB"`
+	MaxMemoryGB            int       `json:"maxMemoryGB"`
 	CreatedAt              time.Time `json:"createdAt"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 
@@ -192,7 +196,7 @@ type Org struct {
 }
 
 // orgColumns is the list of columns returned by all Org queries.
-const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, max_disk_mb, created_at, updated_at,
+const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_timeout_sec, max_disk_mb, max_memory_gb, created_at, updated_at,
 	custom_domain, cf_hostname_id, domain_verification_status, domain_ssl_status,
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
@@ -204,7 +208,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 	org := &Org{}
 	err := row.Scan(
 		&org.ID, &org.Name, &org.Slug, &org.Plan, &org.MaxConcurrentSandboxes,
-		&org.MaxSandboxTimeoutSec, &org.MaxDiskMB, &org.CreatedAt, &org.UpdatedAt,
+		&org.MaxSandboxTimeoutSec, &org.MaxDiskMB, &org.MaxMemoryGB, &org.CreatedAt, &org.UpdatedAt,
 		&org.CustomDomain, &org.CFHostnameID, &org.DomainVerificationStatus, &org.DomainSSLStatus,
 		&org.VerificationTxtName, &org.VerificationTxtValue, &org.SSLTxtName, &org.SSLTxtValue,
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,

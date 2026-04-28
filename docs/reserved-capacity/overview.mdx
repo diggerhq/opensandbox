@@ -1,0 +1,128 @@
+---
+title: "Reserved Capacity"
+description: "Commit memory capacity to future 15-minute intervals at a discounted rate"
+---
+
+<Info>
+  **Coming soon.** Reserved capacity is not yet available. These pages describe
+  the forthcoming v1 API. The contract may change before launch. [Book a
+  call](https://cal.com/team/digger/opencomputer-founder-chat) to be notified
+  when it ships or to influence the design.
+</Info>
+
+Reserved capacity lets you pre-commit to memory you'll use later. OpenComputer
+plans for it instead of holding margin against uncertain demand; you get a
+lower effective rate on the committed usage. Pure on-demand still works for
+everything else.
+
+## Reservations are non-refundable
+
+Once you commit to capacity for an interval, that's a permanent commitment.
+There is no cancellation, no transfer, no partial refund. The commitment is
+the whole reason the rate is lower — any carve-out re-introduces the demand
+risk reserved capacity exists to remove.
+
+The hedge is to **book conservatively**: reserve only what you're confident
+you'll run, and let on-demand absorb everything else.
+
+## The unit is 1 GB-hour
+
+Reservations are made against 15-minute UTC intervals on the quarter-hour
+grid: `:00`, `:15`, `:30`, `:45`. Within each interval, the minimum
+commitment is **4 GB for 15 minutes — that is, 1 GB-hour.** All
+reservations must be multiples of 4 GB per interval; anything smaller
+isn't a meaningful commitment unit and the API rejects it.
+
+The 15-minute time grain is deliberate. Reserve the slots you'll actually
+run in — you aren't pushed into a long contiguous block and asked to pay
+for the troughs in between. A nightly batch reserves the eight intervals
+it occupies; a weekday workload reserves working hours and skips evenings
+and weekends. The reserved rate applies whatever shape your demand takes.
+
+You don't book individual blocks or get block IDs back. You just tell the
+API "for this interval, add this many GB to my reserved capacity," and the
+calendar shows you the new total.
+
+## A small example
+
+Reserve 16 GB for the 02:00–02:15 UTC slot tomorrow:
+
+```bash curl
+curl -X POST https://app.opencomputer.dev/api/capacity/reservations \
+  -H "X-API-Key: $OPENCOMPUTER_API_KEY" \
+  -H "Idempotency-Key: demo-1" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "intervals": [
+      {
+        "startsAt": "2026-04-29T02:00:00Z",
+        "endsAt":   "2026-04-29T02:15:00Z",
+        "capacityGb": 16
+      }
+    ]
+  }'
+```
+
+Response:
+
+```json
+{
+  "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
+  "createdAt": "2026-04-28T18:00:05Z",
+  "intervals": [
+    {
+      "startsAt": "2026-04-29T02:00:00Z",
+      "endsAt":   "2026-04-29T02:15:00Z",
+      "capacityGb": 16
+    }
+  ]
+}
+```
+
+That's it. Run sandboxes normally during 02:00–02:15; they'll be allocated
+against your reserved capacity automatically. Anything over 16 GB during
+that interval falls back to on-demand rates.
+
+## Why reserve instead of running on-demand?
+
+| | On-demand | Reserved |
+| --- | --- | --- |
+| Cost per GB-second | Higher (includes reserve-margin premium) | Lower |
+| Commitment | None | Full — you pay regardless of usage |
+| Availability | Subject to platform headroom | Guaranteed for the interval you booked |
+| Best for | Unpredictable or bursty workloads | Nightly batch jobs, scheduled runs, known traffic patterns |
+
+If you already know you'll run 48 GB of agents at 3am every night, reserve
+the day before, get the lower rate, get the guarantee. If your workload is
+"whatever users ask for," stay on-demand. And because the granularity is
+15 minutes, you can be precise — reserve the peaks, leave the troughs to
+on-demand, and don't commit to capacity outside your actual workload
+window.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="shapes" href="/reserved-capacity/concepts">
+    The vocabulary: intervals, reservations, the reservation log.
+  </Card>
+  <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
+    Plan reservations before you commit.
+  </Card>
+  <Card title="Reserving capacity" icon="lock" href="/reserved-capacity/reserving">
+    The write flow, idempotency, atomicity.
+  </Card>
+  <Card title="Usage and overage" icon="gauge" href="/reserved-capacity/usage-and-overage">
+    How reserved capacity is consumed and how overage is billed.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Full endpoint reference: [`/api/capacity/*`](/api-reference/capacity/get-calendar).
+</Tip>
+
+<Note>
+  **Pricing is intentionally out of scope here.** This API manages capacity
+  rights only. Reserved usage is billed at a discounted rate, overage at the
+  on-demand rate. Specific dollar amounts will be announced separately before
+  launch.
+</Note>
