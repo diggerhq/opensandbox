@@ -646,7 +646,7 @@ func TestFindMigrationTargetSelectsLeastLoaded(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	target := s.findMigrationTarget("us-east-1", "hot")
+	target := s.findMigrationTarget("us-east-1", "hot", 0)
 
 	if target == nil {
 		t.Fatal("expected a migration target")
@@ -671,7 +671,7 @@ func TestFindMigrationTargetSkipsPressuredWorkers(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	target := s.findMigrationTarget("us-east-1", "hot")
+	target := s.findMigrationTarget("us-east-1", "hot", 0)
 
 	if target != nil {
 		t.Errorf("expected no target (all workers under pressure), got %s", target.ID)
@@ -694,7 +694,7 @@ func TestFindMigrationTargetSkipsDraining(t *testing.T) {
 	s := newTestScaler(reg, pool)
 	s.state.SetDraining("osb-worker-draining", &drainState{WorkerID: "draining"})
 
-	target := s.findMigrationTarget("us-east-1", "hot")
+	target := s.findMigrationTarget("us-east-1", "hot", 0)
 	if target != nil {
 		t.Errorf("expected no target (only candidate is draining), got %s", target.ID)
 	}
@@ -725,7 +725,7 @@ func TestFindMigrationTargetAccountsForInFlight(t *testing.T) {
 		s.state.IncrInFlight("target1")
 	}
 
-	target := s.findMigrationTarget("us-east-1", "source")
+	target := s.findMigrationTarget("us-east-1", "source", 0)
 	if target == nil {
 		t.Fatal("expected a migration target")
 	}
@@ -749,10 +749,71 @@ func TestFindMigrationTargetSkipsHighDisk(t *testing.T) {
 	})
 
 	s := newTestScaler(reg, pool)
-	target := s.findMigrationTarget("us-east-1", "source")
+	target := s.findMigrationTarget("us-east-1", "source", 0)
 
 	if target != nil {
 		t.Errorf("expected no target (only candidate has disk > 85%%), got %s", target.ID)
+	}
+}
+
+// TestFindMigrationTargetSkipsWorkerShortOnActualMemory verifies that a
+// worker is rejected when its actual memory (MemPct × TotalMemoryMB) plus
+// the migration's requiredMemMB exceeds the 90% admission line. Without
+// this, the scaler picks a target whose prepare will fail and the drain
+// churns in a retry loop.
+func TestFindMigrationTargetSkipsWorkerShortOnActualMemory(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	reg.addWorker(&WorkerInfo{
+		ID: "source", MachineID: "osb-worker-source", Region: "us-east-1",
+		Capacity: 50, Current: 45, CPUPct: 85, MemPct: 50, DiskPct: 30,
+		TotalMemoryMB: 64000,
+	})
+	// 60% actual used × 64GB = 38.4GB used. Reserve 6.4GB. Available ≈ 19.2GB.
+	// 16GB should fit, 22GB should not.
+	reg.addWorker(&WorkerInfo{
+		ID: "ok", MachineID: "osb-worker-ok", Region: "us-east-1",
+		Capacity: 50, Current: 5, CPUPct: 30, MemPct: 60, DiskPct: 20,
+		TotalMemoryMB: 64000,
+	})
+
+	s := newTestScaler(reg, pool)
+
+	target := s.findMigrationTarget("us-east-1", "source", 16000)
+	if target == nil || target.ID != "ok" {
+		t.Fatalf("expected 'ok' for 16GB request, got %v", target)
+	}
+
+	target = s.findMigrationTarget("us-east-1", "source", 22000)
+	if target != nil {
+		t.Errorf("expected no target for 22GB request (insufficient actual headroom), got %s", target.ID)
+	}
+}
+
+// TestFindMigrationTargetZeroRequiredMemSkipsCheck verifies that passing 0
+// for requiredMemMB disables the actual-memory gate — this is used by the
+// drain loop's pre-flight "does ANY target exist" probe before we know
+// the sandbox size.
+func TestFindMigrationTargetZeroRequiredMemSkipsCheck(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	reg.addWorker(&WorkerInfo{
+		ID: "source", MachineID: "osb-worker-source", Region: "us-east-1",
+		Capacity: 50, Current: 45, CPUPct: 85, MemPct: 50, DiskPct: 30,
+	})
+	// Would fail a memory check (80% used), but slot/pressure checks pass.
+	reg.addWorker(&WorkerInfo{
+		ID: "candidate", MachineID: "osb-worker-candidate", Region: "us-east-1",
+		Capacity: 50, Current: 5, CPUPct: 30, MemPct: 80, DiskPct: 20,
+		TotalMemoryMB: 64000,
+	})
+
+	s := newTestScaler(reg, pool)
+	target := s.findMigrationTarget("us-east-1", "source", 0)
+	if target == nil || target.ID != "candidate" {
+		t.Errorf("expected 'candidate' with 0 requiredMemMB (pre-flight), got %v", target)
 	}
 }
 
@@ -966,7 +1027,7 @@ func TestConcurrentScaleUpDown200(t *testing.T) {
 					// Query state (read contention)
 					_ = reg.RegionUtilization("us-east-1")
 					_, _, _ = reg.RegionResourcePressure("us-east-1")
-					_ = s.findMigrationTarget("us-east-1", "nonexistent")
+					_ = s.findMigrationTarget("us-east-1", "nonexistent", 0)
 				}
 
 				time.Sleep(time.Duration(rng.Intn(5)) * time.Millisecond)
@@ -1240,7 +1301,7 @@ func TestInFlightTrackingPreventsOverload(t *testing.T) {
 		s.state.IncrInFlight("target")
 	}
 
-	target := s.findMigrationTarget("us-east-1", "other")
+	target := s.findMigrationTarget("us-east-1", "other", 0)
 	if target != nil {
 		t.Error("expected no target — in-flight migrations fill remaining capacity")
 	}

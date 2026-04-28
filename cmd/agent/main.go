@@ -24,7 +24,7 @@ func main() {
 	// profile to source, so PATH may be empty or minimal.
 	os.Setenv("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
-	log.Printf("osb-agent %s starting", Version)
+	log.Printf("osb-agent %s starting (build=pin-to-base/r3)", Version)
 
 	// Listen on vsock port 1024 (inside Firecracker) or Unix socket (testing).
 	lis, err := listenVsock()
@@ -42,6 +42,14 @@ func main() {
 	} else {
 		srv.ListenPort = listenPortForPTY
 	}
+
+	// SIGCHLD reaper: when osb-agent runs as PID 1, every orphaned process
+	// in the VM is re-parented to it. If we don't wait4() them they stay as
+	// zombies, occupying a slot in the sandbox cgroup's pids.max budget.
+	// Within hours of a build/test loop the customer hits "fork failed:
+	// resource temporarily unavailable" even though they have nothing
+	// running. Drain on each SIGCHLD; signals coalesce so we loop.
+	startReaper()
 
 	// Signal handling:
 	// SIGTERM/SIGINT: clean shutdown (exit)

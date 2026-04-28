@@ -4,8 +4,34 @@ package agent;
 
 option go_package = "github.com/opensandbox/opensandbox/proto/agent";
 
-// SandboxAgent runs inside each Firecracker microVM and handles
-// exec, file ops, PTY, and stats over gRPC via vsock.
+// SandboxAgent is the in-guest RPC surface. It runs as PID 1 (or under
+// systemd) inside every sandbox VM and is reachable from the host worker
+// over virtio-serial (Unix domain socket) or vsock.
+//
+// === STABILITY CONTRACT ===
+// This proto is a stable, backward-compatible public API. Long-running
+// sandboxes can live for weeks or months; their in-guest agent continues
+// running whatever version was baked into the rootfs at sandbox-creation
+// time. The worker must be able to talk to those old agents indefinitely.
+//
+// Allowed changes:
+//   - Adding new RPCs
+//   - Adding new optional fields to existing messages (with new field numbers)
+//   - Adding new enum values
+//
+// FORBIDDEN changes:
+//   - Removing or renaming RPCs, messages, fields, or enum values
+//   - Repurposing existing field numbers for different semantics
+//   - Making previously-optional fields required
+//   - Changing field types in a non-wire-compatible way
+//
+// New capabilities should prefer being implemented worker-side, composing
+// Exec + file primitives, rather than adding a new agent RPC. An agent
+// binary update requires the sandbox to be destroyed and recreated; there
+// is intentionally no runtime upgrade path.
+//
+// See internal/qemu/manager.go "Runtime agent upgrade" comment for the
+// full rationale on why we don't hot-upgrade.
 service SandboxAgent {
   // Exec runs a command and returns the result after completion.
   rpc Exec(ExecRequest) returns (ExecResponse);

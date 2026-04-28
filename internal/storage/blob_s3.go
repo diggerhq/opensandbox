@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // s3BlobClient implements BlobClient using the AWS S3 SDK.
@@ -100,6 +102,11 @@ func (c *s3BlobClient) Head(ctx context.Context, bucket, key string) (int64, err
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		var nsk *s3types.NoSuchKey
+		var nf *s3types.NotFound
+		if errors.As(err, &nsk) || errors.As(err, &nf) {
+			return 0, ErrNotFound
+		}
 		return 0, err
 	}
 	return aws.ToInt64(resp.ContentLength), nil

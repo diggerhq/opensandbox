@@ -1,6 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
-import { getSessions, type Session } from '../api/client'
+import { useState, useEffect, useRef } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, Link } from 'react-router-dom'
+import { getSessions, getAPIKeys, createAPIKey, type Session } from '../api/client'
+
+const SKILL_INSTALL_CMD = 'npx skills add diggerhq/opencomputer'
 
 export default function Dashboard() {
   const { data: runningSessions, isLoading: loadingRunning } = useQuery({
@@ -18,13 +21,23 @@ export default function Dashboard() {
   const today = new Date().toISOString().slice(0, 10)
   const sessionsToday = all.filter(s => new Date(s.startedAt).toISOString().slice(0, 10) === today).length
 
+  const isFirstRun = !loadingAll && all.length === 0
+
   return (
     <div>
       <div style={{ marginBottom: 32 }}>
-        <h1 className="page-title">Dashboard</h1>
-        <p className="page-subtitle">Overview of your sandbox infrastructure</p>
+        <h1 className="page-title">{isFirstRun ? 'Welcome to OpenComputer' : 'Dashboard'}</h1>
+        <p className="page-subtitle">
+          {isFirstRun
+            ? 'Get your first sandbox running in two steps'
+            : 'Overview of your sandbox infrastructure'}
+        </p>
       </div>
 
+      {isFirstRun ? (
+        <GettingStarted />
+      ) : (
+        <>
       {/* ── Stat Cards ── */}
       <div style={{
         display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 14, marginBottom: 24,
@@ -122,6 +135,220 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ── Getting Started (first-run onboarding) ───────────────── */
+function GettingStarted() {
+  const queryClient = useQueryClient()
+  const { data: keys, isLoading: loadingKeys } = useQuery({ queryKey: ['api-keys'], queryFn: getAPIKeys })
+  const [copied, setCopied] = useState<string | null>(null)
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const autoCreateRef = useRef(false)
+
+  const createMutation = useMutation({
+    mutationFn: () => createAPIKey('Default'),
+    onSuccess: (data) => {
+      setCreatedKey(data.key)
+      queryClient.invalidateQueries({ queryKey: ['api-keys'] })
+    },
+  })
+
+  const hasKeys = (keys?.length ?? 0) > 0
+
+  // On first signup (no keys exist), auto-create a Default key so the user
+  // sees their key immediately without having to click anything.
+  useEffect(() => {
+    if (loadingKeys || autoCreateRef.current) return
+    if (!hasKeys && !createdKey && !createMutation.isPending) {
+      autoCreateRef.current = true
+      createMutation.mutate()
+    }
+  }, [loadingKeys, hasKeys, createdKey, createMutation])
+
+  const copy = (text: string, id: string) => {
+    navigator.clipboard.writeText(text)
+    setCopied(id)
+    setTimeout(() => setCopied(c => (c === id ? null : c)), 1500)
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <StepCard
+        index={1}
+        title="Install the OpenComputer skill"
+        description="Adds a skill to Claude Code (or any agent that supports the Agent Skills standard) so it can drive sandboxes for you."
+      >
+        <CommandRow command={SKILL_INSTALL_CMD} copied={copied === 'install'} onCopy={() => copy(SKILL_INSTALL_CMD, 'install')} />
+      </StepCard>
+
+      <StepCard
+        index={2}
+        title="Your API key"
+        description="The skill uses this key to authenticate with OpenComputer. We've created a Default key for you — copy it now, you won't be able to see it again."
+      >
+        {(loadingKeys || createMutation.isPending) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-tertiary)', fontSize: 13 }}>
+            <div className="loading-spinner" style={{ width: 14, height: 14 }} />
+            Preparing your API key…
+          </div>
+        )}
+
+        {createdKey && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <SecretRow
+              secret={createdKey}
+              copied={copied === 'key'}
+              onCopy={() => copy(createdKey, 'key')}
+            />
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              Then run this in your terminal to configure the CLI:
+            </div>
+            <SecretRow
+              secret={createdKey}
+              wrap={(s) => `oc config set api-key ${s}`}
+              copied={copied === 'cmd'}
+              onCopy={() => copy(`oc config set api-key ${createdKey}`, 'cmd')}
+            />
+          </div>
+        )}
+
+        {!createdKey && !createMutation.isPending && hasKeys && (
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            You already have {keys!.length} API key{keys!.length === 1 ? '' : 's'} from a previous session.
+            For security, existing key values can&apos;t be re-displayed.{' '}
+            <Link to="/api-keys" style={{ color: 'var(--accent-indigo)' }}>Manage keys</Link> to rotate.
+          </div>
+        )}
+
+        {createMutation.isError && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+            <span style={{ fontSize: 12, color: 'var(--accent-rose, #fb7185)' }}>
+              Failed to create your API key.
+            </span>
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 12 }}
+              onClick={() => createMutation.mutate()}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </StepCard>
+    </div>
+  )
+}
+
+function StepCard({ index, title, description, children }: {
+  index: number
+  title: string
+  description: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="glass-card animate-in" style={{ padding: '22px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
+        <div style={{
+          width: 28, height: 28, borderRadius: '50%',
+          background: 'rgba(99,102,241,0.12)',
+          border: '1px solid var(--border-accent)',
+          color: 'var(--accent-indigo)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 13, fontWeight: 600, flexShrink: 0, fontFamily: 'var(--font-mono)',
+        }}>
+          {index}
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+              {title}
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
+              {description}
+            </div>
+          </div>
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CommandRow({ command, copied, onCopy }: {
+  command: string
+  copied: boolean
+  onCopy: () => void
+}) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      background: 'var(--bg-deep)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--radius-sm)',
+      padding: '10px 12px',
+    }}>
+      <code style={{
+        flex: 1, fontFamily: 'var(--font-mono)', fontSize: 13,
+        color: 'var(--text-accent)', wordBreak: 'break-all',
+      }}>
+        {command}
+      </code>
+      <button
+        onClick={onCopy}
+        className="btn-ghost"
+        style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  )
+}
+
+function SecretRow({ secret, wrap, copied, onCopy }: {
+  secret: string
+  wrap?: (s: string) => string
+  copied: boolean
+  onCopy: () => void
+}) {
+  const [revealed, setRevealed] = useState(false)
+  const masked = '•'.repeat(Math.min(secret.length, 32))
+  const display = revealed ? secret : masked
+  const text = wrap ? wrap(display) : display
+
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      background: 'var(--bg-deep)',
+      border: '1px solid var(--border-subtle)',
+      borderRadius: 'var(--radius-sm)',
+      padding: '10px 12px',
+    }}>
+      <code style={{
+        flex: 1, fontFamily: 'var(--font-mono)', fontSize: 13,
+        color: 'var(--text-accent)', wordBreak: 'break-all',
+        letterSpacing: revealed ? 'normal' : '0.05em',
+      }}>
+        {text}
+      </code>
+      <button
+        onClick={() => setRevealed(r => !r)}
+        className="btn-ghost"
+        style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+        aria-label={revealed ? 'Hide secret' : 'Reveal secret'}
+      >
+        {revealed ? 'Hide' : 'Reveal'}
+      </button>
+      <button
+        onClick={onCopy}
+        className="btn-ghost"
+        style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
     </div>
   )
 }

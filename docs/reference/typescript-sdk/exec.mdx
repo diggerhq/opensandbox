@@ -83,6 +83,73 @@ const session = await sandbox.exec.start("node server.js", {
 
 ---
 
+## `sandbox.exec.background(command, opts?)`
+
+Alias for [`start`](#sandbox-exec-start-command-opts). Same options, same return type. Use when the intent is "run this in the background and observe it" — more discoverable than `start` for that case.
+
+```typescript
+const server = await sandbox.exec.background("npm", {
+  args: ["run", "dev"],
+  onStdout: (data) => process.stdout.write(data),
+});
+```
+
+---
+
+## `sandbox.exec.shell(opts?)`
+
+Open a stateful shell session. Subsequent `.run()` calls share the same bash process, so `cwd`, exported env vars, and shell functions persist — the ergonomics of a terminal tab.
+
+Backed by a long-running `bash --noprofile --norc` session. Foreground-only: concurrent `.run()` rejects with `ShellBusyError`. Use [`background`](#sandbox-exec-background-command-opts) for fire-and-forget processes.
+
+<ParamField body="cwd" type="string">
+  Initial working directory
+</ParamField>
+
+<ParamField body="env" type="Record<string, string>">
+  Initial environment variables
+</ParamField>
+
+**Returns:** `Promise<Shell>`
+
+```typescript
+const sh = await sandbox.exec.shell({ cwd: "/app" });
+
+await sh.run("npm install");
+await sh.run("export NODE_ENV=test");
+const r = await sh.run("npm test", {
+  onStdout: (b) => process.stdout.write(b),
+});
+console.log(r.exitCode);
+
+await sh.close();
+```
+
+### Shell
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `sessionId` | `string` | Underlying exec session ID |
+| `run(cmd, opts?)` | `Promise<ProcessResult>` | Run a command, blocking until it exits |
+| `close()` | `Promise<void>` | Write `exit` and wait for bash to terminate |
+
+### ShellRunOpts
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `onStdout` | `(data: Uint8Array) => void` | Per-call stdout callback |
+| `onStderr` | `(data: Uint8Array) => void` | Per-call stderr callback |
+
+<Note>
+  Per-call `cwd`, `env`, and `timeout` are intentionally not supported in v1. Use inline shell syntax (`cd /x && cmd`, `FOO=bar cmd`) — the shell state carries across calls. Timeouts will land once we have a "signal foreground job" primitive.
+</Note>
+
+Errors:
+- `ShellBusyError` — another `run()` is in flight (shell is foreground-only).
+- `ShellClosedError` — bash has exited (explicit `close()`, a command ran `exit`, or the session dropped).
+
+---
+
 ## `sandbox.exec.attach(sessionId, opts?)`
 
 Reconnect to a running exec session.

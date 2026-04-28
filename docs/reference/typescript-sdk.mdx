@@ -361,6 +361,21 @@ const session = await sandbox.exec.start("node server.js", {
 });
 ```
 
+### `sandbox.exec.background(command, opts?): Promise<ExecSession>`
+
+Alias for `start`. Same signature and return type — use when the intent is "run this in the background and observe it".
+
+### `sandbox.exec.shell(opts?): Promise<Shell>`
+
+Open a stateful shell session whose `cwd`, env vars, and shell functions persist across `.run()` calls. Foreground-only. See the [full reference](/reference/typescript-sdk/exec#sandbox-exec-shell-opts).
+
+```typescript
+const sh = await sandbox.exec.shell({ cwd: "/app" });
+await sh.run("export NODE_ENV=test");
+const r = await sh.run("npm test");
+await sh.close();
+```
+
 ### `sandbox.exec.attach(sessionId, opts?): Promise<ExecSession>`
 
 Reconnect to a running exec session.

@@ -218,15 +218,6 @@ func (w *WorkOSMiddleware) ProvisionOrgAndUser(ctx context.Context, email, name,
 		log.Printf("workos: provisioned new org: %s (%s)", org.Name, org.ID)
 	}
 
-	// Generate a default API key for the new org
-	apiKey, err := GenerateAPIKey()
-	if err == nil {
-		hash := db.HashAPIKey(apiKey)
-		prefix := apiKey[:8]
-		_, _ = w.store.CreateAPIKey(ctx, org.ID, nil, hash, prefix, "Default", []string{"sandbox:*"})
-		log.Printf("workos: created default API key for org %s: %s...", org.Slug, prefix)
-	}
-
 	// Determine which org the user should be active in
 	activeOrgID := org.ID
 

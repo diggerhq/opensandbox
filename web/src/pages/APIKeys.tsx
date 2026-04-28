@@ -12,6 +12,7 @@ export default function APIKeys() {
   const [showCreate, setShowCreate] = useState(false)
   const [newKeyName, setNewKeyName] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const createMutation = useMutation({
     mutationFn: (name: string) => createAPIKey(name),
@@ -59,19 +60,56 @@ export default function APIKeys() {
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
             Copy this key now. You won&apos;t be able to see it again.
           </div>
-          <code style={{
-            display: 'block',
-            background: 'var(--bg-deep)',
-            color: 'var(--text-accent)',
-            padding: 14,
-            borderRadius: 'var(--radius-sm)',
-            fontSize: 13,
-            fontFamily: 'var(--font-mono)',
-            wordBreak: 'break-all',
-            border: '1px solid var(--border-subtle)',
-          }}>{createdKey}</code>
+          <div style={{ position: 'relative' }}>
+            <code style={{
+              display: 'block',
+              background: 'var(--bg-deep)',
+              color: 'var(--text-accent)',
+              padding: 14,
+              paddingRight: 96,
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 13,
+              fontFamily: 'var(--font-mono)',
+              wordBreak: 'break-all',
+              border: '1px solid var(--border-subtle)',
+            }}>{createdKey}</code>
+            <button
+              onClick={async () => {
+                await navigator.clipboard.writeText(createdKey)
+                setCopied(true)
+                setTimeout(() => setCopied(false), 1500)
+              }}
+              className="btn-ghost"
+              style={{
+                position: 'absolute',
+                top: 8,
+                right: 8,
+                fontSize: 12,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {copied ? (
+                <>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Copied
+                </>
+              ) : (
+                <>
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
+                  Copy
+                </>
+              )}
+            </button>
+          </div>
           <button
-            onClick={() => setCreatedKey(null)}
+            onClick={() => { setCreatedKey(null); setCopied(false) }}
             style={{
               marginTop: 10, fontSize: 12, background: 'none', border: 'none',
               color: 'var(--accent-indigo)', cursor: 'pointer',

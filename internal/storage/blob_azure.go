@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 )
 
 // azureBlobClient implements BlobClient using the native Azure Blob SDK.
@@ -79,6 +80,9 @@ func (c *azureBlobClient) Head(ctx context.Context, container, key string) (int6
 	}
 	resp, err := c.client.ServiceClient().NewContainerClient(container).NewBlobClient(normalizeKey(container, key)).GetProperties(ctx, nil)
 	if err != nil {
+		if bloberror.HasCode(err, bloberror.BlobNotFound) {
+			return 0, ErrNotFound
+		}
 		return 0, err
 	}
 	if resp.ContentLength == nil {

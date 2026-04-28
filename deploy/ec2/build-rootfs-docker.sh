@@ -164,10 +164,15 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     echo "+cpu +memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
     # Create sandbox cgroup
     mkdir -p /sys/fs/cgroup/sandbox
-    # Defaults: 256 pids, 90% of total memory, 90% of CPUs
+    # Defaults: 4096 pids, 90% of total memory, 90% of CPUs.
+    # 4096 is enough headroom for typical dev tooling (npm install, go test,
+    # multi-process build systems) while still bounding fork-bomb damage.
+    # The previous default of 128 was below an interactive shell + LSP +
+    # build agent working set, and customers hit "fork failed: resource
+    # temporarily unavailable" inside otherwise-idle sandboxes.
     # CPU limit reserves 10% for the agent (PID 1) so it stays responsive
     # even under fork bomb / CPU exhaustion attacks.
-    echo 128 > /sys/fs/cgroup/sandbox/pids.max
+    echo 4096 > /sys/fs/cgroup/sandbox/pids.max
     SANDBOX_MEM=$(awk '/MemTotal/{printf "%.0f", $2 * 1024 * 0.9}' /proc/meminfo)
     echo "$SANDBOX_MEM" > /sys/fs/cgroup/sandbox/memory.max 2>/dev/null
     # cpu.max: limit user processes to 80% of available CPUs.
@@ -178,7 +183,7 @@ if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     echo "$CPU_MAX 100000" > /sys/fs/cgroup/sandbox/cpu.max 2>/dev/null
     # cpu.weight: lower priority than agent
     echo 50 > /sys/fs/cgroup/sandbox/cpu.weight 2>/dev/null
-    echo "init: cgroup sandbox ready (pids=128, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
+    echo "init: cgroup sandbox ready (pids=4096, mem=${SANDBOX_MEM}, cpu=${CPU_MAX}/100000)"
 else
     echo "init: warning: cgroup v2 not available"
 fi
@@ -226,11 +231,21 @@ docker create --name osb-rootfs-tmp "osb-rootfs-${IMAGE_NAME}:build" /bin/true
 docker export osb-rootfs-tmp -o "$TMPDIR/rootfs.tar"
 docker rm -f osb-rootfs-tmp
 
-# Convert tar to ext4
+# Convert tar to ext4. When ROOTFS_UUID is set (by caller), stamp that UUID into
+# the filesystem so identical inputs produce byte-identical ext4 output — the
+# goldenVersion (sha256 of the file) then stays stable across builds that
+# didn't actually change the rootfs content. When unset, mkfs generates a
+# random UUID (previous behaviour), which makes every build produce a new
+# goldenVersion even for identical inputs.
 log "Converting to ext4 (${EXT4_SIZE_MB}MB sparse)..."
 EXT4_PATH="$TMPDIR/rootfs.ext4"
 truncate -s "${EXT4_SIZE_MB}M" "$EXT4_PATH"
-mkfs.ext4 -q -F -L rootfs "$EXT4_PATH"
+if [ -n "${ROOTFS_UUID:-}" ]; then
+    log "Using deterministic UUID: $ROOTFS_UUID"
+    mkfs.ext4 -q -F -L rootfs -U "$ROOTFS_UUID" -E hash_seed="$ROOTFS_UUID" "$EXT4_PATH"
+else
+    mkfs.ext4 -q -F -L rootfs "$EXT4_PATH"
+fi
 
 MNT_DIR="$TMPDIR/mnt"
 mkdir -p "$MNT_DIR"

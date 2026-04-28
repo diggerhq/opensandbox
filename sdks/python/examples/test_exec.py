@@ -86,7 +86,8 @@ async def main():
 
         # 8. exec.start() + list + kill
         print("\n--- 8. exec.start('sleep 60') + list + kill ---")
-        session_id = await sandbox.exec.start("sleep", args=["60"])
+        session = await sandbox.exec.start("sleep", args=["60"])
+        session_id = session.session_id
         print(f"  session: {session_id}")
 
         sessions = await sandbox.exec.list()

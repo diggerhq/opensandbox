@@ -3,29 +3,27 @@ name: Build Worker Image
 on:
   push:
     branches: [main, autoscaling-etc]
-    # Only trigger on paths the worker binary actually depends on.
-    # Server-only directories (internal/api, internal/billing) don't trigger rebuild.
-    # If you add a new internal package used by cmd/worker, add it here.
+    # Paths that actually change what's inside the worker AMI.
+    # cmd/worker's transitive import surface (verified via `go list -deps
+    # ./cmd/worker/`) covers almost every internal package we have. Missing
+    # triggers here cause silent bugs where new worker code never gets
+    # shipped.
+    #
+    # Rootfs content-addressed caching (deploy/packer/worker-ami.pkr.hcl)
+    # means builds from unchanged rootfs inputs reuse the same cached ext4,
+    # so goldenVersion stays stable even when we rebuild the AMI for a
+    # worker-binary-only change. The narrowing here is just about avoiding
+    # wasted CI minutes on pushes that don't affect the worker binary
+    # (e.g. cmd/server/**, web/**, docs/**).
+    # GitHub only permits one of `paths` / `paths-ignore` per event — we use
+    # `paths` with `!` negation patterns to exclude control-plane-only dirs
+    # that would otherwise match `internal/**`.
     paths:
       - 'cmd/worker/**'
       - 'cmd/agent/**'
-      - 'internal/agent/**'
-      - 'internal/analytics/**'
-      - 'internal/auth/**'
-      - 'internal/compute/**'
-      - 'internal/config/**'
-      - 'internal/controlplane/**'
-      - 'internal/crypto/**'
-      - 'internal/db/**'
-      - 'internal/grpctls/**'
-      - 'internal/metrics/**'
-      - 'internal/proxy/**'
-      - 'internal/qemu/**'
-      - 'internal/sandbox/**'
-      - 'internal/secretsproxy/**'
-      - 'internal/sparse/**'
-      - 'internal/storage/**'
-      - 'internal/worker/**'
+      - 'internal/**'
+      - '!internal/api/**'
+      - '!internal/billing/**'
       - 'pkg/**'
       - 'proto/agent/**'
       - 'proto/worker/**'
@@ -54,6 +52,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history required so AGENT_VERSION below can find the most
+          # recent commit that touched cmd/agent / internal/agent / proto/agent
+          # — without it, actions/checkout does a shallow clone (depth 1) and
+          # git log only sees HEAD.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -64,12 +68,23 @@ jobs:
           VERSION=$(git rev-parse --short HEAD)
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
+          # Agent version bumps only when actual agent code changes. Using the
+          # repo-level HEAD SHA would mark every AMI build as a new agent, causing
+          # spurious in-place upgrades on every rolling replace — a known source
+          # of fragility during wake (keepalive misses during 12MB transfer poison
+          # the virtio-serial gRPC connection).
+          AGENT_VERSION=$(git log -1 --pretty=format:%h -- cmd/agent internal/agent proto/agent)
+          if [ -z "$AGENT_VERSION" ]; then
+            AGENT_VERSION=$VERSION
+          fi
+          echo "AGENT_VERSION=$AGENT_VERSION"
+
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.WorkerVersion=$VERSION -X main.AgentVersion=$VERSION" \
+            -ldflags "-X main.WorkerVersion=$VERSION -X main.AgentVersion=$AGENT_VERSION" \
             -o bin/opensandbox-worker ./cmd/worker/
 
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.Version=$VERSION" \
+            -ldflags "-X main.Version=$AGENT_VERSION" \
             -o bin/osb-agent ./cmd/agent/
 
       - name: Package rootfs context
@@ -92,6 +107,22 @@ jobs:
       - name: Packer init
         run: packer init deploy/packer/worker-ami.pkr.hcl
 
+      - name: Read previous golden-version from Key Vault
+        id: prev-golden
+        run: |
+          # Previous successful build wrote its goldenVersion here; the
+          # NEW AMI bakes that base in so customers pinned to the last
+          # golden skip a runtime blob download on first fork.
+          # `az` may inject ANSI color codes even with -o tsv, so extract
+          # just the 16-char hex hash from the output.
+          RAW=$(az keyvault secret show \
+            --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
+            --name "golden-version" \
+            --query value -o tsv 2>/dev/null || echo "")
+          PREV=$(echo "$RAW" | grep -oE '[0-9a-f]{16}' | head -1)
+          echo "prev=$PREV" >> $GITHUB_OUTPUT
+          echo "Previous golden version: ${PREV:-<none>}"
+
       - name: Build image
         run: |
           # Use run number as patch version for gallery (must be integer)
@@ -107,6 +138,7 @@ jobs:
             -var "image_version_patch=$PATCH" \
             -var "base_archive_account=${{ secrets.AZURE_STORAGE_ACCOUNT }}" \
             -var "base_archive_key=${{ secrets.AZURE_STORAGE_KEY }}" \
+            -var "prev_golden_version=${{ steps.prev-golden.outputs.prev }}" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
           # Use the gallery image ID (NVMe-compatible for v7 VMs)
@@ -144,6 +176,19 @@ jobs:
             --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
             --name "worker-image-version" \
             --value "$VERSION"
+
+          # Record this build's goldenVersion so the NEXT AMI build can
+          # retain it as "previous golden" in /opt/opensandbox/images/bases/.
+          NEW_GOLDEN=$(grep -a 'Base image golden version:' /tmp/packer-output.txt | tail -1 | awk '{print $NF}' | tr -d '\r')
+          if [ -n "$NEW_GOLDEN" ]; then
+            az keyvault secret set \
+              --vault-name "${{ secrets.AZURE_KEY_VAULT_NAME }}" \
+              --name "golden-version" \
+              --value "$NEW_GOLDEN"
+            echo "Recorded new golden-version: $NEW_GOLDEN"
+          else
+            echo "WARN: could not extract goldenVersion from packer output — next build won't retain this base"
+          fi
 
           echo "Published image ID to Key Vault"
 

@@ -532,6 +532,8 @@ func (r *RedisWorkerRegistry) GetWorkersByRegion(region string) []*WorkerInfo {
 				CPUPct:    w.CPUPct,
 				MemPct:    w.MemPct,
 				DiskPct:       w.DiskPct,
+				TotalMemoryMB:     w.TotalMemoryMB,
+				CommittedMemoryMB: w.CommittedMemoryMB,
 				GoldenVersion: w.GoldenVersion,
 				WorkerVersion: w.WorkerVersion,
 			})

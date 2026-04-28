@@ -109,6 +109,12 @@ variable "base_archive_container" {
   description = "Container name for the base archive."
 }
 
+variable "prev_golden_version" {
+  type        = string
+  default     = ""
+  description = "Previous AMI's golden version. When set, Packer downloads bases/{prev}/default.ext4 from blob storage and bakes it into the AMI at /opt/opensandbox/images/bases/{prev}/default.ext4 so forks of checkpoints pinned to the previous golden don't need a runtime blob download."
+}
+
 # ---------------------------------------------------------------------
 # Source: Ubuntu 24.04 x86_64 on Azure
 # ---------------------------------------------------------------------
@@ -180,9 +186,27 @@ build {
     script          = "deploy/azure/setup-azure-host.sh"
   }
 
-  # 4. Install binaries and build rootfs
+  # 4. Install binaries and build (or restore from cache) rootfs.
+  #
+  # Rootfs content-addressed caching:
+  #   - Compute ROOTFS_INPUT_HASH from agent binary + all rootfs source files
+  #     + guest kernel modules. Same inputs → same hash → same cached artifact
+  #     → same goldenVersion at runtime. A commit that doesn't touch any
+  #     rootfs input reuses the existing blob and produces a byte-identical
+  #     default.ext4 across AMIs, so the worker fleet stays on one golden.
+  #
+  # Deterministic ext4 build:
+  #   - ROOTFS_UUID is derived from the input hash and passed into
+  #     build-rootfs-docker.sh, which stamps it as the ext4 UUID + hash seed.
+  #     This makes mkfs.ext4 output byte-stable — the file hash matches across
+  #     workers even if the cache download races multiple AMI builds.
   provisioner "shell" {
     execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
+    environment_vars = [
+      "CACHE_ACCOUNT=${var.base_archive_account}",
+      "CACHE_KEY=${var.base_archive_key}",
+      "CACHE_CONTAINER=${var.base_archive_container}",
+    ]
     inline = [
       # Install worker and agent binaries
       "mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker",
@@ -194,11 +218,59 @@ build {
       "mkdir -p /tmp/rootfs-ctx",
       "cd /tmp/rootfs-ctx && tar xzf /tmp/rootfs-ctx.tar.gz",
 
-      # Build rootfs images (Docker was installed by setup-azure-host.sh)
-      "mkdir -p /data/firecracker/images",
-      "cd /tmp/rootfs-ctx && bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default",
+      # Compute a stable hash over all rootfs inputs. Order must be
+      # deterministic — use `sort` — so the same inputs always hash to the
+      # same value regardless of filesystem enumeration order.
+      "INPUT_HASH=$({ sha256sum /usr/local/bin/osb-agent; find /tmp/rootfs-ctx -type f | sort | xargs sha256sum; sha256sum /opt/opensandbox/guest-modules/*.ko* 2>/dev/null; } | sha256sum | awk '{print $1}')",
+      "echo \"Rootfs input hash: $INPUT_HASH\"",
+      "# Derive ext4 UUID from the hash (first 32 hex chars, dashed to UUID form).",
+      "ROOTFS_UUID=$(echo \"$INPUT_HASH\" | head -c 32 | sed 's/\\(........\\)\\(....\\)\\(....\\)\\(....\\)\\(............\\)/\\1-\\2-\\3-\\4-\\5/')",
+      "export ROOTFS_UUID",
+      "# Cache key: short hash for blob path.",
+      "INPUT_HASH_SHORT=$(echo \"$INPUT_HASH\" | cut -c1-16)",
+      "CACHE_BLOB=\"rootfs-cache/$INPUT_HASH_SHORT/default.ext4\"",
 
-      # Inject guest kernel modules into rootfs
+      "mkdir -p /data/firecracker/images",
+
+      "# Try cache download first. Fall through to fresh build on any error.",
+      "CACHE_HIT=0",
+      "if [ -n \"$CACHE_ACCOUNT\" ] && [ -n \"$CACHE_KEY\" ]; then",
+      "  echo \"Checking rootfs cache: $CACHE_BLOB\"",
+      "  CACHE_OUT=/data/firecracker/images/default.ext4",
+      "  if python3 - <<PYEOF; then CACHE_HIT=1; fi",
+      "import http.client, hashlib, hmac, base64, datetime, os, sys",
+      "account = os.environ['CACHE_ACCOUNT']",
+      "key = os.environ['CACHE_KEY']",
+      "container = os.environ['CACHE_CONTAINER']",
+      "blob = '$CACHE_BLOB'",
+      "out_path = '$CACHE_OUT'",
+      "now = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')",
+      "string_to_sign = f'GET\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\nx-ms-date:{now}\\nx-ms-version:2020-10-02\\n/{account}/{container}/{blob}'",
+      "sig = base64.b64encode(hmac.new(base64.b64decode(key), string_to_sign.encode(), hashlib.sha256).digest()).decode()",
+      "conn = http.client.HTTPSConnection(f'{account}.blob.core.windows.net')",
+      "headers = {'x-ms-date': now, 'x-ms-version': '2020-10-02', 'Authorization': f'SharedKey {account}:{sig}'}",
+      "conn.request('GET', f'/{container}/{blob}', headers=headers)",
+      "resp = conn.getresponse()",
+      "if resp.status != 200:",
+      "    print(f'cache miss: {resp.status}'); sys.exit(1)",
+      "with open(out_path, 'wb') as f:",
+      "    while True:",
+      "        chunk = resp.read(8 * 1024 * 1024)",
+      "        if not chunk: break",
+      "        f.write(chunk)",
+      "print(f'cache hit: {os.path.getsize(out_path)} bytes')",
+      "sys.exit(0)",
+      "PYEOF",
+      "fi",
+
+      "if [ \"$CACHE_HIT\" = \"1\" ]; then",
+      "  echo \"Rootfs restored from cache — skipping Docker build\"",
+      "else",
+      "  echo \"Cache miss — building rootfs from source with ROOTFS_UUID=$ROOTFS_UUID\"",
+      "  cd /tmp/rootfs-ctx && ROOTFS_UUID=\"$ROOTFS_UUID\" bash deploy/ec2/build-rootfs-docker.sh /usr/local/bin/osb-agent /data/firecracker/images default",
+      "fi",
+
+      # Inject guest kernel modules into rootfs (applies to both cached and freshly-built images)
       "GUEST_MODDIR=/opt/opensandbox/guest-modules",
       "if [ -d \"$GUEST_MODDIR\" ] && [ -f /data/firecracker/images/default.ext4 ]; then",
       "  MNTDIR=$(mktemp -d)",
@@ -208,6 +280,30 @@ build {
       "  umount $MNTDIR",
       "  rmdir $MNTDIR",
       "  echo 'Guest kernel modules injected into rootfs'",
+      "fi",
+
+      "# On cache miss, upload the freshly built ext4 to the cache for future builds.",
+      "if [ \"$CACHE_HIT\" != \"1\" ] && [ -n \"$CACHE_ACCOUNT\" ] && [ -n \"$CACHE_KEY\" ]; then",
+      "  echo \"Uploading fresh rootfs to cache: $CACHE_BLOB\"",
+      "  python3 - <<PYEOF || echo 'cache upload failed (non-fatal)'",
+      "import http.client, hashlib, hmac, base64, datetime, os, sys",
+      "account = os.environ['CACHE_ACCOUNT']",
+      "key = os.environ['CACHE_KEY']",
+      "container = os.environ['CACHE_CONTAINER']",
+      "blob = '$CACHE_BLOB'",
+      "path = '/data/firecracker/images/default.ext4'",
+      "size = os.path.getsize(path)",
+      "now = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')",
+      "string_to_sign = f'PUT\\n\\n\\n{size}\\n\\napplication/octet-stream\\n\\n\\n\\n\\n\\n\\nx-ms-blob-type:BlockBlob\\nx-ms-date:{now}\\nx-ms-version:2020-10-02\\n/{account}/{container}/{blob}'",
+      "sig = base64.b64encode(hmac.new(base64.b64decode(key), string_to_sign.encode(), hashlib.sha256).digest()).decode()",
+      "conn = http.client.HTTPSConnection(f'{account}.blob.core.windows.net')",
+      "headers = {'x-ms-blob-type': 'BlockBlob', 'x-ms-date': now, 'x-ms-version': '2020-10-02', 'Content-Length': str(size), 'Content-Type': 'application/octet-stream', 'Authorization': f'SharedKey {account}:{sig}'}",
+      "with open(path, 'rb') as f:",
+      "    conn.request('PUT', f'/{container}/{blob}', body=f, headers=headers)",
+      "    resp = conn.getresponse()",
+      "    print(f'cache upload: {resp.status} {resp.reason}')",
+      "    sys.exit(0 if resp.status < 400 else 1)",
+      "PYEOF",
       "fi",
 
       # Save rootfs to /opt (survives NVMe mount overlay on /data)
@@ -242,7 +338,9 @@ build {
       "  echo 'default.ext4 not found — skipping archival'",
       "  exit 0",
       "fi",
-      "GOLDEN_VER=$(head -c 1048576 /opt/opensandbox/images/default.ext4 | sha256sum | cut -c1-16)",
+      "# Use the worker binary's hash function so the archive key matches what",
+      "# ensureCheckpointRebased looks up at runtime.",
+      "GOLDEN_VER=$(/usr/local/bin/opensandbox-worker golden-version /opt/opensandbox/images/default.ext4)",
       "echo \"Base image golden version: $GOLDEN_VER\"",
       "python3 - <<PYEOF",
       "import http.client, hashlib, hmac, base64, datetime, os, sys",
@@ -293,6 +391,63 @@ build {
       "        print(resp.read().decode())",
       "        sys.exit(1)",
       "PYEOF",
+    ]
+  }
+
+  # 4c. Bake previous golden's default.ext4 into the AMI under
+  #     /opt/opensandbox/images/bases/{prev}/default.ext4. At first boot the
+  #     Azure custom-data script copies /opt/opensandbox/images/bases/* to
+  #     /data/firecracker/images/bases/* so forks of checkpoints pinned to
+  #     the previous golden skip the ~4 GB blob download.
+  provisioner "shell" {
+    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
+    environment_vars = [
+      "ARCHIVE_ACCOUNT=${var.base_archive_account}",
+      "ARCHIVE_KEY=${var.base_archive_key}",
+      "ARCHIVE_CONTAINER=${var.base_archive_container}",
+      "PREV_GOLDEN=${var.prev_golden_version}",
+    ]
+    inline = [
+      "if [ -z \"$PREV_GOLDEN\" ] || [ -z \"$ARCHIVE_ACCOUNT\" ] || [ -z \"$ARCHIVE_KEY\" ]; then",
+      "  echo 'No previous golden version — skipping retention'",
+      "  exit 0",
+      "fi",
+      "GOLDEN_VER=$(/usr/local/bin/opensandbox-worker golden-version /opt/opensandbox/images/default.ext4)",
+      "if [ \"$GOLDEN_VER\" = \"$PREV_GOLDEN\" ]; then",
+      "  echo 'Previous golden matches current — skipping retention (no change this build)'",
+      "  exit 0",
+      "fi",
+      "mkdir -p /opt/opensandbox/images/bases/$PREV_GOLDEN",
+      "OUT_PATH=/opt/opensandbox/images/bases/$PREV_GOLDEN/default.ext4",
+      "echo \"Downloading previous base $PREV_GOLDEN → $OUT_PATH\"",
+      "python3 - <<PYEOF",
+      "import http.client, hashlib, hmac, base64, datetime, os, sys",
+      "account = os.environ['ARCHIVE_ACCOUNT']",
+      "key = os.environ['ARCHIVE_KEY']",
+      "container = os.environ['ARCHIVE_CONTAINER']",
+      "prev = os.environ['PREV_GOLDEN']",
+      "blob = f'bases/{prev}/default.ext4'",
+      "out_path = '$OUT_PATH'",
+      "now = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')",
+      "string_to_sign = f'GET\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\nx-ms-date:{now}\\nx-ms-version:2020-10-02\\n/{account}/{container}/{blob}'",
+      "sig = base64.b64encode(hmac.new(base64.b64decode(key), string_to_sign.encode(), hashlib.sha256).digest()).decode()",
+      "conn = http.client.HTTPSConnection(f'{account}.blob.core.windows.net')",
+      "headers = {'x-ms-date': now, 'x-ms-version': '2020-10-02', 'Authorization': f'SharedKey {account}:{sig}'}",
+      "conn.request('GET', f'/{container}/{blob}', headers=headers)",
+      "resp = conn.getresponse()",
+      "if resp.status != 200:",
+      "    print(f'prev-base download failed: {resp.status} — skipping retention (non-fatal)')",
+      "    sys.exit(0)",
+      "with open(out_path, 'wb') as f:",
+      "    while True:",
+      "        chunk = resp.read(8 * 1024 * 1024)",
+      "        if not chunk: break",
+      "        f.write(chunk)",
+      "print(f'retained: {os.path.getsize(out_path)} bytes at {out_path}')",
+      "PYEOF",
+      # If download failed, clean up the empty directory to avoid shipping
+      # a stub.
+      "[ -s \"$OUT_PATH\" ] || rm -rf /opt/opensandbox/images/bases/$PREV_GOLDEN",
     ]
   }
 

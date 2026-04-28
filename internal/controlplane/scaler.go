@@ -206,9 +206,12 @@ func (s *Scaler) evaluate() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Refresh AMI from SSM every ~60s (every 2nd tick at 30s interval)
+	// Refresh AMI from SSM/KV every ~60s. Also force a refresh on the very first
+	// evaluate tick (refreshCount == 0) so targetWorkerVersion is known before
+	// any scale-down decision — prevents the rolling-replace target from being
+	// mistakenly drained when utilization is low.
 	s.refreshCount++
-	if s.refreshCount%2 == 0 {
+	if s.refreshCount == 1 || s.refreshCount%2 == 0 {
 		if refresher, ok := s.pool.(AMIRefresher); ok {
 			if _, version, err := refresher.RefreshAMI(ctx); err != nil {
 				log.Printf("scaler: AMI refresh failed: %v", err)
@@ -572,8 +575,10 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 			continue
 		}
 
-		// Find target: least-loaded worker that isn't the hot one and isn't draining
-		target := s.findMigrationTarget(region, w.ID)
+		// Find target: least-loaded worker that isn't the hot one and isn't draining.
+		// Pass 0 for requiredMemMB — evacuateBatch migrates whatever fits; individual
+		// over-size sandboxes fail their own prepare and are retried elsewhere.
+		target := s.findMigrationTarget(region, w.ID, 0)
 		if target == nil {
 			log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%) but no migration target available",
 				w.ID, w.CPUPct, w.MemPct, w.DiskPct)
@@ -590,7 +595,20 @@ func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []
 
 // findMigrationTarget returns the best worker to receive migrated sandboxes.
 // Accounts for in-flight migrations so we don't pile onto the same target.
-func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo {
+// findMigrationTarget returns the best worker to receive a migrated sandbox.
+// requiredMemMB is the real RAM the migration will land (source VM RSS);
+// workers whose actual used memory wouldn't leave that much headroom are
+// rejected. This mirrors the worker's PrepareMigrationIncoming gate exactly
+// so the scaler doesn't pick targets that will then reject the prepare.
+// Pass 0 for requiredMemMB to skip the memory check (used by pre-flight
+// "does ANY target exist" probes where we don't yet know the sandbox size).
+//
+// Scheduling on actual (not committed/configured) memory matters: a 16GB-max
+// sandbox idling at 200MB RSS consumes 200MB of real host RAM, not 16GB. If
+// we scheduled on the configured ceiling, a cluster at 50% committed would
+// need 2x the workers of one at 50% actual — expensive dead weight for an
+// idle-heavy workload like sandboxes.
+func (s *Scaler) findMigrationTarget(region, excludeWorkerID string, requiredMemMB int32) *WorkerInfo {
 	workers := s.registry.GetWorkersByRegion(region)
 
 	var best *WorkerInfo
@@ -607,6 +625,16 @@ func (s *Scaler) findMigrationTarget(region, excludeWorkerID string) *WorkerInfo
 		remaining := w.Capacity - w.Current - pending
 		if remaining <= 0 || w.CPUPct > 85 || w.MemPct > 85 || w.DiskPct > 85 {
 			continue
+		}
+		// Actual-memory check. Uses host's real used RAM (derived from MemPct)
+		// with a 10% safety margin — matches the worker's admission formula.
+		if requiredMemMB > 0 && w.TotalMemoryMB > 0 {
+			actualUsedMB := int(w.MemPct * float64(w.TotalMemoryMB) / 100)
+			reserveMB := w.TotalMemoryMB / 10
+			availableMB := w.TotalMemoryMB - actualUsedMB - reserveMB
+			if int(requiredMemMB) > availableMB {
+				continue
+			}
 		}
 		resourceScore := (100.0 - w.CPUPct) / 100.0 * (100.0 - w.MemPct) / 100.0 * (100.0 - w.DiskPct) / 100.0
 		score := float64(remaining) * resourceScore
@@ -664,8 +692,19 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 		return
 	}
 
-	// Don't scale down while a rolling replace is in progress
-	if s.targetWorkerVersion != "" {
+	// If workers report a WorkerVersion but our target version isn't known yet
+	// (first boot, before the initial AMI/KV refresh), don't scale down — we
+	// can't tell stale from current, and blindly picking the least-loaded
+	// worker will happily delete a rolling-replace target that just launched
+	// empty.
+	if s.targetWorkerVersion == "" {
+		for _, w := range workers {
+			if w.WorkerVersion != "" {
+				return
+			}
+		}
+	} else {
+		// Target version known: ensure no stale workers remain before scaling down.
 		for _, w := range workers {
 			if w.WorkerVersion != s.targetWorkerVersion && w.WorkerVersion != "" {
 				return // stale workers still exist, let rolling replace handle it
@@ -828,27 +867,78 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 		}
 		if len(running) == 0 {
 			log.Printf("scaler: drain: worker %s fully drained", workerID)
+			// Terminal sweep: a post-QMP migration failure may leave DB rows
+			// pointing at this worker even though ListSandboxes returns 0.
+			// Reconcile any leftover running/migrating rows here so the row
+			// reflects reality before the worker gets destroyed.
+			if s.store != nil {
+				sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if n, err := s.store.MarkOrphanedOnWorker(sweepCtx, workerID, "drain completed; worker reported no sandboxes"); err != nil {
+					log.Printf("scaler: drain: orphan sweep on %s failed: %v", workerID, err)
+				} else if n > 0 {
+					log.Printf("scaler: drain: orphan sweep on %s reconciled %d phantom row(s)", workerID, n)
+				}
+				sweepCancel()
+			}
 			return
 		}
 
-		// If too many migration failures, fall back to natural expiry
+		// If too many migration failures, back off and retry rather than falling
+		// into forever-wait. Drains still bound by drainTimeout (45 min). The
+		// failure cause is often transient — target worker just came up, old
+		// base only just got uploaded, a previous attempt left stale files —
+		// and a periodic reset lets us succeed once the transient clears. If
+		// migration genuinely can't complete, drainTimeout terminates the loop
+		// and the next eval tick takes over.
 		if migrationFailures >= maxMigrationFailures {
-			log.Printf("scaler: drain: %d migration failures on %s, waiting for %d sandboxes to expire naturally",
+			log.Printf("scaler: drain: %d migration failures on %s, backing off 5min before retry (%d sandboxes remaining)",
 				migrationFailures, workerID, len(running))
-			s.waitForNaturalDrain(ctx, workerID)
-			return
+			select {
+			case <-ctx.Done():
+				log.Printf("scaler: drain: timeout reached for worker %s", workerID)
+				return
+			case <-time.After(5 * time.Minute):
+			}
+			migrationFailures = 0
+			continue
 		}
 
-		// Find target for this batch
-		target := s.findMigrationTarget(region, workerID)
-		if target == nil {
-			log.Printf("scaler: drain: no migration target for %s (%d sandboxes), waiting for natural expiry", workerID, len(running))
+		// Pre-flight: is there ANY viable target in the region? We don't yet
+		// know the sandbox memory sizes (those come from PreCopyDrives inside
+		// liveMigrateSandbox), so pass 0 — this just confirms a non-draining
+		// worker exists with slot capacity. Per-sandbox memory fit is checked
+		// later by liveMigrateSandbox using the real sandbox size.
+		//
+		// If no target exists and we're under maxWorkers, proactively scale
+		// up. This covers the case where committed memory is saturated on
+		// every existing target but actual CPU/RAM usage is low, so the
+		// utilization-based scale-up path in Evaluate() won't trigger.
+		if probe := s.findMigrationTarget(region, workerID, 0); probe == nil {
+			effective := 0
+			for _, w := range s.registry.GetWorkersByRegion(region) {
+				if !s.state.IsDraining(w.MachineID) {
+					effective++
+				}
+			}
+			pending := len(s.state.GetPendingLaunches(region))
+			if effective+pending < s.maxWorkers {
+				log.Printf("scaler: drain: no migration target for %s (%d sandboxes), triggering scale-up", workerID, len(running))
+				s.scaleUp(ctx, region)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(60 * time.Second):
+				}
+				continue
+			}
+			log.Printf("scaler: drain: no migration target for %s (%d sandboxes) and at max workers (%d), waiting for natural expiry", workerID, len(running), s.maxWorkers)
 			s.waitForNaturalDrain(ctx, workerID)
 			return
 		}
 
 		// Migrate a batch — bounded parallelism to avoid overwhelming
-		// network/disk on source and target workers.
+		// network/disk on source and target workers. Each sandbox picks its
+		// own target (based on its own memory footprint) inside liveMigrateSandbox.
 		batch := running
 		if len(batch) > evacuationBatchSize {
 			batch = batch[:evacuationBatchSize]
@@ -861,8 +951,8 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 			wg.Add(1)
 			go func(sbID string) {
 				defer wg.Done()
-				if err := s.liveMigrateSandbox(ctx, sbID, workerID, target.ID); err != nil {
-					log.Printf("scaler: drain: migrate %s to %s failed: %v", sbID, target.ID, err)
+				if err := s.liveMigrateSandbox(ctx, sbID, workerID, ""); err != nil {
+					log.Printf("scaler: drain: migrate %s failed: %v", sbID, err)
 					atomic.AddInt64(&failCount, 1)
 				}
 			}(sandboxID)
@@ -1051,6 +1141,12 @@ func (s *Scaler) getWorkerInfo(workerID string) *WorkerInfo {
 
 // liveMigrateSandbox performs a full live migration of a sandbox between workers.
 // Steps: pre-copy drives to S3 → prepare target → QMP migrate → complete → update DB.
+//
+// If targetWorkerID is empty, a target is picked after pre-copy using the
+// sandbox's actual memory footprint (so an oversize sandbox doesn't get
+// routed to a worker that can only reserve 4GB). Callers that need to force
+// a specific destination (e.g. evacuateBatch, which uses a pre-scored
+// target for the whole batch) pass it explicitly.
 func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorkerID, targetWorkerID string) error {
 	// Prevent double-migrate
 	if !s.state.AcquireMigrationLock(sandboxID) {
@@ -1058,36 +1154,17 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	}
 	defer s.state.ReleaseMigrationLock(sandboxID)
 
-	// Mark sandbox as migrating in DB — blocks exec routing during migration
-	migrationCompleted := false
-	if s.store != nil {
-		if err := s.store.SetMigrating(ctx, sandboxID, targetWorkerID); err != nil {
-			log.Printf("scaler: failed to set migrating state for %s: %v", sandboxID, err)
-		}
-		defer func() {
-			if !migrationCompleted && s.store != nil {
-				s.store.FailMigration(ctx, sandboxID)
-			}
-		}()
-	}
-
-	// Track in-flight migration to target so other evacuations don't pile on
-	s.state.IncrInFlight(targetWorkerID)
-	defer s.state.DecrInFlight(targetWorkerID)
-
 	sourceClient, err := s.registry.GetWorkerClient(sourceWorkerID)
 	if err != nil {
 		return fmt.Errorf("source worker %s unreachable: %w", sourceWorkerID, err)
-	}
-	targetClient, err := s.registry.GetWorkerClient(targetWorkerID)
-	if err != nil {
-		return fmt.Errorf("target worker %s unreachable: %w", targetWorkerID, err)
 	}
 
 	t0 := time.Now()
 
 	// Step 1: Pre-copy drives to S3 (source uploads thin overlay — never flattens).
 	// Target worker rebases to its own base if golden versions differ.
+	// Pre-copy before target selection — we need BaseMemoryMb from the
+	// response to pick a target that can actually reserve that much.
 	preCopyCtx, preCopyCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer preCopyCancel()
 	preCopyResp, err := sourceClient.PreCopyDrives(preCopyCtx, &pb.PreCopyDrivesRequest{
@@ -1140,6 +1217,73 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		}
 	}
 
+	// Real RAM the migration will land on the target = source VM's current
+	// RSS (reported by PreCopyDrives). Fall back to the configured base
+	// memory if the source is an older worker that doesn't report RSS.
+	// Final safety floor: 256MB (QEMU overhead alone).
+	actualMemMB := preCopyResp.ActualMemoryMb
+	if actualMemMB == 0 {
+		actualMemMB = memoryMB
+	}
+	if actualMemMB < 256 {
+		actualMemMB = 256
+	}
+
+	// Target selection: if caller didn't pre-pick, find a worker with enough
+	// actual-memory headroom for this sandbox's real footprint. Must happen
+	// after PreCopyDrives so we know the RSS.
+	if targetWorkerID == "" {
+		srcInfo := s.getWorkerInfo(sourceWorkerID)
+		if srcInfo == nil {
+			return fmt.Errorf("source worker %s not in registry", sourceWorkerID)
+		}
+		target := s.findMigrationTarget(srcInfo.Region, sourceWorkerID, actualMemMB)
+		if target == nil {
+			return fmt.Errorf("no viable migration target in %s for %dMB actual-RSS sandbox", srcInfo.Region, actualMemMB)
+		}
+		targetWorkerID = target.ID
+	}
+
+	targetClient, err := s.registry.GetWorkerClient(targetWorkerID)
+	if err != nil {
+		return fmt.Errorf("target worker %s unreachable: %w", targetWorkerID, err)
+	}
+
+	// Mark sandbox as migrating in DB — blocks exec routing during migration.
+	// Must happen after target selection because the DB row records the
+	// destination worker.
+	migrationCompleted := false
+	qmpSucceeded := false
+	if s.store != nil {
+		if err := s.store.SetMigrating(ctx, sandboxID, targetWorkerID); err != nil {
+			log.Printf("scaler: failed to set migrating state for %s: %v", sandboxID, err)
+		}
+		defer func() {
+			if migrationCompleted || s.store == nil {
+				return
+			}
+			// Recovery path depends on which phase failed:
+			//   - Pre-QMP: source still has the VM. Revert to running on source.
+			//   - Post-QMP: source's QEMU has shut down (state migrated). Reverting to
+			//     running on source produces a phantom — DB says running, source has
+			//     no QEMU, drain's ListSandboxes returns 0 and exits cleanly leaving
+			//     the row stuck. Mark error instead so the sandbox is visibly broken.
+			if qmpSucceeded {
+				if err := s.store.FailMigrationPostQMP(ctx, sandboxID, "migration failed after QMP transfer; source VM gone, target failed to complete"); err != nil {
+					log.Printf("scaler: migrate %s: FailMigrationPostQMP failed: %v", sandboxID, err)
+				}
+			} else {
+				if err := s.store.FailMigration(ctx, sandboxID); err != nil {
+					log.Printf("scaler: migrate %s: FailMigration failed: %v", sandboxID, err)
+				}
+			}
+		}()
+	}
+
+	// Track in-flight migration to target so other evacuations don't pile on.
+	s.state.IncrInFlight(targetWorkerID)
+	defer s.state.DecrInFlight(targetWorkerID)
+
 	prepCtx, prepCancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer prepCancel()
 	prepResp, err := targetClient.PrepareMigrationIncoming(prepCtx, &pb.PrepareMigrationIncomingRequest{
@@ -1152,7 +1296,7 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
 		OverlayMode:         true,
 		SourceGoldenVersion: sourceGoldenVersion,
-		TargetMemoryMb:      4096,
+		TargetMemoryMb:      actualMemMB,
 	})
 	if err != nil {
 		return fmt.Errorf("prepare target: %w", err)
@@ -1170,11 +1314,20 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	if err != nil {
 		return fmt.Errorf("live migrate: %w", err)
 	}
+	// QMP transfer done — source has shut down its VM. Any failure from here
+	// must mark the sandbox as error rather than reverting to "running on source"
+	// (the source's QEMU is gone; reverting would produce a phantom).
+	qmpSucceeded = true
 
 	log.Printf("scaler: migrate %s: QMP migration complete (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
-	// Step 4: Complete on target (reconnect agent, patch network)
-	completeCtx, completeCancel := context.WithTimeout(ctx, 30*time.Second)
+	// Step 4: Complete on target (reconnect agent, patch network).
+	// Agent socket reconnect is bounded to 10s and patchGuestNetwork runs
+	// several guest-side exec commands that can be slow on a freshly resumed
+	// VM (especially post-rebase). 30s was too tight — a 3min window is
+	// generous but still bounded so we eventually fail loud if something is
+	// truly stuck.
+	completeCtx, completeCancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer completeCancel()
 	_, err = targetClient.CompleteMigrationIncoming(completeCtx, &pb.CompleteMigrationIncomingRequest{
 		SandboxId: sandboxID,
