@@ -1,0 +1,1 @@
+ALTER TABLE orgs DROP COLUMN IF EXISTS billing_mode;

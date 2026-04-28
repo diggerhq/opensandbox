@@ -233,14 +233,19 @@ func (s *Store) UpdateLastUsageReportedAt(ctx context.Context, orgID uuid.UUID, 
 	return err
 }
 
-// ListBillableOrgIDs returns org IDs with plan="pro" that have unreported usage:
-// either a currently-running sandbox or a scale event that ended after the last report.
+// ListBillableOrgIDs returns org IDs with plan="pro" AND
+// billing_mode='legacy' that have unreported usage: either a
+// currently-running sandbox or a scale event that ended after the last
+// report. Orgs in billing_mode='unified' are shipped via the phase-3
+// `BillableEventsSender` reading from `billable_events`, so they must
+// be skipped here to prevent double-billing.
 func (s *Store) ListBillableOrgIDs(ctx context.Context) ([]uuid.UUID, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT se.org_id
 		 FROM sandbox_scale_events se
 		 JOIN orgs o ON o.id = se.org_id
 		 WHERE o.plan = 'pro'
+		   AND o.billing_mode = 'legacy'
 		   AND (se.ended_at IS NULL OR se.ended_at > o.last_usage_reported_at)`)
 	if err != nil {
 		return nil, err

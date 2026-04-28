@@ -124,6 +124,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{31, "migrations/028_capacity_idempotency_keys.up.sql"},
 		{32, "migrations/029_orgs_max_memory_gb.up.sql"},
 		{33, "migrations/030_billable_events.up.sql"},
+		{34, "migrations/031_orgs_billing_mode.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -194,6 +195,13 @@ type Org struct {
 	StripeSubscriptionID *string    `json:"stripeSubscriptionId,omitempty"`
 	LastUsageReportedAt  time.Time  `json:"lastUsageReportedAt"`
 	PriceLocked          bool       `json:"priceLocked"`
+
+	// Per-org billing pipeline selector. 'legacy' = UsageReporter ships
+	// to Stripe; 'unified' = the phase-3 sender ships from
+	// billable_events. Both paths produce the same dollar amounts via
+	// today's tiered rates — the column controls *how* events are
+	// emitted, not what the customer pays.
+	BillingMode string `json:"billingMode"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
@@ -202,7 +210,7 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
 	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked,
-	free_credits_remaining_cents`
+	free_credits_remaining_cents, billing_mode`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -215,7 +223,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
 		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
 		&org.PriceLocked,
-		&org.FreeCreditsRemainingCents,
+		&org.FreeCreditsRemainingCents, &org.BillingMode,
 	)
 	return org, err
 }
