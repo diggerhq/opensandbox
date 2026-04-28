@@ -1,6 +1,6 @@
 ---
 title: "Usage and Overage"
-description: "How reserved capacity is consumed, how overage is calculated, and why a flat ceiling at every instant is the entire model"
+description: "How reserved capacity is consumed and how overage is calculated"
 ---
 
 <Info>
@@ -8,285 +8,130 @@ description: "How reserved capacity is consumed, how overage is calculated, and 
   may change before launch.
 </Info>
 
-This page explains exactly how your bill is computed when you have reserved
-capacity. Read it once carefully — there are very few surprises, but the
-ones that exist are worth understanding before you commit dollars.
+## Every second is its own settlement
 
-## The one rule
+Reserved capacity is billed and settled per second. Not per minute, not per
+interval, not against a GB-second budget. At each second `t` within an
+interval:
 
-> **At every instant within an interval, your reserved capacity acts as a
-> flat ceiling. Memory at or below the ceiling is covered by your
-> reservation. Memory above the ceiling is overage.**
+- if `usage(t) ≤ reservedGb`: that second's memory is covered by your
+  reservation and billed at the reserved rate
+- if `usage(t) > reservedGb`: the part above the ceiling is overage, billed
+  at the on-demand rate
 
-That's the entire model. Everything else on this page is restating, working
-through examples, and pointing out the edge cases.
-
-## Said three ways
-
-Three different framings of the same rule. Pick whichever clicks for you.
-
-**Framing 1 — Ceiling.** Imagine a horizontal line drawn at your
-`reservedGb` level on a chart of your concurrent memory over time. Anything
-the chart pokes above that line is overage; anything below is covered.
-
-**Framing 2 — Per-second.** At every second `t` within an interval:
-- if `usage(t) ≤ reservedGb`: that second is covered by your reservation
-- if `usage(t) > reservedGb`: the difference contributes to overage for
-  that second
-
-**Framing 3 — Formula.** For each 15-minute interval, per `(org, resource)`:
+Per 15-minute interval, per `(org, resource)`:
 
 ```text
-reservedBilled  =  reservedGb × 900 sec                    (full commitment)
-overageBilled   =  ∑_t  max(usage(t) − reservedGb, 0)       (per-second integration)
+reservedBilled  =  reservedGb × 900 sec                 (the commitment, regardless of usage)
+overageBilled   =  ∑_t  max(usage(t) − reservedGb, 0)    (per-second integration)
 ```
 
-## Visualizing it
+Two charges, computed independently:
 
-Below is your concurrent memory across one 15-minute interval, with a
-reservation of `16 GB`. The dashed line is the reserved-capacity ceiling.
-Everything above the dashed line is overage; everything below it is
-covered by your reservation.
+- **Reserved**: a flat `reservedGb × 900` GB-seconds, billed every interval
+  at the reserved rate, whether you used it or not. That's the commitment.
+- **Overage**: whatever exceeded the reserved ceiling at any instant,
+  summed second by second, billed at the on-demand rate.
 
-```text
-  GB
-  30 │             ┌─────┐                   ← spike: 30 GB for ~60s
-     │             │ XXX │
-  25 │             │ XXX │
-     │             │ XXX │                   ← X = overage
-  20 │             │ XXX │
-     │             │ XXX │
-  16 ╞═════════════╪═════╪═══════════════════ reserved ceiling = 16 GB
-     │             │ RRR │                   ← R = covered by reservation
-  10 │ ┌───────────┘ RRR │
-     │ │ R R R R R R RRR │
-   8 │ │ R R R R R R RRR │
-     │ │ R R R R R R RRR │
-   0 │─┴─R─R─R─R─R─R─RRR─┴──────────────────  (zero usage at the end)
-       02:00           02:11             02:15
-       │                │   │            │
-       │                │   60s spike    │
-       │                │                │
-       └──── 600s @ 8 GB ───┘  └─ 240s @ 0 GB ─┘
-```
+There is no draw-down, no carry-forward, no averaging. The ceiling is
+re-checked every second.
 
-Reading the chart:
-- For 600 seconds, usage = 8 GB, all below the ceiling — fully covered.
-- For 60 seconds, usage = 30 GB. The first 16 GB is covered (R); the
-  remaining 14 GB is overage (X).
-- For 240 seconds, usage = 0 — nothing happens.
+## A worked example
 
-The exact GB-second numbers are below.
+You reserve 16 GB for `02:00–02:15`. Your sandboxes use:
 
-## A complete worked example
-
-You reserve `16 GB` for the interval `02:00–02:15` (900 seconds). During
-the interval your sandboxes use:
-
-| Phase | Duration | Concurrent memory |
+| Phase | Duration | Memory |
 | ---: | ---: | ---: |
 | 1 | 600 s | 8 GB |
 | 2 | 60 s | 30 GB |
 | 3 | 240 s | 0 GB |
 
-### Step 1 — split each phase into reserved vs overage
+Each second is settled against the 16 GB ceiling:
 
-For each phase, apply the rule "min for reserved, max-minus-reserved for
-overage."
+| Phase | Reserved per s | Overage per s | Reserved GB·s | Overage GB·s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 8 | 0 | 4 800 | 0 |
+| 2 | 16 | 14 | 960 | **840** |
+| 3 | 0 | 0 | 0 | 0 |
 
-| Phase | Memory | Reserved component (per second) | Overage component (per second) |
-| ---: | ---: | --- | --- |
-| 1 | 8 GB | `min(8, 16) = 8 GB`  | `max(8 − 16, 0) = 0 GB`  |
-| 2 | 30 GB | `min(30, 16) = 16 GB` | `max(30 − 16, 0) = 14 GB` |
-| 3 | 0 GB | `min(0, 16) = 0 GB`  | `max(0 − 16, 0) = 0 GB`  |
-
-### Step 2 — multiply by duration to get GB-seconds
-
-| Phase | Reserved (GB · s) | Overage (GB · s) |
-| ---: | ---: | ---: |
-| 1 | 8 × 600 = **4 800** | 0 × 600 = **0** |
-| 2 | 16 × 60 = **960** | 14 × 60 = **840** |
-| 3 | 0 × 240 = **0** | 0 × 240 = **0** |
-| **Sum** | **5 760 GB-s actual reserved consumption** | **840 GB-s overage** |
-
-Notice: of the 14 400 GB-seconds you reserved (16 × 900), you actually
-*used* 5 760 GB-seconds of it. The remaining 8 640 GB-seconds went unused.
-
-### Step 3 — bill the commitment, not the consumption
-
-Here's the critical point. Reserved capacity is billed in full,
-regardless of how much of it you actually consumed. Your overage is
-billed separately.
+Bill for the interval:
 
 | Charge | GB-seconds | Rate |
 | --- | ---: | --- |
-| Reserved (commitment, always full) | 16 × 900 = **14 400** | reserved-tier rate |
-| Overage (per-second spike) | **840** | overage-tier rate |
+| Reserved (commitment) | 14 400 | reserved |
+| Overage | 840 | on-demand |
 
-You pay for the **full 14 400 GB-seconds** at the reserved rate, plus
-**840 GB-seconds** at the overage rate. The 8 640 unused GB-seconds are
-still billed — that's what "commitment" means.
+You pay the full 14 400 GB-seconds (`16 × 900`) for the reservation
+regardless of consumption. The 60-second spike to 30 GB produced 840
+GB-seconds of overage on top, calculated second by second.
 
-## Three more examples to nail it down
+## Three contrasting cases
 
-The model deserves repetition.
+**Usage stays below the ceiling.** Reserve 16 GB, run 4 GB throughout.
+Reserved = 14 400 GB·s (commitment, paid in full). Overage = 0. The unused
+capacity is the cost of optionality you gave up.
 
-### Example A — usage stays below reserved the whole time
+**Usage stays above the ceiling.** Reserve 16 GB, run 24 GB throughout.
+Reserved = 14 400 GB·s. Overage = `8 × 900 = 7 200` GB·s.
 
-You reserve 16 GB, average usage is 4 GB the whole interval.
+**Usage averages below the ceiling but spikes above.** Reserve 16 GB, run
+4 GB for 800 s then 25 GB for 100 s. Average is 6.8 GB — under
+reservation. The 100 s above the ceiling still produces `9 × 100 = 900`
+GB·s of overage. The ceiling is checked every second; averages are
+irrelevant.
 
-| | Reserved (GB · s) | Overage (GB · s) |
-| --- | ---: | ---: |
-| Per second | min(4, 16) = 4 | max(4 − 16, 0) = 0 |
-| Over 900 s | 3 600 actual consumption | **0 overage** |
-
-Bill:
-- Reserved (commitment): **16 × 900 = 14 400 GB-s** at reserved rate.
-- Overage: **0**.
-
-You paid for 14 400 GB-seconds of reservation. You only used 3 600. No
-overage because you stayed below the ceiling. The unused 10 800 is the
-cost of the commitment.
-
-### Example B — usage stays above reserved the whole time
-
-You reserve 16 GB, sandbox runs at 24 GB the whole interval.
-
-| | Reserved (GB · s) | Overage (GB · s) |
-| --- | ---: | ---: |
-| Per second | min(24, 16) = 16 | max(24 − 16, 0) = 8 |
-| Over 900 s | 14 400 covered | **7 200 overage** |
-
-Bill:
-- Reserved (commitment): **14 400 GB-s** at reserved rate.
-- Overage: **7 200 GB-s** at overage rate.
-
-The reservation absorbed 16 GB at every instant. The 8 GB above the
-ceiling at every instant became overage. You ran 24 × 900 = 21 600 GB-s
-of compute total; 14 400 is covered, 7 200 is overage.
-
-### Example C — usage averages below reserved but briefly spikes above
-
-You reserve 16 GB. Usage is 4 GB for 800 seconds, then 25 GB for 100
-seconds.
-
-| Phase | Memory | Reserved per second | Overage per second |
-| ---: | ---: | ---: | ---: |
-| 800 s | 4 GB | 4 | 0 |
-| 100 s | 25 GB | 16 | 9 |
-
-Aggregated:
-
-| | Reserved (GB · s) | Overage (GB · s) |
-| ---: | ---: | ---: |
-| First 800 s | 3 200 | 0 |
-| Last 100 s | 1 600 | **900** |
-| **Sum** | **4 800 actual consumption** | **900 overage** |
-
-Bill:
-- Reserved (commitment): **14 400 GB-s** at reserved rate.
-- Overage: **900 GB-s** at overage rate.
-
-**This is the crucial counterintuitive case.** Your average usage was
-`(4 × 800 + 25 × 100) / 900 ≈ 6.8 GB` — well under your 16 GB reservation.
-You might think "I didn't use up my reservation, so there should be no
-overage." That's wrong.
-
-The reservation is a flat ceiling **at every instant**, not a budget
-averaged over the interval. The 100-second spike above the ceiling
-produces 900 GB-seconds of overage during those 100 seconds, regardless
-of what happened in the other 800 seconds.
-
-If this matters to you, the lever is to reserve enough to cover your
-peaks, not your average.
-
-## The two charges are independent
-
-It bears emphasizing again because it's where most confusion comes from.
+## Reservation and overage are independent
 
 | Question | Answer |
 | --- | --- |
-| Does my reservation amount affect my reserved bill? | Yes. Reserved bill = `reservedGb × 900` per interval, always. |
-| Does my actual usage affect my reserved bill? | **No.** You pay the full reservation regardless. |
-| Does my reservation amount affect my overage bill? | Yes. Higher reserved ceiling = less spike sticking out above it = less overage. |
-| Does my actual usage affect my overage bill? | Yes. Overage = sum of seconds where usage exceeded the ceiling. |
-| If I use less than my reservation, do I get a credit? | **No.** Unused reserved capacity is the cost of commitment. |
-| If I use exactly my reservation, do I pay overage? | No. At every instant, usage is at-or-below the ceiling. |
+| Does the reservation amount affect the reserved bill? | Yes. Reserved bill = `reservedGb × 900` per interval, always. |
+| Does actual usage affect the reserved bill? | No. The commitment is paid in full regardless. |
+| Does the reservation amount affect the overage bill? | Yes. Higher ceiling → less excess at each instant → less overage. |
+| Does actual usage affect the overage bill? | Yes. Sum of seconds where usage exceeded the ceiling. |
+| Do I get a credit for unused reserved capacity? | No. Unused reserved is the cost of commitment. |
 
-The reserved charge is the price of optionality you gave up. The overage
-charge is the price of optionality you kept (the spikes above your
-ceiling).
+## Common confusions
 
-## Common misconceptions, explicitly addressed
+> **"I'll only get overage when my total usage exceeds the GB-second budget."**
 
-We're going to walk through phrases you might think to yourself or hear
-from a teammate. For each, the answer.
+There is no GB-second budget. Every second is settled independently
+against the ceiling.
 
-> **"I have 16 GB reserved. I'll only get charged overage if my total
-> usage in this interval exceeds 16 × 900 = 14 400 GB-seconds."**
+> **"I averaged less than my reservation, so there can't be overage."**
 
-No. Reserved capacity is not a GB-second budget. It is a flat ceiling at
-every instant. A 60-second spike to 30 GB produces overage during those
-60 seconds, even if your average is below the ceiling.
+Wrong if you ever exceeded the ceiling. Averaging is never applied.
 
-> **"I averaged 8 GB across the interval, my reservation is 16 GB, so
-> there can't be any overage."**
+> **"I didn't use my reservation; I shouldn't pay for it."**
 
-Wrong if you ever spiked above 16 GB. The averaging argument doesn't
-apply — every second is settled independently against the ceiling.
+You pay for it because reserving means committing unconditionally. The
+reserved rate is lower precisely because of that.
 
-> **"I never used my reservation; surely I shouldn't pay for it."**
+> **"My reservation should auto-cover spikes."**
 
-You pay for it because that's what reserving means. The discount on the
-reserved rate exists *because* you committed unconditionally. If
-unused-but-paid behavior bothers you, reserve less and let on-demand
-absorb the variability.
+It doesn't. Spikes above the ceiling are overage. To cover spikes,
+reserve a higher amount.
 
-> **"My reservation should auto-resize to cover spikes."**
-
-It doesn't. The reservation is whatever you committed to. Spikes above
-the ceiling become overage. If you want spikes covered, reserve a higher
-amount.
-
-> **"If I cancel a sandbox in the middle of the interval, my unused
-> reservation should roll over to the next interval."**
-
-It doesn't. Reservations are per-interval; unused capacity in one
-interval doesn't flow to the next.
-
-> **"Reserved capacity makes the platform run my sandboxes faster /
-> guarantee they start."**
-
-Reserved capacity doesn't change runtime behavior. It guarantees the
-platform has set aside capacity for you in that interval, so you won't
-be admission-blocked. The sandboxes themselves run the same way.
-
-## Edge cases at a glance
+## Edge cases
 
 | Case | Behavior |
 | --- | --- |
-| You hold reservations but run nothing | Reserved capacity billed in full (commitment). No overage. |
-| You run workloads but have no reservations | `reservedGb = 0`, so the ceiling is at zero. **Every second of usage is overage.** Same as today's pure on-demand bill. |
-| You hold reservations in one interval and run in a different one | No carryover. Allocation is strictly per interval. |
-| You run multiple sandboxes whose memory sums above your reservation | Their concurrent memory is summed, then the ceiling rule applies. No per-sandbox attribution — the platform doesn't decide which sandbox is "the reserved one." |
-| Your reservation matches your spike but not your average | You pay the full reservation (committed at the spike size); spikes are covered; below-spike time is below the ceiling and consumed at the reserved rate. Sometimes the right shape — covers worst-case at the lower rate. |
-| A sandbox crashes mid-interval | Memory drops as soon as the scale event closes. The per-second integration sees the new lower memory immediately for subsequent seconds. |
-| You make a reservation mid-interval | Not possible — reservations must be made before the interval starts (`earliestReservableStart` enforces a lead time). The interval you're already in is on-demand only. |
+| You hold a reservation but run nothing | Reserved billed in full. No overage. |
+| You run workloads but have no reservation | Ceiling is at zero. Every second of usage is overage. |
+| You hold a reservation in one interval but run in another | No carryover. Allocation is per interval. |
+| Multiple sandboxes' memory sums above the ceiling | Concurrent memory is summed before the ceiling is applied. No per-sandbox attribution. |
+| A sandbox crashes mid-interval | Memory drops as soon as the scale event closes; subsequent seconds see the lower number. |
+| You try to reserve for an interval you're already in | Rejected — reservations require lead time (`earliestReservableStart`). |
 
-## Why per-second instead of aggregate?
+## Why per-second
 
-It's simpler and matches the "capacity available" intuition.
+A GB-second budget would let arbitrary spikes ride for free as long as
+quiet time balanced them out. That's burstable behavior, not
+committed-capacity behavior, and it creates incentives for adversarial
+spike patterns.
 
-If we used a GB-second budget — "you have 14 400 GB-seconds budgeted
-for this interval, you only pay overage when you exceed that total" —
-then a brief spike of arbitrary magnitude could be free as long as it's
-balanced by quiet time. That makes reservations behave like burstable
-budgets, which is harder to reason about and creates incentives for
-adversarial spike patterns.
-
-Per-second settlement is honest: at every moment, your committed
-capacity is what you committed to. Above it is overage. Below it is
-covered. No gaming, no averaging, no edge cases.
+Per-second settlement matches what the reservation actually is: at every
+moment, the ceiling is what you committed to. Above it is overage. Below
+it is covered.
 
 ## Where to go next
 
@@ -296,8 +141,5 @@ covered. No gaming, no averaging, no edge cases.
   </Card>
   <Card title="Reading the calendar" icon="calendar" href="/reserved-capacity/calendar">
     Plan capacity you'll actually use.
-  </Card>
-  <Card title="Sandboxes overview" icon="cube" href="/sandboxes/overview">
-    How sandbox memory tiers work today.
   </Card>
 </CardGroup>
