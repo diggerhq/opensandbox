@@ -102,8 +102,8 @@ POST /api/capacity/reservations  capacityGb: 80   → applied
 ### Plan then write, lost race
 
 ```text
-GET  /api/capacity/calendar                       → reservableGb: 50
-POST /api/capacity/reservations  capacityGb: 80   → rejected with reservableGb: 30
+GET  /api/capacity/calendar                       → reservableGb: 48
+POST /api/capacity/reservations  capacityGb: 80   → rejected with reservableGb: 28
 ```
 
 On rejection, read the calendar again and either:

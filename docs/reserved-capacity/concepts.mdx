@@ -48,7 +48,9 @@ entries, not a single range:
 
 A commitment event. Each `POST /api/capacity/reservations` creates one
 reservation: a server-generated UUID, a `createdAt` timestamp, and one or
-more `(interval, capacityGb)` line items.
+more `(interval, capacityGb)` line items. `capacityGb` must be a positive
+multiple of 4 (= 1 GB-hour over the 15-minute interval); single-GB
+reservations aren't accepted.
 
 ```json
 {

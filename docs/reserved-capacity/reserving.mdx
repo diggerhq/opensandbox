@@ -55,7 +55,7 @@ Response (success):
 | --- | --- |
 | `startsAt` and `endsAt` UTC and 15-minute aligned | Reject misaligned. |
 | `endsAt == startsAt + 15 minutes` | Reject longer spans; enumerate intervals. |
-| `capacityGb` positive integer | Reject zero, negative, or fractional. |
+| `capacityGb` is a positive multiple of 4 | Reject anything else. The grain is 1 GB-hour (= 4 GB × 15 min). |
 | `startsAt >= earliestReservableStart` | Reject intervals too soon. |
 | Requested capacity fits current `reservableGb` | Reject instead of overbooking. |
 | `Idempotency-Key` stable on retry | Replaying same key + body returns original result. |
@@ -69,7 +69,7 @@ Response (success):
     {
       "startsAt": "2026-04-29T02:00:00Z",
       "requestedGb": 80,
-      "reservableGb": 30,
+      "reservableGb": 28,
       "reason": "insufficient_capacity"
     }
   ]
@@ -85,6 +85,7 @@ with adjusted numbers in a single round-trip.
 | `reservation_limit_exceeded` | Would exceed your org's `max_memory_gb` for the interval. |
 | `too_soon` | `startsAt` is before `earliestReservableStart`. |
 | `misaligned` | `startsAt`/`endsAt` not on the 15-minute grid. |
+| `capacity_grain` | `capacityGb` is not a positive multiple of 4. |
 
 ## Idempotency
 

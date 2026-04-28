@@ -25,16 +25,18 @@ risk reserved capacity exists to remove.
 The hedge is to **book conservatively**: reserve only what you're confident
 you'll run, and let on-demand absorb everything else.
 
-## The unit is 1 GB for 15 UTC minutes
+## The unit is 1 GB-hour
 
 Reservations are made against 15-minute UTC intervals on the quarter-hour
-grid: `:00`, `:15`, `:30`, `:45`. Within each interval, you commit an
-integer number of GB. A two-hour reservation of 16 GB is 8 intervals × 16 GB.
+grid: `:00`, `:15`, `:30`, `:45`. Within each interval, the minimum
+commitment is **4 GB for 15 minutes — that is, 1 GB-hour.** All
+reservations must be multiples of 4 GB per interval; anything smaller
+isn't a meaningful commitment unit and the API rejects it.
 
-The 15-minute grain is deliberate. Reserve the slots you'll actually run
-in — you aren't pushed into a long contiguous block and asked to pay for
-the troughs in between. A nightly batch reserves the eight intervals it
-occupies; a weekday workload reserves working hours and skips evenings
+The 15-minute time grain is deliberate. Reserve the slots you'll actually
+run in — you aren't pushed into a long contiguous block and asked to pay
+for the troughs in between. A nightly batch reserves the eight intervals
+it occupies; a weekday workload reserves working hours and skips evenings
 and weekends. The reserved rate applies whatever shape your demand takes.
 
 You don't book individual blocks or get block IDs back. You just tell the
@@ -90,7 +92,7 @@ that interval falls back to on-demand rates.
 | Availability | Subject to platform headroom | Guaranteed for the interval you booked |
 | Best for | Unpredictable or bursty workloads | Nightly batch jobs, scheduled runs, known traffic patterns |
 
-If you already know you'll run 50 GB of agents at 3am every night, reserve
+If you already know you'll run 48 GB of agents at 3am every night, reserve
 the day before, get the lower rate, get the guarantee. If your workload is
 "whatever users ask for," stay on-demand. And because the granularity is
 15 minutes, you can be precise — reserve the peaks, leave the troughs to
