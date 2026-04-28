@@ -597,12 +597,42 @@ func (s *Store) CompleteMigration(ctx context.Context, sandboxID, newWorkerID st
 }
 
 // FailMigration reverts a sandbox to running on its original worker after a failed migration.
+// Only safe before QMP transfer succeeds — after QMP, the source has lost the VM and reverting
+// to "running on source" produces a phantom (DB says running, source has no QEMU). Use
+// FailMigrationPostQMP in that case.
 func (s *Store) FailMigration(ctx context.Context, sandboxID string) error {
 	_, err := s.pool.Exec(ctx,
 		`UPDATE sandbox_sessions SET status = 'running', migrating_to_worker = ''
 		 WHERE sandbox_id = $1 AND status = 'migrating'`,
 		sandboxID)
 	return err
+}
+
+// FailMigrationPostQMP marks a sandbox as error after QMP transfer succeeded but the migration
+// failed to complete (typically agent-connect on target). After QMP, the source has shut down
+// its QEMU, so neither side has a healthy VM. Marking error (rather than reverting to running)
+// stops drainWorker from believing the sandbox is still alive on the source.
+func (s *Store) FailMigrationPostQMP(ctx context.Context, sandboxID, errorMsg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'error', migrating_to_worker = '', stopped_at = now(), error_msg = $2
+		 WHERE sandbox_id = $1 AND status = 'migrating'`,
+		sandboxID, errorMsg)
+	return err
+}
+
+// MarkOrphanedOnWorker marks any still-running/migrating sandboxes pointing at the given worker
+// as error. Called when drain finishes to sweep up rows the per-sandbox migration failure paths
+// missed — e.g. a sandbox that vanished from the worker (failed migration cleanup) but whose DB
+// row still references the worker.
+func (s *Store) MarkOrphanedOnWorker(ctx context.Context, workerID, errorMsg string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET status = 'error', migrating_to_worker = '', stopped_at = now(), error_msg = $2
+		 WHERE worker_id = $1 AND status IN ('running', 'migrating')`,
+		workerID, errorMsg)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // RecoverStaleMigrations resets any sandbox stuck in 'migrating' status for more than the given duration.

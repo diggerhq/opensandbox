@@ -867,6 +867,19 @@ func (s *Scaler) drainWorker(workerID, machineID, region string) {
 		}
 		if len(running) == 0 {
 			log.Printf("scaler: drain: worker %s fully drained", workerID)
+			// Terminal sweep: a post-QMP migration failure may leave DB rows
+			// pointing at this worker even though ListSandboxes returns 0.
+			// Reconcile any leftover running/migrating rows here so the row
+			// reflects reality before the worker gets destroyed.
+			if s.store != nil {
+				sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if n, err := s.store.MarkOrphanedOnWorker(sweepCtx, workerID, "drain completed; worker reported no sandboxes"); err != nil {
+					log.Printf("scaler: drain: orphan sweep on %s failed: %v", workerID, err)
+				} else if n > 0 {
+					log.Printf("scaler: drain: orphan sweep on %s reconciled %d phantom row(s)", workerID, n)
+				}
+				sweepCancel()
+			}
 			return
 		}
 
@@ -1240,13 +1253,29 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	// Must happen after target selection because the DB row records the
 	// destination worker.
 	migrationCompleted := false
+	qmpSucceeded := false
 	if s.store != nil {
 		if err := s.store.SetMigrating(ctx, sandboxID, targetWorkerID); err != nil {
 			log.Printf("scaler: failed to set migrating state for %s: %v", sandboxID, err)
 		}
 		defer func() {
-			if !migrationCompleted && s.store != nil {
-				s.store.FailMigration(ctx, sandboxID)
+			if migrationCompleted || s.store == nil {
+				return
+			}
+			// Recovery path depends on which phase failed:
+			//   - Pre-QMP: source still has the VM. Revert to running on source.
+			//   - Post-QMP: source's QEMU has shut down (state migrated). Reverting to
+			//     running on source produces a phantom — DB says running, source has
+			//     no QEMU, drain's ListSandboxes returns 0 and exits cleanly leaving
+			//     the row stuck. Mark error instead so the sandbox is visibly broken.
+			if qmpSucceeded {
+				if err := s.store.FailMigrationPostQMP(ctx, sandboxID, "migration failed after QMP transfer; source VM gone, target failed to complete"); err != nil {
+					log.Printf("scaler: migrate %s: FailMigrationPostQMP failed: %v", sandboxID, err)
+				}
+			} else {
+				if err := s.store.FailMigration(ctx, sandboxID); err != nil {
+					log.Printf("scaler: migrate %s: FailMigration failed: %v", sandboxID, err)
+				}
 			}
 		}()
 	}
@@ -1285,6 +1314,10 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 	if err != nil {
 		return fmt.Errorf("live migrate: %w", err)
 	}
+	// QMP transfer done — source has shut down its VM. Any failure from here
+	// must mark the sandbox as error rather than reverting to "running on source"
+	// (the source's QEMU is gone; reverting would produce a phantom).
+	qmpSucceeded = true
 
 	log.Printf("scaler: migrate %s: QMP migration complete (%dms)", sandboxID, time.Since(t0).Milliseconds())
 
