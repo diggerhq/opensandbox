@@ -124,6 +124,83 @@ type AllocatorCandidate struct {
 	BucketStart time.Time
 }
 
+// PendingBillableEventForSender carries the row plus the joined
+// `orgs.stripe_customer_id` so the sender can submit a meter event
+// without a second per-event DB lookup. Only orgs with
+// `billing_mode='unified'` and a non-null Stripe customer ID are
+// returned — legacy orgs and unset-billing orgs are filtered out at
+// query time.
+type PendingBillableEventForSender struct {
+	Event            BillableEvent
+	StripeCustomerID string
+}
+
+// ListPendingBillableEventsForSender returns up to `limit` pending
+// rows ordered by `(created_at, id)` from orgs in unified mode that
+// have a Stripe customer ID set. Skipped:
+//   - rows where the org is `billing_mode='legacy'` (UsageReporter
+//     ships those)
+//   - rows where the org has no Stripe customer (free-tier or
+//     unfinished checkout)
+//   - rows already in `delivery_state='sent'` or `'failed'`
+func (s *Store) ListPendingBillableEventsForSender(ctx context.Context, limit int) ([]PendingBillableEventForSender, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT be.id, be.org_id, be.event_type, be.memory_mb, be.gb_seconds,
+		       be.bucket_start, be.bucket_end, be.delivery_state,
+		       be.stripe_event_id, be.created_at, be.delivered_at,
+		       o.stripe_customer_id
+		FROM billable_events be
+		JOIN orgs o ON o.id = be.org_id
+		WHERE be.delivery_state = 'pending'
+		  AND o.billing_mode = 'unified'
+		  AND o.stripe_customer_id IS NOT NULL
+		ORDER BY be.created_at, be.id
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pending billable events for sender: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]PendingBillableEventForSender, 0, limit)
+	for rows.Next() {
+		var p PendingBillableEventForSender
+		if err := rows.Scan(
+			&p.Event.ID, &p.Event.OrgID, &p.Event.EventType, &p.Event.MemoryMB, &p.Event.GBSeconds,
+			&p.Event.BucketStart, &p.Event.BucketEnd, &p.Event.DeliveryState,
+			&p.Event.StripeEventID, &p.Event.CreatedAt, &p.Event.DeliveredAt,
+			&p.StripeCustomerID,
+		); err != nil {
+			return nil, fmt.Errorf("scan pending event for sender: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pending events for sender rows: %w", err)
+	}
+	return out, nil
+}
+
+// MarkBillableEventSent flips delivery_state to 'sent', stamps
+// stripe_event_id and delivered_at. Idempotent at the row level: a
+// concurrent re-run with the same id is harmless.
+func (s *Store) MarkBillableEventSent(ctx context.Context, id uuid.UUID, stripeEventID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE billable_events
+		   SET delivery_state = 'sent',
+		       stripe_event_id = $2,
+		       delivered_at = now()
+		 WHERE id = $1
+	`, id, stripeEventID)
+	if err != nil {
+		return fmt.Errorf("mark billable event sent: %w", err)
+	}
+	return nil
+}
+
 // ListAllocatorCandidates returns (org, bucket_start) pairs in
 // `[lookbackStart, cutoff)` where there's either a reservation or
 // scale-event activity, and no row exists yet in `billable_events` for
@@ -131,15 +208,27 @@ type AllocatorCandidate struct {
 //
 // `cutoff` should be `now() - settle` truncated to a 15-min boundary —
 // only fully-settled buckets become candidates.
+//
+// **Filter:** only orgs with `plan='pro' AND billing_mode='unified'`.
+// Legacy-mode orgs are billed by `UsageReporter`, so writing outbox
+// rows for them would be both wasted work and a landmine on a
+// later flip (the historical rows would ship at once). Free-plan
+// orgs use the legacy credit-deduction path; the future free-tier
+// drainer will revisit allocator scope when it ships.
 func (s *Store) ListAllocatorCandidates(ctx context.Context, lookbackStart, cutoff time.Time, limit int) ([]AllocatorCandidate, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	rows, err := s.pool.Query(ctx, `
-		WITH reservation_buckets AS (
+		WITH eligible_orgs AS (
+			SELECT id FROM orgs
+			WHERE plan = 'pro' AND billing_mode = 'unified'
+		),
+		reservation_buckets AS (
 			SELECT org_id, starts_at AS bucket_start
 			FROM capacity_reservation_intervals
 			WHERE starts_at >= $1 AND starts_at < $2
+			  AND org_id IN (SELECT id FROM eligible_orgs)
 			GROUP BY org_id, starts_at
 		),
 		scale_buckets AS (
@@ -152,6 +241,7 @@ func (s *Store) ListAllocatorCandidates(ctx context.Context, lookbackStart, cuto
 			) AS b(bucket_start)
 			WHERE se.started_at < $2
 			  AND COALESCE(se.ended_at, $2) > $1
+			  AND se.org_id IN (SELECT id FROM eligible_orgs)
 			GROUP BY se.org_id, b.bucket_start
 		),
 		candidates AS (

@@ -396,10 +396,10 @@ func main() {
 		log.Println("opensandbox: usage reporter started (interval=5m)")
 	}
 
-	// Phase-2 capacity allocator (shadow mode). Writes reserved/overage
-	// rows to the billable_events outbox after each settled bucket;
-	// Stripe delivery is not enabled until phase 3. Tunable via env;
-	// rollback is by reverting the deploy.
+	// Phase-2 capacity allocator. Writes outbox rows for unified-mode
+	// pro orgs after each settled bucket. Allocator skips legacy and
+	// free orgs (see ListAllocatorCandidates); rollback is by
+	// reverting the deploy.
 	if opts.Store != nil {
 		allocOpts := billing.CapacityReconcilerOpts{
 			Interval: getDurationEnv("CAPACITY_ALLOCATOR_INTERVAL", 5*time.Minute),
@@ -412,6 +412,24 @@ func main() {
 		defer allocator.Stop()
 		log.Printf("opensandbox: capacity allocator started (interval=%s, settle=%s, lookback=%s)",
 			allocOpts.Interval, allocOpts.Settle, allocOpts.Lookback)
+	}
+
+	// Phase-3 billable-events sender. Ships pending outbox rows to
+	// Stripe via meter events for orgs in `billing_mode='unified'`
+	// with a Stripe customer ID. New orgs default to unified per
+	// migration 031; existing orgs are pinned to legacy and stay
+	// untouched on UsageReporter. Idempotency is per-row via
+	// `billable_events.id` as Stripe meter event Identifier.
+	if opts.Store != nil && stripeClient != nil {
+		senderOpts := billing.BillableEventsSenderOpts{
+			Interval: getDurationEnv("BILLABLE_EVENTS_SENDER_INTERVAL", 5*time.Minute),
+			Batch:    getIntEnv("BILLABLE_EVENTS_SENDER_BATCH", 200),
+		}
+		sender := billing.NewBillableEventsSender(opts.Store, stripeClient, senderOpts)
+		sender.Start()
+		defer sender.Stop()
+		log.Printf("opensandbox: billable events sender started (interval=%s, batch=%d)",
+			senderOpts.Interval, senderOpts.Batch)
 	}
 
 	// Start NATS sync consumer if both PG and NATS are configured

@@ -34,6 +34,15 @@ type StripeClient struct {
 	// Disk overage meter / price (single dimension: GB-seconds above 20GB).
 	DiskOveragePriceID       string
 	DiskOverageMeterEventName string
+
+	// Phase-3 unified-pipeline meters and prices. Two flat meters
+	// (overage + reserved) used by new orgs (`billing_mode='unified'`).
+	// Legacy per-tier meters above are untouched and continue to serve
+	// existing orgs via UsageReporter.
+	OveragePriceID         string // flat overage Price for `overage_usage` events
+	OverageMeterEventName  string // "sandbox_compute_sandbox_overage"
+	ReservedPriceID        string // flat reserved Price for `reserved_usage` events
+	ReservedMeterEventName string // "sandbox_compute_sandbox_reserved"
 }
 
 // NewStripeClient creates a new Stripe client.
@@ -222,7 +231,62 @@ func (s *StripeClient) EnsureProducts() error {
 		log.Printf("billing: created disk overage price (id=%s)", p.ID)
 	}
 
+	// 5. Phase-3 unified-pipeline meters. Two flat meters (overage +
+	//    reserved) at unit GB-seconds. Code creates the *meters* (their
+	//    event names are stable wire-protocol coupling) but **does not
+	//    create Prices** — those are configured in the Stripe Dashboard
+	//    so pricing changes don't need a code deploy. The Price IDs
+	//    are discovered below if present; if missing, meter events
+	//    still flow but won't appear on invoices until a Price is
+	//    linked to the meter in Stripe.
+	s.OverageMeterEventName = ensureMeter(existingMeters, "sandbox_compute_"+OverageMeterKey, "Sandbox Instant Compute (GB-seconds)")
+	s.ReservedMeterEventName = ensureMeter(existingMeters, "sandbox_compute_"+ReservedMeterKey, "Sandbox Reserved Capacity (GB-seconds)")
+
+	if id, ok := existingPrices[OveragePriceKey]; ok {
+		s.OveragePriceID = id
+		log.Printf("billing: found existing overage price (id=%s)", id)
+	} else {
+		log.Printf("billing: no overage price configured for meter %s — meter events will flow but won't appear on invoices until a Price is created in Stripe", s.OverageMeterEventName)
+	}
+	if id, ok := existingPrices[ReservedPriceKey]; ok {
+		s.ReservedPriceID = id
+		log.Printf("billing: found existing reserved price (id=%s)", id)
+	} else {
+		log.Printf("billing: no reserved price configured for meter %s — meter events will flow but won't appear on invoices until a Price is created in Stripe", s.ReservedMeterEventName)
+	}
+
 	return nil
+}
+
+// ensureMeter is a small helper that returns the event_name after
+// creating or finding the meter. Used only for the phase-3 flat
+// meters; legacy per-tier meters retain their inline creation so the
+// unrelated stripe.go diff stays small.
+func ensureMeter(existing map[string]*stripe.BillingMeter, eventName, displayName string) string {
+	if m, ok := existing[eventName]; ok {
+		log.Printf("billing: found existing meter %s (id=%s)", eventName, m.ID)
+		return eventName
+	}
+	m, err := meter.New(&stripe.BillingMeterParams{
+		DisplayName: stripe.String(displayName),
+		EventName:   stripe.String(eventName),
+		DefaultAggregation: &stripe.BillingMeterDefaultAggregationParams{
+			Formula: stripe.String(string(stripe.BillingMeterDefaultAggregationFormulaSum)),
+		},
+		CustomerMapping: &stripe.BillingMeterCustomerMappingParams{
+			EventPayloadKey: stripe.String("stripe_customer_id"),
+			Type:            stripe.String(string(stripe.BillingMeterCustomerMappingTypeByID)),
+		},
+		ValueSettings: &stripe.BillingMeterValueSettingsParams{
+			EventPayloadKey: stripe.String("value"),
+		},
+	})
+	if err != nil {
+		log.Printf("billing: WARN failed to create meter %s: %v", eventName, err)
+		return eventName // return name anyway; sender will fail loudly if used
+	}
+	log.Printf("billing: created meter %s (id=%s)", eventName, m.ID)
+	return eventName
 }
 
 // CreateCustomer creates a Stripe customer for an org.
@@ -275,7 +339,10 @@ func (s *StripeClient) CreatePortalSession(customerID, returnURL string) (string
 }
 
 // CreateSubscription creates a subscription with metered prices for all tiers.
-// Returns subscription ID and map of memoryMB → subscription item ID.
+// Returns subscription ID and map of memoryMB → subscription item ID
+// (legacy per-second tier items only; phase-3 overage/reserved items
+// are added to the subscription but not returned in the map since
+// `org_subscription_items` only tracks the legacy mapping).
 func (s *StripeClient) CreateSubscription(customerID string) (string, map[int]string, error) {
 	var items []*stripe.SubscriptionItemsParams
 	for _, priceID := range s.PriceIDs {
@@ -286,6 +353,21 @@ func (s *StripeClient) CreateSubscription(customerID string) (string, map[int]st
 	if s.DiskOveragePriceID != "" {
 		items = append(items, &stripe.SubscriptionItemsParams{
 			Price: stripe.String(s.DiskOveragePriceID),
+		})
+	}
+	// Phase-3 unified-pipeline items: flat overage + flat reserved.
+	// New orgs default to `billing_mode='unified'` so meter events
+	// flow to these items. Existing legacy orgs sit at zero usage
+	// on these line items (Stripe omits zero-usage rows from invoices,
+	// so they're invisible to the customer).
+	if s.OveragePriceID != "" {
+		items = append(items, &stripe.SubscriptionItemsParams{
+			Price: stripe.String(s.OveragePriceID),
+		})
+	}
+	if s.ReservedPriceID != "" {
+		items = append(items, &stripe.SubscriptionItemsParams{
+			Price: stripe.String(s.ReservedPriceID),
 		})
 	}
 
@@ -344,6 +426,34 @@ func (s *StripeClient) ReportUsage(customerID string, memoryMB int, seconds int6
 		return fmt.Errorf("report usage for %s: %w", eventName, err)
 	}
 	return nil
+}
+
+// ReportMeterEvent sends a single Stripe meter event with an
+// idempotency identifier. Used by the phase-3 sender to ship outbox
+// rows; the identifier (typically `billable_events.id`) makes
+// at-least-once shipping safe — Stripe dedups repeated submissions
+// of the same identifier within 24h.
+//
+// Returns the resulting BillingMeterEvent.Identifier echo'd by Stripe
+// (which equals the input on successful submission). Caller stores
+// this in `billable_events.stripe_event_id` for traceability.
+func (s *StripeClient) ReportMeterEvent(eventName, customerID string, value float64, identifier string, timestamp int64) (string, error) {
+	resp, err := meterevent.New(&stripe.BillingMeterEventParams{
+		EventName:  stripe.String(eventName),
+		Identifier: stripe.String(identifier),
+		Timestamp:  stripe.Int64(timestamp),
+		Payload: map[string]string{
+			"stripe_customer_id": customerID,
+			// Stripe accepts string-encoded values; use a high-precision
+			// format so fractional GB-seconds (the proportional split
+			// produces them) don't get truncated to integers.
+			"value": fmt.Sprintf("%.6f", value),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("report meter event %s: %w", eventName, err)
+	}
+	return resp.Identifier, nil
 }
 
 // ReportDiskOverageUsage sends a meter event for disk overage GB-seconds
