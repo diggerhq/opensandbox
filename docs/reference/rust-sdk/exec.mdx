@@ -1,0 +1,147 @@
+---
+title: "Exec"
+description: "Run commands and stream output"
+---
+
+`sandbox.commands()` and `sandbox.exec()` return the same `Exec` handle —
+the names are kept for parity with the TypeScript and Python SDKs.
+
+## `exec.run(command, opts: RunOpts) -> Result<ProcessResult>`
+
+Run a shell command and wait for completion. Executed via `sh -c`, so pipes,
+redirects, and shell expansion work.
+
+```rust
+use opencomputer::RunOpts;
+
+let result = sandbox
+    .commands()
+    .run(
+        "npm run build",
+        RunOpts::new()
+            .cwd("/app")
+            .env("NODE_ENV", "production")
+            .timeout(120),
+    )
+    .await?;
+
+if result.exit_code != 0 {
+    eprintln!("Build failed: {}", result.stderr);
+}
+```
+
+### `RunOpts`
+
+| Builder method        | Type    | Default | Description                            |
+| --------------------- | ------- | ------- | -------------------------------------- |
+| `.timeout(secs)`      | `u64`   | `60`    | Timeout in seconds                     |
+| `.env(key, value)`    | `&str`, `&str` | — | Inject one env var; chainable        |
+| `.envs(map)`          | `HashMap<String,String>` | — | Replace the env-var map      |
+| `.cwd(path)`          | `&str` / `String` | — | Working directory                  |
+
+### `ProcessResult`
+
+| Field         | Type     | Description     |
+| ------------- | -------- | --------------- |
+| `exit_code`   | `i32`    | Exit code       |
+| `stdout`      | `String` | Captured stdout |
+| `stderr`      | `String` | Captured stderr |
+
+## `exec.start(command, opts: ExecStartOpts)`
+
+Start a long-running command and attach for streaming I/O. Returns
+`(ExecSession, mpsc::UnboundedReceiver<StreamEvent>)`. Drain the receiver
+to consume stdout / stderr / exit / scrollback events.
+
+`exec.background(...)` is an alias.
+
+```rust
+use opencomputer::{ExecStartOpts, StreamEvent};
+
+let (session, mut events) = sandbox
+    .exec()
+    .start(
+        "node",
+        ExecStartOpts::new()
+            .args(vec!["server.js".into()])
+            .cwd("/app")
+            .env("PORT", "3000"),
+    )
+    .await?;
+
+tokio::spawn(async move {
+    while let Some(ev) = events.recv().await {
+        match ev {
+            StreamEvent::Stdout(b) => print!("{}", String::from_utf8_lossy(&b)),
+            StreamEvent::Stderr(b) => eprint!("{}", String::from_utf8_lossy(&b)),
+            StreamEvent::ScrollbackEnd => eprintln!("--- live output ---"),
+            StreamEvent::Exit(code) => {
+                eprintln!("exited: {code}");
+                break;
+            }
+        }
+    }
+});
+
+session.send_stdin("hello\n");
+let code = session.done().await;
+```
+
+### `ExecStartOpts`
+
+| Builder method                       | Type      | Description                                 |
+| ------------------------------------ | --------- | ------------------------------------------- |
+| `.args(vec)`                         | `Vec<String>` | Command arguments                       |
+| `.env(key, value)` / `.envs(map)`    | —         | Environment variables                       |
+| `.cwd(path)`                         | `&str` / `String` | Working directory                   |
+| `.timeout(secs)`                     | `u64`     | Timeout in seconds                          |
+| `max_run_after_disconnect`           | `u64`     | Seconds to keep running after disconnect    |
+
+### `ExecSession`
+
+| Member                             | Description                                              |
+| ---------------------------------- | -------------------------------------------------------- |
+| `.session_id`                      | `String` — exec session ID                               |
+| `.sandbox_id`                      | `String`                                                 |
+| `.done().await`                    | Wait for the process to exit; returns the exit code      |
+| `.send_stdin(data)`                | Write to the process stdin                               |
+| `.kill(signal: Option<i32>).await` | Kill the process. Default signal is `SIGKILL` (9)        |
+| `.close().await`                   | Detach from the WebSocket without killing the process    |
+
+### `StreamEvent`
+
+| Variant                | Payload     | Description                                    |
+| ---------------------- | ----------- | ---------------------------------------------- |
+| `Stdout(Vec<u8>)`      | bytes       | Stdout chunk                                   |
+| `Stderr(Vec<u8>)`      | bytes       | Stderr chunk                                   |
+| `ScrollbackEnd`        | —           | End of historical replay; live output begins   |
+| `Exit(i32)`            | exit code   | Always the last event                          |
+
+## Managing sessions
+
+```rust
+let sessions = sandbox.exec().list().await?;
+for s in sessions {
+    let status = if s.running {
+        "running".to_string()
+    } else {
+        format!("exited ({:?})", s.exit_code)
+    };
+    println!("{} {} clients={}", s.session_id, status, s.attached_clients);
+}
+
+sandbox.exec().kill(&session_id, Some(15)).await?; // SIGTERM
+```
+
+## `exec.attach(session_id)`
+
+Re-attach to a running exec session. Same return type as `start()`. Server
+replays scrollback first, sends a `StreamEvent::ScrollbackEnd`, then streams
+live output.
+
+<Tip>
+  CLI equivalent: [`oc exec`](/cli/exec).
+  Other SDKs: [TypeScript](/reference/typescript-sdk/exec) ·
+  [Python](/reference/python-sdk/exec) ·
+  [HTTP API](/api-reference/exec/run).
+</Tip>

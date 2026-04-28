@@ -26,6 +26,18 @@ async with await Sandbox.create() as sandbox:
     print(content)  # "Hello, World!"
 ```
 
+```rust Rust
+use opencomputer::{Sandbox, SandboxOpts};
+
+let sandbox = Sandbox::create(SandboxOpts::new()).await?;
+
+sandbox.files().write("/app/hello.txt", "Hello, World!").await?;
+let content = sandbox.files().read("/app/hello.txt").await?;
+println!("{}", content); // "Hello, World!"
+
+sandbox.kill().await?;
+```
+
 </CodeGroup>
 
 ## Reading Files

@@ -32,7 +32,7 @@ truth they come from.
 - `proto/` — inter-tier contracts
 - `docs/mint.json` — docs navigation
 - `cmd/oc/` — CLI entrypoint
-- `sdks/typescript/` and `sdks/python/` — published SDKs
+- `sdks/typescript/`, `sdks/python/`, and `sdks/rust/` — published SDKs
 
 Managed-agent product behavior is mostly **not** implemented here:
 
@@ -132,7 +132,7 @@ you are editing:
 
 - `proto/` — contracts between tiers
 - public HTTP API routes in `internal/api/`
-- `sdks/` — published TypeScript and Python SDKs
+- `sdks/` — published TypeScript, Python, and Rust SDKs
 - `cmd/oc/` — CLI behavior users script against
 - `docs/` — user-facing product and API documentation
 

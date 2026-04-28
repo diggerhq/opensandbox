@@ -1,0 +1,56 @@
+name: Test Rust SDK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdks/rust/**'
+      - 'examples/rust/**'
+      - '.github/workflows/test-rust-sdk.yml'
+  pull_request:
+    paths:
+      - 'sdks/rust/**'
+      - 'examples/rust/**'
+      - '.github/workflows/test-rust-sdk.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sdks/rust
+            examples/rust
+
+      - name: Format check (SDK)
+        working-directory: sdks/rust
+        run: cargo fmt --all -- --check
+
+      - name: Format check (examples)
+        working-directory: examples/rust
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: sdks/rust
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build SDK (lib + examples + tests)
+        working-directory: sdks/rust
+        run: cargo build --all-targets
+
+      - name: Build examples/rust
+        working-directory: examples/rust
+        run: cargo build
+
+      - name: Offline tests
+        working-directory: sdks/rust
+        run: cargo test --tests

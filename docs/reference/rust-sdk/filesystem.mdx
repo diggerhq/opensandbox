@@ -1,0 +1,71 @@
+---
+title: "Filesystem"
+description: "Read, write, and manage files inside a sandbox"
+---
+
+`sandbox.files()` returns a `Filesystem` handle. All paths are absolute
+inside the sandbox.
+
+```rust
+sandbox.files().write("/tmp/hi.txt", "hello").await?;
+let content = sandbox.files().read("/tmp/hi.txt").await?;
+```
+
+## Methods
+
+### `files.read(path) -> Result<String>`
+
+Read a file as UTF-8 text.
+
+### `files.read_bytes(path) -> Result<Vec<u8>>`
+
+Read a file as raw bytes (binary-safe).
+
+### `files.write(path, content) -> Result<()>`
+
+Overwrite a file. `content: impl Into<Vec<u8>>` — `&str`, `String`, `Vec<u8>`,
+and `&[u8]` all work.
+
+```rust
+sandbox.files().write("/tmp/data.bin", vec![0u8, 1, 2, 3]).await?;
+sandbox.files().write("/tmp/note.txt", "hi").await?;
+```
+
+### `files.list(path) -> Result<Vec<EntryInfo>>`
+
+List a directory. Returns an empty `Vec` if the directory is empty.
+
+```rust
+for entry in sandbox.files().list("/tmp").await? {
+    let kind = if entry.is_dir { "d" } else { "-" };
+    println!("{} {} ({} bytes)", kind, entry.name, entry.size);
+}
+```
+
+### `EntryInfo`
+
+| Field      | Type    | Description                      |
+| ---------- | ------- | -------------------------------- |
+| `name`     | `String`| File / directory name            |
+| `is_dir`   | `bool`  | `true` if directory              |
+| `path`     | `String`| Full path inside the sandbox     |
+| `size`     | `u64`   | Size in bytes (0 for directories) |
+
+### `files.make_dir(path) -> Result<()>`
+
+Create a directory. Use `sandbox.commands().run("mkdir -p ...")` if you need
+intermediate directories created.
+
+### `files.remove(path) -> Result<()>`
+
+Remove a file or directory (recursive for directories).
+
+### `files.exists(path) -> bool`
+
+Check whether a path exists. Returns `false` on any error (does not throw).
+
+<Tip>
+  Other SDKs: [TypeScript](/reference/typescript-sdk/filesystem) ·
+  [Python](/reference/python-sdk/filesystem) ·
+  [HTTP API](/api-reference/files/read).
+</Tip>
