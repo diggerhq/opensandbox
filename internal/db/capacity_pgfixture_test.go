@@ -257,8 +257,12 @@ func TestListReservations_cursor_pgfixture(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	from := time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)
-	to := time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+	// from/to filter on the reservation's createdAt, not the bucket time.
+	// CreateReservation uses time.Now().UTC() for createdAt, so anchor the
+	// window around wall-clock now.
+	now := time.Now().UTC()
+	from := now.Add(-1 * time.Hour)
+	to := now.Add(1 * time.Hour)
 
 	first, next, err := store.ListReservations(ctx, ListReservationsRequest{
 		OrgID: orgID, From: from, To: to, Limit: 2,
