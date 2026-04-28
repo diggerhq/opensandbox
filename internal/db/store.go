@@ -123,6 +123,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{30, "migrations/027_capacity_reservation_intervals.up.sql"},
 		{31, "migrations/028_capacity_idempotency_keys.up.sql"},
 		{32, "migrations/029_orgs_max_memory_gb.up.sql"},
+		{33, "migrations/030_billable_events.up.sql"},
 	}
 
 	for _, m := range migrations {

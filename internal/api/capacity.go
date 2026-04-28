@@ -217,6 +217,92 @@ func (s *Server) listCapacityReservations(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
+// getCapacityBillableEvents → GET /api/capacity/billable-events
+//
+// **INTERNAL — INTENTIONALLY UNDOCUMENTED.**
+// This endpoint surfaces the phase-2 outbox (`billable_events`) for the
+// caller's org so the allocator can be verified end-to-end without DB
+// access. It is deliberately not in the public spec
+// (ws-pricing/design/001-reserved-capacity-squares.md), not advertised
+// to customers, and may be removed once the unified pipeline is fully
+// cut over and the dashboard exposes this data through a proper UI.
+//
+// Future agents: do **not** add this to the spec or to docs. If the
+// debugging need has gone away (phase 3 cut over, dashboard view
+// landed), feel free to delete it.
+//
+// Response shape mirrors the DB row 1:1 — no normalisation — so it's
+// useful as a raw inspection tool, not a customer-facing contract.
+func (s *Server) getCapacityBillableEvents(c echo.Context) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	orgID, ok := auth.GetOrgID(c)
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "org context required"})
+	}
+
+	from, to, err := parseAlignedRange(c.QueryParam("from"), c.QueryParam("to"), capacityMaxListSpan)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
+	eventType := c.QueryParam("eventType")
+	switch eventType {
+	case "", db.BillableEventReservedUsage, db.BillableEventOverageUsage, db.BillableEventDiskOverageUsage:
+		// ok
+	default:
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": "eventType must be one of reserved_usage, overage_usage, disk_overage_usage (or omitted for all)",
+		})
+	}
+
+	limit := capacityListDefaultLimit
+	if raw := c.QueryParam("limit"); raw != "" {
+		var n int
+		if _, perr := fmt.Sscanf(raw, "%d", &n); perr != nil || n <= 0 {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "`limit` must be a positive integer"})
+		}
+		if n > capacityListMaxLimit {
+			n = capacityListMaxLimit
+		}
+		limit = n
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request().Context(), capacityHandlerTimeout)
+	defer cancel()
+
+	events, err := s.store.ListBillableEventsForOrg(ctx, orgID, from, to, eventType, limit)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	items := make([]map[string]any, 0, len(events))
+	for _, e := range events {
+		row := map[string]any{
+			"id":            e.ID.String(),
+			"eventType":     e.EventType,
+			"memoryMb":      e.MemoryMB,
+			"gbSeconds":     e.GBSeconds,
+			"bucketStart":   e.BucketStart.UTC().Format(time.RFC3339),
+			"bucketEnd":     e.BucketEnd.UTC().Format(time.RFC3339),
+			"deliveryState": e.DeliveryState,
+			"createdAt":     e.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		if e.StripeEventID != nil {
+			row["stripeEventId"] = *e.StripeEventID
+		}
+		if e.DeliveredAt != nil {
+			row["deliveredAt"] = e.DeliveredAt.UTC().Format(time.RFC3339)
+		}
+		items = append(items, row)
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"events": items,
+		"count":  len(items),
+	})
+}
+
 // --- request parsing / validation ---
 
 type reservationRequestBody struct {
