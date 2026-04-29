@@ -52,7 +52,7 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 
 	// Auth middleware
 	api := e.Group("")
-	api.Use(auth.PGAPIKeyMiddleware(store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(store, apiKey, jwtIssuer))
 
 	// Sandbox lifecycle (control plane only handles create/destroy/discover)
 	api.POST("/sandboxes", s.createSandbox)
@@ -99,11 +99,19 @@ func (s *Server) createSandbox(c echo.Context) error {
 		MemoryMB   int               `json:"memoryMB"`
 		CpuCount   int               `json:"cpuCount"`
 		Metadata   map[string]string `json:"metadata"`
-		NetworkEnabled bool          `json:"networkEnabled"`
+		NetworkEnabled *bool         `json:"networkEnabled"`
 		SecretStore    string        `json:"secretStore"` // secret store name — resolves secrets + egress config
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+	}
+
+	// Default networkEnabled to true when caller omits the field. The worker
+	// currently sets up networking unconditionally, so a missing field that
+	// marshaled to false caused the UI to mislabel sandboxes as "Disabled".
+	if req.NetworkEnabled == nil {
+		t := true
+		req.NetworkEnabled = &t
 	}
 
 	orgID, ok := auth.GetOrgID(c)
@@ -194,7 +202,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		Envs:               req.Envs,
 		MemoryMb:           int32(req.MemoryMB),
 		CpuCount:           int32(req.CpuCount),
-		NetworkEnabled:     req.NetworkEnabled,
+		NetworkEnabled:     *req.NetworkEnabled,
 		EgressAllowlist:    egressAllowlist,
 		SecretAllowedHosts: secretAllowedHosts,
 	})

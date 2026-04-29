@@ -310,3 +310,94 @@ export const redeemPromoCode = (code: string) =>
     method: 'POST',
     body: JSON.stringify({ code }),
   })
+
+// ── Agents (proxied to sessions-api at /api/dashboard/agents/*) ──
+
+export interface Agent {
+  id: string
+  display_name: string
+  core: string | null
+  model: string | null
+  channels: Array<{ name: string; bot_username?: string | null; connected_at?: string }>
+  packages: Array<{ name: string; installed_at?: string }>
+  secret_store: string | null
+  config: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentDetail extends Agent {
+  status: 'ready' | 'starting' | 'degraded' | 'error' | 'unknown'
+  instance_id: string | null
+  instance_status: string | null
+  core_status: { status: string; reason?: string; message?: string; updated_at?: string } | null
+  channel_status: Record<string, { status: string; phase?: string; message?: string }>
+  package_status: Record<string, { status: string; phase?: string; message?: string }>
+  conditions: Array<{ type: string; status: string; reason?: string; message?: string }>
+  current_operation: AgentOperation | null
+  last_error: { phase: string; message: string; at: string } | null
+}
+
+export interface AgentOperation {
+  id: string
+  agent_id: string
+  kind: string
+  target_type?: string | null
+  target_key?: string | null
+  phase: string
+  state: 'queued' | 'running' | 'success' | 'error' | 'canceled'
+  message?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export const listAgents = () =>
+  apiFetch<{ agents: Agent[] }>('/agents')
+
+export const getAgent = (id: string) =>
+  apiFetch<AgentDetail>(`/agents/${encodeURIComponent(id)}`)
+
+export const createAgent = (input: {
+  id: string
+  display_name?: string
+  core?: string
+  model?: string
+  config?: Record<string, unknown>
+  secrets?: Record<string, string>
+}) =>
+  apiFetch<AgentDetail>('/agents', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+
+export const deleteAgent = (id: string) =>
+  apiFetch<{ id: string; deleted: boolean }>(`/agents/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+
+export const installGbrain = (agentId: string) =>
+  apiFetch<{ agent_id: string; package: string; status: string; operation: AgentOperation }>(
+    `/agents/${encodeURIComponent(agentId)}/packages/gbrain`,
+    { method: 'POST' },
+  )
+
+export const uninstallGbrain = (agentId: string) =>
+  apiFetch<{ agent_id: string; package: string; status: string }>(
+    `/agents/${encodeURIComponent(agentId)}/packages/gbrain`,
+    { method: 'DELETE' },
+  )
+
+export const connectTelegram = (agentId: string, botToken: string) =>
+  apiFetch<{ agent_id: string; channel: string; status: string; operation: AgentOperation }>(
+    `/agents/${encodeURIComponent(agentId)}/channels/telegram`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ bot_token: botToken }),
+    },
+  )
+
+export const disconnectTelegram = (agentId: string) =>
+  apiFetch<{ agent_id: string; channel: string; status: string }>(
+    `/agents/${encodeURIComponent(agentId)}/channels/telegram`,
+    { method: 'DELETE' },
+  )

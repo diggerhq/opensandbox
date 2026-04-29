@@ -188,7 +188,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 
 	// API routes (with API key auth)
 	api := e.Group("/api")
-	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey, s.jwtIssuer))
 
 	// Identity
 	api.POST("/auth/token", s.createAuthToken)
@@ -402,6 +402,13 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.POST("/billing/portal", s.billingPortal)
 
 		// Admin endpoints
+
+		// Agents — reverse-proxy to sessions-api. Mints short-lived identity
+		// JWTs for the inbound (sessions-api) and downstream (OC API) hops so
+		// no API key is needed end-to-end. CLI users bypass this and hit
+		// sessions-api directly with X-API-Key.
+		dash.Any("/agents", s.dashboardAgentsProxy)
+		dash.Any("/agents/*", s.dashboardAgentsProxy)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
