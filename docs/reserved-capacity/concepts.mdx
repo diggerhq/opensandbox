@@ -91,20 +91,13 @@ See [Reading the calendar](/reserved-capacity/calendar) for the full shape.
 
 ## Per-org capacity cap
 
-Your org has a single configured ceiling: `max_memory_gb`. It applies in
-two places:
+Your org has a configured ceiling: `max_memory_gb`. It limits how
+much capacity you can hold in any single 15-minute interval — your
+`reservedGb` for an interval cannot exceed it. The cap appears as
+`reservationLimitGb` in calendar interval rows.
 
-| Where | What it limits |
-| --- | --- |
-| Reservations | Across any single interval, your `reservedGb` cannot exceed `max_memory_gb`. |
-| Runtime | Your concurrent running memory across all sandboxes cannot exceed `max_memory_gb` either. |
-
-Same number, two enforcement points. The mental model: "I can have up to
-N GB of memory in flight at once, whether reserved or running." If you
-need to reserve more than your current limit allows, ask to have the
-limit raised.
-
-This appears as `reservationLimitGb` in calendar interval rows.
+If you need to reserve more than your current limit allows, ask to
+have the limit raised.
 
 ## Usage and overage
 

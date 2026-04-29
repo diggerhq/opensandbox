@@ -115,7 +115,7 @@ reserve a higher amount.
 | You hold a reservation in one interval but run in another | No carryover. Allocation is per interval. |
 | Multiple sandboxes' memory sums above the ceiling | Concurrent memory is summed before the ceiling is applied. No per-sandbox attribution. |
 | A sandbox crashes mid-interval | Memory drops as soon as the scale event closes; subsequent seconds see the lower number. |
-| You try to reserve for an interval you're already in | Rejected — reservations require lead time (`earliestReservableStart`). |
+| You try to reserve for an interval you're already in | Rejected — reservations require a 30-minute minimum lead time. |
 
 ## Why per-second
 

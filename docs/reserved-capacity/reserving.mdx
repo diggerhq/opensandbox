@@ -46,16 +46,22 @@ Response (success):
 
 ### Validation
 
-| Rule | Behavior |
-| --- | --- |
-| `startsAt` and `endsAt` UTC and 15-minute aligned | Reject misaligned. |
-| `endsAt == startsAt + 15 minutes` | Reject longer spans; enumerate intervals. |
-| `capacityGb` is a positive multiple of 4 | Reject anything else. The grain is 1 GB-hour (= 4 GB × 15 min). |
-| `startsAt >= earliestReservableStart` | Reject intervals too soon. |
-| Requested capacity fits current `reservableGb` | Reject instead of overbooking. |
-| `Idempotency-Key` stable on retry | Replaying same key + body returns original result. |
+The server rejects malformed requests with `400 Bad Request` and a
+plain text error message:
 
-### Rejected write
+| Rule | Failure |
+| --- | --- |
+| `startsAt` / `endsAt` UTC and 15-minute aligned | Misaligned values rejected. |
+| `endsAt == startsAt + 15 minutes` | Multi-interval spans rejected — enumerate intervals instead. |
+| `capacityGb` is a positive multiple of 4 | Other values rejected. The grain is 1 GB-hour (= 4 GB × 15 min). |
+| `startsAt >= now + 30 minutes` | Lead-time violation rejected. |
+
+### Capacity shortfall (409)
+
+When the request is well-formed but doesn't fit available capacity,
+the server returns `409 capacity_not_available` with a list of every
+problematic interval, so the client can retry with adjusted numbers in
+a single round-trip:
 
 ```json
 {
@@ -71,16 +77,12 @@ Response (success):
 }
 ```
 
-The response lists every problematic interval, so the client can retry
-with adjusted numbers in a single round-trip.
+`reason` is one of:
 
 | `reason` | Meaning |
 | --- | --- |
-| `insufficient_capacity` | Request exceeds current `reservableGb` (platform-side). |
-| `reservation_limit_exceeded` | Would exceed your org's `max_memory_gb` for the interval. |
-| `too_soon` | `startsAt` is before `earliestReservableStart`. |
-| `misaligned` | `startsAt`/`endsAt` not on the 15-minute grid. |
-| `capacity_grain` | `capacityGb` is not a positive multiple of 4. |
+| `insufficient_capacity` | Request exceeds current `reservableGb` for the interval (either the platform-side limit or your org's `max_memory_gb`). |
+| `concurrent_write` | Another reservation for the same interval committed first; retry with the updated `reservableGb`. |
 
 ## Idempotency
 
@@ -120,6 +122,8 @@ Response:
 
 ```json
 {
+  "from": "2026-04-01T00:00:00Z",
+  "to":   "2026-05-01T00:00:00Z",
   "reservations": [
     {
       "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",
@@ -134,12 +138,12 @@ Response:
 }
 ```
 
-| Query param | Meaning |
-| --- | --- |
-| `from` | Return reservations whose `createdAt >= from`. |
-| `to` | Return reservations whose `createdAt < to`. |
-| `cursor` | Pagination cursor from a previous response. |
-| `limit` | Max reservations per page. |
+| Query param | Required | Meaning |
+| --- | --- | --- |
+| `from` | yes | Return reservations whose `createdAt >= from`. |
+| `to` | yes | Return reservations whose `createdAt < to`. |
+| `cursor` | no | Pagination cursor from a previous response's `nextCursor`. |
+| `limit` | no | Max reservations per page. Server applies a ceiling. |
 
 For end-of-month reconciliation, list reservations and group totals by
 interval. The calendar gives you the current per-interval state; the list
