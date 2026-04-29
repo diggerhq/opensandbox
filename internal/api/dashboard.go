@@ -1016,6 +1016,68 @@ func (s *Server) dashboardKillPTY(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
+// dashboardRebootSession soft-restarts a running sandbox owned by the
+// authenticated org. Equivalent of POST /api/sandboxes/:id/reboot but
+// scoped to the dashboard's org-membership auth.
+func (s *Server) dashboardRebootSession(c echo.Context) error {
+	sandboxID, session, err := s.dashboardResolveSandbox(c)
+	if err != nil {
+		return err
+	}
+	if s.workerRegistry != nil {
+		client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+		}
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 90*time.Second)
+		defer cancel()
+		if _, err := client.RebootSandbox(ctx, &pb.RebootSandboxRequest{SandboxId: sandboxID}); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reboot failed: " + err.Error()})
+		}
+		s.emitEvent("reboot", sandboxID, session.WorkerID, "rebooted")
+		return c.NoContent(http.StatusNoContent)
+	}
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+	if err := s.manager.RebootSandbox(c.Request().Context(), sandboxID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+// dashboardPowerCycleSession hard-restarts a running sandbox owned by the
+// authenticated org.
+func (s *Server) dashboardPowerCycleSession(c echo.Context) error {
+	sandboxID, session, err := s.dashboardResolveSandbox(c)
+	if err != nil {
+		return err
+	}
+	if s.workerRegistry != nil {
+		client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+		if err != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+		}
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 120*time.Second)
+		defer cancel()
+		if _, err := client.PowerCycleSandbox(ctx, &pb.PowerCycleSandboxRequest{SandboxId: sandboxID}); err != nil {
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "power-cycle failed: " + err.Error()})
+		}
+		if s.sandboxAPIProxy != nil {
+			s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+		}
+		s.emitEvent("power-cycle", sandboxID, session.WorkerID, "power-cycled")
+		return c.NoContent(http.StatusNoContent)
+	}
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+	if _, err := s.manager.PowerCycleSandbox(c.Request().Context(), sandboxID); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
 // dashboardResolveSandbox validates the sandbox belongs to the authenticated org and is running.
 func (s *Server) dashboardResolveSandbox(c echo.Context) (string, *db.SandboxSession, error) {
 	if s.store == nil {

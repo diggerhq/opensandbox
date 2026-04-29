@@ -194,6 +194,15 @@ func (q *QMPClient) Quit() error {
 	return err
 }
 
+// SystemReset issues a hardware reset to the guest, equivalent to pressing
+// the reset button on a physical machine. The QEMU process and its
+// resources (TAP, drives, QMP socket) stay alive; the guest CPU is reset
+// and re-runs the boot sequence from scratch. RAM contents are wiped.
+func (q *QMPClient) SystemReset() error {
+	_, err := q.execute(qmpCommand{Execute: "system_reset"}, 10*time.Second)
+	return err
+}
+
 // QueryStatus returns the current VM status.
 func (q *QMPClient) QueryStatus() (*QMPStatus, error) {
 	resp, err := q.execute(qmpCommand{Execute: "query-status"}, 10*time.Second)

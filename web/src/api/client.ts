@@ -70,6 +70,14 @@ export const getSessionDetail = (sandboxId: string) =>
 export const getSessionStats = (sandboxId: string) =>
   apiFetch<SandboxStats>(`/sessions/${sandboxId}/stats`)
 
+// Soft restart: guest kernel reboots, QEMU process + workspace stay.
+export const rebootSession = (sandboxId: string) =>
+  apiFetch<void>(`/sessions/${sandboxId}/reboot`, { method: 'POST' })
+
+// Hard restart: QEMU process recreated, workspace data preserved.
+export const powerCycleSession = (sandboxId: string) =>
+  apiFetch<void>(`/sessions/${sandboxId}/power-cycle`, { method: 'POST' })
+
 export const getOrg = () => apiFetch<Org>('/org')
 
 export const updateOrg = (name: string) =>
