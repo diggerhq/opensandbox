@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -560,37 +561,86 @@ func (s *Scaler) hibernateBatch(workerID string, count int) {
 
 // --- Pressure Evacuation ---
 
-// evacuateHotWorkers live-migrates sandboxes off workers that exceed critical thresholds.
+// evacuateHotWorkers live-migrates sandboxes off workers that exceed critical
+// thresholds.
+//
+// Two scheduling rules that matter under quota pressure:
+//
+//  1. **One source at a time.** Earlier versions spawned a goroutine per hot
+//     source in parallel, which under quota constraints (e.g. eastus2 prod
+//     where the Dadsv7 family is at ~60% of limit) means every source races
+//     for the same one or two viable target workers. The first migration
+//     wins, the others stall on capacity, and we get the imbalance pattern
+//     we saw on prod: 60 sandboxes piled onto a single worker while the
+//     others stayed lightly loaded. Serializing means we drain one source
+//     completely before starting the next.
+//
+//  2. **Lightest source first.** A 5-sandbox source drains in seconds and
+//     the now-empty worker becomes a viable target for subsequent drains.
+//     A 60-sandbox source drained first would block all subsequent
+//     evacuations behind it. Going lightest-first organically grows our
+//     target pool from drained sources, so by the time we reach the
+//     heaviest source we have N workers worth of target capacity instead
+//     of 1.
+//
+// Per-sandbox target selection (inside evacuateBatch via liveMigrateSandbox)
+// remains in place — it spreads the migrations within a single source's
+// drain across whatever targets exist at the moment.
 func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []*WorkerInfo) {
+	// If an evacuation is already in flight, skip this tick — the active
+	// drain will finish and release the lock; the next tick picks up.
+	if !s.state.TryAcquireEvacuationLock() {
+		return
+	}
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			s.state.ReleaseEvacuationLock()
+		}
+	}()
+
+	// Collect hot, non-draining workers off cooldown.
+	hot := make([]*WorkerInfo, 0)
 	for _, w := range workers {
 		if w.CPUPct < evacuationCPUThreshold && w.MemPct < evacuationMemThreshold && w.DiskPct < evacuationDiskThreshold {
 			continue
 		}
-		// Skip if already being drained for scale-down
 		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
-		// Cooldown — don't evacuate the same worker every tick
 		if last, ok := s.state.GetLastEvacuation(w.ID); ok && time.Since(last) < evacuationCooldown {
 			continue
 		}
-
-		// Find target: least-loaded worker that isn't the hot one and isn't draining.
-		// Pass 0 for requiredMemMB — evacuateBatch migrates whatever fits; individual
-		// over-size sandboxes fail their own prepare and are retried elsewhere.
-		target := s.findMigrationTarget(region, w.ID, 0)
-		if target == nil {
-			log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%) but no migration target available",
-				w.ID, w.CPUPct, w.MemPct, w.DiskPct)
-			continue
-		}
-
-		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), evacuating up to %d sandboxes to %s",
-			w.ID, w.CPUPct, w.MemPct, w.DiskPct, evacuationBatchSize, target.ID)
-
-		s.state.SetLastEvacuation(w.ID, time.Now())
-		go s.evacuateBatch(w.ID, target.ID, evacuationBatchSize)
+		hot = append(hot, w)
 	}
+	if len(hot) == 0 {
+		return
+	}
+
+	// Sort lightest first — see rule 2 in the function comment.
+	sort.Slice(hot, func(i, j int) bool {
+		return hot[i].Current < hot[j].Current
+	})
+	src := hot[0]
+
+	// Pre-flight: confirm SOME viable target exists in the region. Pass 0 for
+	// requiredMemMB; per-sandbox memory fit is checked inside liveMigrateSandbox
+	// after PreCopyDrives reports the real RSS.
+	if probe := s.findMigrationTarget(region, src.ID, 0); probe == nil {
+		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%, current=%d) but no migration target available — letting scale-up handle this",
+			src.ID, src.CPUPct, src.MemPct, src.DiskPct, src.Current)
+		return
+	}
+
+	log.Printf("scaler: worker %s selected for evacuation (lightest of %d hot, current=%d, cpu=%.1f%% mem=%.1f%% disk=%.1f%%) — draining serially",
+		src.ID, len(hot), src.Current, src.CPUPct, src.MemPct, src.DiskPct)
+
+	s.state.SetLastEvacuation(src.ID, time.Now())
+	releaseLock = false // goroutine will release on its own
+	go func() {
+		defer s.state.ReleaseEvacuationLock()
+		s.evacuateBatch(src.ID, evacuationBatchSize)
+	}()
 }
 
 // findMigrationTarget returns the best worker to receive migrated sandboxes.
@@ -646,8 +696,18 @@ func (s *Scaler) findMigrationTarget(region, excludeWorkerID string, requiredMem
 	return best
 }
 
-// evacuateBatch live-migrates up to count sandboxes from sourceWorker to targetWorker.
-func (s *Scaler) evacuateBatch(sourceWorkerID, targetWorkerID string, count int) {
+// evacuateBatch live-migrates up to count sandboxes off sourceWorker, picking
+// a fresh target per sandbox.
+//
+// Why per-sandbox target selection: an earlier version pinned all migrations
+// in a batch to one target (chosen up front by evacuateHotWorkers). Result —
+// during the prod event where 60 sandboxes were rehydrating, every batch
+// piled onto whichever worker was least-loaded at batch start, blowing past
+// it while the other targets stayed nearly empty. By passing "" to
+// liveMigrateSandbox (which then calls findMigrationTarget after PreCopyDrives
+// reports actual RSS), each migration sees up-to-date in-flight counts and
+// the load distributes naturally across all viable targets.
+func (s *Scaler) evacuateBatch(sourceWorkerID string, count int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -671,15 +731,18 @@ func (s *Scaler) evacuateBatch(sourceWorkerID, targetWorkerID string, count int)
 		if sb.Status != "running" {
 			continue
 		}
-		if err := s.liveMigrateSandbox(ctx, sb.SandboxId, sourceWorkerID, targetWorkerID); err != nil {
+		// Empty targetWorkerID → liveMigrateSandbox re-picks per call. This is
+		// what produces the load-distribution behavior described in the
+		// function comment.
+		if err := s.liveMigrateSandbox(ctx, sb.SandboxId, sourceWorkerID, ""); err != nil {
 			log.Printf("scaler: evacuate: migrate %s failed: %v", sb.SandboxId, err)
 			continue
 		}
 		migrated++
 	}
 
-	log.Printf("scaler: evacuation batch complete for %s: %d/%d migrated to %s",
-		sourceWorkerID, migrated, count, targetWorkerID)
+	log.Printf("scaler: evacuation batch complete for %s: %d/%d migrated (per-sandbox target selection)",
+		sourceWorkerID, migrated, count)
 }
 
 // --- Smart Scale-Down ---
