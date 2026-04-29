@@ -961,19 +961,40 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 
 // patchGuestNetwork reconfigures the guest's eth0 with the new IP/gateway.
 // This is needed because the golden snapshot was booted with a different IP.
+//
+// Each step is independent and idempotent — DNS and /etc/hosts writes always
+// run regardless of whether the network ops succeed. Earlier versions chained
+// every step with `&&`, so a transient `ip addr add` failure (e.g. address
+// already configured) short-circuited the chain and left /etc/hosts un-patched,
+// which surfaces downstream as `sudo: unable to resolve host sandbox` on every
+// sudo call. We verify the final network state at the end and only fail then.
 func patchGuestNetwork(ctx context.Context, agent *AgentClient, netCfg *NetworkConfig) error {
 	// Calculate prefix length from mask (e.g. "255.255.255.252" → 30)
 	prefixLen := maskToPrefixLen(netCfg.Mask)
 
-	script := fmt.Sprintf(
-		"ip addr flush dev eth0 && "+
-			"ip addr add %s/%d dev eth0 && "+
-			"ip link set eth0 up && "+
-			"ip route add default via %s && "+
-			"echo 'nameserver 8.8.8.8' > /etc/resolv.conf && "+
-			"echo 'nameserver 1.1.1.1' >> /etc/resolv.conf && "+
-			"grep -q \"$(hostname)\" /etc/hosts || echo \"127.0.0.1 $(hostname)\" >> /etc/hosts",
+	// `ip route replace` is idempotent — works whether the route exists or not.
+	// `ip addr add` may say "File exists" if the address is already there, which
+	// is a no-op for our purposes; suppress and verify at the end.
+	script := fmt.Sprintf(`set +e
+ip addr flush dev eth0
+ip addr add %s/%d dev eth0 2>/dev/null
+ip link set eth0 up
+ip route replace default via %s
+
+# DNS — always write, independent of network ops
+echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+echo 'nameserver 1.1.1.1' >> /etc/resolv.conf
+
+# /etc/hosts — always ensure entry for current hostname
+grep -q "$(hostname)" /etc/hosts || echo "127.0.0.1 $(hostname)" >> /etc/hosts
+
+# Final verification — only fail if the network didn't reach desired state
+ip addr show eth0 | grep -q "%s" || exit 1
+ip route show default | grep -q "%s" || exit 2
+exit 0
+`,
 		netCfg.GuestIP, prefixLen, netCfg.HostIP,
+		netCfg.GuestIP, netCfg.HostIP,
 	)
 
 	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -2237,28 +2258,16 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	metaJSON, _ := json.Marshal(meta)
 	_ = os.WriteFile(filepath.Join(stagingDir, "snapshot", "snapshot-meta.json"), metaJSON, 0644)
 
-	// Extract memory into an external mem.zst and strip the internal savevm
-	// snapshot from the staging qcow2s. This converts the checkpoint into a
-	// format fork restore prefers (-incoming exec:zstdcat over loadvm) and
-	// that qemu-img rebase composes cleanly with for cross-golden forks.
-	// Done before the rename so the local cache never exposes a
-	// half-converted state to concurrent fork readers.
-	//
-	// Best-effort: on failure, leave the savevm-based layout in place. Fork
-	// restore still works via loadvm for same-golden forks; cross-golden
-	// will fail the same way it does without this step, so we're no worse
-	// off than before.
-	extractCtx, extractCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	// Pass baseMemoryMB (initial -m value), not MemoryMB (which reflects the
-	// current virtio-mem balloon). The extract QEMU's cmdline must match the
-	// original VM's -m for loadvm to restore correctly; virtio-mem state
-	// inside the snapshot replays the balloon up to the ballooned size.
-	if extractErr := m.extractCheckpointMemory(extractCtx, stagingDir, snapshotName, vm.guestMAC, vm.baseMemoryMB, vm.CpuCount); extractErr != nil {
-		log.Printf("qemu: checkpoint %s: memory extract failed (falling back to savevm format): %v", checkpointID, extractErr)
-	} else {
-		log.Printf("qemu: checkpoint %s: memory extracted to mem.zst (%dms total)", checkpointID, time.Since(t0).Milliseconds())
-	}
-	extractCancel()
+	// Note: an earlier version of this code extracted the memory into an
+	// external mem.zst and stripped the internal savevm snapshot from the
+	// staging qcow2s, intending to make qemu-img rebase compose cleanly for
+	// cross-golden forks (loaded via `-incoming exec:zstdcat`). In practice
+	// the resulting checkpoints would not load: QEMU sat in `prelaunch`
+	// indefinitely while reading the migration stream, never transitioning
+	// to `paused`. Reverted to the savevm/loadvm path which has months of
+	// production track record. Cross-golden forks rely on pin-to-base
+	// (ensureCheckpointRebased) to align the qcow2's backing file at fork
+	// time without touching the captured savevm state.
 
 	// Atomic rename into cache under write lock.
 	m.checkpointCacheMu.Lock()
