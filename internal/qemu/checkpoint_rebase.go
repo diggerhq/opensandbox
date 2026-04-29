@@ -3,6 +3,7 @@ package qemu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/opensandbox/opensandbox/internal/storage"
 )
 
 // Pin-to-base: checkpoints stay tied to the exact goldenVersion they were
@@ -101,6 +104,12 @@ func (m *Manager) resolveBaseForVersion(ctx context.Context, goldenVersion strin
 
 // downloadBaseToLocal fetches bases/{goldenVersion}/default.ext4 from blob
 // storage. Concurrent callers share one download through an in-flight map.
+//
+// Cleans up the destination directory if download fails — otherwise an empty
+// bases/<ver>/ would be left behind, indistinguishable from a partial state
+// on the next attempt. Retries a small number of times on ErrNotFound to
+// tolerate the brief window between a peer worker calling
+// UploadBaseImageIfNew and the blob becoming visible to the downloader.
 func (m *Manager) downloadBaseToLocal(ctx context.Context, goldenVersion, destPath string) error {
 	flightMu.Lock()
 	if ch, downloading := downloadFlight[goldenVersion]; downloading {
@@ -128,21 +137,33 @@ func (m *Manager) downloadBaseToLocal(ctx context.Context, goldenVersion, destPa
 	if fileExists(destPath) {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("mkdir base cache: %w", err)
 	}
+	// On failure, clean up the empty dir so subsequent resolves don't see a
+	// stub directory that masks the missing base.
+	cleanupOnFail := true
+	defer func() {
+		if !cleanupOnFail {
+			return
+		}
+		if entries, err := os.ReadDir(dir); err == nil && len(entries) == 0 {
+			os.Remove(dir)
+		}
+	}()
 
 	log.Printf("qemu: downloading base %s from blob storage", goldenVersion)
 	t0 := time.Now()
 
 	key := fmt.Sprintf("bases/%s/default.ext4", goldenVersion)
-	reader, err := m.checkpointStore.Download(ctx, key)
+	reader, err := m.openBaseReaderWithRetry(ctx, key)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", key, err)
 	}
 	defer reader.Close()
 
-	tmpFile, err := os.CreateTemp(filepath.Dir(destPath), "default-dl-*.ext4")
+	tmpFile, err := os.CreateTemp(dir, "default-dl-*.ext4")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -162,8 +183,38 @@ func (m *Manager) downloadBaseToLocal(ctx context.Context, goldenVersion, destPa
 		return fmt.Errorf("rename: %w", err)
 	}
 
+	cleanupOnFail = false
 	log.Printf("qemu: base %s cached at %s (%dms)", goldenVersion, destPath, time.Since(t0).Milliseconds())
 	return nil
+}
+
+// openBaseReaderWithRetry retries Download on ErrNotFound with exponential
+// backoff (250ms → 500ms → 1s → 2s → 4s, ~8s total). The retry exists for
+// the race where a peer worker that just took a checkpoint is still
+// uploading its base via UploadBaseImageIfNew. Other errors fail fast.
+func (m *Manager) openBaseReaderWithRetry(ctx context.Context, key string) (io.ReadCloser, error) {
+	var lastErr error
+	delay := 250 * time.Millisecond
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+				delay *= 2
+			}
+		}
+		reader, err := m.checkpointStore.Download(ctx, key)
+		if err == nil {
+			return reader, nil
+		}
+		if !errors.Is(err, storage.ErrNotFound) && !strings.Contains(err.Error(), "object not found") {
+			return nil, err
+		}
+		lastErr = err
+		log.Printf("qemu: base download for %s: not found yet (attempt %d), retrying", key, attempt+1)
+	}
+	return nil, lastErr
 }
 
 var (
