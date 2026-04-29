@@ -38,6 +38,12 @@ type ScalerStateStore interface {
 	AcquireMigrationLock(sandboxID string) bool
 	ReleaseMigrationLock(sandboxID string)
 
+	// Evacuation serialization — only one source worker drains at a time
+	// (see evacuateHotWorkers). Held across goroutine boundaries; TTL'd so
+	// a crashed CP doesn't permanently block evacuations on restart.
+	TryAcquireEvacuationLock() bool
+	ReleaseEvacuationLock()
+
 	// In-flight migration tracking
 	IncrInFlight(workerID string)
 	DecrInFlight(workerID string)
@@ -243,6 +249,25 @@ func (r *RedisScalerState) ReleaseMigrationLock(sandboxID string) {
 	r.rdb.Del(ctx, "scaler:migrating:"+sandboxID)
 }
 
+// TryAcquireEvacuationLock takes a region-wide (actually global, single-key)
+// lock that serializes evacuateHotWorkers across CPs. 10-min TTL so a CP
+// crash doesn't pin the lock — evacuations can resume on the next tick.
+func (r *RedisScalerState) TryAcquireEvacuationLock() bool {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	ok, err := r.rdb.SetArgs(ctx, "scaler:evacuating", "1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  10 * time.Minute,
+	}).Result()
+	return err == nil && ok == "OK"
+}
+
+func (r *RedisScalerState) ReleaseEvacuationLock() {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	r.rdb.Del(ctx, "scaler:evacuating")
+}
+
 // --- In-flight ---
 
 func (r *RedisScalerState) IncrInFlight(workerID string) {
@@ -441,6 +466,13 @@ func (m *InMemoryScalerState) AcquireMigrationLock(sandboxID string) bool {
 }
 func (m *InMemoryScalerState) ReleaseMigrationLock(sandboxID string) {
 	m.migrating.Delete(sandboxID)
+}
+func (m *InMemoryScalerState) TryAcquireEvacuationLock() bool {
+	_, loaded := m.migrating.LoadOrStore("__evacuation__", struct{}{})
+	return !loaded
+}
+func (m *InMemoryScalerState) ReleaseEvacuationLock() {
+	m.migrating.Delete("__evacuation__")
 }
 func (m *InMemoryScalerState) IncrInFlight(workerID string) {
 	m.mu.Lock()

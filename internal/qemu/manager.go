@@ -3004,13 +3004,15 @@ func (m *Manager) GetAgent(sandboxID string) (*AgentClient, error) {
 	return vm.agent, nil
 }
 
-// GetWorkspacePath returns the host path to a sandbox's workspace.ext4.
+// GetWorkspacePath returns the host path to a sandbox's workspace qcow2.
+// Used by the autosave loop to gate SyncFS on mtime — no point syncing if
+// the workspace hasn't been touched since the last successful sync.
 func (m *Manager) GetWorkspacePath(sandboxID string) (string, error) {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(vm.sandboxDir, "workspace.ext4"), nil
+	return filepath.Join(vm.sandboxDir, "workspace.qcow2"), nil
 }
 
 // SyncFS flushes filesystem buffers inside the VM.
