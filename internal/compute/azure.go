@@ -555,26 +555,61 @@ func (p *AzurePool) buildUserData(opts MachineOpts) string {
 
 	// Mount data disk as XFS with reflink (required for QEMU snapshot copies).
 	// v7 VMs have multiple local NVMe temp disks — RAID 0 them for max throughput.
-	sb.WriteString("# Mount data disk (RAID 0 across local NVMe, XFS with reflink)\n")
+	// SCSI-only SKUs (D-series, B-series, etc.) fall through to /dev/sdc+ probe.
+	//
+	// Two robustness guards baked in:
+	//  1. After successful mount, persist via /etc/fstab so /data survives
+	//     kernel-update reboots. UUID-based entry — robust against device-name
+	//     re-ordering across boots.
+	//  2. SCSI fallback skips any disk that looks like Azure's ephemeral
+	//     resource disk (mounted at /mnt by the Azure agent). On SCSI-only
+	//     SKUs the resource disk lives at /dev/sdb — overwriting it would
+	//     destroy the worker's swap area and confuse the Azure agent.
+	sb.WriteString("# Mount data disk (RAID 0 across local NVMe, XFS with reflink, fstab-persisted)\n")
 	sb.WriteString("if ! mountpoint -q /data 2>/dev/null; then\n")
 	sb.WriteString("  mkdir -p /data\n")
 	sb.WriteString("  ROOT_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null | head -1)\n")
+	// Identify any disk currently used as Azure's ephemeral resource disk
+	// (Azure waagent typically mounts it at /mnt). We refuse to mkfs over it.
+	sb.WriteString("  RESOURCE_DEV=\"\"\n")
+	sb.WriteString("  if findmnt -n -o SOURCE /mnt >/dev/null 2>&1; then\n")
+	sb.WriteString("    RESOURCE_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /mnt) 2>/dev/null | head -1)\n")
+	sb.WriteString("    [ -n \"$RESOURCE_DEV\" ] && RESOURCE_DEV=\"/dev/$RESOURCE_DEV\"\n")
+	sb.WriteString("  fi\n")
 	sb.WriteString("  NVME_DISKS=()\n")
 	sb.WriteString("  for d in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1; do\n")
 	sb.WriteString("    [ -b \"$d\" ] || continue\n")
 	sb.WriteString("    [ \"$(basename $d)\" = \"$ROOT_DEV\" ] && continue\n")
+	sb.WriteString("    [ \"$d\" = \"$RESOURCE_DEV\" ] && continue\n")
 	sb.WriteString("    NVME_DISKS+=(\"$d\")\n")
 	sb.WriteString("  done\n")
+	// DATA_DEV holds the device that ends up mounted at /data (used to write
+	// the fstab entry below).
+	sb.WriteString("  DATA_DEV=\"\"\n")
 	sb.WriteString("  if [ ${#NVME_DISKS[@]} -gt 1 ]; then\n")
 	sb.WriteString("    mdadm --create /dev/md0 --level=0 --raid-devices=${#NVME_DISKS[@]} \"${NVME_DISKS[@]}\" --run --force\n")
-	sb.WriteString("    mkfs.xfs -f -m reflink=1 /dev/md0 && mount /dev/md0 /data\n")
+	sb.WriteString("    mkfs.xfs -f -m reflink=1 /dev/md0 && mount /dev/md0 /data && DATA_DEV=/dev/md0\n")
 	sb.WriteString("  elif [ ${#NVME_DISKS[@]} -eq 1 ]; then\n")
-	sb.WriteString("    mkfs.xfs -f -m reflink=1 \"${NVME_DISKS[0]}\" && mount \"${NVME_DISKS[0]}\" /data\n")
+	sb.WriteString("    mkfs.xfs -f -m reflink=1 \"${NVME_DISKS[0]}\" && mount \"${NVME_DISKS[0]}\" /data && DATA_DEV=\"${NVME_DISKS[0]}\"\n")
 	sb.WriteString("  else\n")
+	// SCSI fallback. /dev/sdb LAST is intentional: it's typically the Azure
+	// resource disk on machines without local NVMe. The RESOURCE_DEV guard
+	// above will skip it if /mnt is currently using it, so the loop only
+	// formats /dev/sdb when no /mnt mount exists (i.e., truly unused).
 	sb.WriteString("    for d in /dev/sdc /dev/sdd /dev/sdb; do\n")
 	sb.WriteString("      [ -b \"$d\" ] || continue\n")
-	sb.WriteString("      mkfs.xfs -f -m reflink=1 \"$d\" && mount \"$d\" /data && break\n")
+	sb.WriteString("      [ \"$d\" = \"$RESOURCE_DEV\" ] && continue\n")
+	sb.WriteString("      mkfs.xfs -f -m reflink=1 \"$d\" && mount \"$d\" /data && DATA_DEV=\"$d\" && break\n")
 	sb.WriteString("    done\n")
+	sb.WriteString("  fi\n")
+	// Persist the mount via fstab so kernel-update reboots don't lose /data.
+	// Use UUID rather than device path — device naming can shift across
+	// reboots. `nofail` so a failed-disk boot still reaches single-user mode.
+	sb.WriteString("  if [ -n \"$DATA_DEV\" ]; then\n")
+	sb.WriteString("    DATA_UUID=$(blkid -s UUID -o value \"$DATA_DEV\" 2>/dev/null || true)\n")
+	sb.WriteString("    if [ -n \"$DATA_UUID\" ] && ! grep -q \"UUID=$DATA_UUID\" /etc/fstab 2>/dev/null; then\n")
+	sb.WriteString("      echo \"UUID=$DATA_UUID /data xfs defaults,nofail 0 2\" >> /etc/fstab\n")
+	sb.WriteString("    fi\n")
 	sb.WriteString("  fi\n")
 	sb.WriteString("fi\n")
 	sb.WriteString("mkdir -p /data/sandboxes /data/firecracker/images\n")
