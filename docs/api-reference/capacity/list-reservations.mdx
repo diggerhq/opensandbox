@@ -3,21 +3,16 @@ title: 'List Reservations'
 api: 'GET /api/capacity/reservations'
 ---
 
-<Info>
-  **Coming soon.** Reserved capacity is not yet available. See the
-  [Reserved Capacity overview](/reserved-capacity/overview).
-</Info>
-
 Return reservation events made by the authenticated org, in
 reverse-chronological order by `createdAt`. Each reservation row includes
 all the intervals it committed to. Useful for end-of-month reconciliation
 and audit.
 
-<ParamField query="from" type="string">
+<ParamField query="from" type="string" required>
   Return reservations whose `createdAt >= from`. RFC 3339, UTC.
 </ParamField>
 
-<ParamField query="to" type="string">
+<ParamField query="to" type="string" required>
   Return reservations whose `createdAt < to`. RFC 3339, UTC.
 </ParamField>
 
@@ -32,6 +27,8 @@ and audit.
 <ResponseExample>
 ```json 200
 {
+  "from": "2026-04-01T00:00:00Z",
+  "to":   "2026-05-01T00:00:00Z",
   "reservations": [
     {
       "reservationId": "9f67b8f7-7b91-4d2d-b1cb-19d0d0a14562",

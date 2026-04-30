@@ -179,6 +179,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	admin.GET("/events/history", s.adminEventsHistory)
 	admin.GET("/report", s.adminReport)
 	admin.POST("/events/clear", s.adminClearEvents)
+	admin.POST("/workers/:id/drain", s.adminSetWorkerDraining)
 	admin.GET("/demo/migration", s.demoPingPongPage)
 	admin.GET("/demo/chaos", s.demoChaosPage)
 
@@ -217,6 +218,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Hibernation
 	api.POST("/sandboxes/:id/hibernate", s.hibernateSandbox)
 	api.POST("/sandboxes/:id/wake", s.wakeSandbox)
+
+	// Reset operations: reboot is a soft, in-place guest restart; power-cycle
+	// is a hard restart that re-creates the QEMU process. Both preserve the
+	// sandbox's identity and persistent data.
+	api.POST("/sandboxes/:id/reboot", s.rebootSandbox)
+	api.POST("/sandboxes/:id/power-cycle", s.powerCycleSandbox)
 
 	// Live migration
 	api.POST("/sandboxes/:id/migrate", s.migrateSandbox)
@@ -413,6 +420,9 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
 		dash.GET("/sessions/:sandboxId/stats", s.dashboardGetSessionStats)
+		// Reset operations
+		dash.POST("/sessions/:sandboxId/reboot", s.dashboardRebootSession)
+		dash.POST("/sessions/:sandboxId/power-cycle", s.dashboardPowerCycleSession)
 		// PTY (terminal)
 		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
 		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)
