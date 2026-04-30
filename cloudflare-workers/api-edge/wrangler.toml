@@ -1,0 +1,55 @@
+# api-edge Worker — global API entry point at app.opencomputer.dev / app.dev.opensandbox.ai
+#
+# Routes:
+#   POST /auth/login, /auth/refresh, /auth/logout — WorkOS flow + session JWT
+#   POST /webhooks/stripe                          — Stripe webhook (DO /mark-pro)
+#   POST /api/sandboxes                            — create flow (auth + credit check + cell select + cap-token mint + proxy to CP)
+#   GET  /api/sandboxes                            — cross-region list (D1 sandboxes_index)
+#   GET  /api/sandboxes/{id}                       — metadata with cell_endpoint
+#   ANY  /api/sandboxes/{id}/*                     — 307 redirect to {cell_id}.app.opensandbox.ai (dumb-client fallback)
+#   GET  /internal/halt-list                       — HMAC-auth, called by CP halt_reconciler
+
+name = "opensandbox-edge-dev"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "1241f114453e32d292197e3fb36210b2"
+
+# Route the Worker at app.dev.opensandbox.ai once the zone goes live.
+# Until then, accessible at opensandbox-edge-dev.brian-124.workers.dev.
+# routes = [
+#   { pattern = "app.dev.opensandbox.ai/*", zone_name = "opensandbox.ai" }
+# ]
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-dev"
+database_id = "f9e534bf-a9f3-4b30-81cd-f9eb9087e96d"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "694f22abd551461da4ad99839f161b2f"
+
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+script_name = "opensandbox-edge-dev"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CreditAccount"]
+
+# Secrets (set via `wrangler secret put`):
+#   SESSION_JWT_SECRET     — HMAC for session JWT (shared with all CPs in cell fleet)
+#   CF_ADMIN_SECRET        — HMAC for /admin/halt-org and /admin/resume-org callbacks to CPs
+#   STRIPE_WEBHOOK_SECRET  — verifies inbound Stripe webhook signatures
+#   STRIPE_API_KEY         — for creating Stripe customer + subscription on /mark-pro
+#   WORKOS_API_KEY         — server-side WorkOS API for /auth/login
+#   WORKOS_CLIENT_ID       — WorkOS client identifier
+#   EVENT_SECRET           — HMAC for /internal/halt-list endpoint (shared with CP halt_reconciler)
+
+[vars]
+WORKER_ENV = "dev"
+# Cells available in this deployment. The edge Worker uses this to validate
+# cell_id selections and to construct cell_endpoint URLs.
+CELLS = "azure-westus2-cell-a"

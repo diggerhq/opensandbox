@@ -1,0 +1,51 @@
+# events-ingest Worker — receives HMAC-signed event batches from regional CPs.
+#
+# Routes:
+#   POST /ingest — receives batches, dedups via KV, inserts into D1, archives to R2,
+#                  fan-outs DO /debit calls for free-tier usage_tick events.
+#
+# Pipeline inside /ingest:
+#   1. Verify HMAC signature + X-Timestamp freshness (±5 min)
+#   2. Parse batch
+#   3. For each event: skip if KV seen:{event_id}, else accumulate
+#   4. D1.batch([...]) atomic insert into events table
+#   5. Promise.all DO /debit for free-tier usage_tick events
+#   6. R2 put gzipped raw batch at raw/{cell_id}/{yyyy-mm-dd}/{batch_id}.json.gz
+#   7. KV put seen:{event_id} TTL 24h for each successful event
+#   8. Return 202 {accepted, deduped}
+
+name = "opensandbox-events-ingest-dev"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "1241f114453e32d292197e3fb36210b2"
+
+# Route at events.dev.opensandbox.ai or use the workers.dev URL until DNS is live.
+# The CP forwarder hits this directly via OPENSANDBOX_CF_EVENT_ENDPOINT.
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-dev"
+database_id = "f9e534bf-a9f3-4b30-81cd-f9eb9087e96d"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "694f22abd551461da4ad99839f161b2f"
+
+[[r2_buckets]]
+binding = "EVENTS_ARCHIVE"
+bucket_name = "events-archive-dev"
+
+# CreditAccount DO is owned by api-edge; reference it here for /debit calls.
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+script_name = "opensandbox-edge-dev"
+
+# Secrets:
+#   EVENT_SECRET    — HMAC for /ingest
+#   CF_ADMIN_SECRET — HMAC the DO uses when dispatching halt webhooks (so the
+#                     events-ingest Worker can sign DO-initiated callbacks too)
+
+[vars]
+WORKER_ENV = "dev"

@@ -163,6 +163,32 @@ func main() {
 			opts.SandboxAPIProxy = proxy.NewSandboxAPIProxy(opts.Store, redisRegistry, opts.JWTIssuer)
 			log.Println("opensandbox: sandbox API proxy enabled (data-plane requests proxied to workers)")
 		}
+
+		// CF-parallel event forwarder. Drains events:{cell_id} from Redis and
+		// POSTs HMAC-signed batches to the events-ingest Worker. Inert when
+		// CFEventEndpoint is empty — old NATS path keeps running independently.
+		if cfg.CFEventEndpoint != "" && cfg.CFEventSecret != "" && cfg.CellID != "" {
+			cfClient := controlplane.NewCFEventClient(cfg.CFEventEndpoint, cfg.CFEventSecret, cfg.CellID)
+			fwd, err := controlplane.NewEventForwarder(controlplane.EventForwarderConfig{
+				Redis:  redisRegistry.RedisClient(),
+				CellID: cfg.CellID,
+				Client: cfClient,
+			})
+			if err != nil {
+				log.Fatalf("event_forwarder: %v", err)
+			}
+			if err := fwd.Start(context.Background()); err != nil {
+				log.Fatalf("event_forwarder start: %v", err)
+			}
+			defer func() {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer stopCancel()
+				_ = fwd.Stop(stopCtx)
+			}()
+			log.Printf("opensandbox: CF event forwarder started (endpoint=%s cell=%s)", cfg.CFEventEndpoint, cfg.CellID)
+		} else if cfg.Mode == "server" {
+			log.Printf("opensandbox: CF event forwarder NOT started (CFEventEndpoint/Secret/CellID unset)")
+		}
 	}
 
 	// Initialize compute pool + autoscaler (server mode)

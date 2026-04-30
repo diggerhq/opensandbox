@@ -456,6 +456,28 @@ func main() {
 		}
 	}
 
+	// CF-parallel: Redis Streams event publisher. Inert unless CellID is set.
+	// Runs in addition to (not replacing) the NATS publisher during cutover.
+	if cfg.CellID != "" && cfg.RedisURL != "" {
+		redisPub, err := worker.NewRedisEventPublisher(worker.RedisEventPublisherConfig{
+			RedisURL:   cfg.RedisURL,
+			SandboxDBs: sandboxDBMgr,
+			CellID:     cfg.CellID,
+			WorkerID:   cfg.WorkerID,
+		})
+		if err != nil {
+			log.Printf("opensandbox-worker: Redis event publisher init failed: %v (continuing)", err)
+		} else {
+			redisPub.Start(context.Background())
+			defer func() {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel()
+				_ = redisPub.Stop(stopCtx)
+			}()
+			log.Printf("opensandbox-worker: Redis event publisher started (stream=events:%s)", cfg.CellID)
+		}
+	}
+
 	// Periodic SyncFS
 	autosaver := worker.NewWorkspaceAutosaver(mgr, autosaverSyncer, 5*time.Minute)
 	autosaver.Start()

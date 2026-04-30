@@ -124,6 +124,33 @@ type Config struct {
 	SentryEnvironment      string
 	SentrySampleRate       float64 // 0.0–1.0, default 1.0 (capture every error)
 	SentryTracesSampleRate float64 // 0.0–1.0, default 0.0 (tracing off)
+
+	// Distributed-architecture cutover (CF-parallel mode). Each block below is
+	// inert when the corresponding endpoint/secret is empty — current behavior
+	// is fully preserved until env vars are set.
+
+	// Cell identity. Full deployment identifier used in Redis stream keys, event
+	// envelopes, and CF routing. Replaces Region for cell-aware code paths.
+	// Format: "{cloud}-{region}-cell-{slot}", e.g. "azure-westus2-cell-a".
+	CellID string
+
+	// CF events-ingest endpoint. When set, the regional control plane runs an
+	// event_forwarder goroutine that drains the local Redis stream and POSTs
+	// HMAC-signed batches here.
+	CFEventEndpoint string
+	CFEventSecret   string // HMAC secret shared with events-ingest Worker
+
+	// CF admin callback secret. Verifies HMAC signatures on /admin/halt-org and
+	// /admin/resume-org webhooks dispatched from the CreditAccount DO.
+	CFAdminSecret string
+
+	// Session JWT secret. HMAC-SHA256 verifies session tokens minted by the
+	// api-edge Worker. Shared across all regional CPs in the cell fleet.
+	SessionJWTSecret string
+
+	// CF halt-list endpoint. The halt_reconciler goroutine pulls this every 60s
+	// to catch missed halt webhooks. Empty disables the reconciler.
+	HaltListURL string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -220,6 +247,13 @@ func Load() (*Config, error) {
 		SentryEnvironment:      os.Getenv("OPENSANDBOX_SENTRY_ENVIRONMENT"),
 		SentrySampleRate:       envOrDefaultFloat("OPENSANDBOX_SENTRY_SAMPLE_RATE", 1.0),
 		SentryTracesSampleRate: envOrDefaultFloat("OPENSANDBOX_SENTRY_TRACES_SAMPLE_RATE", 0.0),
+
+		CellID:           os.Getenv("OPENSANDBOX_CELL_ID"),
+		CFEventEndpoint:  os.Getenv("OPENSANDBOX_CF_EVENT_ENDPOINT"),
+		CFEventSecret:    os.Getenv("OPENSANDBOX_CF_EVENT_SECRET"),
+		CFAdminSecret:    os.Getenv("OPENSANDBOX_CF_ADMIN_SECRET"),
+		SessionJWTSecret: os.Getenv("OPENSANDBOX_SESSION_JWT_SECRET"),
+		HaltListURL:      os.Getenv("OPENSANDBOX_HALT_LIST_URL"),
 	}
 
 	if cfg.SentryEnvironment == "" {
