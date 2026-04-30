@@ -6,6 +6,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Sessions from './pages/Sessions'
 import Agents from './pages/Agents'
+import AgentDetail from './pages/AgentDetail'
 import APIKeys from './pages/APIKeys'
 import Checkpoints from './pages/Checkpoints'
 import Templates from './pages/Templates'
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="sessions" element={<Sessions />} />
             <Route path="sessions/:sandboxId" element={<SessionDetail />} />
             <Route path="agents" element={<Agents />} />
+            <Route path="agents/:agentId" element={<AgentDetail />} />
             <Route path="checkpoints" element={<Checkpoints />} />
             <Route path="templates" element={<Templates />} />
             <Route path="api-keys" element={<APIKeys />} />

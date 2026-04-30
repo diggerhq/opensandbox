@@ -142,7 +142,11 @@ func (s *Server) dashboardAgentsProxy(c echo.Context) error {
 		req.Header.Set("Content-Type", ct)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// Use a client without a fixed timeout so SSE streams (e.g. the
+	// instance messages endpoint) can stay open. Idle reads are bounded
+	// by the upstream's own keep-alive / write deadlines.
+	streamingClient := &http.Client{}
+	resp, err := streamingClient.Do(req)
 	if err != nil {
 		log.Printf("dashboard_agents: upstream call failed: %v", err)
 		return c.JSON(http.StatusBadGateway, map[string]string{
@@ -160,9 +164,31 @@ func (s *Server) dashboardAgentsProxy(c echo.Context) error {
 		c.Response().Header()[k] = v
 	}
 	c.Response().WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(c.Response().Writer, resp.Body); err != nil {
-		log.Printf("dashboard_agents: copy upstream body failed: %v", err)
+
+	// Streaming-aware copy: flush after every read so SSE events from the
+	// upstream (text/event-stream Content-Type) reach the browser as soon
+	// as they're produced. io.Copy on its own does not call Flush; the
+	// browser would only see events when net/http's own buffer fills,
+	// which kills the chat UX.
+	flusher, _ := c.Response().Writer.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := c.Response().Writer.Write(buf[:n]); writeErr != nil {
+				log.Printf("dashboard_agents: write to client failed: %v", writeErr)
+				return nil
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				log.Printf("dashboard_agents: read from upstream failed: %v", readErr)
+			}
+			return nil
+		}
 	}
-	return nil
 }
 

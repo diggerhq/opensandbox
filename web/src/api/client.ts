@@ -18,7 +18,15 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.error || `Request failed: ${res.status}`)
+    // OC dashboard returns {error: "string"}; sessions-api returns
+    // {error: {type, message}}. Handle both so we don't surface
+    // "[object Object]" when the proxy talks to sessions-api.
+    let msg: string
+    if (typeof body.error === 'string') msg = body.error
+    else if (body.error && typeof body.error.message === 'string') msg = body.error.message
+    else if (typeof body.message === 'string') msg = body.message
+    else msg = `Request failed: ${res.status}`
+    throw new Error(msg)
   }
 
   if (res.status === 204) {
@@ -338,6 +346,7 @@ export interface AgentDetail extends Agent {
   status: 'ready' | 'starting' | 'degraded' | 'error' | 'unknown'
   instance_id: string | null
   instance_status: string | null
+  sandbox_id: string | null
   core_status: { status: string; reason?: string; message?: string; updated_at?: string } | null
   channel_status: Record<string, { status: string; phase?: string; message?: string }>
   package_status: Record<string, { status: string; phase?: string; message?: string }>
@@ -409,3 +418,91 @@ export const disconnectTelegram = (agentId: string) =>
     `/agents/${encodeURIComponent(agentId)}/channels/telegram`,
     { method: 'DELETE' },
   )
+
+export interface AgentEvent {
+  id: string
+  agent_id: string
+  type: 'info' | 'warning' | 'error'
+  phase: string
+  message: string
+  at: string
+}
+
+export const getAgentEvents = (agentId: string, limit = 50) =>
+  apiFetch<{ events: AgentEvent[]; next_before: string | null }>(
+    `/agents/${encodeURIComponent(agentId)}/events?limit=${limit}`,
+  )
+
+export const getAgentOperations = (agentId: string, limit = 20) =>
+  apiFetch<{ operations: AgentOperation[]; next_before: string | null }>(
+    `/agents/${encodeURIComponent(agentId)}/operations?limit=${limit}`,
+  )
+
+export const restartAgent = (agentId: string) =>
+  apiFetch<{ agent_id: string; status: string }>(
+    `/agents/${encodeURIComponent(agentId)}/restart`,
+    { method: 'POST' },
+  )
+
+export const getAgentLogs = (agentId: string, tail = 300) =>
+  apiFetch<{ agent_id: string; sandbox_id: string; source: string; lines: number; content: string }>(
+    `/agents/${encodeURIComponent(agentId)}/logs?tail=${tail}`,
+  )
+
+/**
+ * Streams a chat turn to an agent's instance and yields parsed SSE events
+ * as they arrive. The upstream (sessions-api POST /v1/agents/:id/instances/:id/messages)
+ * emits `data: {type:"text",content:"..."}` and `data: {type:"done"}`.
+ *
+ * Uses fetch + ReadableStream because EventSource is GET-only.
+ */
+export type ChatEvent =
+  | { type: 'text'; content: string; conversation_id?: string }
+  | { type: 'done' }
+  | { type: 'raw'; data: string }
+
+export async function* streamAgentChat(
+  agentId: string,
+  instanceId: string,
+  content: string,
+  conversationId?: string,
+): AsyncGenerator<ChatEvent, void, unknown> {
+  const res = await fetch(
+    `/api/dashboard/agents/${encodeURIComponent(agentId)}/instances/${encodeURIComponent(instanceId)}/messages`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(conversationId ? { content, conversation_id: conversationId } : { content }),
+    },
+  )
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`chat ${res.status}: ${text || 'no body'}`)
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return
+    buffer += decoder.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      const data = block
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (!data) continue
+      try {
+        yield JSON.parse(data) as ChatEvent
+      } catch {
+        yield { type: 'raw', data }
+      }
+    }
+  }
+}
