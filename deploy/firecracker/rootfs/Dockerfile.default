@@ -64,6 +64,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tree \
     rsync \
     man-db \
+    # Container runtime — dockerd does NOT auto-start (osb-agent is PID 1, no
+    # systemd). Users opt in via `sudo dockerd &` or supervisord. Keeps idle
+    # snapshots clean of daemon state.
+    docker.io \
+    # Process supervisor — for users who want declarative service management
+    # without systemd. Started on demand by users (`sudo supervisord -c ...`).
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python setup ─────────────────────────────────────────────────────────────
@@ -102,9 +109,17 @@ ENV LC_ALL=en_US.UTF-8
 # The agent (PID 1) runs as root, but all user commands run as "sandbox".
 # This matches user expectations for a normal Linux environment and allows
 # Claude Code to work without --allow-dangerously-skip-permissions.
+# /etc/hosts gets the sandbox hostname baked in so sudo doesn't print
+# `unable to resolve host sandbox` on every invocation. The runtime network
+# patch in manager.go also writes this, but that path can short-circuit if
+# an earlier `ip addr add` fails — bake it as defense-in-depth.
 RUN useradd -m -s /bin/bash -G sudo sandbox \
     && echo "sandbox ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/sandbox \
-    && chmod 440 /etc/sudoers.d/sandbox
+    && chmod 440 /etc/sudoers.d/sandbox \
+    && (grep -q sandbox /etc/hosts || echo "127.0.0.1 sandbox" >> /etc/hosts) \
+    # Add sandbox user to docker group so `docker` CLI works without sudo
+    # once dockerd is started.
+    && usermod -aG docker sandbox
 
 # /workspace is a symlink to ~ for backward compatibility
 RUN ln -s /home/sandbox /workspace
