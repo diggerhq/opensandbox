@@ -62,13 +62,11 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		return nil, fmt.Errorf("mkdir snapshot dir: %w", err)
 	}
 
-	// Step 1: Sync filesystems and quiesce agent.
+	// Step 1: Sync filesystems, quiesce agent, close host conn, and WAIT for
+	// the guest to process EOF before savevm. See quiesceAndCloseAgent.
 	// Don't unmount /workspace — open FDs prevent clean unmount and cause ext4 corruption.
-	// PrepareHibernate syncs dirty pages and resets the virtio-serial listener
-	// synchronously, so no post-close sleep is needed.
 	if vm.agent != nil {
-		prepareAgentForHibernate(ctx, vm.agent)
-		vm.agent.Close()
+		quiesceAndCloseAgent(ctx, vm.agent)
 		vm.agent = nil
 	}
 	log.Printf("qemu: hibernate %s: guest sync + unmount done (%dms)", vm.ID, time.Since(t0).Milliseconds())
@@ -796,15 +794,33 @@ func copyFileReflink(src, dst string) error {
 }
 
 // syncGuestClock sets the guest clock to the current host time via agent exec.
+//
+// Wraps the underlying RPC with a 10s deadline (caller-side timeout, NOT just
+// the agent-side TimeoutSeconds) and one Redial-on-transport-error retry. Prior
+// version used the caller's context.Background() which had no deadline at all,
+// so a wedged virtio-serial channel would block until gRPC keepalive (~7 min)
+// gave up. That stall is what produced the multi-minute "from-checkpoint"
+// requests in load tests.
 func syncGuestClock(ctx context.Context, agent *AgentClient) error {
 	now := time.Now().Unix()
-	cmd := fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)
-	resp, err := agent.Exec(ctx, &pb.ExecRequest{
+	req := &pb.ExecRequest{
 		Command:        "/bin/sh",
-		Args:           []string{"-c", cmd},
+		Args:           []string{"-c", fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)},
 		TimeoutSeconds: 5,
 		RunAsRoot:      true,
-	})
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := agent.Exec(rpcCtx, req)
+	if err != nil && IsTransportError(err) {
+		log.Printf("qemu: syncGuestClock: transport error %v, redialing and retrying once", err)
+		if rdErr := agent.Redial(); rdErr != nil {
+			return fmt.Errorf("clock sync redial: %w (orig: %v)", rdErr, err)
+		}
+		rpcCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel2()
+		resp, err = agent.Exec(rpcCtx2, req)
+	}
 	if err != nil {
 		return fmt.Errorf("exec clock sync: %w", err)
 	}

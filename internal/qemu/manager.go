@@ -58,6 +58,26 @@ func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) {
 	time.Sleep(1 * time.Second)
 }
 
+// quiesceAndCloseAgent prepares the agent for hibernate, closes the host-side
+// gRPC client connection, and waits 200ms for the guest's gRPC server to
+// process the EOF and re-enter its Accept poll loop. After this returns it is
+// safe for the caller to call savevm — the captured snapshot will not have a
+// stale virtioSerialConn whose buffered HTTP/2 framer state could corrupt the
+// next host's gRPC handshake on fork/restore.
+//
+// The 200ms is empirically sufficient for the guest virtio-serial driver to
+// surface EOF on /dev/virtio-ports/agent → for the gRPC server's Read goroutine
+// to drop its conn → for onClose to run (active=false). Without this wait the
+// snapshot can land mid-tear-down and the bug returns.
+func quiesceAndCloseAgent(ctx context.Context, agent *AgentClient) {
+	if agent == nil {
+		return
+	}
+	prepareAgentForHibernate(ctx, agent)
+	_ = agent.Close()
+	time.Sleep(200 * time.Millisecond)
+}
+
 // Compile-time check that Manager implements sandbox.Manager.
 var _ sandbox.Manager = (*Manager)(nil)
 
@@ -975,11 +995,18 @@ func patchGuestNetwork(ctx context.Context, agent *AgentClient, netCfg *NetworkC
 	// `ip route replace` is idempotent — works whether the route exists or not.
 	// `ip addr add` may say "File exists" if the address is already there, which
 	// is a no-op for our purposes; suppress and verify at the end.
+	//
+	// `ip neigh flush all` is critical on cross-worker fork: the captured ARP
+	// cache has the SOURCE worker's gateway MAC, but the destination worker's
+	// TAP has a different MAC. Without flushing, the kernel keeps the stale
+	// REACHABLE entry for ~30s (base_reachable_time) and every outbound packet
+	// silently drops. Flush forces a fresh ARP resolve on the next packet.
 	script := fmt.Sprintf(`set +e
 ip addr flush dev eth0
 ip addr add %s/%d dev eth0 2>/dev/null
 ip link set eth0 up
 ip route replace default via %s
+ip neigh flush all
 
 # DNS — always write, independent of network ops
 echo 'nameserver 8.8.8.8' > /etc/resolv.conf
@@ -997,15 +1024,30 @@ exit 0
 		netCfg.GuestIP, netCfg.HostIP,
 	)
 
-	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	resp, err := agent.Exec(execCtx, &pb.ExecRequest{
+	// 30s deadline (bumped from 5s) — under host load `ip link` and arping
+	// can take several seconds, and the prior 5s budget left no room for the
+	// agent's Exec round-trip on top of that. The 5s timeout produced the
+	// `network patch failed: rpc error: code = DeadlineExceeded` cluster in
+	// load tests. One Redial-on-transport-error retry handles the post-loadvm
+	// stale-conn case where the first call hits a wedged virtio-serial channel.
+	req := &pb.ExecRequest{
 		Command:        "/bin/sh",
 		Args:           []string{"-c", script},
-		TimeoutSeconds: 5,
+		TimeoutSeconds: 25,
 		RunAsRoot:      true,
-	})
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := agent.Exec(rpcCtx, req)
+	if err != nil && IsTransportError(err) {
+		log.Printf("qemu: patchGuestNetwork: transport error %v, redialing and retrying once", err)
+		if rdErr := agent.Redial(); rdErr != nil {
+			return fmt.Errorf("network patch redial: %w (orig: %v)", rdErr, err)
+		}
+		rpcCtx2, cancel2 := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel2()
+		resp, err = agent.Exec(rpcCtx2, req)
+	}
 	if err != nil {
 		return fmt.Errorf("exec network patch: %w", err)
 	}
@@ -1701,13 +1743,24 @@ func (m *Manager) Exec(ctx context.Context, sandboxID string, cfg types.ProcessC
 		command = "/bin/sh"
 	}
 
-	resp, err := vm.agent.Exec(ctx, &pb.ExecRequest{
+	req := &pb.ExecRequest{
 		Command:        command,
 		Args:           args,
 		Envs:           cfg.Env,
 		Cwd:            cfg.Cwd,
 		TimeoutSeconds: timeout,
-	})
+	}
+	resp, err := vm.agent.Exec(ctx, req)
+	if err != nil && IsTransportError(err) {
+		// Same recovery path as SyncFS: the gRPC client conn can be in a
+		// transient-failure state immediately after fork (waitForAgentSocket
+		// passes with one ping, but the next RPC races with conn state).
+		// Redial and retry once.
+		log.Printf("qemu: Exec %s: transport error (%v), redialing agent", sandboxID, err)
+		if rdErr := vm.agent.Redial(); rdErr == nil {
+			resp, err = vm.agent.Exec(ctx, req)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("exec in %s: %w", sandboxID, err)
 	}
@@ -2147,11 +2200,11 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
-	// Sync filesystem and quiesce virtio-serial before snapshot. The PrepareHibernate
-	// RPC returns only after the guest is fully prepared, so no sleep is needed.
+	// Sync filesystem, quiesce virtio-serial, close host conn, and WAIT for
+	// the guest to process EOF before savevm. Critical for clean snapshot
+	// state — see quiesceAndCloseAgent for the protocol details.
 	if vm.agent != nil {
-		prepareAgentForHibernate(ctx, vm.agent)
-		vm.agent.Close()
+		quiesceAndCloseAgent(ctx, vm.agent)
 		vm.agent = nil
 	}
 
@@ -2220,15 +2273,19 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	if reconnErr == nil {
 		vm.agent = agentClient
 	} else {
-		log.Printf("qemu: CreateCheckpoint %s/%s: CRITICAL: agent reconnect failed, killing orphan VM", sandboxID, checkpointID)
-		if vm.qmp != nil {
-			_ = vm.qmp.Quit()
-			vm.qmp.Close()
-			vm.qmp = nil
-		}
+		// Agent didn't come back after savevm — the VM is unmanageable. Full
+		// teardown via destroyVM, not the partial QMP-quit-only cleanup that
+		// used to live here. The old path left the qemu process and TAP/dir
+		// behind any time qmp.Quit didn't reach the process, producing the
+		// orphan qemu we observed under load (m.vms removed but qemu alive,
+		// invisible to the rest of the worker until the orphan reaper runs).
+		log.Printf("qemu: CreateCheckpoint %s/%s: CRITICAL: agent reconnect failed, destroying VM cleanly", sandboxID, checkpointID)
 		m.mu.Lock()
 		delete(m.vms, sandboxID)
 		m.mu.Unlock()
+		if err := m.destroyVM(vm); err != nil {
+			log.Printf("qemu: CreateCheckpoint %s/%s: destroyVM also failed: %v (orphan reaper will catch)", sandboxID, checkpointID, err)
+		}
 	}
 
 	// Write metadata and finalize cache.
@@ -2851,13 +2908,36 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 
 	log.Printf("qemu: ForkFromCheckpoint %s → %s: agent connected, patching network...", checkpointID, id)
 
-	// Patch network (fork gets new IPs) + sync clock
+	// Patch network (fork gets new IPs) + sync clock — both LOAD-BEARING.
+	// Earlier this code only logged failures; the fork would "complete" with
+	// the wrong IP/route/DNS and an unresponsive agent gRPC channel, leaking
+	// a half-broken VM. Now: propagate errors, destroy the half-built fork,
+	// and return — caller retries against a clean slate.
+	patchT0 := time.Now()
 	if err := patchGuestNetwork(context.Background(), agent, netCfg); err != nil {
-		log.Printf("qemu: ForkFromCheckpoint %s: network patch failed: %v", id, err)
+		log.Printf("qemu: ForkFromCheckpoint %s: ABORT network patch failed (%dms): %v",
+			id, time.Since(patchT0).Milliseconds(), err)
+		_ = agent.Close()
+		_ = qmpClient.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("fork %s: network patch failed: %w", id, err)
 	}
+	log.Printf("qemu: ForkFromCheckpoint %s: network patched (%dms)", id, time.Since(patchT0).Milliseconds())
+
+	clockT0 := time.Now()
 	if err := syncGuestClock(context.Background(), agent); err != nil {
-		log.Printf("qemu: ForkFromCheckpoint %s: clock sync failed: %v", id, err)
+		log.Printf("qemu: ForkFromCheckpoint %s: ABORT clock sync failed (%dms): %v",
+			id, time.Since(clockT0).Milliseconds(), err)
+		_ = agent.Close()
+		_ = qmpClient.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		m.cleanupVM(netCfg, sandboxDir)
+		return nil, fmt.Errorf("fork %s: clock sync failed: %w", id, err)
 	}
+	log.Printf("qemu: ForkFromCheckpoint %s: clock synced (%dms)", id, time.Since(clockT0).Milliseconds())
 
 	// Set env vars (sealed via secrets proxy if configured)
 	envsToInject := m.sealSandboxEnvs(context.Background(), id, netCfg, agent, cfg)
@@ -3016,6 +3096,13 @@ func (m *Manager) GetWorkspacePath(sandboxID string) (string, error) {
 }
 
 // SyncFS flushes filesystem buffers inside the VM.
+//
+// On transport errors (Unavailable, EOF, "closed network connection"), the
+// agent client redials and retries once. This is the recovery path for the
+// prod scenario where an agent connection silently dropped ~10 min after
+// migration restore and stayed dropped: every autosave-driven SyncFS would
+// hit a closed conn and log a failure forever, with no reconnect attempt.
+// Now we redial on demand and the next autosave succeeds.
 func (m *Manager) SyncFS(ctx context.Context, sandboxID string) error {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
@@ -3024,7 +3111,17 @@ func (m *Manager) SyncFS(ctx context.Context, sandboxID string) error {
 	if vm.agent == nil {
 		return fmt.Errorf("no agent connection for %s", sandboxID)
 	}
-	return vm.agent.SyncFS(ctx)
+	if err := vm.agent.SyncFS(ctx); err != nil {
+		if !IsTransportError(err) {
+			return err
+		}
+		log.Printf("qemu: SyncFS %s: transport error (%v), redialing agent", sandboxID, err)
+		if rdErr := vm.agent.Redial(); rdErr != nil {
+			return fmt.Errorf("syncfs failed and redial failed: orig=%v redial=%w", err, rdErr)
+		}
+		return vm.agent.SyncFS(ctx)
+	}
+	return nil
 }
 
 // CleanupOrphanedProcesses kills any QEMU processes and TAP devices

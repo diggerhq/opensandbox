@@ -72,13 +72,6 @@ type virtioSerialListener struct {
 	closed chan struct{}
 	mu     sync.Mutex
 	active bool // true when a connection is being served
-	// activeConn tracks the conn handed to gRPC so PrepareHibernate can
-	// force-close it before savevm captures state. Without this, the
-	// gRPC server's HTTP/2 parser state survives savevm/loadvm and gets
-	// fed garbage from the next worker's handshake — the post-loadvm
-	// "agent not ready" race that surfaces ~5% under fork stress and
-	// indefinitely on prod-style restore.
-	activeConn *virtioSerialConn
 }
 
 func listenVirtioSerial(path string) (net.Listener, error) {
@@ -118,15 +111,13 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 		}
 		l.mu.Unlock()
 
-		// Clear any read deadline left over from PrepareHibernate's conn
-		// teardown — without this, poll/Read on this fd would immediately
-		// return ErrDeadlineExceeded forever.
-		_ = l.f.SetReadDeadline(time.Time{})
-
 		// Drain any stale data from the previous gRPC session.
 		// After a gRPC connection drops, the serial port may have leftover
 		// bytes (GOAWAY frames, partial HTTP/2 frames). If we hand these to
 		// the new gRPC session, it gets a protocol error and closes immediately.
+		if instrumentVirtioSerial {
+			log.Printf("virtio-serial: Accept iter: active=false, draining stale...")
+		}
 		drainStaleData(l.f)
 
 		// Wait for the host to connect (port becomes readable with fresh data)
@@ -140,22 +131,17 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 			l.mu.Unlock()
 			continue
 		}
-		conn := &virtioSerialConn{
+		l.active = true
+		l.mu.Unlock()
+		log.Printf("agent: virtio-serial Accept: port readable, accepting connection")
+		return &virtioSerialConn{
 			f: l.f,
 			onClose: func() {
 				l.mu.Lock()
 				l.active = false
-				if l.activeConn != nil {
-					l.activeConn = nil
-				}
 				l.mu.Unlock()
 			},
-		}
-		l.active = true
-		l.activeConn = conn
-		l.mu.Unlock()
-		log.Printf("agent: virtio-serial Accept: port readable, accepting connection")
-		return conn, nil
+		}, nil
 	}
 }
 
@@ -198,41 +184,14 @@ func waitForReadable(f *os.File, timeout time.Duration) bool {
 	return fds[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0
 }
 
-// PrepareHibernate resets the active flag AND wakes up the gRPC server's
-// blocked Read goroutine via a past read deadline, then clears the deadline
-// before the next Accept cycle.
-//
-// Why this matters: without forcing the gRPC server to release the conn, its
-// HTTP/2 parser state (in-flight frames, keepalive pings) gets captured by
-// savevm. On the next worker's loadvm + reconnect, that captured parser
-// tries to interpret fresh HTTP/2 SETTINGS frames as continuation of the
-// old stream, consumes bytes but fails at semantics, and stays in the bad
-// state past the worker's 30s agent-connect timeout. By setting the read
-// deadline in the past, the blocked Read returns ErrDeadlineExceeded, gRPC
-// treats it as a conn error and drops the stream cleanly. Now savevm
-// captures an idle, drained chardev with no parser in flight.
-//
-// The deadline reset happens at the top of Accept (see resetReadDeadline)
-// so future connections are unaffected.
+// PrepareHibernate resets the active flag so that after migration restore,
+// the Accept loop will poll for a new host-side connection instead of
+// thinking the old connection is still active.
 func (l *virtioSerialListener) PrepareHibernate() {
 	l.mu.Lock()
-	conn := l.activeConn
-	l.activeConn = nil
 	l.active = false
 	l.mu.Unlock()
 	log.Printf("agent: virtio-serial: prepared for hibernate (active=false)")
-	if conn == nil {
-		return
-	}
-	// Give the PrepareHibernate response time to flush before disrupting
-	// the conn. 50ms is more than enough on a virtio-serial pipe.
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		// SetReadDeadline in the past wakes up the blocked Read goroutine
-		// inside gRPC's HTTP/2 transport with os.ErrDeadlineExceeded.
-		_ = conn.f.SetReadDeadline(time.Now().Add(-1 * time.Second))
-		log.Printf("agent: virtio-serial: triggered conn teardown (frees gRPC parser state for clean savevm)")
-	}()
 }
 
 func (l *virtioSerialListener) Close() error {
@@ -258,10 +217,41 @@ type virtioSerialConn struct {
 	once    sync.Once
 }
 
-func (c *virtioSerialConn) Read(b []byte) (int, error)  { return c.f.Read(b) }
-func (c *virtioSerialConn) Write(b []byte) (int, error) { return c.f.Write(b) }
+// instrumentVirtioSerial controls per-Read logging on the conn. Set true via
+// OSB_AGENT_TRACE_VIRTIO=1 env var to debug post-loadvm protocol confusion.
+// HARDCODED TO TRUE FOR INVESTIGATION BUILD — revert before merging.
+var instrumentVirtioSerial = true || os.Getenv("OSB_AGENT_TRACE_VIRTIO") == "1"
+
+func (c *virtioSerialConn) Read(b []byte) (int, error) {
+	n, err := c.f.Read(b)
+	if instrumentVirtioSerial {
+		// Log first 16 bytes (or fewer) so we can spot HTTP/2 prefaces
+		// that might be from a NEW gRPC session being fed to the OLD parser.
+		// HTTP/2 preface is 24 bytes starting with "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".
+		preview := ""
+		if n > 0 {
+			max := n
+			if max > 16 {
+				max = 16
+			}
+			preview = fmt.Sprintf(" first=%q", b[:max])
+		}
+		log.Printf("virtio-serial: conn.Read n=%d err=%v%s", n, err, preview)
+	}
+	return n, err
+}
+func (c *virtioSerialConn) Write(b []byte) (int, error) {
+	n, err := c.f.Write(b)
+	if instrumentVirtioSerial && err != nil {
+		log.Printf("virtio-serial: conn.Write n=%d err=%v", n, err)
+	}
+	return n, err
+}
 func (c *virtioSerialConn) Close() error {
 	c.once.Do(func() {
+		if instrumentVirtioSerial {
+			log.Printf("virtio-serial: conn.Close called (gRPC dropped this conn)")
+		}
 		if c.onClose != nil {
 			c.onClose()
 		}
