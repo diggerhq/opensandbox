@@ -44,6 +44,16 @@ type ScalerStateStore interface {
 	TryAcquireEvacuationLock() bool
 	ReleaseEvacuationLock()
 
+	// Rolling-replace serialization — only one stale-worker replacement is
+	// in flight at a time (see rollingReplace). Without this, two ticks
+	// could each pick a different stale worker to drain, both targeting the
+	// single new-version worker, piling sandboxes onto it and starving the
+	// rest of the cluster of capacity. 30-min TTL — a single replacement
+	// (drain + terminate + scaleUp + new-worker boot) is bounded but can
+	// take 5-10 minutes.
+	TryAcquireReplacingLock() bool
+	ReleaseReplacingLock()
+
 	// In-flight migration tracking
 	IncrInFlight(workerID string)
 	DecrInFlight(workerID string)
@@ -268,6 +278,25 @@ func (r *RedisScalerState) ReleaseEvacuationLock() {
 	r.rdb.Del(ctx, "scaler:evacuating")
 }
 
+// TryAcquireReplacingLock serializes rollingReplace across CPs. 30-min TTL
+// so a CP crash doesn't pin the lock indefinitely — but long enough that a
+// real drain+terminate+scaleUp cycle (5-10 min normally) won't expire it.
+func (r *RedisScalerState) TryAcquireReplacingLock() bool {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	ok, err := r.rdb.SetArgs(ctx, "scaler:replacing", "1", redis.SetArgs{
+		Mode: "NX",
+		TTL:  30 * time.Minute,
+	}).Result()
+	return err == nil && ok == "OK"
+}
+
+func (r *RedisScalerState) ReleaseReplacingLock() {
+	ctx, cancel := r.ctx()
+	defer cancel()
+	r.rdb.Del(ctx, "scaler:replacing")
+}
+
 // --- In-flight ---
 
 func (r *RedisScalerState) IncrInFlight(workerID string) {
@@ -473,6 +502,13 @@ func (m *InMemoryScalerState) TryAcquireEvacuationLock() bool {
 }
 func (m *InMemoryScalerState) ReleaseEvacuationLock() {
 	m.migrating.Delete("__evacuation__")
+}
+func (m *InMemoryScalerState) TryAcquireReplacingLock() bool {
+	_, loaded := m.migrating.LoadOrStore("__replacing__", struct{}{})
+	return !loaded
+}
+func (m *InMemoryScalerState) ReleaseReplacingLock() {
+	m.migrating.Delete("__replacing__")
 }
 func (m *InMemoryScalerState) IncrInFlight(workerID string) {
 	m.mu.Lock()
