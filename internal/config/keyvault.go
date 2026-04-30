@@ -44,6 +44,8 @@ var secretMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
+	"server-azure-vm-sizes":         "OPENSANDBOX_AZURE_VM_SIZES",
+	"server-ec2-instance-types":     "OPENSANDBOX_EC2_INSTANCE_TYPES",
 
 	// Worker secrets
 	"worker-jwt-secret":    "OPENSANDBOX_JWT_SECRET",

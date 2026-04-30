@@ -452,6 +452,26 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return m.coldBootLocal(ctx, sandboxID, timeout)
 	}
 
+	// Re-plug virtio-mem to match the pre-hibernate total BEFORE Cont. The VM
+	// is paused, so the kernel sees the full memory map immediately on resume
+	// — without this, restored processes that were using more than baseMem
+	// OOM before any post-resume scale could land. Mirrors the
+	// RestoreFromCheckpoint path (manager.go:2536). Also keeps host-side
+	// accounting honest: vm.MemoryMB stays equal to what's actually plugged,
+	// not the ceiling, so TotalCommittedMemoryMB reflects reality.
+	pluggedMB := 0
+	if meta.MemoryMB > baseMem {
+		additionalMB := alignVirtioMemBlock(meta.MemoryMB - baseMem)
+		if err := qmpClient.SetVirtioMemSize(additionalMB); err != nil {
+			log.Printf("qemu: wake %s: pre-resume virtio-mem plug to %dMB failed: %v (continuing with base %dMB)",
+				sandboxID, additionalMB, err, baseMem)
+		} else {
+			pluggedMB = additionalMB
+			log.Printf("qemu: wake %s: pre-resume virtio-mem plug %dMB (base=%d, total=%d)",
+				sandboxID, additionalMB, baseMem, baseMem+additionalMB)
+		}
+	}
+
 	if err := qmpClient.Cont(); err != nil {
 		qmpClient.Close()
 		cmd.Process.Kill()
@@ -504,16 +524,17 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 
 	vm := &VMInstance{
-		ID:            sandboxID,
-		Template:      meta.Template,
-		Status:        types.SandboxStatusRunning,
-		StartedAt:     now,
-		EndAt:         now.Add(ttl),
-		CpuCount:      meta.CpuCount,
-		MemoryMB:      meta.MemoryMB,
-		baseMemoryMB:  baseMem,
-		HostPort:      hostPort,
-		GuestPort:     netCfg.GuestPort,
+		ID:                   sandboxID,
+		Template:             meta.Template,
+		Status:               types.SandboxStatusRunning,
+		StartedAt:            now,
+		EndAt:                now.Add(ttl),
+		CpuCount:             meta.CpuCount,
+		MemoryMB:             baseMem + pluggedMB, // actually-plugged total, not the ceiling — keeps committed accounting honest
+		baseMemoryMB:         baseMem,
+		virtioMemRequestedMB: pluggedMB,
+		HostPort:             hostPort,
+		GuestPort:             netCfg.GuestPort,
 		pid:           cmd.Process.Pid,
 		cmd:           cmd,
 		network:       netCfg,

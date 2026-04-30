@@ -288,17 +288,31 @@ func main() {
 		}
 
 		if pool != nil {
+			// Pick the per-provider ranked size list. Empty → scaler defers to
+			// the pool's single configured default (cfg.AzureVMSize / cfg.EC2InstanceType).
+			var machineSizes []string
+			switch {
+			case len(cfg.AzureVMSizes) > 0 && cfg.AzureSubscriptionID != "":
+				machineSizes = cfg.AzureVMSizes
+			case len(cfg.EC2InstanceTypes) > 0 && (cfg.EC2AMI != "" || cfg.EC2SSMParameterName != ""):
+				machineSizes = cfg.EC2InstanceTypes
+			}
+			if len(machineSizes) > 0 {
+				log.Printf("opensandbox: scaler size fallback ranked: %v", machineSizes)
+			}
+
 			scalerState := controlplane.NewRedisScalerState(redisRegistry.RedisClient())
 			scaler := controlplane.NewScaler(controlplane.ScalerConfig{
-				Pool:        pool,
-				Registry:    redisRegistry,
-				Store:       opts.Store,
-				StateStore:  scalerState,
-				WorkerImage: cfg.EC2WorkerImage,
-				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
-				MinWorkers:  cfg.MinWorkersPerRegion,
-				MaxWorkers:  cfg.MaxWorkersPerRegion,
-				IdleReserve: cfg.IdleReserveWorkers,
+				Pool:         pool,
+				Registry:     redisRegistry,
+				Store:        opts.Store,
+				StateStore:   scalerState,
+				WorkerImage:  cfg.EC2WorkerImage,
+				Cooldown:     time.Duration(cfg.ScaleCooldownSec) * time.Second,
+				MinWorkers:   cfg.MinWorkersPerRegion,
+				MaxWorkers:   cfg.MaxWorkersPerRegion,
+				IdleReserve:  cfg.IdleReserveWorkers,
+				MachineSizes: machineSizes,
 			})
 			defer scaler.Stop()
 

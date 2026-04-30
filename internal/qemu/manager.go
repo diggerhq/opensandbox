@@ -1105,8 +1105,7 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 	// The virtio-mem backend allocates lazily (only requested-size is committed),
 	// but maxmem must exceed base+pool for QEMU to accept the device.
 	// Pool = 16GB - base, so any sandbox can scale up to 16GB total regardless of base.
-	// Round up to 128MB block alignment.
-	virtioMemPoolMB := ((16384 - memMB + 127) / 128) * 128
+	virtioMemPoolMB := alignVirtioMemBlock(16384 - memMB)
 	if virtioMemPoolMB < 1024 {
 		virtioMemPoolMB = 1024 // minimum 1GB pool
 	}
@@ -1843,23 +1842,29 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		if additionalMB < 0 {
 			additionalMB = 0
 		}
-		// Round up to 128MB block size
-		additionalMB = ((additionalMB + 127) / 128) * 128
+		additionalMB = alignVirtioMemBlock(additionalMB)
 
-		// Check committed memory across all VMs before attempting hotplug.
-		// Reserve 20% of host RAM for OS, QEMU overhead, page cache, etc.
+		// Check actual host memory before attempting hotplug. Uses real RSS-based
+		// usage (MemTotal - MemAvailable from /proc/meminfo) rather than the
+		// committed sum: a sandbox configured with maxmem=16GB but actually
+		// using 200MB RSS holds 200MB of host RAM, not 16GB. Committed-based
+		// admission rejects grow requests on workers that have plenty of real
+		// headroom — same misleading-signal bug that was already fixed for
+		// migration admission (grpc_server.go PrepareMigrationIncoming).
+		// Reserve 20% of host RAM as a safety margin for OS, QEMU overhead,
+		// page cache, and the burst the grow request itself will pull in.
 		if additionalMB > vm.virtioMemRequestedMB {
 			deltaMB := additionalMB - vm.virtioMemRequestedMB
-			committedMB := m.totalCommittedMemoryMB()
 			hostTotalMB := m.hostMemoryMB()
+			hostUsedMB := m.hostUsedMemoryMB()
 			reserveMB := hostTotalMB / 5 // 20% safety margin
-			availableMB := hostTotalMB - committedMB - reserveMB
+			availableMB := hostTotalMB - hostUsedMB - reserveMB
 
 			if deltaMB > availableMB {
-				log.Printf("qemu: virtio-mem %s: need %dMB but only %dMB available (committed=%dMB, host=%dMB, reserve=%dMB)",
-					sandboxID, deltaMB, availableMB, committedMB, hostTotalMB, reserveMB)
-				return fmt.Errorf("insufficient_capacity: need %dMB additional but only %dMB available on this worker (committed=%dMB/%dMB)",
-					deltaMB, availableMB, committedMB, hostTotalMB)
+				log.Printf("qemu: virtio-mem %s: need %dMB but only %dMB available (used=%dMB, host=%dMB, reserve=%dMB)",
+					sandboxID, deltaMB, availableMB, hostUsedMB, hostTotalMB, reserveMB)
+				return fmt.Errorf("insufficient_capacity: need %dMB additional but only %dMB available on this worker (used=%dMB/%dMB)",
+					deltaMB, availableMB, hostUsedMB, hostTotalMB)
 			}
 		}
 
@@ -1969,6 +1974,21 @@ func (m *Manager) hostUsedMemoryMB() int {
 // HostUsedMemoryMB exposes used memory for the capacity checker interface.
 func (m *Manager) HostUsedMemoryMB() int {
 	return m.hostUsedMemoryMB()
+}
+
+// virtioMemBlockSizeMB is the QEMU virtio-mem device block size. All plug
+// requests must be a multiple of this — QMP qom-set rejects non-aligned
+// values. Set in -device virtio-mem-pci,block-size=128M; keep them in sync.
+const virtioMemBlockSizeMB = 128
+
+// alignVirtioMemBlock rounds an additional-memory request up to the virtio-mem
+// device's block size so the QMP qom-set call is accepted. Negative or zero
+// inputs return zero.
+func alignVirtioMemBlock(mb int) int {
+	if mb <= 0 {
+		return 0
+	}
+	return ((mb + virtioMemBlockSizeMB - 1) / virtioMemBlockSizeMB) * virtioMemBlockSizeMB
 }
 
 // VMActualMemoryMB returns the QEMU process RSS for a sandbox — true physical
@@ -2537,8 +2557,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	// memory immediately on resume. Without this, restored processes that were using
 	// >baseMemMB would OOM before the post-resume re-scale completes.
 	if desiredMemMB > bootMemMB {
-		additionalMB := desiredMemMB - bootMemMB
-		additionalMB = ((additionalMB + 127) / 128) * 128 // align to 128MB block size
+		additionalMB := alignVirtioMemBlock(desiredMemMB - bootMemMB)
 		if err := qmpClient.SetVirtioMemSize(additionalMB); err != nil {
 			log.Printf("qemu: RestoreFromCheckpoint %s: pre-resume scale to %dMB failed: %v (continuing with base %dMB)",
 				sandboxID, desiredMemMB, err, bootMemMB)
@@ -2593,7 +2612,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	vm.CpuCount = bootCpus
 	vm.baseMemoryMB = bootMemMB
 	if desiredMemMB > bootMemMB {
-		additionalMB := ((desiredMemMB - bootMemMB + 127) / 128) * 128
+		additionalMB := alignVirtioMemBlock(desiredMemMB - bootMemMB)
 		vm.MemoryMB = bootMemMB + additionalMB
 		vm.virtioMemRequestedMB = additionalMB
 	} else {
