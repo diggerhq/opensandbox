@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -193,86 +192,77 @@ func main() {
 
 	// Initialize compute pool + autoscaler (server mode)
 	if cfg.Mode == "server" && redisRegistry != nil {
+		// Build the WorkerSpec: cloud-neutral config that the CP supplies to
+		// whichever pool is selected. The pool combines this with cloud-specific
+		// cloud-init to launch new workers.
+		//
+		// Workers need to reach Postgres/Redis on the CP's private IP,
+		// not localhost. Replace localhost with the CP's IP if known.
+		cpIP := os.Getenv("OPENSANDBOX_CONTROLPLANE_IP")
+		workerDBURL := cfg.DatabaseURL
+		workerRedisURL := cfg.RedisURL
+		if cpIP != "" {
+			workerDBURL = strings.ReplaceAll(workerDBURL, "localhost", cpIP)
+			workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
+			workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
+			workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
+		}
+		spec := compute.WorkerSpec{
+			CellID:            cfg.CellID,
+			Region:            cfg.Region,
+			DatabaseURL:       workerDBURL,
+			RedisURL:          workerRedisURL,
+			JWTSecret:         cfg.JWTSecret,
+			SessionJWTSecret:  cfg.SessionJWTSecret,
+			CFEventEndpoint:   cfg.CFEventEndpoint,
+			CFEventSecret:     cfg.CFEventSecret,
+			CFAdminSecret:     cfg.CFAdminSecret,
+			MaxCapacity:       cfg.MaxCapacity,
+			SandboxDomain:     cfg.SandboxDomain,
+			DefaultMemoryMB:   cfg.DefaultSandboxMemoryMB,
+			DefaultCPUs:       cfg.DefaultSandboxCPUs,
+			DefaultDiskMB:     cfg.DefaultSandboxDiskMB,
+			S3Bucket:          cfg.S3Bucket,
+			S3Region:          cfg.S3Region,
+			S3Endpoint:        cfg.S3Endpoint,
+			S3AccessKeyID:     cfg.S3AccessKeyID,
+			S3SecretAccessKey: cfg.S3SecretAccessKey,
+			S3ForcePathStyle:  cfg.S3ForcePathStyle,
+			SegmentWriteKey:   cfg.SegmentWriteKey,
+			SecretsRef:        cfg.SecretsARN,
+		}
+
+		// Provider selection. Explicit cfg.ComputeProvider wins; otherwise we
+		// autodetect from existing fields for backwards compatibility.
+		provider := cfg.ComputeProvider
+		if provider == "" {
+			switch {
+			case cfg.AzureSubscriptionID != "" && (cfg.AzureImageID != "" || cfg.AzureKeyVaultName != ""):
+				provider = "azure"
+			case cfg.EC2AMI != "" || cfg.EC2SSMParameterName != "":
+				provider = "aws"
+			}
+		}
+
 		var pool compute.Pool
 		var poolName string
 
-		if cfg.AzureSubscriptionID != "" && (cfg.AzureImageID != "" || cfg.AzureKeyVaultName != "") {
-			// Build worker env template — new VMs get this via cloud-init.
-			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are patched by cloud-init
-			// with the VM's actual private IP and hostname.
-			// Workers need to reach Postgres/Redis on the control plane's private IP,
-			// not localhost. Replace localhost with the control plane's IP.
-			cpIP := os.Getenv("OPENSANDBOX_CONTROLPLANE_IP")
-			workerDBURL := cfg.DatabaseURL
-			workerRedisURL := cfg.RedisURL
-			if cpIP != "" {
-				workerDBURL = strings.ReplaceAll(workerDBURL, "localhost", cpIP)
-				workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
-				workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
-				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
-			}
-
-			workerEnv := fmt.Sprintf(
-				"OPENSANDBOX_MODE=worker\n"+
-					"OPENSANDBOX_VM_BACKEND=qemu\n"+
-					"OPENSANDBOX_QEMU_BIN=qemu-system-x86_64\n"+
-					"OPENSANDBOX_DATA_DIR=/data/sandboxes\n"+
-					"OPENSANDBOX_KERNEL_PATH=/opt/opensandbox/vmlinux\n"+
-					"OPENSANDBOX_IMAGES_DIR=/data/firecracker/images\n"+
-					"OPENSANDBOX_GRPC_ADVERTISE=PLACEHOLDER:9090\n"+
-					"OPENSANDBOX_HTTP_ADDR=http://PLACEHOLDER:8081\n"+
-					"OPENSANDBOX_JWT_SECRET=%s\n"+
-					"OPENSANDBOX_WORKER_ID=PLACEHOLDER\n"+
-					"OPENSANDBOX_REGION=%s\n"+
-					"OPENSANDBOX_MAX_CAPACITY=%d\n"+
-					"OPENSANDBOX_PORT=8081\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=%d\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_CPUS=%d\n"+
-					"OPENSANDBOX_DATABASE_URL=%s\n"+
-					"OPENSANDBOX_REDIS_URL=%s\n"+
-					"OPENSANDBOX_S3_BUCKET=%s\n"+
-					"OPENSANDBOX_S3_REGION=%s\n"+
-					"OPENSANDBOX_S3_ENDPOINT=%s\n"+
-					"OPENSANDBOX_S3_ACCESS_KEY_ID=%s\n"+
-					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n"+
-					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n"+
-					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
-					"SEGMENT_WRITE_KEY=%s\n",
-				cfg.JWTSecret,
-				cfg.Region,
-				cfg.MaxCapacity,
-				cfg.DefaultSandboxMemoryMB,
-				cfg.DefaultSandboxCPUs,
-				workerDBURL,
-				workerRedisURL,
-				cfg.S3Bucket,
-				cfg.S3Region,
-				cfg.S3Endpoint,
-				cfg.S3AccessKeyID,
-				cfg.S3SecretAccessKey,
-				cfg.S3ForcePathStyle,
-				cfg.SandboxDomain,
-				cfg.DefaultSandboxDiskMB,
-				cfg.SegmentWriteKey,
-			)
-			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
-
+		switch provider {
+		case "azure":
 			azPool, err := compute.NewAzurePool(compute.AzurePoolConfig{
-				SubscriptionID:  cfg.AzureSubscriptionID,
-				ResourceGroup:   cfg.AzureResourceGroup,
-				Region:          cfg.Region,
-				VMSize:          cfg.AzureVMSize,
-				ImageID:         cfg.AzureImageID,
-				SubnetID:        cfg.AzureSubnetID,
-				SSHPublicKey:    cfg.AzureSSHPublicKey,
-				KeyVaultName:    cfg.AzureKeyVaultName,
-				WorkerEnvBase64: workerEnvB64,
+				SubscriptionID: cfg.AzureSubscriptionID,
+				ResourceGroup:  cfg.AzureResourceGroup,
+				Region:         cfg.Region,
+				VMSize:         cfg.AzureVMSize,
+				ImageID:        cfg.AzureImageID,
+				SubnetID:       cfg.AzureSubnetID,
+				SSHPublicKey:   cfg.AzureSSHPublicKey,
+				KeyVaultName:   cfg.AzureKeyVaultName,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)
 			}
-			// If image not set statically but Key Vault is configured, fetch initial image
+			azPool.SetWorkerSpec(spec)
 			if cfg.AzureImageID == "" && cfg.AzureKeyVaultName != "" {
 				imgID, version, kvErr := azPool.RefreshAMI(context.Background())
 				if kvErr != nil {
@@ -282,8 +272,8 @@ func main() {
 			}
 			pool = azPool
 			poolName = fmt.Sprintf("Azure (size=%s, image=%s, keyvault=%s)", cfg.AzureVMSize, cfg.AzureImageID, cfg.AzureKeyVaultName)
-		} else if cfg.EC2AMI != "" || cfg.EC2SSMParameterName != "" {
-			// AWS EC2 compute pool (AMI from config or dynamically from SSM)
+
+		case "aws":
 			ec2Pool, err := compute.NewEC2Pool(compute.EC2PoolConfig{
 				Region:             cfg.S3Region,
 				AccessKeyID:        cfg.S3AccessKeyID,
@@ -300,7 +290,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create EC2 pool: %v", err)
 			}
-			// If AMI not set statically but SSM is configured, fetch initial AMI from SSM
+			ec2Pool.SetWorkerSpec(spec)
 			if cfg.EC2AMI == "" && cfg.EC2SSMParameterName != "" {
 				amiID, version, ssmErr := ec2Pool.RefreshAMI(context.Background())
 				if ssmErr != nil {
@@ -310,6 +300,11 @@ func main() {
 			}
 			pool = ec2Pool
 			poolName = fmt.Sprintf("EC2 (ami=%s, type=%s, ssm=%s)", cfg.EC2AMI, cfg.EC2InstanceType, cfg.EC2SSMParameterName)
+
+		case "":
+			log.Println("opensandbox: no compute provider configured (combined mode, no autoscaling)")
+		default:
+			log.Fatalf("opensandbox: unknown compute provider %q (expected azure|aws)", provider)
 		}
 
 		if pool != nil {

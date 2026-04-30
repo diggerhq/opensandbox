@@ -151,6 +151,17 @@ type Config struct {
 	// CF halt-list endpoint. The halt_reconciler goroutine pulls this every 60s
 	// to catch missed halt webhooks. Empty disables the reconciler.
 	HaltListURL string
+
+	// Multi-cloud abstraction. Selects which compute pool the autoscaler uses.
+	// Valid values: "azure", "aws", "" (autodetect from existing fields).
+	// Adding a new cloud means a new compute.Pool implementation + a new
+	// case in cmd/server/main.go pool selection.
+	ComputeProvider string
+
+	// SecretsProvider selects the runtime secrets backend.
+	// Valid values: "keyvault" (Azure), "secretsmanager" (AWS), "env" (env-var only).
+	// Defaults to "env" if unset.
+	SecretsProvider string
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -254,6 +265,9 @@ func Load() (*Config, error) {
 		CFAdminSecret:    os.Getenv("OPENSANDBOX_CF_ADMIN_SECRET"),
 		SessionJWTSecret: os.Getenv("OPENSANDBOX_SESSION_JWT_SECRET"),
 		HaltListURL:      os.Getenv("OPENSANDBOX_HALT_LIST_URL"),
+
+		ComputeProvider: os.Getenv("OPENSANDBOX_COMPUTE_PROVIDER"),
+		SecretsProvider: envOrDefault("OPENSANDBOX_SECRETS_PROVIDER", "env"),
 	}
 
 	if cfg.SentryEnvironment == "" {

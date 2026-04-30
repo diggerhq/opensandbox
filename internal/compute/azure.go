@@ -25,27 +25,40 @@ const (
 
 // AzurePoolConfig configures the Azure compute pool.
 type AzurePoolConfig struct {
-	SubscriptionID     string
-	ResourceGroup      string
-	Region             string // e.g. "westus2"
-	VMSize             string // e.g. "Standard_D16s_v5"
-	ImageID            string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
-	SubnetID           string // full resource ID of the subnet
-	AdminUsername      string // SSH username (default: "azureuser")
-	SSHPublicKey       string // SSH public key content
-	DataDiskSizeGB     int    // data disk size (default: 256)
-	WorkerEnvBase64 string // base64-encoded worker.env content (injected via cloud-init)
-	KeyVaultName    string // Azure Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	SubscriptionID string
+	ResourceGroup  string
+	Region         string // e.g. "westus2"
+	VMSize         string // e.g. "Standard_D16s_v5"
+	ImageID        string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
+	SubnetID       string // full resource ID of the subnet
+	AdminUsername  string // SSH username (default: "azureuser")
+	SSHPublicKey   string // SSH public key content
+	DataDiskSizeGB int    // data disk size (default: 256)
+	KeyVaultName   string // Azure Key Vault name for dynamic image ID refresh
 }
 
 // AzurePool implements compute.Pool using Azure VMs.
+//
+// Worker bring-up: the CP injects a WorkerSpec via SetWorkerSpec at startup.
+// CreateMachine combines the spec with Azure-specific cloud-init (NVMe RAID,
+// AMI image-layout assumptions, Azure metadata fetches) to produce userdata.
 type AzurePool struct {
 	vmClient   *armcompute.VirtualMachinesClient
 	diskClient *armcompute.DisksClient
 	nicClient  *armnetwork.InterfacesClient
-	mu         sync.RWMutex // protects cfg.ImageID
+	mu         sync.RWMutex // protects cfg.ImageID + spec
 	cfg        AzurePoolConfig
+	spec       WorkerSpec        // injected via SetWorkerSpec; copied into worker env on every CreateMachine
 	kvClient   *azsecrets.Client // Key Vault client for dynamic image refresh (nil if not configured)
+}
+
+// SetWorkerSpec injects the cloud-neutral worker config the CP wants every
+// new worker VM to use. Idempotent — overwrites any previous spec.
+// Implements compute.WorkerSpecHolder.
+func (p *AzurePool) SetWorkerSpec(spec WorkerSpec) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spec = spec
 }
 
 // NewAzurePool creates an Azure compute pool using default credentials (managed identity, CLI, env vars).
@@ -536,6 +549,7 @@ func (p *AzurePool) vmToMachine(vm *armcompute.VirtualMachine, nic *armnetwork.I
 }
 
 func (p *AzurePool) buildUserData(opts MachineOpts) string {
+	_ = opts // opts.Region/Size honored at VM-create level; cloud-init is cell-uniform
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nset -euo pipefail\n\n")
 
@@ -578,11 +592,15 @@ func (p *AzurePool) buildUserData(opts MachineOpts) string {
 	sb.WriteString("  echo 'Copied retained bases from /opt/opensandbox/images/bases to /data/firecracker/images/bases'\n")
 	sb.WriteString("fi\n\n")
 
-	// Write worker env file from base64-encoded config
-	if p.cfg.WorkerEnvBase64 != "" {
-		sb.WriteString("# Write worker env (from control plane config)\n")
+	// Write worker env file from injected WorkerSpec.
+	p.mu.RLock()
+	envContent := BuildWorkerEnv(p.spec)
+	p.mu.RUnlock()
+	if envContent != "" {
+		envB64 := base64.StdEncoding.EncodeToString([]byte(envContent))
+		sb.WriteString("# Write worker env (from control plane WorkerSpec)\n")
 		sb.WriteString("mkdir -p /etc/opensandbox\n")
-		sb.WriteString(fmt.Sprintf("echo '%s' | base64 -d > /etc/opensandbox/worker.env\n\n", p.cfg.WorkerEnvBase64))
+		sb.WriteString(fmt.Sprintf("echo '%s' | base64 -d > /etc/opensandbox/worker.env\n\n", envB64))
 
 		// Patch in the VM's own private IP and identity
 		sb.WriteString("# Patch worker identity with this VM's private IP and hostname\n")
