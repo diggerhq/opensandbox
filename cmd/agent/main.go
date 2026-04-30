@@ -8,6 +8,7 @@ package main
 import (
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
@@ -50,6 +51,24 @@ func main() {
 	// resource temporarily unavailable" even though they have nothing
 	// running. Drain on each SIGCHLD; signals coalesce so we loop.
 	startReaper()
+
+	// Best-effort: start supervisord if installed and configured. Run as a
+	// daemon (default mode, not -n) so it returns immediately and we don't
+	// block agent startup. Supervisord becomes a regular child of PID 1; its
+	// own children (configured programs) are reparented to it, not to us, so
+	// our SIGCHLD reaper doesn't conflict with supervisord's own wait4 calls.
+	// Without this, "supervisord baked into rootfs" only works while the user
+	// manually starts it — programs don't auto-start at boot the way they do
+	// on a systemd-managed VM.
+	if _, err := os.Stat("/usr/bin/supervisord"); err == nil {
+		if _, err := os.Stat("/etc/supervisor/supervisord.conf"); err == nil {
+			if err := exec.Command("/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf").Start(); err != nil {
+				log.Printf("agent: supervisord start failed: %v (continuing)", err)
+			} else {
+				log.Printf("agent: supervisord started (config=/etc/supervisor/supervisord.conf)")
+			}
+		}
+	}
 
 	// Signal handling:
 	// SIGTERM/SIGINT: clean shutdown (exit)
