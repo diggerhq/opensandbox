@@ -179,6 +179,7 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	admin.GET("/events/history", s.adminEventsHistory)
 	admin.GET("/report", s.adminReport)
 	admin.POST("/events/clear", s.adminClearEvents)
+	admin.POST("/workers/:id/drain", s.adminSetWorkerDraining)
 	admin.GET("/demo/migration", s.demoPingPongPage)
 	admin.GET("/demo/chaos", s.demoChaosPage)
 
