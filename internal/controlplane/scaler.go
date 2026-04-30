@@ -361,36 +361,43 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	}
 
 	if needsScaleUp {
-		// Check cooldown before scaling up
+		// Cascade of guards. Important: each guard logs and SKIPS scale-up but
+		// must NOT `return` from Evaluate — Phase 5 (rollingReplace) below has
+		// to run regardless. Without this, a cluster pinned at maxWorkers with
+		// all stale workers can't ever roll because the early-return short-
+		// circuits both scaleUp AND rollingReplace, and rollingReplace is the
+		// only path that actually frees a slot (drain → terminate → scaleUp).
+		canScaleUp := true
 		if last, ok := s.state.GetLastScaleUp(region); ok && time.Since(last) < s.cooldown {
 			log.Printf("scaler: region %s needs scale-up (%s) but cooldown active (%s remaining)",
 				region, reason, s.cooldown-time.Since(last))
-			return
+			canScaleUp = false
 		}
-
-		// Don't scale up if there are already pending (unregistered) workers
-		pending := s.state.GetPendingLaunches(region)
-		if len(pending) > 0 {
-			log.Printf("scaler: region %s needs scale-up (%s) but %d worker(s) still pending registration",
-				region, reason, len(pending))
-			return
-		}
-
-		// Don't exceed max workers per region (exclude draining workers from capacity)
-		effectiveWorkers := 0
-		for _, w := range workers {
-			if !s.state.IsDraining(w.MachineID) {
-				effectiveWorkers++
+		if canScaleUp {
+			pending := s.state.GetPendingLaunches(region)
+			if len(pending) > 0 {
+				log.Printf("scaler: region %s needs scale-up (%s) but %d worker(s) still pending registration",
+					region, reason, len(pending))
+				canScaleUp = false
 			}
 		}
-		if effectiveWorkers+len(s.state.GetPendingLaunches(region)) >= s.maxWorkers {
-			log.Printf("scaler: region %s at max workers (%d/%d), skipping scale-up", region, effectiveWorkers, s.maxWorkers)
-			return
+		if canScaleUp {
+			effectiveWorkers := 0
+			for _, w := range workers {
+				if !s.state.IsDraining(w.MachineID) {
+					effectiveWorkers++
+				}
+			}
+			if effectiveWorkers+len(s.state.GetPendingLaunches(region)) >= s.maxWorkers {
+				log.Printf("scaler: region %s at max workers (%d/%d), skipping scale-up", region, effectiveWorkers, s.maxWorkers)
+				canScaleUp = false
+			}
 		}
-
-		log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% disk=%.1f%% util=%.1f%%)",
-			region, reason, maxCPU, maxMem, maxDisk, utilization*100)
-		s.scaleUp(ctx, region)
+		if canScaleUp {
+			log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% disk=%.1f%% util=%.1f%%)",
+				region, reason, maxCPU, maxMem, maxDisk, utilization*100)
+			s.scaleUp(ctx, region)
+		}
 	} else if utilization < scaleDownThreshold && len(workers) > s.minWorkers {
 		// Phase 4: Scale down via smart drain (live-migrate sandboxes, then destroy)
 		log.Printf("scaler: region %s utilization %.1f%% < %.0f%%, initiating smart drain", region, utilization*100, scaleDownThreshold*100)
