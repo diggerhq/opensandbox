@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { getSessionDetail, getSessionStats } from '../api/client'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { getSessionDetail, getSessionStats, rebootSession, powerCycleSession } from '../api/client'
 import Terminal from '../components/Terminal'
 
 function StatusBadge({ status }: { status: string }) {
@@ -59,9 +59,53 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 export default function SessionDetail() {
   const { sandboxId } = useParams<{ sandboxId: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
   const [showTerminal, setShowTerminal] = useState(false)
   const [showInternal, setShowInternal] = useState(false)
+  const [resetState, setResetState] = useState<'idle' | 'rebooting' | 'power-cycling'>('idle')
+  const [resetError, setResetError] = useState<string | null>(null)
+
+  const handleReboot = async () => {
+    if (resetState !== 'idle') return
+    if (!confirm(
+      'Reboot this sandbox?\n\n' +
+      'The guest kernel will restart. Running processes are killed; ' +
+      'workspace data is preserved. Takes a few seconds.'
+    )) return
+    setResetState('rebooting')
+    setResetError(null)
+    try {
+      await rebootSession(sandboxId!)
+      queryClient.invalidateQueries({ queryKey: ['session-detail', sandboxId] })
+      queryClient.invalidateQueries({ queryKey: ['session-stats', sandboxId] })
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResetState('idle')
+    }
+  }
+
+  const handlePowerCycle = async () => {
+    if (resetState !== 'idle') return
+    if (!confirm(
+      'Power-cycle this sandbox?\n\n' +
+      'The QEMU process is destroyed and recreated with the same disks. ' +
+      'Use this if a regular reboot didn\'t recover. ' +
+      'Workspace data is preserved; takes ~30 seconds.'
+    )) return
+    setResetState('power-cycling')
+    setResetError(null)
+    try {
+      await powerCycleSession(sandboxId!)
+      queryClient.invalidateQueries({ queryKey: ['session-detail', sandboxId] })
+      queryClient.invalidateQueries({ queryKey: ['session-stats', sandboxId] })
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setResetState('idle')
+    }
+  }
 
   const { data: session, isLoading } = useQuery({
     queryKey: ['session-detail', sandboxId],
@@ -145,10 +189,47 @@ export default function SessionDetail() {
                   </svg>
                   Terminal
                 </button>
+                <button
+                  className="btn-ghost"
+                  onClick={handleReboot}
+                  disabled={resetState !== 'idle'}
+                  title="Soft restart: kernel reboots, workspace preserved"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  {resetState === 'rebooting' ? 'Rebooting…' : 'Reboot'}
+                </button>
+                <button
+                  className="btn-ghost"
+                  onClick={handlePowerCycle}
+                  disabled={resetState !== 'idle'}
+                  title="Hard restart: rebuilds VM, workspace preserved. Use if reboot didn't recover."
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+                    <line x1="12" y1="2" x2="12" y2="12" />
+                  </svg>
+                  {resetState === 'power-cycling' ? 'Power-cycling…' : 'Power Cycle'}
+                </button>
               </>
             )}
           </div>
         </div>
+        {resetError && (
+          <div style={{
+            marginTop: 12,
+            padding: '10px 14px',
+            background: 'rgba(239,68,68,0.08)',
+            border: '1px solid rgba(239,68,68,0.3)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-error, #f87171)',
+            fontSize: 13,
+          }}>
+            Reset failed: {resetError}
+          </div>
+        )}
       </div>
 
       {/* Terminal */}

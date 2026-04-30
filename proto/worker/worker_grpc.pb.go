@@ -35,6 +35,8 @@ const (
 	SandboxWorker_ExecSessionKill_FullMethodName           = "/worker.SandboxWorker/ExecSessionKill"
 	SandboxWorker_HibernateSandbox_FullMethodName          = "/worker.SandboxWorker/HibernateSandbox"
 	SandboxWorker_WakeSandbox_FullMethodName               = "/worker.SandboxWorker/WakeSandbox"
+	SandboxWorker_RebootSandbox_FullMethodName             = "/worker.SandboxWorker/RebootSandbox"
+	SandboxWorker_PowerCycleSandbox_FullMethodName         = "/worker.SandboxWorker/PowerCycleSandbox"
 	SandboxWorker_SaveAsTemplate_FullMethodName            = "/worker.SandboxWorker/SaveAsTemplate"
 	SandboxWorker_CreateCheckpoint_FullMethodName          = "/worker.SandboxWorker/CreateCheckpoint"
 	SandboxWorker_RestoreCheckpoint_FullMethodName         = "/worker.SandboxWorker/RestoreCheckpoint"
@@ -68,6 +70,17 @@ type SandboxWorkerClient interface {
 	ExecSessionKill(ctx context.Context, in *ExecSessionKillRequest, opts ...grpc.CallOption) (*ExecSessionKillResponse, error)
 	HibernateSandbox(ctx context.Context, in *HibernateSandboxRequest, opts ...grpc.CallOption) (*HibernateSandboxResponse, error)
 	WakeSandbox(ctx context.Context, in *WakeSandboxRequest, opts ...grpc.CallOption) (*WakeSandboxResponse, error)
+	// Reboot performs a soft, in-place guest reset (QMP system_reset). The
+	// QEMU process, network, and workspace stay in place; only the guest
+	// kernel and processes are reset. Recovers from in-guest wedges (zombie
+	// pile, OOM-killed agent, runaway process).
+	RebootSandbox(ctx context.Context, in *RebootSandboxRequest, opts ...grpc.CallOption) (*RebootSandboxResponse, error)
+	// PowerCycle does a hard reset: tears down the QEMU process and
+	// cold-boots a fresh VM with the existing workspace.qcow2. Use when the
+	// VMM itself is wedged (QMP unresponsive) or a soft reboot didn't
+	// recover. Sandbox keeps its ID, project, secrets, and persistent data;
+	// it gets a new TAP, host port, and PID.
+	PowerCycleSandbox(ctx context.Context, in *PowerCycleSandboxRequest, opts ...grpc.CallOption) (*PowerCycleSandboxResponse, error)
 	SaveAsTemplate(ctx context.Context, in *SaveAsTemplateRequest, opts ...grpc.CallOption) (*SaveAsTemplateResponse, error)
 	CreateCheckpoint(ctx context.Context, in *CreateCheckpointRequest, opts ...grpc.CallOption) (*CreateCheckpointResponse, error)
 	RestoreCheckpoint(ctx context.Context, in *RestoreCheckpointRequest, opts ...grpc.CallOption) (*RestoreCheckpointResponse, error)
@@ -263,6 +276,26 @@ func (c *sandboxWorkerClient) WakeSandbox(ctx context.Context, in *WakeSandboxRe
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) RebootSandbox(ctx context.Context, in *RebootSandboxRequest, opts ...grpc.CallOption) (*RebootSandboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RebootSandboxResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_RebootSandbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxWorkerClient) PowerCycleSandbox(ctx context.Context, in *PowerCycleSandboxRequest, opts ...grpc.CallOption) (*PowerCycleSandboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PowerCycleSandboxResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_PowerCycleSandbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxWorkerClient) SaveAsTemplate(ctx context.Context, in *SaveAsTemplateRequest, opts ...grpc.CallOption) (*SaveAsTemplateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SaveAsTemplateResponse)
@@ -393,6 +426,17 @@ type SandboxWorkerServer interface {
 	ExecSessionKill(context.Context, *ExecSessionKillRequest) (*ExecSessionKillResponse, error)
 	HibernateSandbox(context.Context, *HibernateSandboxRequest) (*HibernateSandboxResponse, error)
 	WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error)
+	// Reboot performs a soft, in-place guest reset (QMP system_reset). The
+	// QEMU process, network, and workspace stay in place; only the guest
+	// kernel and processes are reset. Recovers from in-guest wedges (zombie
+	// pile, OOM-killed agent, runaway process).
+	RebootSandbox(context.Context, *RebootSandboxRequest) (*RebootSandboxResponse, error)
+	// PowerCycle does a hard reset: tears down the QEMU process and
+	// cold-boots a fresh VM with the existing workspace.qcow2. Use when the
+	// VMM itself is wedged (QMP unresponsive) or a soft reboot didn't
+	// recover. Sandbox keeps its ID, project, secrets, and persistent data;
+	// it gets a new TAP, host port, and PID.
+	PowerCycleSandbox(context.Context, *PowerCycleSandboxRequest) (*PowerCycleSandboxResponse, error)
 	SaveAsTemplate(context.Context, *SaveAsTemplateRequest) (*SaveAsTemplateResponse, error)
 	CreateCheckpoint(context.Context, *CreateCheckpointRequest) (*CreateCheckpointResponse, error)
 	RestoreCheckpoint(context.Context, *RestoreCheckpointRequest) (*RestoreCheckpointResponse, error)
@@ -463,6 +507,12 @@ func (UnimplementedSandboxWorkerServer) HibernateSandbox(context.Context, *Hiber
 }
 func (UnimplementedSandboxWorkerServer) WakeSandbox(context.Context, *WakeSandboxRequest) (*WakeSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method WakeSandbox not implemented")
+}
+func (UnimplementedSandboxWorkerServer) RebootSandbox(context.Context, *RebootSandboxRequest) (*RebootSandboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RebootSandbox not implemented")
+}
+func (UnimplementedSandboxWorkerServer) PowerCycleSandbox(context.Context, *PowerCycleSandboxRequest) (*PowerCycleSandboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PowerCycleSandbox not implemented")
 }
 func (UnimplementedSandboxWorkerServer) SaveAsTemplate(context.Context, *SaveAsTemplateRequest) (*SaveAsTemplateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SaveAsTemplate not implemented")
@@ -788,6 +838,42 @@ func _SandboxWorker_WakeSandbox_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_RebootSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebootSandboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).RebootSandbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_RebootSandbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).RebootSandbox(ctx, req.(*RebootSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxWorker_PowerCycleSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PowerCycleSandboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).PowerCycleSandbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_PowerCycleSandbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).PowerCycleSandbox(ctx, req.(*PowerCycleSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxWorker_SaveAsTemplate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SaveAsTemplateRequest)
 	if err := dec(in); err != nil {
@@ -1048,6 +1134,14 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "WakeSandbox",
 			Handler:    _SandboxWorker_WakeSandbox_Handler,
+		},
+		{
+			MethodName: "RebootSandbox",
+			Handler:    _SandboxWorker_RebootSandbox_Handler,
+		},
+		{
+			MethodName: "PowerCycleSandbox",
+			Handler:    _SandboxWorker_PowerCycleSandbox_Handler,
 		},
 		{
 			MethodName: "SaveAsTemplate",

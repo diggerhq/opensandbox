@@ -1727,6 +1727,103 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	return c.JSON(http.StatusOK, resp)
 }
 
+// rebootSandbox triggers a soft, in-place guest restart on a running
+// sandbox. The QEMU process, network mapping, and persistent disks all
+// stay; only the guest CPU is reset and the kernel reboots. Recovers from
+// in-guest wedges (zombie pile-up, OOM-killed agent, runaway processes).
+//
+// POST /api/sandboxes/:id/reboot
+func (s *Server) rebootSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	if s.workerRegistry != nil {
+		return s.rebootSandboxRemote(c, id)
+	}
+
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if err := s.manager.RebootSandbox(c.Request().Context(), id); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) rebootSandboxRemote(c echo.Context, sandboxID string) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+	}
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 90*time.Second)
+	defer cancel()
+	if _, err := client.RebootSandbox(grpcCtx, &pb.RebootSandboxRequest{SandboxId: sandboxID}); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reboot failed: " + err.Error()})
+	}
+	s.emitEvent("reboot", sandboxID, session.WorkerID, "rebooted")
+	return c.NoContent(http.StatusNoContent)
+}
+
+// powerCycleSandbox tears down the QEMU process and cold-boots a fresh VM
+// with the existing on-disk drives. Use when the VMM itself is wedged or
+// a soft reboot didn't recover. Sandbox keeps its ID, project, secrets,
+// and persistent data; gets a new TAP and host port.
+//
+// POST /api/sandboxes/:id/power-cycle
+func (s *Server) powerCycleSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	if s.workerRegistry != nil {
+		return s.powerCycleSandboxRemote(c, id)
+	}
+
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if _, err := s.manager.PowerCycleSandbox(c.Request().Context(), id); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) powerCycleSandboxRemote(c echo.Context, sandboxID string) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+	}
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 120*time.Second)
+	defer cancel()
+	if _, err := client.PowerCycleSandbox(grpcCtx, &pb.PowerCycleSandboxRequest{SandboxId: sandboxID}); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "power-cycle failed: " + err.Error()})
+	}
+
+	// Worker re-allocated the TAP/host port. The CP→worker mapping is
+	// unchanged so the sandbox API proxy doesn't need refreshing, but the
+	// proxy's per-sandbox cache might hold a stale workerURL/JWT — drop it
+	// so the next request re-resolves cleanly.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
+
+	s.emitEvent("power-cycle", sandboxID, session.WorkerID, "power-cycled")
+	return c.NoContent(http.StatusNoContent)
+}
+
 // --- Checkpoint handlers ---
 
 // createCheckpoint creates a named checkpoint of a running sandbox.
