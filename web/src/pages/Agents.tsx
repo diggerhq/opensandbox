@@ -115,7 +115,13 @@ export default function Agents() {
       )}
 
       {loading ? (
-        <div style={{ color: 'var(--text-tertiary)', fontSize: 13, padding: '32px 0' }}>Loading…</div>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          color: 'var(--text-tertiary)', fontSize: 13, padding: '32px 0',
+        }}>
+          <span className="loading-spinner" style={{ width: 14, height: 14, borderWidth: 1.5 }} />
+          Loading agents…
+        </div>
       ) : agents.length === 0 ? (
         <EmptyState onCreate={() => setShowCreate(true)} />
       ) : (
@@ -136,14 +142,23 @@ export default function Agents() {
                 }}
               >
                 <div
+                  className={
+                    d?.status === 'starting' || d?.status === 'degraded' || d?.current_operation
+                      ? 'pulse-dot'
+                      : undefined
+                  }
                   style={{
                     width: 8,
                     height: 8,
                     borderRadius: '50%',
                     background: statusColor[d?.status ?? 'unknown'] ?? statusColor.unknown,
                     flexShrink: 0,
+                    boxShadow:
+                      d?.status === 'starting' || d?.current_operation
+                        ? `0 0 0 3px ${statusColor[d?.status ?? 'starting']}22`
+                        : undefined,
                   }}
-                  title={d?.status ?? 'unknown'}
+                  title={d?.current_operation ? `${d.current_operation.kind} · ${d.current_operation.phase}` : (d?.status ?? 'unknown')}
                 />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
@@ -162,9 +177,22 @@ export default function Agents() {
                     </span>
                   </div>
                   {d?.current_operation && (
-                    <div style={{ fontSize: 11, color: 'var(--accent-amber, #fbbf24)', marginTop: 4 }}>
-                      {d.current_operation.kind} · {d.current_operation.phase}
-                      {d.current_operation.message ? ` — ${d.current_operation.message}` : ''}
+                    <div style={{
+                      fontSize: 11, color: 'var(--accent-amber, #fbbf24)', marginTop: 4,
+                      display: 'flex', alignItems: 'center', gap: 6,
+                    }}>
+                      <span
+                        className="loading-spinner"
+                        style={{
+                          width: 10, height: 10, borderWidth: 1.5,
+                          borderColor: 'rgba(251,191,36,0.25)',
+                          borderTopColor: 'var(--accent-amber, #fbbf24)',
+                        }}
+                      />
+                      <span>
+                        {d.current_operation.kind} · {d.current_operation.phase}
+                        {d.current_operation.message ? ` — ${d.current_operation.message}` : ''}
+                      </span>
                     </div>
                   )}
                   {d?.last_error && d.status !== 'ready' && (
@@ -294,7 +322,7 @@ function CreateAgentModal({
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>
           <button type="button" onClick={onClose} style={secondaryButton}>Cancel</button>
           <button type="submit" disabled={submitting || !id} style={primaryButton}>
-            {submitting ? 'Creating…' : 'Create agent'}
+            {submitting ? <BusyLabel text="Creating…" /> : 'Create agent'}
           </button>
         </div>
       </form>
@@ -358,7 +386,7 @@ function ManageDrawer({
                     disabled={busy !== null}
                     style={dangerButton}
                   >
-                    {busy === 'uninstall gbrain' ? 'Working…' : 'Uninstall'}
+                    {busy === 'uninstall gbrain' ? <BusyLabel text="Working…" /> : 'Uninstall'}
                   </button>
                 </div>
               ) : (
@@ -367,7 +395,7 @@ function ManageDrawer({
                   disabled={busy !== null}
                   style={primaryButton}
                 >
-                  {busy === 'install gbrain' ? 'Queueing…' : 'Install gbrain'}
+                  {busy === 'install gbrain' ? <BusyLabel text="Queueing…" /> : 'Install gbrain'}
                 </button>
               )}
             </Section>
@@ -381,7 +409,7 @@ function ManageDrawer({
                     disabled={busy !== null}
                     style={dangerButton}
                   >
-                    {busy === 'disconnect telegram' ? 'Working…' : 'Disconnect'}
+                    {busy === 'disconnect telegram' ? <BusyLabel text="Working…" /> : 'Disconnect'}
                   </button>
                 </div>
               ) : (
@@ -405,7 +433,7 @@ function ManageDrawer({
                     disabled={busy !== null || !botToken.trim()}
                     style={primaryButton}
                   >
-                    {busy === 'connect telegram' ? 'Queueing…' : 'Connect Telegram'}
+                    {busy === 'connect telegram' ? <BusyLabel text="Queueing…" /> : 'Connect Telegram'}
                   </button>
                 </div>
               )}
@@ -482,6 +510,22 @@ function KV({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
       <span style={{ color: 'var(--text-tertiary)' }}>{k}</span>
       <span style={{ color: 'var(--text-primary)', fontFamily: mono ? 'var(--font-mono)' : undefined }}>{v}</span>
     </div>
+  )
+}
+
+function BusyLabel({ text }: { text: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span
+        className="loading-spinner"
+        style={{
+          width: 11, height: 11, borderWidth: 1.5,
+          borderColor: 'rgba(255,255,255,0.25)',
+          borderTopColor: 'currentColor',
+        }}
+      />
+      {text}
+    </span>
   )
 }
 
