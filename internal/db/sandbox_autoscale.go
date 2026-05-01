@@ -62,12 +62,19 @@ func (s *Store) GetSandboxAutoscale(ctx context.Context, sandboxID string) (enab
 	return enabled, minMB, maxMB, nil
 }
 
-// ListAutoscaleEnabled returns running sandboxes with autoscale_enabled=true.
-// The partial index added in migration 035 keeps this scan cheap regardless
-// of total session count.
+// ListAutoscaleEnabled returns running sandboxes with autoscale_enabled=true
+// that are NOT currently being migrated. We exclude rows with a non-empty
+// migrating_to_worker because:
+//   - the worker_id column is the source worker but the gRPC routes there
+//     would land on a sandbox that's mid-handoff
+//   - the heartbeat stats are racey across the source/dest workers during
+//     the cutover, so a scaling decision based on either is unreliable
+//   - autoscaling resumes naturally on the next tick after the migration
+//     completes (CompleteMigration clears migrating_to_worker)
 //
-// CurrentMB is left at zero — populated by the caller from live heartbeat
-// stats. See the AutoscaleSandbox doc comment.
+// The partial index added in migration 035 keeps this scan cheap regardless
+// of total session count. CurrentMB is left at zero — populated by the
+// caller from live heartbeat stats. See the AutoscaleSandbox doc comment.
 func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT sandbox_id, worker_id, org_id::text,
@@ -75,7 +82,9 @@ func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, e
 		       COALESCE(autoscale_max_mb, 0)            AS max_mb,
 		       COALESCE(autoscale_last_event_at, '1970-01-01'::timestamptz) AS last_event_at
 		FROM sandbox_sessions
-		WHERE autoscale_enabled = TRUE AND status = 'running'
+		WHERE autoscale_enabled = TRUE
+		  AND status = 'running'
+		  AND migrating_to_worker = ''
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list autoscale-enabled: %w", err)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pbw "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -52,6 +53,19 @@ func (s *Server) setAutoscale(c echo.Context) error {
 		}
 		if req.MinMemoryMB > req.MaxMemoryMB {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "minMemoryMB must be ≤ maxMemoryMB"})
+		}
+		// Plan cap: free tier is bounded at 4 GB just like manual /scale.
+		// Without this a free-tier user could PUT max=16GB and the
+		// autoscaler would obediently scale them past their plan. Mirror the
+		// same check we apply in scaleSandbox so the two paths can't diverge.
+		if orgID, hasOrg := auth.GetOrgID(c); hasOrg {
+			if org, err := s.store.GetOrg(c.Request().Context(), orgID); err == nil && org.Plan == "free" {
+				if req.MaxMemoryMB > 4096 {
+					return c.JSON(http.StatusPaymentRequired, map[string]string{
+						"error": "free plan caps autoscale at 4096 MB — upgrade to pro for larger instances",
+					})
+				}
+			}
 		}
 	}
 
@@ -105,7 +119,12 @@ func NewAutoscalerSetter(server *Server) *AutoscalerSetter {
 // autoscaler should only ever pass values that are already allowed tiers,
 // but we re-validate here as defense in depth — if a future caller passes
 // 6 GB we'd silently corrupt the worker's expected scaling table.
-func (a *AutoscalerSetter) SetSandboxMemoryMB(ctx context.Context, sandboxID string, memoryMB int) error {
+//
+// On success we also emit an admin event so the operator dashboard sees
+// every autoscaler-driven scale event ("why did sandbox X grow last
+// night?" — answer is now visible without grepping logs).
+func (a *AutoscalerSetter) SetSandboxMemoryMB(ctx context.Context, sandboxID string, fromMB, toMB int) error {
+	memoryMB := toMB
 	vcpus, err := types.ValidateMemoryMB(memoryMB)
 	if err != nil {
 		return fmt.Errorf("invalid memoryMB %d: %w", memoryMB, err)
@@ -124,6 +143,14 @@ func (a *AutoscalerSetter) SetSandboxMemoryMB(ctx context.Context, sandboxID str
 		return nil
 	}
 
+	// Defense in depth: re-check the org plan cap here in case the autoscale
+	// row was set before a downgrade or the cap was raised by another path.
+	// The PUT /autoscale handler already enforces this; this is the second
+	// gate so an obsolete row can't keep scaling past plan limits.
+	if org, err := a.server.store.GetOrg(ctx, session.OrgID); err == nil && org.Plan == "free" && memoryMB > 4096 {
+		return fmt.Errorf("plan cap: free plan limited to 4096 MB, refusing autoscale to %d", memoryMB)
+	}
+
 	client, err := a.server.workerRegistry.GetWorkerClient(session.WorkerID)
 	if err != nil {
 		return fmt.Errorf("get worker client: %w", err)
@@ -140,5 +167,13 @@ func (a *AutoscalerSetter) SetSandboxMemoryMB(ctx context.Context, sandboxID str
 		CpuMaxUsec:     int64(cpuPercent) * 1000,
 		CpuPeriodUsec:  100000,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Audit event — visible in /admin/events SSE + /admin/events/history.
+	if a.server.adminEvents != nil {
+		a.server.adminEvents.Publish("autoscale", sandboxID, session.WorkerID,
+			fmt.Sprintf("autoscaler: %dMB → %dMB", fromMB, toMB))
+	}
+	return nil
 }

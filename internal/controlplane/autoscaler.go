@@ -84,15 +84,18 @@ type AutoscalerRegistry interface {
 
 // AutoscalerScaleSetter applies a scale decision via the existing setLimits
 // machinery (worker gRPC SetSandboxLimits). Decoupled so we can test without
-// a real worker.
+// a real worker. The from→to pair is passed so implementations can emit
+// audit events (admin dashboard, structured logs) showing the transition,
+// not just the new size.
 type AutoscalerScaleSetter interface {
-	SetSandboxMemoryMB(ctx context.Context, sandboxID string, memoryMB int) error
+	SetSandboxMemoryMB(ctx context.Context, sandboxID string, fromMB, toMB int) error
 }
 
 type Autoscaler struct {
 	store     AutoscalerSandboxStore
 	registry  AutoscalerRegistry
 	setter    AutoscalerScaleSetter
+	isLeader  func() bool // optional: skip ticks when not leader (HA setup)
 
 	mu     sync.Mutex
 	stats  map[string]*sandboxStats // sandboxID → samples
@@ -104,11 +107,17 @@ type sandboxStats struct {
 }
 
 // NewAutoscaler wires up the loop. Caller invokes Start to begin ticking.
-func NewAutoscaler(store AutoscalerSandboxStore, registry AutoscalerRegistry, setter AutoscalerScaleSetter) *Autoscaler {
+//
+// isLeader (optional) is consulted at the top of each tick. When non-nil and
+// returning false, the tick is skipped entirely — used in HA setups where
+// only one CP should drive scaling decisions. Passing nil makes the loop
+// run unconditionally (single-CP / dev / no-leader-election deployments).
+func NewAutoscaler(store AutoscalerSandboxStore, registry AutoscalerRegistry, setter AutoscalerScaleSetter, isLeader func() bool) *Autoscaler {
 	return &Autoscaler{
 		store:    store,
 		registry: registry,
 		setter:   setter,
+		isLeader: isLeader,
 		stats:    make(map[string]*sandboxStats),
 		stop:     make(chan struct{}),
 	}
@@ -138,6 +147,9 @@ func (a *Autoscaler) run(ctx context.Context) {
 }
 
 func (a *Autoscaler) tick(ctx context.Context) {
+	if a.isLeader != nil && !a.isLeader() {
+		return
+	}
 	sandboxes, err := a.store.ListAutoscaleEnabled(ctx)
 	if err != nil {
 		log.Printf("autoscaler: ListAutoscaleEnabled failed: %v", err)
@@ -176,7 +188,15 @@ func (a *Autoscaler) evaluateOne(ctx context.Context, sb db.AutoscaleSandbox) {
 		log.Printf("autoscaler: %s no MemLimit in heartbeat; skipping", sb.SandboxID)
 		return
 	}
-	sb.CurrentMB = int(stats.MemLimit / (1024 * 1024))
+	// MemLimit comes from the guest's /proc/meminfo MemTotal — which is
+	// ~10% smaller than the QEMU -m due to kernel reservations (e.g. a
+	// sandbox configured at 1024 MB shows 896 MB). Round UP to the nearest
+	// tier so the autoscaler reasons about the *configured* size, not the
+	// kernel-visible size. Without this, a 1 GB sandbox with mem pressure
+	// loops forever scaling 896→1024 (which is a no-op on virtio-mem
+	// because base=1024 already), never reaching the next real tier.
+	rawMB := int(stats.MemLimit / (1024 * 1024))
+	sb.CurrentMB = roundUpToTier(rawMB)
 	memPct := stats.MemPct
 
 	// 2. Record sample.
@@ -203,12 +223,14 @@ func (a *Autoscaler) evaluateOne(ctx context.Context, sb db.AutoscaleSandbox) {
 
 	// 5. Apply. Cooldown is already burned (intentional — gRPC failures
 	// shouldn't retry-storm at every tick; wait the cooldown out).
-	if err := a.setter.SetSandboxMemoryMB(ctx, sb.SandboxID, target); err != nil {
+	if err := a.setter.SetSandboxMemoryMB(ctx, sb.SandboxID, sb.CurrentMB, target); err != nil {
 		log.Printf("autoscaler: %s scale %d→%d MB failed: %v", sb.SandboxID, sb.CurrentMB, target, err)
 		return
 	}
-	log.Printf("autoscaler: %s scaled %d MB → %d MB (mem=%.1f%% min=%d max=%d)",
-		sb.SandboxID, sb.CurrentMB, target, memPct, sb.MinMB, sb.MaxMB)
+	// Structured audit log line — `autoscaler: scaled` is greppable. Setter
+	// also emits this to the admin event bus so the dashboard surfaces it.
+	log.Printf("autoscaler: scaled sandbox=%s from=%dMB to=%dMB mem_pct=%.1f min=%d max=%d worker=%s",
+		sb.SandboxID, sb.CurrentMB, target, memPct, sb.MinMB, sb.MaxMB, sb.WorkerID)
 }
 
 func (a *Autoscaler) recordSample(sandboxID string, memPct float64) {
@@ -315,6 +337,23 @@ func prevTier(currentMB, minMB int) int {
 		}
 	}
 	return currentMB
+}
+
+// roundUpToTier returns the smallest tier ≥ mb. If mb is already at or above
+// the highest tier, returns the highest. If mb ≤ 0, returns the lowest tier.
+// Used to reconcile guest-reported MemTotal (which is ~10% below QEMU -m)
+// to the operator-configured tier.
+func roundUpToTier(mb int) int {
+	tiers := tierMBs()
+	if len(tiers) == 0 {
+		return mb
+	}
+	for _, t := range tiers {
+		if mb <= t {
+			return t
+		}
+	}
+	return tiers[len(tiers)-1]
 }
 
 // tierMBs returns the allowed memory tier values in ascending order.
