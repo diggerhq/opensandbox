@@ -188,6 +188,10 @@ type Manager struct {
 
 	secretsProxy    SecretsProxyIntegration  // nil if secrets proxy is not configured
 	checkpointStore *storage.CheckpointStore // for base image archival + checkpoint rebasing (nil until set)
+
+	// Per-sandbox stats cache populated by a background collector and read by
+	// the heartbeat path. See stats_collector.go.
+	statsCache *SandboxStatsCache
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.

@@ -381,6 +381,19 @@ func main() {
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
 
+	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
+	// sandbox via PUT /api/sandboxes/:id/autoscale, runs only on the
+	// server side that owns the worker registry. Unlike the cluster
+	// scaler this doesn't need leader election — multiple instances
+	// would both read sandbox stats and call SetSandboxLimits, which
+	// is idempotent.
+	if opts.Store != nil && redisRegistry != nil {
+		autoscaler := controlplane.NewAutoscaler(opts.Store, redisRegistry, api.NewAutoscalerSetter(server))
+		autoscaler.Start(ctx)
+		defer autoscaler.Stop()
+		log.Println("opensandbox: per-sandbox autoscaler started (interval=30s)")
+	}
+
 	// Start usage reporter — reports Pro org usage to Stripe and deducts
 	// free-tier trial credits (force-hibernates on empty) every 5 min.
 	// redisRegistry may be nil in combined mode; reporter tolerates that by

@@ -1122,6 +1122,16 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 	cpuMaxUsec := int64(cpuPercent) * 1000
 	cpuPeriodUsec := int64(100000)
 
+	// Manual scale disables autoscale. Rationale: a user explicitly setting a
+	// size has signalled they want predictability — letting the autoscaler
+	// override would surprise them. They can re-enable via PUT /autoscale.
+	// Best-effort — failure to disable is logged but doesn't fail the scale.
+	if s.store != nil {
+		if err := s.store.SetSandboxAutoscale(c.Request().Context(), id, false, 0, 0); err != nil {
+			log.Printf("scale: failed to disable autoscale on %s after manual scale: %v", id, err)
+		}
+	}
+
 	if s.workerRegistry != nil {
 		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
 	}
