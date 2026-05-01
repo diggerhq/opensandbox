@@ -133,6 +133,12 @@ func main() {
 
 		qmMgr.CleanupOrphanedProcesses()
 
+		// Start the periodic orphan reaper. Catches qemu processes that
+		// survived a destroyVM-path failure (state-inconsistency / panic /
+		// hibernate race) so they don't pile up and silently shrink worker
+		// capacity. See internal/qemu/orphan_reaper.go.
+		qmMgr.StartOrphanReaper(ctx)
+
 		// Prepare golden snapshot for fast VM creation
 		if err := qmMgr.PrepareGoldenSnapshot(); err != nil {
 			log.Printf("opensandbox-worker: WARNING: golden snapshot failed, using cold boot: %v", err)

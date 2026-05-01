@@ -4,14 +4,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
@@ -19,51 +24,61 @@ import (
 const streamChunkSize = 256 * 1024 // 256KB per gRPC chunk
 
 // AgentClient is the host-side gRPC client that connects to the
-// osb-agent running inside a QEMU VM via AF_VSOCK.
+// osb-agent running inside a QEMU VM via AF_VSOCK or virtio-serial.
+//
+// dialer captures the constructor's dial logic so Redial can rebuild the
+// connection without the caller knowing whether this is vsock or virtio-
+// serial transport. This is the recovery path for the post-loadvm protocol-
+// confusion bug and the prod 10-min-after-restore agent disconnect: when an
+// RPC fails with a transport error, the caller invokes Redial and retries.
 type AgentClient struct {
+	mu     sync.Mutex
 	conn   *grpc.ClientConn
 	client pb.SandboxAgentClient
+	dialer func() (*grpc.ClientConn, error)
 }
 
 // NewAgentClient connects to the agent via AF_VSOCK using the guest CID.
 // QEMU uses the kernel's vhost-vsock directly — no UDS file needed.
 // Port 1024 is the agent gRPC server inside the VM.
 func NewAgentClient(guestCID uint32) (*AgentClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx,
-		"passthrough:///vsock",
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.Config{
-				BaseDelay:  10 * time.Millisecond,
-				Multiplier: 1.6,
-				Jitter:     0.2,
-				MaxDelay:   1 * time.Second,
-			},
-		}),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return dialVsock(ctx, guestCID, 1024)
-		}),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(256*1024*1024),
-			grpc.MaxCallSendMsgSize(256*1024*1024),
-		),
-	)
+	dialer := func() (*grpc.ClientConn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return grpc.DialContext(ctx,
+			"passthrough:///vsock",
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff: backoff.Config{
+					BaseDelay:  10 * time.Millisecond,
+					Multiplier: 1.6,
+					Jitter:     0.2,
+					MaxDelay:   1 * time.Second,
+				},
+			}),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+				return dialVsock(ctx, guestCID, 1024)
+			}),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(256*1024*1024),
+				grpc.MaxCallSendMsgSize(256*1024*1024),
+			),
+		)
+	}
+	conn, err := dialer()
 	if err != nil {
 		return nil, fmt.Errorf("connect to agent at CID %d: %w", guestCID, err)
 	}
-
 	return &AgentClient{
 		conn:   conn,
 		client: pb.NewSandboxAgentClient(conn),
+		dialer: dialer,
 	}, nil
 }
 
@@ -479,37 +494,89 @@ func (c *AgentClient) ConnectPTYData(guestCID uint32, dataPort uint32) (net.Conn
 // NewAgentClientSocket connects to the agent via a Unix socket (virtio-serial chardev).
 // Used by QEMU backend — virtio-serial survives QEMU live migration.
 func NewAgentClientSocket(socketPath string) (*AgentClient, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	conn, err := grpc.DialContext(ctx,
-		"unix://"+socketPath,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-		grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.Config{
-				BaseDelay:  10 * time.Millisecond,
-				Multiplier: 1.6,
-				Jitter:     0.2,
-				MaxDelay:   1 * time.Second,
-			},
-		}),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                30 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(256*1024*1024),
-			grpc.MaxCallSendMsgSize(256*1024*1024),
-		),
-	)
+	dialer := func() (*grpc.ClientConn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return grpc.DialContext(ctx,
+			"unix://"+socketPath,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+			grpc.WithConnectParams(grpc.ConnectParams{
+				Backoff: backoff.Config{
+					BaseDelay:  10 * time.Millisecond,
+					Multiplier: 1.6,
+					Jitter:     0.2,
+					MaxDelay:   1 * time.Second,
+				},
+			}),
+			grpc.WithKeepaliveParams(keepalive.ClientParameters{
+				Time:                30 * time.Second,
+				Timeout:             10 * time.Second,
+				PermitWithoutStream: true,
+			}),
+			grpc.WithDefaultCallOptions(
+				grpc.MaxCallRecvMsgSize(256*1024*1024),
+				grpc.MaxCallSendMsgSize(256*1024*1024),
+			),
+		)
+	}
+	conn, err := dialer()
 	if err != nil {
 		return nil, fmt.Errorf("connect to agent at %s: %w", socketPath, err)
 	}
-
 	return &AgentClient{
 		conn:   conn,
 		client: pb.NewSandboxAgentClient(conn),
+		dialer: dialer,
 	}, nil
+}
+
+// Redial closes the current gRPC conn and dials a new one using the dialer
+// captured at construction. Safe under concurrent callers — only one
+// redial happens at a time, others wait and reuse the result.
+//
+// Use this when an RPC fails with a transport error (Unavailable, EOF,
+// closed network connection). After Redial, retry the RPC on the fresh
+// conn. If the agent inside the VM is fundamentally wedged this won't
+// help — but for the common "stale conn after savevm/loadvm" or
+// "control channel dropped at idle" case it recovers transparently.
+func (c *AgentClient) Redial() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dialer == nil {
+		return fmt.Errorf("AgentClient has no dialer (already closed?)")
+	}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	conn, err := c.dialer()
+	if err != nil {
+		return fmt.Errorf("redial agent: %w", err)
+	}
+	c.conn = conn
+	c.client = pb.NewSandboxAgentClient(conn)
+	log.Printf("agent-client: redial succeeded")
+	return nil
+}
+
+// IsTransportError returns true if err looks like a gRPC transport-level
+// failure that a Redial+retry would plausibly fix. Distinguished from
+// application errors (NotFound, InvalidArgument, etc.) which are caller
+// problems and shouldn't trigger reconnect storms.
+func IsTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if st, ok := status.FromError(err); ok {
+		switch st.Code() {
+		case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+			return true
+		}
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "transport is closing")
 }
