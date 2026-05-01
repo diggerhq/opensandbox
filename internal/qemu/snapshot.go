@@ -524,6 +524,14 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		bootArgs:      bootArgs,
 		goldenVersion: m.goldenVersion, // set on wake — VM runs on the current worker's base
 	}
+	// Recompute virtio-mem amount from the meta. Without this the field
+	// stays at zero on wake, which would (a) make grow deltas under-charge
+	// the host capacity check and (b) make the shrink-OOM-floor in
+	// SetResourceLimits silently no-op since `additional == requested == 0`
+	// is treated as "no change" and skips the check entirely.
+	if meta.MemoryMB > baseMem {
+		vm.virtioMemRequestedMB = meta.MemoryMB - baseMem
+	}
 	vm.agent = agentClient
 
 	// Agent binary updates happen via qemu-img rebase of the rootfs, not via
