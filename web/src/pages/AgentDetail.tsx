@@ -619,12 +619,21 @@ function ChatTab({
     typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `c-${Date.now()}`,
   )
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [history, streaming])
+
+  // Refocus the composer when streaming ends (or starts disabled→enabled)
+  // so the user can keep typing without grabbing the mouse.
+  useEffect(() => {
+    if (!streaming && !disabled) {
+      inputRef.current?.focus()
+    }
+  }, [streaming, disabled])
 
   async function send() {
     if (!input.trim() || !instanceId || streaming) return
@@ -740,6 +749,7 @@ function ChatTab({
         style={{ display: 'flex', gap: 8 }}
       >
         <input
+          ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder={disabled ? 'Agent not ready' : 'Send a message…'}
