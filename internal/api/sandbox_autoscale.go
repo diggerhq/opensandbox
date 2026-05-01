@@ -45,6 +45,16 @@ func (s *Server) setAutoscale(c echo.Context) error {
 	}
 
 	if req.Enabled {
+		// Refuse if the sandbox is scaling-locked. The lock auto-disables
+		// autoscale on toggle; refusing here prevents a user from
+		// re-enabling it while the lock is still on (which would be a
+		// confusing two-state mismatch).
+		if locked, err := s.store.GetScalingLock(c.Request().Context(), sandboxID); err == nil && locked {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "scaling is locked on this sandbox — unlock via PUT /scaling-lock to enable autoscale",
+				"code":  "scaling_locked",
+			})
+		}
 		if _, err := types.ValidateMemoryMB(req.MinMemoryMB); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "minMemoryMB: " + err.Error()})
 		}

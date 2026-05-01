@@ -1117,6 +1117,18 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 		}
 	}
 
+	// Scaling lock: refuse if the user has explicitly pinned this sandbox's
+	// resources. Same code that the autoscale endpoint and the autoscaler
+	// loop use, so SDK consumers can branch on a single error code.
+	if s.store != nil {
+		if locked, err := s.store.GetScalingLock(c.Request().Context(), id); err == nil && locked {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "scaling is locked on this sandbox — unlock via PUT /scaling-lock to allow size changes",
+				"code":  "scaling_locked",
+			})
+		}
+	}
+
 	cpuPercent := vcpus * 100
 	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
 	cpuMaxUsec := int64(cpuPercent) * 1000

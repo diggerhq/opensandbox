@@ -85,6 +85,7 @@ func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, e
 		WHERE autoscale_enabled = TRUE
 		  AND status = 'running'
 		  AND migrating_to_worker = ''
+		  AND scaling_locked = FALSE
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list autoscale-enabled: %w", err)
