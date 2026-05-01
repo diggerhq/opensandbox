@@ -958,12 +958,19 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
 		OverlayMode:         true,
 		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		// Carry the secrets-proxy session from source → target. Without
+		// this the destination has no substitution map and outbound HTTPS
+		// from the migrated VM would leak `osb_sealed_xxx` env vars
+		// verbatim to upstream services. Empty when no secret store.
+		SealedTokens:    preCopyResp.SealedTokens,
+		EgressAllowlist: preCopyResp.EgressAllowlist,
+		TokenHosts:      preCopyResp.TokenHosts,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
 	}
 
-	log.Printf("migrate %s: target prepared at %s (host port %d)", id, prepResp.IncomingAddr, prepResp.HostPort)
+	log.Printf("migrate %s: target prepared at %s (host port %d, secrets=%d)", id, prepResp.IncomingAddr, prepResp.HostPort, len(preCopyResp.SealedTokens))
 
 	// Step 3: Live migrate from source to target
 	migrateCtx, migrateCancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1387,6 +1394,10 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		OverlayMode:         true,
 		SourceGoldenVersion: preCopyResp.GoldenVersion,
 		TargetMemoryMb:      int32(memoryMB),
+		// Carry secrets-proxy session from source to target (see PreCopyDrives).
+		SealedTokens:    preCopyResp.SealedTokens,
+		EgressAllowlist: preCopyResp.EgressAllowlist,
+		TokenHosts:      preCopyResp.TokenHosts,
 	})
 	if err != nil {
 		log.Printf("scale-migrate %s: prepare target failed: %v", sandboxID, err)

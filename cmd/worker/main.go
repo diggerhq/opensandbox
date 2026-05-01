@@ -91,7 +91,32 @@ func main() {
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
-	secretsCA, err := secretsproxy.LoadOrCreateCA(filepath.Join(cfg.DataDir, "proxy-ca"))
+	//
+	// CA must be region-scoped (shared across all workers in the same KV)
+	// so live migration of a sandbox doesn't break TLS substitution. The
+	// guest's trust store has the source worker's CA cert baked in; if the
+	// destination presents certs signed by a different CA, every outbound
+	// HTTPS call after migration fails with "authority and subject key
+	// identifier mismatch". With KV-backed shared CA, every worker in the
+	// region presents the same cert and migration is transparent.
+	//
+	// Falls back to per-worker CA when no KV is configured (dev / EC2
+	// without SSM bridging) — single-worker setups still work, but live
+	// migration of secrets-using sandboxes will fail TLS until a shared
+	// store is wired.
+	caDir := filepath.Join(cfg.DataDir, "proxy-ca")
+	var kvStore secretsproxy.KVStore
+	if cfg.AzureKeyVaultName != "" {
+		if kv, kvErr := secretsproxy.NewAzureKVStore(cfg.AzureKeyVaultName); kvErr != nil {
+			log.Printf("opensandbox-worker: shared CA: KV client failed (%v) — falling back to per-worker CA", kvErr)
+		} else {
+			kvStore = kv
+			log.Printf("opensandbox-worker: shared CA: using Azure Key Vault %s", cfg.AzureKeyVaultName)
+		}
+	}
+	caCtx, caCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	secretsCA, err := secretsproxy.LoadOrCreateSharedCA(caCtx, kvStore, "proxy-ca-cert", "proxy-ca-key", caDir)
+	caCancel()
 	if err != nil {
 		log.Printf("opensandbox-worker: secrets proxy CA failed: %v (secrets proxy disabled)", err)
 	}

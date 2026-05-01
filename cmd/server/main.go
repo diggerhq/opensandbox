@@ -213,6 +213,7 @@ func main() {
 					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n"+
 					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
+					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
 					"SEGMENT_WRITE_KEY=%s\n",
 				cfg.JWTSecret,
 				cfg.Region,
@@ -229,20 +230,22 @@ func main() {
 				cfg.S3ForcePathStyle,
 				cfg.SandboxDomain,
 				cfg.DefaultSandboxDiskMB,
+				cfg.AzureKeyVaultName,
 				cfg.SegmentWriteKey,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 
 			azPool, err := compute.NewAzurePool(compute.AzurePoolConfig{
-				SubscriptionID:  cfg.AzureSubscriptionID,
-				ResourceGroup:   cfg.AzureResourceGroup,
-				Region:          cfg.Region,
-				VMSize:          cfg.AzureVMSize,
-				ImageID:         cfg.AzureImageID,
-				SubnetID:        cfg.AzureSubnetID,
-				SSHPublicKey:    cfg.AzureSSHPublicKey,
-				KeyVaultName:    cfg.AzureKeyVaultName,
-				WorkerEnvBase64: workerEnvB64,
+				SubscriptionID:   cfg.AzureSubscriptionID,
+				ResourceGroup:    cfg.AzureResourceGroup,
+				Region:           cfg.Region,
+				VMSize:           cfg.AzureVMSize,
+				ImageID:          cfg.AzureImageID,
+				SubnetID:         cfg.AzureSubnetID,
+				SSHPublicKey:     cfg.AzureSSHPublicKey,
+				KeyVaultName:     cfg.AzureKeyVaultName,
+				WorkerIdentityID: cfg.AzureWorkerIdentityID,
+				WorkerEnvBase64:  workerEnvB64,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)

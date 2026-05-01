@@ -36,6 +36,16 @@ type AzurePoolConfig struct {
 	DataDiskSizeGB     int    // data disk size (default: 256)
 	WorkerEnvBase64 string // base64-encoded worker.env content (injected via cloud-init)
 	KeyVaultName    string // Azure Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	// WorkerIdentityID is the full resource ID of a UserAssigned managed
+	// identity to attach to every worker VM. Bootstrap once per region
+	// (see deploy/azure/bootstrap-worker-identity.sh): create the identity,
+	// grant "Key Vault Secrets Officer" on the regional KV, then set this
+	// to the identity's resource ID. Required for live migration of
+	// secrets-using sandboxes — workers fetch the shared MITM CA from KV
+	// using this identity. Empty string = no identity attached (workers
+	// can't fetch shared CA; live migration of secrets sandboxes will TLS-
+	// fail across worker boundaries — see secretsproxy.LoadOrCreateSharedCA).
+	WorkerIdentityID string
 }
 
 // AzurePool implements compute.Pool using Azure VMs.
@@ -145,14 +155,28 @@ func (p *AzurePool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machi
 	imageID := p.cfg.ImageID
 	p.mu.RUnlock()
 
-	// Create VM
-	log.Printf("azure: creating VM %s (size=%s, image=%s)", vmName, vmSize, imageID)
+	// Create VM. Identity is attached when WorkerIdentityID is configured —
+	// the worker uses this identity to fetch the shared secrets-proxy CA
+	// from Key Vault. Without it, freshly-launched workers generate per-
+	// worker CAs and live migration of secrets-using sandboxes fails TLS.
+	var identity *armcompute.VirtualMachineIdentity
+	if p.cfg.WorkerIdentityID != "" {
+		identity = &armcompute.VirtualMachineIdentity{
+			Type: to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
+			UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{
+				p.cfg.WorkerIdentityID: {},
+			},
+		}
+	}
+
+	log.Printf("azure: creating VM %s (size=%s, image=%s, identity=%v)", vmName, vmSize, imageID, p.cfg.WorkerIdentityID != "")
 	vmPoller, err := p.vmClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, vmName, armcompute.VirtualMachine{
 		Location: to.Ptr(p.cfg.Region),
 		Tags: map[string]*string{
 			"Name":       to.Ptr(vmName),
 			azureTagRole: to.Ptr("worker"),
 		},
+		Identity: identity,
 		Properties: &armcompute.VirtualMachineProperties{
 			HardwareProfile: &armcompute.HardwareProfile{
 				VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(vmSize)),

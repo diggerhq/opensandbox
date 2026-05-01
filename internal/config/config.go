@@ -89,6 +89,15 @@ type Config struct {
 	AzureSubnetID       string // Full resource ID of the VNet subnet
 	AzureSSHPublicKey   string // SSH public key for worker VMs
 	AzureKeyVaultName   string // Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	// AzureWorkerIdentityID is the full resource ID of a UserAssigned managed
+	// identity to attach to every worker VM. The identity must already have
+	// "Key Vault Secrets Officer" on the regional KV so workers can fetch
+	// the shared secrets-proxy CA. Created once per region as a bootstrap
+	// step (see deploy/azure/bootstrap-worker-identity.sh). Without this,
+	// workers can't reach KV for the shared CA and live migration of
+	// secret-store-using sandboxes will fail TLS substitution after the
+	// migration completes (per-worker CAs don't match each other).
+	AzureWorkerIdentityID string
 
 	// Cloudflare (custom hostname for org sandbox domains)
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
@@ -196,6 +205,7 @@ func Load() (*Config, error) {
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
 		AzureKeyVaultName:   os.Getenv("OPENSANDBOX_AZURE_KEY_VAULT_NAME"),
+		AzureWorkerIdentityID: os.Getenv("OPENSANDBOX_AZURE_WORKER_IDENTITY_ID"),
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
@@ -323,6 +324,14 @@ func (mc *MigrationCoordinator) LiveMigrate(ctx context.Context, sandboxID, inco
 		}
 	}
 
+	// Tear down the secrets-proxy session for this sandbox on the source.
+	// The destination has already re-registered it during
+	// PrepareMigrationIncoming, so leaving it here would leak plaintext
+	// secrets in the source worker's process memory until restart.
+	if mc.manager.secretsProxy != nil && vm.network != nil && vm.network.GuestIP != "" {
+		mc.manager.secretsProxy.UnregisterSession(vm.network.GuestIP)
+	}
+
 	if vm.network != nil {
 		RemoveMetadataDNAT(vm.network.TAPName, vm.network.HostIP)
 		RemoveDNAT(vm.network)
@@ -581,20 +590,38 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 // Always uploads the thin overlay (never flattens). The target worker rebases
 // to its own base image if golden versions differ.
 // Returns S3 keys, golden version, and base CPU/memory for QEMU matching.
-func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem, actualMem int, err error) {
+// See sandbox.MigrationSecrets for the canonical type. We use the shared
+// type so the worker gRPC layer can refer to it without an import cycle.
+
+func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVer string, baseCPU, baseMem, actualMem int, secrets sandbox.MigrationSecrets, err error) {
 	m.mu.RLock()
 	vm, exists := m.vms[sandboxID]
 	var pid int
+	var guestIP string
 	if exists {
 		goldenVer = vm.goldenVersion
 		baseCPU = vm.CpuCount
 		baseMem = vm.baseMemoryMB
 		pid = vm.pid
+		if vm.network != nil {
+			guestIP = vm.network.GuestIP
+		}
 	}
 	m.mu.RUnlock()
 
 	if pid > 0 {
 		actualMem = readProcRSSMB(pid)
+	}
+
+	// Capture secrets-proxy state BEFORE we start uploading drives. The
+	// proxy session is keyed by guest IP; we look it up here so the
+	// orchestrator can hand it to the target via PrepareMigrationIncoming.
+	// Empty maps when no secrets are registered — orchestrator just passes
+	// nil/empty through and target's ReregisterSession is a no-op.
+	if m.secretsProxy != nil && guestIP != "" {
+		secrets.SealedTokens = m.secretsProxy.GetSessionTokens(guestIP)
+		secrets.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(guestIP)
+		secrets.TokenHosts = m.secretsProxy.GetSessionTokenHosts(guestIP)
 	}
 
 	mc := &MigrationCoordinator{
@@ -612,7 +639,15 @@ func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpoin
 // matches the target's current golden version, a fast metadata-only repoint is used.
 // When versions differ, a full rebase downloads the old base from S3 and migrates
 // the overlay to the current base — same logic as checkpoint fork rebase.
-func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error) {
+//
+// secrets is the per-sandbox secrets-proxy state captured by PreCopyDrives on
+// the source. We register it with this worker's secrets proxy AFTER the
+// destination QEMU is staged (so vm.network.GuestIP is known) but BEFORE the
+// source initiates the live migration. Once the migration completes and
+// CompleteIncomingMigration unpauses the VM, the first outbound HTTPS
+// request finds its substitution map already in place. Empty maps are a
+// no-op (sandboxes without a secret store).
+func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string, secrets sandbox.MigrationSecrets) (incomingAddr string, hostPort int, err error) {
 	sandboxDir := filepath.Join(m.cfg.DataDir, "sandboxes", sandboxID)
 	// Clean any leftover state from a prior failed prepare attempt. Without this,
 	// zstd refuses to overwrite an existing workspace.qcow2 and the retry fails
@@ -691,7 +726,25 @@ func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID,
 		return "", 0, r.err
 	}
 
-	return m.PrepareIncomingMigration(ctx, sandboxID, rootfsPath, workspacePath, cpus, memMB, guestPort, template)
+	incomingAddr, hostPort, err = m.PrepareIncomingMigration(ctx, sandboxID, rootfsPath, workspacePath, cpus, memMB, guestPort, template)
+	if err != nil {
+		return "", 0, err
+	}
+
+	// Re-register the secrets-proxy session on this worker, keyed by the
+	// guest IP we just allocated in PrepareIncomingMigration. Done before
+	// returning so the source can issue the LiveMigrate RPC immediately
+	// without a races window where the migrated VM is running but the
+	// proxy has no substitution map.
+	if m.secretsProxy != nil && len(secrets.SealedTokens) > 0 {
+		if vm, getErr := m.getVM(sandboxID); getErr == nil && vm.network != nil && vm.network.GuestIP != "" {
+			m.secretsProxy.ReregisterSession(sandboxID, vm.network.GuestIP, secrets.SealedTokens, secrets.EgressAllowlist, secrets.TokenHosts)
+			log.Printf("qemu: migration %s: re-registered secrets proxy session (%d tokens, guestIP=%s)",
+				sandboxID, len(secrets.SealedTokens), vm.network.GuestIP)
+		}
+	}
+
+	return incomingAddr, hostPort, nil
 }
 
 // downloadS3ToFile downloads an S3 object to a local file.
