@@ -63,7 +63,7 @@ func (s *Store) GetSandboxAutoscale(ctx context.Context, sandboxID string) (enab
 }
 
 // ListAutoscaleEnabled returns running sandboxes with autoscale_enabled=true.
-// The partial index added in migration 032 keeps this scan cheap regardless
+// The partial index added in migration 035 keeps this scan cheap regardless
 // of total session count.
 //
 // CurrentMB is left at zero — populated by the caller from live heartbeat
