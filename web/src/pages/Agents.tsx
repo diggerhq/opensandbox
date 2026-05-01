@@ -74,7 +74,7 @@ export default function Agents() {
         <div>
           <h1 style={{ fontSize: 22, margin: 0, fontFamily: 'var(--font-display)', fontWeight: 700 }}>Agents</h1>
           <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 6 }}>
-            Managed agent runtimes (Hermes, OpenClaw). Add channels and packages to extend what they do.
+            Managed agent runtimes powered by OpenClaw. Add channels and packages to extend what they do.
           </p>
         </div>
         <button onClick={() => setShowCreate(true)} style={primaryButton}>+ New agent</button>
@@ -256,7 +256,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
     >
       <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No agents yet</div>
       <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 20 }}>
-        Spin up a managed Hermes agent and connect it to Telegram. Add gbrain to give it long-term memory.
+        Spin up a managed OpenClaw agent and connect it to Telegram. Add gbrain to give it long-term memory.
       </p>
       <button onClick={onCreate} style={primaryButton}>Create your first agent</button>
     </div>
@@ -274,7 +274,7 @@ function CreateAgentModal({
 }) {
   const [id, setId] = useState('')
   const [displayName, setDisplayName] = useState('')
-  const [core, setCore] = useState<'openclaw' | 'hermes'>('openclaw')
+  const [core, setCore] = useState<'openclaw'>('openclaw')
   const [submitting, setSubmitting] = useState(false)
 
   async function submit(e: React.FormEvent) {
@@ -314,10 +314,10 @@ function CreateAgentModal({
         <Field label="Display name (optional)">
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={id || 'My Bot'} style={input} />
         </Field>
-        <Field label="Core" hint="OpenClaw is the recommended runtime; Hermes is the legacy chat agent.">
-          <select value={core} onChange={(e) => setCore(e.target.value as 'openclaw' | 'hermes')} style={input}>
+        <Field label="Core" hint="OpenClaw is the only runtime available right now. Hermes support is coming soon.">
+          <select value={core} onChange={(e) => setCore(e.target.value as 'openclaw')} style={input}>
             <option value="openclaw">openclaw</option>
-            <option value="hermes">hermes</option>
+            <option value="hermes" disabled>hermes (coming soon)</option>
           </select>
         </Field>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 4 }}>

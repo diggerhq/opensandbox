@@ -47,6 +47,36 @@ var agentConnectCmd = &cobra.Command{
 		body := map[string]interface{}{}
 
 		if channel == "telegram" {
+			// Pre-flight entitlement check — bail with a clean upgrade
+			// message before asking for a bot token if the agent isn't
+			// subscribed. The actual connect endpoint also gates, but
+			// hitting that path first means the user has to paste a token
+			// just to see the paywall, which is jarring.
+			var ent struct {
+				Entitled          bool   `json:"entitled"`
+				Reason            string `json:"reason"`
+				PriceMonthlyCents int64  `json:"price_monthly_cents"`
+			}
+			err := sc.Get(cmd.Context(), "/v1/agents/"+agentID+"/channels/"+channel+"/entitlement", &ent)
+			if err != nil {
+				if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 402 {
+					upgradeURL := dashboardAgentURL(cmd, agentID)
+					price := "$20/mo"
+					if ent.PriceMonthlyCents > 0 {
+						price = fmt.Sprintf("$%.2f/mo", float64(ent.PriceMonthlyCents)/100)
+					}
+					fmt.Fprintf(os.Stderr,
+						"\nThis agent isn't subscribed to %s yet (%s per agent).\n"+
+							"Subscribe in the dashboard, then re-run this command:\n\n"+
+							"  %s\n\n",
+						channel, price, upgradeURL,
+					)
+					return fmt.Errorf("subscription required for %s on %s", channel, agentID)
+				}
+				// Soft-fail on other lookup errors — fall through to the
+				// real connect, which will surface a more specific error.
+			}
+
 			token, _ := cmd.Flags().GetString("bot-token")
 			if token == "" {
 				if !stdinIsTTY() {
