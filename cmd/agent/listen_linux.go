@@ -115,6 +115,9 @@ func (l *virtioSerialListener) Accept() (net.Conn, error) {
 		// After a gRPC connection drops, the serial port may have leftover
 		// bytes (GOAWAY frames, partial HTTP/2 frames). If we hand these to
 		// the new gRPC session, it gets a protocol error and closes immediately.
+		if instrumentVirtioSerial {
+			log.Printf("virtio-serial: Accept iter: active=false, draining stale...")
+		}
 		drainStaleData(l.f)
 
 		// Wait for the host to connect (port becomes readable with fresh data)
@@ -214,10 +217,41 @@ type virtioSerialConn struct {
 	once    sync.Once
 }
 
-func (c *virtioSerialConn) Read(b []byte) (int, error)  { return c.f.Read(b) }
-func (c *virtioSerialConn) Write(b []byte) (int, error) { return c.f.Write(b) }
+// instrumentVirtioSerial controls per-Read logging on the conn. Set true via
+// OSB_AGENT_TRACE_VIRTIO=1 env var to debug post-loadvm protocol confusion.
+// HARDCODED TO TRUE FOR INVESTIGATION BUILD — revert before merging.
+var instrumentVirtioSerial = true || os.Getenv("OSB_AGENT_TRACE_VIRTIO") == "1"
+
+func (c *virtioSerialConn) Read(b []byte) (int, error) {
+	n, err := c.f.Read(b)
+	if instrumentVirtioSerial {
+		// Log first 16 bytes (or fewer) so we can spot HTTP/2 prefaces
+		// that might be from a NEW gRPC session being fed to the OLD parser.
+		// HTTP/2 preface is 24 bytes starting with "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".
+		preview := ""
+		if n > 0 {
+			max := n
+			if max > 16 {
+				max = 16
+			}
+			preview = fmt.Sprintf(" first=%q", b[:max])
+		}
+		log.Printf("virtio-serial: conn.Read n=%d err=%v%s", n, err, preview)
+	}
+	return n, err
+}
+func (c *virtioSerialConn) Write(b []byte) (int, error) {
+	n, err := c.f.Write(b)
+	if instrumentVirtioSerial && err != nil {
+		log.Printf("virtio-serial: conn.Write n=%d err=%v", n, err)
+	}
+	return n, err
+}
 func (c *virtioSerialConn) Close() error {
 	c.once.Do(func() {
+		if instrumentVirtioSerial {
+			log.Printf("virtio-serial: conn.Close called (gRPC dropped this conn)")
+		}
 		if c.onClose != nil {
 			c.onClose()
 		}

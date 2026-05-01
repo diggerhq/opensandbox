@@ -907,6 +907,155 @@ func TestDrainCompletesWhenEmpty(t *testing.T) {
 }
 
 // ============================================================
+// Test: Rolling-replace quota-aware dance
+// ============================================================
+
+// TestRollingReplaceDance_StartsWithScaleUpWhenAllStale validates that when
+// every worker is stale and no current-version worker exists, the first
+// rollingReplace tick scales up a replacement (doesn't drain blindly with
+// nowhere to go).
+func TestRollingReplaceDance_StartsWithScaleUpWhenAllStale(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	// 3 stale workers, all running the old version, none current.
+	for i := 1; i <= 3; i++ {
+		reg.addWorker(&WorkerInfo{
+			ID: fmt.Sprintf("w%d", i), MachineID: fmt.Sprintf("osb-worker-w%d", i),
+			Region: "us-east-1", Capacity: 50, Current: 5,
+			WorkerVersion: "v-old",
+		})
+	}
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(150 * time.Millisecond)
+	if atomic.LoadInt32(&pool.created) == 0 {
+		t.Error("expected scaler to launch a replacement when no current-version worker exists")
+	}
+	if atomic.LoadInt32(&pool.destroyed) != 0 {
+		t.Errorf("expected NO destroys until a current-version worker is up; got %d",
+			atomic.LoadInt32(&pool.destroyed))
+	}
+}
+
+// TestRollingReplaceDance_LightestStaleFirst validates that when multiple
+// stale workers exist, the lightest one is picked for drain.
+func TestRollingReplaceDance_LightestStaleFirst(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	// Heavy stale (30 sandboxes) + Light stale (5 sandboxes) + one current.
+	reg.addWorker(&WorkerInfo{
+		ID: "wHeavy", MachineID: "osb-worker-wHeavy", Region: "us-east-1",
+		Capacity: 50, Current: 30, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wLight", MachineID: "osb-worker-wLight", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wNew", MachineID: "osb-worker-wNew", Region: "us-east-1",
+		Capacity: 50, Current: 0, WorkerVersion: "v-new",
+	})
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	// Light should be picked, draining state should be set on it (not heavy).
+	time.Sleep(50 * time.Millisecond)
+	if !s.state.IsDraining("osb-worker-wLight") {
+		t.Error("expected lightest stale (wLight) to be picked for drain")
+	}
+	if s.state.IsDraining("osb-worker-wHeavy") {
+		t.Error("expected heavy stale (wHeavy) to be left alone for now")
+	}
+}
+
+// TestRollingReplaceDance_LockSerializes validates that two concurrent ticks
+// can't both fire rollingReplace — only the first acquires the lock.
+func TestRollingReplaceDance_LockSerializes(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	reg.addWorker(&WorkerInfo{
+		ID: "w1", MachineID: "osb-worker-w1", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "w2", MachineID: "osb-worker-w2", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wNew", MachineID: "osb-worker-wNew", Region: "us-east-1",
+		Capacity: 50, Current: 0, WorkerVersion: "v-new",
+	})
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	// First call grabs the lock and dispatches the goroutine.
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	// Second call — should be a no-op because the lock is held.
+	// To detect: count how many SetDraining calls actually pinned a worker.
+	// Both w1 and w2 are stale; if the lock didn't hold, the second call would
+	// pick the OTHER stale and pin it as draining too.
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(50 * time.Millisecond)
+	pinned := 0
+	for _, id := range []string{"osb-worker-w1", "osb-worker-w2"} {
+		if s.state.IsDraining(id) {
+			pinned++
+		}
+	}
+	if pinned > 1 {
+		t.Errorf("expected lock to serialize: only one stale worker should be draining; got %d", pinned)
+	}
+	if pinned == 0 {
+		t.Error("expected at least one stale worker to be draining after first rollingReplace call")
+	}
+}
+
+// TestRollingReplaceDance_NoOpOnAllCurrent validates that when every worker
+// already matches targetWorkerVersion, rollingReplace does nothing.
+func TestRollingReplaceDance_NoOpOnAllCurrent(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	for i := 1; i <= 3; i++ {
+		reg.addWorker(&WorkerInfo{
+			ID: fmt.Sprintf("w%d", i), MachineID: fmt.Sprintf("osb-worker-w%d", i),
+			Region: "us-east-1", Capacity: 50, Current: 5,
+			WorkerVersion: "v-current",
+		})
+	}
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-current"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&pool.created) != 0 {
+		t.Error("expected no machine creation when all workers are current")
+	}
+	if atomic.LoadInt32(&pool.destroyed) != 0 {
+		t.Error("expected no destroys when all workers are current")
+	}
+}
+
+// ============================================================
 // Test: Golden version in migration target selection
 // ============================================================
 

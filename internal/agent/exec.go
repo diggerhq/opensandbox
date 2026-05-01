@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -108,7 +109,12 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("exec start: %w", err)
 	}
-	moveToCgroup(cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	// Register with reaper BEFORE the child can exit. If the SIGCHLD reaper
+	// races us and reaps the child first, cmd.Wait() returns ECHILD; we
+	// recover the status from this channel. See reap_registry.go.
+	exitCh := RegisterReap(pid)
+	moveToCgroup(pid)
 
 	// Wait with cgroup kill on timeout — if the process doesn't exit when the
 	// context deadline fires, kill the entire sandbox cgroup to clean up fork
@@ -127,6 +133,7 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		}
 		killCgroup()
 		<-waitDone // wait for cmd.Wait to return after kills
+		UnregisterReap(pid)
 		return &pb.ExecResponse{
 			ExitCode: -1,
 			Stdout:   stdout.String(),
@@ -136,11 +143,22 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
+		switch {
+		case isExitError(err):
+			exitCode = err.(*exec.ExitError).ExitCode()
+			UnregisterReap(pid)
+		case errors.Is(err, syscall.ECHILD):
+			// Reaper got there first; pull WaitStatus from registry channel.
+			// The reaper has already populated it (otherwise wait4 would
+			// have returned the status to cmd.Wait, not ECHILD).
+			ws := <-exitCh
+			exitCode = ws.ExitStatus()
+		default:
+			UnregisterReap(pid)
 			return nil, fmt.Errorf("exec failed: %w", err)
 		}
+	} else {
+		UnregisterReap(pid)
 	}
 
 	return &pb.ExecResponse{
@@ -148,6 +166,11 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),
 	}, nil
+}
+
+func isExitError(err error) bool {
+	_, ok := err.(*exec.ExitError)
+	return ok
 }
 
 // ExecStream runs a command and streams stdout/stderr chunks.

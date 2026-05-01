@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,36 +372,43 @@ func (s *Scaler) evaluateRegion(ctx context.Context, region string) {
 	}
 
 	if needsScaleUp {
-		// Check cooldown before scaling up
+		// Cascade of guards. Important: each guard logs and SKIPS scale-up but
+		// must NOT `return` from Evaluate — Phase 5 (rollingReplace) below has
+		// to run regardless. Without this, a cluster pinned at maxWorkers with
+		// all stale workers can't ever roll because the early-return short-
+		// circuits both scaleUp AND rollingReplace, and rollingReplace is the
+		// only path that actually frees a slot (drain → terminate → scaleUp).
+		canScaleUp := true
 		if last, ok := s.state.GetLastScaleUp(region); ok && time.Since(last) < s.cooldown {
 			log.Printf("scaler: region %s needs scale-up (%s) but cooldown active (%s remaining)",
 				region, reason, s.cooldown-time.Since(last))
-			return
+			canScaleUp = false
 		}
-
-		// Don't scale up if there are already pending (unregistered) workers
-		pending := s.state.GetPendingLaunches(region)
-		if len(pending) > 0 {
-			log.Printf("scaler: region %s needs scale-up (%s) but %d worker(s) still pending registration",
-				region, reason, len(pending))
-			return
-		}
-
-		// Don't exceed max workers per region (exclude draining workers from capacity)
-		effectiveWorkers := 0
-		for _, w := range workers {
-			if !s.state.IsDraining(w.MachineID) {
-				effectiveWorkers++
+		if canScaleUp {
+			pending := s.state.GetPendingLaunches(region)
+			if len(pending) > 0 {
+				log.Printf("scaler: region %s needs scale-up (%s) but %d worker(s) still pending registration",
+					region, reason, len(pending))
+				canScaleUp = false
 			}
 		}
-		if effectiveWorkers+len(s.state.GetPendingLaunches(region)) >= s.maxWorkers {
-			log.Printf("scaler: region %s at max workers (%d/%d), skipping scale-up", region, effectiveWorkers, s.maxWorkers)
-			return
+		if canScaleUp {
+			effectiveWorkers := 0
+			for _, w := range workers {
+				if !s.state.IsDraining(w.MachineID) {
+					effectiveWorkers++
+				}
+			}
+			if effectiveWorkers+len(s.state.GetPendingLaunches(region)) >= s.maxWorkers {
+				log.Printf("scaler: region %s at max workers (%d/%d), skipping scale-up", region, effectiveWorkers, s.maxWorkers)
+				canScaleUp = false
+			}
 		}
-
-		log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% disk=%.1f%% util=%.1f%%)",
-			region, reason, maxCPU, maxMem, maxDisk, utilization*100)
-		s.scaleUp(ctx, region)
+		if canScaleUp {
+			log.Printf("scaler: region %s %s, scaling up (cpu=%.1f%% mem=%.1f%% disk=%.1f%% util=%.1f%%)",
+				region, reason, maxCPU, maxMem, maxDisk, utilization*100)
+			s.scaleUp(ctx, region)
+		}
 	} else if utilization < scaleDownThreshold && len(workers) > s.minWorkers {
 		// Phase 4: Scale down via smart drain (live-migrate sandboxes, then destroy)
 		log.Printf("scaler: region %s utilization %.1f%% < %.0f%%, initiating smart drain", region, utilization*100, scaleDownThreshold*100)
@@ -607,37 +615,86 @@ func (s *Scaler) hibernateBatch(workerID string, count int) {
 
 // --- Pressure Evacuation ---
 
-// evacuateHotWorkers live-migrates sandboxes off workers that exceed critical thresholds.
+// evacuateHotWorkers live-migrates sandboxes off workers that exceed critical
+// thresholds.
+//
+// Two scheduling rules that matter under quota pressure:
+//
+//  1. **One source at a time.** Earlier versions spawned a goroutine per hot
+//     source in parallel, which under quota constraints (e.g. eastus2 prod
+//     where the Dadsv7 family is at ~60% of limit) means every source races
+//     for the same one or two viable target workers. The first migration
+//     wins, the others stall on capacity, and we get the imbalance pattern
+//     we saw on prod: 60 sandboxes piled onto a single worker while the
+//     others stayed lightly loaded. Serializing means we drain one source
+//     completely before starting the next.
+//
+//  2. **Lightest source first.** A 5-sandbox source drains in seconds and
+//     the now-empty worker becomes a viable target for subsequent drains.
+//     A 60-sandbox source drained first would block all subsequent
+//     evacuations behind it. Going lightest-first organically grows our
+//     target pool from drained sources, so by the time we reach the
+//     heaviest source we have N workers worth of target capacity instead
+//     of 1.
+//
+// Per-sandbox target selection (inside evacuateBatch via liveMigrateSandbox)
+// remains in place — it spreads the migrations within a single source's
+// drain across whatever targets exist at the moment.
 func (s *Scaler) evacuateHotWorkers(_ context.Context, region string, workers []*WorkerInfo) {
+	// If an evacuation is already in flight, skip this tick — the active
+	// drain will finish and release the lock; the next tick picks up.
+	if !s.state.TryAcquireEvacuationLock() {
+		return
+	}
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			s.state.ReleaseEvacuationLock()
+		}
+	}()
+
+	// Collect hot, non-draining workers off cooldown.
+	hot := make([]*WorkerInfo, 0)
 	for _, w := range workers {
 		if w.CPUPct < evacuationCPUThreshold && w.MemPct < evacuationMemThreshold && w.DiskPct < evacuationDiskThreshold {
 			continue
 		}
-		// Skip if already being drained for scale-down
 		if s.state.IsDraining(w.MachineID) {
 			continue
 		}
-		// Cooldown — don't evacuate the same worker every tick
 		if last, ok := s.state.GetLastEvacuation(w.ID); ok && time.Since(last) < evacuationCooldown {
 			continue
 		}
-
-		// Find target: least-loaded worker that isn't the hot one and isn't draining.
-		// Pass 0 for requiredMemMB — evacuateBatch migrates whatever fits; individual
-		// over-size sandboxes fail their own prepare and are retried elsewhere.
-		target := s.findMigrationTarget(region, w.ID, 0)
-		if target == nil {
-			log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%) but no migration target available",
-				w.ID, w.CPUPct, w.MemPct, w.DiskPct)
-			continue
-		}
-
-		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%), evacuating up to %d sandboxes to %s",
-			w.ID, w.CPUPct, w.MemPct, w.DiskPct, evacuationBatchSize, target.ID)
-
-		s.state.SetLastEvacuation(w.ID, time.Now())
-		go s.evacuateBatch(w.ID, target.ID, evacuationBatchSize)
+		hot = append(hot, w)
 	}
+	if len(hot) == 0 {
+		return
+	}
+
+	// Sort lightest first — see rule 2 in the function comment.
+	sort.Slice(hot, func(i, j int) bool {
+		return hot[i].Current < hot[j].Current
+	})
+	src := hot[0]
+
+	// Pre-flight: confirm SOME viable target exists in the region. Pass 0 for
+	// requiredMemMB; per-sandbox memory fit is checked inside liveMigrateSandbox
+	// after PreCopyDrives reports the real RSS.
+	if probe := s.findMigrationTarget(region, src.ID, 0); probe == nil {
+		log.Printf("scaler: worker %s under pressure (cpu=%.1f%% mem=%.1f%% disk=%.1f%%, current=%d) but no migration target available — letting scale-up handle this",
+			src.ID, src.CPUPct, src.MemPct, src.DiskPct, src.Current)
+		return
+	}
+
+	log.Printf("scaler: worker %s selected for evacuation (lightest of %d hot, current=%d, cpu=%.1f%% mem=%.1f%% disk=%.1f%%) — draining serially",
+		src.ID, len(hot), src.Current, src.CPUPct, src.MemPct, src.DiskPct)
+
+	s.state.SetLastEvacuation(src.ID, time.Now())
+	releaseLock = false // goroutine will release on its own
+	go func() {
+		defer s.state.ReleaseEvacuationLock()
+		s.evacuateBatch(src.ID, evacuationBatchSize)
+	}()
 }
 
 // findMigrationTarget returns the best worker to receive migrated sandboxes.
@@ -693,8 +750,18 @@ func (s *Scaler) findMigrationTarget(region, excludeWorkerID string, requiredMem
 	return best
 }
 
-// evacuateBatch live-migrates up to count sandboxes from sourceWorker to targetWorker.
-func (s *Scaler) evacuateBatch(sourceWorkerID, targetWorkerID string, count int) {
+// evacuateBatch live-migrates up to count sandboxes off sourceWorker, picking
+// a fresh target per sandbox.
+//
+// Why per-sandbox target selection: an earlier version pinned all migrations
+// in a batch to one target (chosen up front by evacuateHotWorkers). Result —
+// during the prod event where 60 sandboxes were rehydrating, every batch
+// piled onto whichever worker was least-loaded at batch start, blowing past
+// it while the other targets stayed nearly empty. By passing "" to
+// liveMigrateSandbox (which then calls findMigrationTarget after PreCopyDrives
+// reports actual RSS), each migration sees up-to-date in-flight counts and
+// the load distributes naturally across all viable targets.
+func (s *Scaler) evacuateBatch(sourceWorkerID string, count int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -718,15 +785,18 @@ func (s *Scaler) evacuateBatch(sourceWorkerID, targetWorkerID string, count int)
 		if sb.Status != "running" {
 			continue
 		}
-		if err := s.liveMigrateSandbox(ctx, sb.SandboxId, sourceWorkerID, targetWorkerID); err != nil {
+		// Empty targetWorkerID → liveMigrateSandbox re-picks per call. This is
+		// what produces the load-distribution behavior described in the
+		// function comment.
+		if err := s.liveMigrateSandbox(ctx, sb.SandboxId, sourceWorkerID, ""); err != nil {
 			log.Printf("scaler: evacuate: migrate %s failed: %v", sb.SandboxId, err)
 			continue
 		}
 		migrated++
 	}
 
-	log.Printf("scaler: evacuation batch complete for %s: %d/%d migrated to %s",
-		sourceWorkerID, migrated, count, targetWorkerID)
+	log.Printf("scaler: evacuation batch complete for %s: %d/%d migrated (per-sandbox target selection)",
+		sourceWorkerID, migrated, count)
 }
 
 // --- Smart Scale-Down ---
@@ -797,15 +867,42 @@ func (s *Scaler) smartScaleDown(_ context.Context, region string, workers []*Wor
 	go s.drainWorker(target.ID, target.MachineID, region)
 }
 
-// rollingReplace drains workers running an old version one at a time,
-// allowing the scaler to replace them with new-AMI workers.
+// rollingReplace executes a quota-aware rolling replacement of stale workers
+// (workers whose WorkerVersion != targetWorkerVersion).
+//
+// The dance under quota pressure (e.g., eastus2 prod with 1-2 spare worker
+// slots in the Dadsv7 family quota):
+//
+//	loop {
+//	    pick lightest stale worker S
+//	    drain S (sandboxes migrate onto current-version workers)
+//	    once S is empty: terminate S — frees one quota slot
+//	    if more stale workers remain: scaleUp (consume the freed slot)
+//	    next tick: repeat
+//	}
+//
+// At any moment in the dance the cluster holds at most N+1 workers (N stale
+// before the dance starts + 1 freshly-launched). The number of new-version
+// workers grows by one each cycle: cycle 1 lands all of S1 onto NV1; cycle 2
+// lands S2 across {NV1, NV2}; cycle 3 across {NV1, NV2, NV3}; etc. By the
+// time we drain the heaviest stale worker, our target pool is N-1 workers
+// wide and per-sandbox findMigrationTarget can spread the load evenly.
+//
+// Without this dance (the prior implementation): drain ran async per tick,
+// terminate happened via the separate idle-scale-down path on a different
+// tick, and replacement scaleUp only triggered when current==0. So all
+// stale workers' sandboxes piled onto whichever single new-version worker
+// existed first, overloading it and triggering the agent-reconnect-timeout
+// failure modes that this PR also addresses elsewhere.
+//
+// Serialized via Redis lock so concurrent ticks across CPs don't double-fire.
 func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*WorkerInfo) {
 	if s.targetWorkerVersion == "" {
 		return
 	}
 
 	var stale []*WorkerInfo
-	var current int
+	var current []*WorkerInfo
 	for _, w := range workers {
 		// Skip workers already being drained
 		if s.state.IsDraining(w.MachineID) {
@@ -822,7 +919,7 @@ func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*W
 			continue // static worker, not autoscaled
 		}
 		if w.WorkerVersion == s.targetWorkerVersion {
-			current++
+			current = append(current, w)
 		} else {
 			stale = append(stale, w)
 		}
@@ -832,23 +929,35 @@ func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*W
 		return
 	}
 
-	// If no current-version workers exist, try to launch a replacement first.
-	// If launch fails (e.g., quota), fall back to draining one stale worker
-	// to free capacity — the min-workers check will launch a replacement next tick.
-	if current < 1 {
+	// Take the rolling-replace lock so concurrent ticks (or the other CP)
+	// don't pick a different stale worker and double-drain. Released after
+	// the synchronous dance returns.
+	if !s.state.TryAcquireReplacingLock() {
+		return
+	}
+	releaseLock := true
+	defer func() {
+		if releaseLock {
+			s.state.ReleaseReplacingLock()
+		}
+	}()
+
+	// Need at least one current-version worker (or pending one) to migrate
+	// onto. If none, scale up first and wait for next tick.
+	if len(current) == 0 {
 		pendingCount := len(s.state.GetPendingLaunches(region))
 		if pendingCount > 0 {
-			log.Printf("scaler: region %s has %d stale workers, waiting for pending replacement to register",
-				region, len(stale))
+			log.Printf("scaler: rolling replace: %d stale workers, waiting for pending replacement to register",
+				len(stale))
 			return
 		}
-		log.Printf("scaler: rolling replace: all %d workers stale — launching replacement with new version",
+		log.Printf("scaler: rolling replace: all %d workers stale — launching first replacement",
 			len(stale))
 		s.scaleUp(ctx, region)
 		return
 	}
 
-	// Only drain one stale worker at a time (conservative rolling update)
+	// Pick lightest stale — see header comment.
 	target := stale[0]
 	for _, w := range stale[1:] {
 		if w.Current < target.Current {
@@ -856,8 +965,9 @@ func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*W
 		}
 	}
 
-	log.Printf("scaler: rolling replace: draining stale worker %s (version=%q, want=%q, sandboxes=%d)",
-		target.ID, target.WorkerVersion, s.targetWorkerVersion, target.Current)
+	moreStaleAfter := len(stale) > 1
+	log.Printf("scaler: rolling replace: draining stale worker %s (version=%q, want=%q, sandboxes=%d, %d stale total, %d current)",
+		target.ID, target.WorkerVersion, s.targetWorkerVersion, target.Current, len(stale), len(current))
 
 	s.state.SetDraining(target.MachineID, &drainState{
 		WorkerID:  target.ID,
@@ -866,7 +976,55 @@ func (s *Scaler) rollingReplace(ctx context.Context, region string, workers []*W
 		StartedAt: time.Now(),
 	})
 
-	go s.drainWorker(target.ID, target.MachineID, region)
+	// Run the dance in a goroutine so we don't block the scaler tick.
+	// The lock is held for the duration via releaseLock = false here.
+	releaseLock = false
+	go func() {
+		defer s.state.ReleaseReplacingLock()
+		s.replaceOneStale(ctx, region, target, moreStaleAfter)
+	}()
+}
+
+// replaceOneStale executes one cycle of the rolling-replace dance:
+// drain the target stale worker, terminate it (freeing one quota slot),
+// then if more stale workers remain, immediately scale up a replacement
+// so the next tick has somewhere to drain to.
+//
+// Synchronous within the goroutine so the next scaler tick observes the
+// post-terminate state cleanly. Lock is held by the caller across this
+// function via the defer in rollingReplace.
+func (s *Scaler) replaceOneStale(ctx context.Context, region string, target *WorkerInfo, moreStaleAfter bool) {
+	// 1. Drain — synchronous; returns when the worker is empty or drainTimeout
+	//    fires. drainWorker handles per-sandbox findMigrationTarget so each
+	//    sandbox lands on whichever current-version worker has the most room
+	//    at that exact moment.
+	s.drainWorker(target.ID, target.MachineID, region)
+
+	// 2. Terminate the (now-empty) stale worker. Frees the quota slot for the
+	//    replacement scaleUp below. We do this even on partial drain — the
+	//    natural-expiry path will catch any stragglers on the source via
+	//    sandbox timeouts; better to free quota and unblock the dance than
+	//    keep an old-version worker around.
+	if s.pool != nil && target.MachineID != "" {
+		termCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		if err := s.pool.DestroyMachine(termCtx, target.MachineID); err != nil {
+			log.Printf("scaler: rolling replace: failed to terminate drained worker %s (%s): %v — letting natural expiry take it",
+				target.ID, target.MachineID, err)
+		} else {
+			log.Printf("scaler: rolling replace: terminated drained worker %s (%s)", target.ID, target.MachineID)
+		}
+		cancel()
+	}
+
+	// 3. If more stale workers remain, fire the next replacement now so it's
+	//    boot-warm by the time the next tick picks the next stale source.
+	//    Without this, the next tick would either drain another stale onto
+	//    the same single new-version worker (the "killer" pile-up) or stall
+	//    waiting for organic scale-up.
+	if moreStaleAfter {
+		log.Printf("scaler: rolling replace: more stale workers remain, launching next replacement")
+		s.scaleUp(ctx, region)
+	}
 }
 
 // drainWorker attempts to live-migrate sandboxes off a worker. If migration fails
