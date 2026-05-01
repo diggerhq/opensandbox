@@ -2,7 +2,6 @@ package controlplane
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -66,8 +65,11 @@ const (
 type AutoscalerSandboxStore interface {
 	// ListAutoscaleEnabled returns running sandboxes with autoscale_enabled=true.
 	ListAutoscaleEnabled(ctx context.Context) ([]db.AutoscaleSandbox, error)
-	// UpdateAutoscaleLastEvent records a scale event for cooldown tracking.
-	UpdateAutoscaleLastEvent(ctx context.Context, sandboxID string, t time.Time) error
+	// ClaimAutoscaleEvent atomically claims the right to apply a scale event,
+	// guarding against (a) a manual scale that disabled autoscale concurrently
+	// and (b) two CPs deciding on the same pre-event row. Returns true if the
+	// caller has the claim and may proceed with the gRPC.
+	ClaimAutoscaleEvent(ctx context.Context, sandboxID string, prev, now time.Time) (bool, error)
 }
 
 // AutoscalerRegistry is the small subset of WorkerRegistry the autoscaler
@@ -161,13 +163,21 @@ func (a *Autoscaler) tick(ctx context.Context) {
 }
 
 func (a *Autoscaler) evaluateOne(ctx context.Context, sb db.AutoscaleSandbox) {
-	// 1. Fetch current stats from the worker.
-	memPct, err := a.fetchMemPct(ctx, sb)
-	if err != nil {
-		// Transient — log at low frequency and skip.
-		log.Printf("autoscaler: %s stats fetch failed: %v", sb.SandboxID, err)
+	// 1. Fetch current stats from the worker. The registry's cached stats
+	// also provide the live MemLimit which is the authoritative current
+	// memory size (sandbox_sessions.config does NOT update on scale).
+	stats, _, ok := a.registry.GetSandboxStats(sb.SandboxID)
+	if !ok {
+		// No recent heartbeat — skip this tick; data should appear within ~10s.
 		return
 	}
+	if stats.MemLimit == 0 {
+		// Defensive: without a known limit we can't compute a tier. Skip.
+		log.Printf("autoscaler: %s no MemLimit in heartbeat; skipping", sb.SandboxID)
+		return
+	}
+	sb.CurrentMB = int(stats.MemLimit / (1024 * 1024))
+	memPct := stats.MemPct
 
 	// 2. Record sample.
 	a.recordSample(sb.SandboxID, memPct)
@@ -178,31 +188,27 @@ func (a *Autoscaler) evaluateOne(ctx context.Context, sb db.AutoscaleSandbox) {
 		return
 	}
 
-	// 4. Apply.
+	// 4. Claim the right to scale (atomic CAS — closes manual-vs-auto race
+	// and multi-CP race in one step). If 0 rows updated, someone else won.
+	now := time.Now()
+	claimed, err := a.store.ClaimAutoscaleEvent(ctx, sb.SandboxID, sb.LastEventAt, now)
+	if err != nil {
+		log.Printf("autoscaler: %s claim failed: %v", sb.SandboxID, err)
+		return
+	}
+	if !claimed {
+		log.Printf("autoscaler: %s claim lost (manual scale or peer CP raced); skipping", sb.SandboxID)
+		return
+	}
+
+	// 5. Apply. Cooldown is already burned (intentional — gRPC failures
+	// shouldn't retry-storm at every tick; wait the cooldown out).
 	if err := a.setter.SetSandboxMemoryMB(ctx, sb.SandboxID, target); err != nil {
 		log.Printf("autoscaler: %s scale %d→%d MB failed: %v", sb.SandboxID, sb.CurrentMB, target, err)
 		return
 	}
-	if err := a.store.UpdateAutoscaleLastEvent(ctx, sb.SandboxID, time.Now()); err != nil {
-		log.Printf("autoscaler: %s update last_event failed: %v", sb.SandboxID, err)
-	}
 	log.Printf("autoscaler: %s scaled %d MB → %d MB (mem=%.1f%% min=%d max=%d)",
 		sb.SandboxID, sb.CurrentMB, target, memPct, sb.MinMB, sb.MaxMB)
-}
-
-// fetchMemPct returns the latest cached mem_pct for a sandbox. Stats are
-// populated by worker heartbeats — see internal/qemu/stats_collector.go on
-// the worker side and redis_registry.go's handleHeartbeat ingestion.
-//
-// Returns ok=false (via the err) if no recent heartbeat has carried this
-// sandbox. The autoscaler skips the tick for that sandbox; on the next
-// heartbeat (~10s later) the data should appear.
-func (a *Autoscaler) fetchMemPct(_ context.Context, sb db.AutoscaleSandbox) (float64, error) {
-	stats, _, ok := a.registry.GetSandboxStats(sb.SandboxID)
-	if !ok {
-		return 0, fmt.Errorf("no cached stats for %s — worker heartbeat may be stale", sb.SandboxID)
-	}
-	return stats.MemPct, nil
 }
 
 func (a *Autoscaler) recordSample(sandboxID string, memPct float64) {
@@ -241,7 +247,10 @@ func (a *Autoscaler) decideTarget(sb db.AutoscaleSandbox) int {
 	now := time.Now()
 
 	// Scale up: 1-min above threshold, current < max, off scale-up cooldown.
-	if avg1 > scaleUpMemPctThreshold && currentMB < sb.MaxMB {
+	// Require at least window1m samples (≥2) so a single noisy reading on a
+	// freshly-(re)started CP can't trigger a scale-up before we've had a
+	// chance to confirm it.
+	if avg1 > scaleUpMemPctThreshold && currentMB < sb.MaxMB && len(s.memSamples) >= window1m {
 		if !sb.LastEventAt.IsZero() && now.Sub(sb.LastEventAt) < scaleUpCooldown {
 			return 0
 		}

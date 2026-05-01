@@ -10,11 +10,17 @@ import (
 // tick. Defined here (not in internal/controlplane) so the db package owns
 // its own row type and the autoscaler imports from db rather than the
 // other way around — avoids the controlplane↔db import cycle.
+//
+// CurrentMB is intentionally NOT set from sandbox_sessions.config: that
+// column is the original creation memory and never updates after a scale
+// event (manual or autoscale). The autoscaler populates CurrentMB from the
+// live worker heartbeat (registry.SandboxStats.MemLimit) before deciding
+// scale targets — that's the only authoritative current size.
 type AutoscaleSandbox struct {
 	SandboxID   string
 	WorkerID    string
 	OrgID       string
-	CurrentMB   int       // current memoryMB, parsed from sandbox_sessions.config
+	CurrentMB   int       // populated by autoscaler from registry stats, NOT from DB
 	MinMB       int       // user-configured floor (0 = unset)
 	MaxMB       int       // user-configured ceiling (0 = unset)
 	LastEventAt time.Time // zero if never scaled
@@ -60,14 +66,11 @@ func (s *Store) GetSandboxAutoscale(ctx context.Context, sandboxID string) (enab
 // The partial index added in migration 032 keeps this scan cheap regardless
 // of total session count.
 //
-// CurrentMB is parsed from sandbox_sessions.config — the canonical source-
-// of-truth for sandbox sizing. We don't track it as a separate column to
-// avoid drift between the autoscale "what we think it is" and the worker's
-// actual virtio-mem state.
+// CurrentMB is left at zero — populated by the caller from live heartbeat
+// stats. See the AutoscaleSandbox doc comment.
 func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT sandbox_id, worker_id, org_id::text,
-		       COALESCE((config->>'memoryMB')::int, 0) AS current_mb,
 		       COALESCE(autoscale_min_mb, 0)            AS min_mb,
 		       COALESCE(autoscale_max_mb, 0)            AS max_mb,
 		       COALESCE(autoscale_last_event_at, '1970-01-01'::timestamptz) AS last_event_at
@@ -83,7 +86,7 @@ func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, e
 	for rows.Next() {
 		var sb AutoscaleSandbox
 		if err := rows.Scan(&sb.SandboxID, &sb.WorkerID, &sb.OrgID,
-			&sb.CurrentMB, &sb.MinMB, &sb.MaxMB, &sb.LastEventAt); err != nil {
+			&sb.MinMB, &sb.MaxMB, &sb.LastEventAt); err != nil {
 			return nil, err
 		}
 		out = append(out, sb)
@@ -91,12 +94,39 @@ func (s *Store) ListAutoscaleEnabled(ctx context.Context) ([]AutoscaleSandbox, e
 	return out, rows.Err()
 }
 
-// UpdateAutoscaleLastEvent stamps the cooldown anchor after a scale event
-// (either direction). The autoscaler reads this before deciding whether
-// the per-direction cooldown has elapsed.
-func (s *Store) UpdateAutoscaleLastEvent(ctx context.Context, sandboxID string, t time.Time) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE sandbox_sessions SET autoscale_last_event_at = $1 WHERE sandbox_id = $2
-	`, t, sandboxID)
-	return err
+// ClaimAutoscaleEvent atomically claims the right to apply a scale event for
+// this sandbox. Performs a CAS on (autoscale_enabled, autoscale_last_event_at):
+//
+//   - autoscale_enabled must still be TRUE — guards against a manual /scale
+//     call (which sets enabled=false) racing with an in-flight autoscaler tick.
+//   - autoscale_last_event_at must equal the value the caller observed —
+//     guards against two control planes both deciding to scale on the same
+//     pre-event row.
+//
+// If either guard fails, RowsAffected is 0 and the caller MUST NOT proceed
+// with the scale: another writer either disabled autoscale or already
+// claimed the event. On success the cooldown anchor is updated to `now`,
+// so a subsequent gRPC failure simply means we'll retry on the next cooldown
+// boundary rather than retry-storming.
+//
+// `prev` is the LastEventAt value the caller read from ListAutoscaleEnabled
+// (zero-valued for never-scaled sandboxes — handled via IS NOT DISTINCT FROM).
+func (s *Store) ClaimAutoscaleEvent(ctx context.Context, sandboxID string, prev, now time.Time) (bool, error) {
+	// Treat the seeded sentinel from ListAutoscaleEnabled (1970-01-01) as
+	// "never scaled" so the CAS matches the actual NULL stored on the row.
+	var prevArg interface{} = prev
+	if prev.Year() <= 1970 {
+		prevArg = nil
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE sandbox_sessions
+		SET autoscale_last_event_at = $1
+		WHERE sandbox_id = $2
+		  AND autoscale_enabled = TRUE
+		  AND autoscale_last_event_at IS NOT DISTINCT FROM $3
+	`, now, sandboxID, prevArg)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
 }

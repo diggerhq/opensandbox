@@ -1921,6 +1921,26 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		}
 
 		if additionalMB != vm.virtioMemRequestedMB {
+			// Shrink-safety: if we're reducing memory, ensure the new total
+			// won't be below the guest's working set. virtio-mem unplug below
+			// resident anon memory will OOM-kill processes inside the guest.
+			// We use MemUsage (= MemTotal - MemAvailable from /proc/meminfo
+			// inside the guest) as a conservative upper bound on anon — it
+			// includes some active page cache but is always ≥ resident anon.
+			// 5% headroom covers transient growth during the unplug window.
+			if additionalMB < vm.virtioMemRequestedMB && vm.agent != nil {
+				newTotalMB := vm.baseMemoryMB + additionalMB
+				if stats, statsErr := vm.agent.Stats(ctx); statsErr == nil && stats != nil && stats.MemUsage > 0 {
+					usedMB := int(stats.MemUsage / (1024 * 1024))
+					floorMB := usedMB * 105 / 100
+					if newTotalMB < floorMB {
+						log.Printf("qemu: virtio-mem %s: refusing shrink to %dMB — working set %dMB requires ≥%dMB",
+							sandboxID, newTotalMB, usedMB, floorMB)
+						return fmt.Errorf("oom_floor: target %dMB below guest working set (%dMB used, %dMB floor)",
+							newTotalMB, usedMB, floorMB)
+					}
+				}
+			}
 			if err := vm.qmp.SetVirtioMemSize(additionalMB); err != nil {
 				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — returning insufficient capacity error", sandboxID, additionalMB, err)
 				return fmt.Errorf("insufficient_capacity: cannot hotplug %dMB on this worker: %w", additionalMB, err)
