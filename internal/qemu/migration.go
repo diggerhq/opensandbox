@@ -563,6 +563,18 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 		log.Printf("qemu: migration %s: clock sync failed: %v", sandboxID, err)
 	}
 
+	// Re-install the secrets-proxy CA cert into the guest so the destination
+	// worker's cert chain is trusted by anything the guest does next. Even
+	// with the shared-CA-via-KV path, this is belt-and-suspenders that also
+	// retrofits sandboxes which were created BEFORE the shared CA rollout
+	// (their trust store has the source's per-worker CA baked in). The
+	// guest's env vars (SSL_CERT_FILE / REQUESTS_CA_BUNDLE / NODE_EXTRA_CA_CERTS)
+	// already point to this fixed path; overwriting the file is enough — no
+	// update-ca-certificates run required because consumers read the file
+	// directly. Cheap (~1ms agent RPC) and idempotent: in steady state the
+	// new content equals the old, so this is a no-op write.
+	m.reinstallProxyCA(ctx, sandboxID, agentClient)
+
 	// Sync VM memory tracking with actual QEMU state.
 	// After migration, the QEMU process has the source's virtio-mem hotplugged memory,
 	// but the Go struct still has the prep values (virtioMemRequestedMB=0, MemoryMB=baseMem).

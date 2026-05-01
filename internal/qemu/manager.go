@@ -313,6 +313,42 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 	return sealed
 }
 
+// reinstallProxyCA overwrites the proxy CA cert in the guest's trust store
+// with the destination worker's current CA. Called from any handoff path
+// where the sandbox can land on a different worker than it was created on:
+// live migration, hibernate→wake (cross-worker), checkpoint fork.
+//
+// The guest's env vars (SSL_CERT_FILE / REQUESTS_CA_BUNDLE / NODE_EXTRA_CA_CERTS)
+// point at the fixed path the proxy injected at sandbox creation, so we
+// only need to overwrite the file content; no update-ca-certificates run
+// is required because the consuming libraries read the file directly.
+//
+// Idempotent: in steady state where every worker shares the same CA via KV,
+// the destination's CA equals the source's and this is a no-op write. The
+// value is in the transition window (sandboxes created before shared-CA
+// rollout) and any future "the destination's CA differs" scenario (cross-
+// cell migration, planned CA rotation, etc.).
+//
+// Best-effort — errors are logged but don't fail the handoff. A migration
+// that successfully moves the workload but fails to refresh the cert is
+// strictly better than refusing the migration.
+func (m *Manager) reinstallProxyCA(ctx context.Context, sandboxID string, agent *AgentClient) {
+	if m.secretsProxy == nil || agent == nil {
+		return
+	}
+	certPEM := m.secretsProxy.CACertPEM()
+	if len(certPEM) == 0 {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := agent.WriteFile(writeCtx, "/usr/local/share/ca-certificates/opensandbox-proxy.crt", certPEM); err != nil {
+		log.Printf("qemu: %s: reinstall proxy CA failed: %v (sandbox is alive but TLS substitution may break until next handoff)", sandboxID, err)
+		return
+	}
+	log.Printf("qemu: %s: reinstalled proxy CA on guest", sandboxID)
+}
+
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
 // hibernates it to create a reusable snapshot. Subsequent Create() calls
 // restore from this snapshot instead of cold-booting, cutting start time
@@ -2981,6 +3017,12 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	m.mu.Lock()
 	m.vms[id] = vm
 	m.mu.Unlock()
+
+	// Refresh the proxy CA in the forked guest's trust store. The fork
+	// inherits the source checkpoint's disk + RAM, so its trust store has
+	// whatever CA the original sandbox was created against — which is
+	// probably a different worker. Idempotent in the shared-CA case.
+	m.reinstallProxyCA(ctx, id, agent)
 
 	// Notify metadata server
 	if m.onSandboxReady != nil {
