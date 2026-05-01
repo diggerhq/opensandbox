@@ -449,6 +449,68 @@ export const getAgentLogs = (agentId: string, tail = 300) =>
     `/agents/${encodeURIComponent(agentId)}/logs?tail=${tail}`,
   )
 
+// ── Per-agent paywalled feature subscriptions (Telegram et al) ──
+
+export type EntitlementReason = 'ungated' | 'subscription_required' | string
+
+export interface AgentEntitlement {
+  feature: string
+  entitled: boolean
+  reason?: EntitlementReason
+  price_monthly_cents?: number
+  status?: string
+  current_period_end?: string
+  cancel_at_period_end?: boolean
+  stripe_subscription_id?: string
+}
+
+export const listAgentEntitlements = (agentId: string) =>
+  apiFetch<{ agent_id: string; entitlements: AgentEntitlement[] }>(
+    `/agents/${encodeURIComponent(agentId)}/entitlements`,
+  )
+
+export type SubscribeResult =
+  | { status: 'active'; feature: string; agent_id: string; subscription_id: string; price_id: string }
+  | { status: 'already_subscribed'; feature: string; agent_id: string; subscription_id: string }
+  | { status: 'ungated'; feature: string; agent_id: string }
+  | { status: 'checkout_required'; feature: string; agent_id: string; checkout_url: string }
+
+export const subscribeAgentFeature = (agentId: string, feature: string) =>
+  apiFetch<SubscribeResult>(
+    `/agents/${encodeURIComponent(agentId)}/subscriptions/${encodeURIComponent(feature)}`,
+    { method: 'POST' },
+  )
+
+export interface OrgAgentSubscription {
+  agent_id: string
+  feature: string
+  status: string
+  active: boolean
+  price_monthly_cents: number
+  current_period_end?: string
+  cancel_at_period_end: boolean
+  canceled_at?: string
+  created_at: string
+  stripe_subscription_id: string
+}
+
+export const listOrgAgentSubscriptions = () =>
+  apiFetch<{ subscriptions: OrgAgentSubscription[] }>(
+    '/billing/agent-subscriptions',
+  )
+
+export const cancelAgentFeature = (agentId: string, feature: string) =>
+  apiFetch<{
+    status: string
+    feature: string
+    agent_id: string
+    cancel_at_period_end: boolean
+    current_period_end?: string
+  }>(
+    `/agents/${encodeURIComponent(agentId)}/subscriptions/${encodeURIComponent(feature)}`,
+    { method: 'DELETE' },
+  )
+
 /**
  * Streams a chat turn to an agent's instance and yields parsed SSE events
  * as they arrive. The upstream (sessions-api POST /v1/agents/:id/instances/:id/messages)
@@ -461,19 +523,35 @@ export type ChatEvent =
   | { type: 'done' }
   | { type: 'raw'; data: string }
 
+export interface ChatTurn { role: 'user' | 'assistant' | 'system'; content: string }
+
 export async function* streamAgentChat(
   agentId: string,
   instanceId: string,
   content: string,
   conversationId?: string,
+  history?: ChatTurn[],
 ): AsyncGenerator<ChatEvent, void, unknown> {
+  // OpenAI-style chat-completions is stateless: the gateway needs the
+  // full conversation each turn to have any memory of prior messages.
+  // Caller passes `history` (already including the new user turn).
+  // For backwards compat with older callers, we still accept `content`
+  // as a single-turn shortcut.
+  const body: Record<string, unknown> = {}
+  if (history && history.length > 0) {
+    body.messages = history
+  } else {
+    body.content = content
+  }
+  if (conversationId) body.conversation_id = conversationId
+
   const res = await fetch(
     `/api/dashboard/agents/${encodeURIComponent(agentId)}/instances/${encodeURIComponent(instanceId)}/messages`,
     {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(conversationId ? { content, conversation_id: conversationId } : { content }),
+      body: JSON.stringify(body),
     },
   )
   if (!res.ok || !res.body) {

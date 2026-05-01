@@ -370,6 +370,7 @@ func main() {
 	var stripeClient *billing.StripeClient
 	if cfg.StripeSecretKey != "" {
 		stripeClient = billing.NewStripeClient(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripeSuccessURL, cfg.StripeCancelURL)
+		stripeClient.TelegramAgentPriceID = cfg.StripeTelegramAgentPriceID
 		if err := stripeClient.EnsureProducts(); err != nil {
 			log.Printf("opensandbox: Stripe product setup failed: %v (billing may not work)", err)
 		} else {

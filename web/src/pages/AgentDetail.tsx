@@ -13,6 +13,10 @@ import {
   getAgentOperations,
   getAgentLogs,
   streamAgentChat,
+  listAgentEntitlements,
+  subscribeAgentFeature,
+  cancelAgentFeature,
+  type AgentEntitlement,
   type AgentDetail,
   type AgentOperation,
   type AgentEvent as AgentEventRow,
@@ -33,6 +37,7 @@ export default function AgentDetailPage() {
   const { agentId = '' } = useParams<{ agentId: string }>()
   const navigate = useNavigate()
   const [detail, setDetail] = useState<AgentDetail | null>(null)
+  const [entitlementsByFeature, setEntitlementsByFeature] = useState<Record<string, AgentEntitlement>>({})
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('overview')
   const [banner, setBanner] = useState<Banner>(null)
@@ -42,6 +47,16 @@ export default function AgentDetailPage() {
     try {
       const d = await getAgent(agentId)
       setDetail(d)
+      // Refresh entitlements alongside detail so the header upgrade
+      // pill stays in sync with the latest subscription state.
+      try {
+        const e = await listAgentEntitlements(agentId)
+        const map: Record<string, AgentEntitlement> = {}
+        for (const ent of e.entitlements) map[ent.feature] = ent
+        setEntitlementsByFeature(map)
+      } catch {
+        // best-effort — don't block the page on entitlement fetch
+      }
     } catch (err) {
       setBanner({ kind: 'error', text: `Failed to load agent: ${(err as Error).message}` })
     } finally {
@@ -180,6 +195,34 @@ export default function AgentDetailPage() {
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {(() => {
+            const tg = entitlementsByFeature.telegram
+            const needsUpgrade = tg && tg.entitled === false && tg.reason !== 'ungated'
+            if (!needsUpgrade) return null
+            const priceCents = tg.price_monthly_cents ?? 2000
+            return (
+              <button
+                onClick={() => setTab('channels')}
+                style={{
+                  background: 'rgba(99,102,241,0.08)',
+                  color: 'var(--accent-indigo, #818cf8)',
+                  border: '1px solid rgba(99,102,241,0.35)',
+                  padding: '6px 12px',
+                  borderRadius: 999,
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontFamily: 'var(--font-body)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+                title={`Subscribe to Telegram channel for $${(priceCents / 100).toFixed(0)}/mo`}
+              >
+                <span style={{ fontSize: 11 }}>★</span>
+                Upgrade — ${(priceCents / 100).toFixed(0)}/mo
+              </button>
+            )
+          })()}
           <button
             onClick={() =>
               act('restart core', () => restartAgent(agentId), 'Core restarted.')
@@ -639,12 +682,22 @@ function ChatTab({
     if (!input.trim() || !instanceId || streaming) return
     const userMsg = input.trim()
     setInput('')
+    // Build the full history we'll send to the gateway BEFORE we mutate
+    // local state. Includes every prior user/assistant turn (skipping
+    // 'system' rows we generate locally for error display) plus the
+    // new user turn. Empty-text turns are dropped — the placeholder
+    // assistant bubble we add for UX must not be sent.
+    const apiHistory = history
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.text.length > 0)
+      .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text }))
+    apiHistory.push({ role: 'user', content: userMsg })
+
     setHistory((h) => [...h, { role: 'user', text: userMsg }, { role: 'assistant', text: '' }])
     setStreaming(true)
     let receivedText = false
     let saw_done = false
     try {
-      for await (const ev of streamAgentChat(agentId, instanceId, userMsg, conversationId)) {
+      for await (const ev of streamAgentChat(agentId, instanceId, userMsg, conversationId, apiHistory)) {
         if (ev.type === 'text' && ev.content) {
           receivedText = true
           setHistory((h) => {
@@ -775,8 +828,27 @@ function ChannelsTab({
   onAction: <T>(label: string, fn: () => Promise<T>, ok: string) => Promise<void>
 }) {
   const [telegramModal, setTelegramModal] = useState(false)
+  const [paywallModal, setPaywallModal] = useState(false)
+  const [subscribing, setSubscribing] = useState(false)
+  const [entitlements, setEntitlements] = useState<Record<string, AgentEntitlement>>({})
   const telegramConnected = detail.channels.some((c) => c.name === 'telegram')
   const canMutate = detail.core !== null
+
+  async function refreshEntitlements() {
+    try {
+      const res = await listAgentEntitlements(detail.id)
+      const map: Record<string, AgentEntitlement> = {}
+      for (const e of res.entitlements) map[e.feature] = e
+      setEntitlements(map)
+    } catch {
+      // best-effort: leave previous state
+    }
+  }
+
+  useEffect(() => {
+    void refreshEntitlements()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail.id])
 
   if (!canMutate) {
     return (
@@ -784,6 +856,50 @@ function ChannelsTab({
         This agent has no managed core, so channels aren't applicable.
       </p>
     )
+  }
+
+  const telegramEntitlement = entitlements.telegram
+  const telegramEntitled = telegramEntitlement?.entitled !== false // undefined treated as entitled (loading) to avoid flash
+  const telegramUngated = telegramEntitlement?.reason === 'ungated'
+  const telegramPriceCents = telegramEntitlement?.price_monthly_cents ?? 2000
+
+  async function handleTelegramAction() {
+    if (telegramConnected) {
+      // Already connected — manage flow
+      setTelegramModal(true)
+      return
+    }
+    if (!telegramEntitled) {
+      // Show paywall first
+      setPaywallModal(true)
+      return
+    }
+    // Entitled but not connected — connect flow
+    setTelegramModal(true)
+  }
+
+  async function handleSubscribe() {
+    setSubscribing(true)
+    try {
+      const result = await subscribeAgentFeature(detail.id, 'telegram')
+      if (result.status === 'checkout_required') {
+        // Bounce to Stripe Checkout for first-time card capture.
+        // Intentional: we lose the "open the connect modal next" flow,
+        // because Stripe redirects out and back. The user comes back
+        // to /agents/:id/?success=true and has to click Connect again
+        // — entitlement check will pass at that point.
+        window.location.href = result.checkout_url
+        return
+      }
+      // active / already_subscribed / ungated → entitled now
+      await refreshEntitlements()
+      setPaywallModal(false)
+      setTelegramModal(true)
+    } catch (err) {
+      alert(`Subscription failed: ${(err as Error).message}`)
+    } finally {
+      setSubscribing(false)
+    }
   }
 
   return (
@@ -794,13 +910,25 @@ function ChannelsTab({
           accent="sky"
           icon="✈️"
           name="Telegram"
-          description="Talk to the agent through a Telegram bot."
+          description={
+            telegramUngated
+              ? 'Talk to the agent through a Telegram bot. (Paywall not configured on this deployment.)'
+              : telegramEntitled
+                ? 'Talk to the agent through a Telegram bot.'
+                : `Talk to the agent through a Telegram bot. $${(telegramPriceCents / 100).toFixed(0)}/mo per agent.`
+          }
           status={telegramConnected ? 'connected' : 'available'}
-          actionLabel={telegramConnected ? 'Configure' : 'Connect'}
+          actionLabel={
+            telegramConnected
+              ? 'Configure'
+              : telegramEntitled
+                ? 'Connect'
+                : `Subscribe & connect — $${(telegramPriceCents / 100).toFixed(0)}/mo`
+          }
           actionTone={telegramConnected ? 'secondary' : 'primary'}
           busy={acting === 'connect telegram' || acting === 'disconnect telegram'}
           disabled={!!acting}
-          onAction={() => setTelegramModal(true)}
+          onAction={handleTelegramAction}
         />
 
         {COMING_SOON_CHANNELS.map((it) => (
@@ -816,9 +944,22 @@ function ChannelsTab({
         ))}
       </div>
 
+      {paywallModal && (
+        <TelegramPaywallModal
+          priceCents={telegramPriceCents}
+          subscribing={subscribing}
+          onClose={() => setPaywallModal(false)}
+          onSubscribe={handleSubscribe}
+        />
+      )}
+
       {telegramModal && (
         <TelegramConnectModal
           alreadyConnected={telegramConnected}
+          ungated={telegramUngated}
+          subscriptionActive={!!entitlements.telegram?.entitled && !telegramUngated}
+          subscriptionWillCancel={!!entitlements.telegram?.cancel_at_period_end}
+          subscriptionRenewsAt={entitlements.telegram?.current_period_end}
           onClose={() => setTelegramModal(false)}
           onSubmit={async (token) => {
             setTelegramModal(false)
@@ -838,9 +979,75 @@ function ChannelsTab({
               'Telegram disconnected.',
             )
           }}
+          onCancelSubscription={async () => {
+            try {
+              await cancelAgentFeature(detail.id, 'telegram')
+              await refreshEntitlements()
+              setTelegramModal(false)
+              alert('Subscription scheduled to cancel at period end. Telegram remains active until then.')
+            } catch (err) {
+              alert(`Cancel failed: ${(err as Error).message}`)
+            }
+          }}
         />
       )}
     </>
+  )
+}
+
+function TelegramPaywallModal({
+  priceCents,
+  subscribing,
+  onClose,
+  onSubscribe,
+}: {
+  priceCents: number
+  subscribing: boolean
+  onClose: () => void
+  onSubscribe: () => Promise<void>
+}) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 100,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: 'var(--bg-deep)',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 12, width: '100%', maxWidth: 460, padding: 22,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h2 style={{ fontSize: 16, margin: 0, fontFamily: 'var(--font-display)' }}>Subscribe to Telegram for this agent</h2>
+          <button onClick={onClose} style={iconButton}>×</button>
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 16 }}>
+          Connecting Telegram to a managed agent costs <b>${(priceCents / 100).toFixed(0)}/month</b>. Each agent
+          you connect to Telegram is billed separately. Cancel any time — service runs to the end of the
+          current billing period.
+        </div>
+        <div style={{
+          background: 'rgba(99,102,241,0.08)',
+          border: '1px solid rgba(99,102,241,0.2)',
+          borderRadius: 6, padding: '10px 12px',
+          fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16,
+        }}>
+          Your card on file will be charged immediately and prorated to the end of the current billing
+          period. If no card is on file, Stripe Checkout will collect one.
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <button type="button" onClick={onClose} style={secondaryButton}>Cancel</button>
+          <button onClick={() => void onSubscribe()} disabled={subscribing} style={primaryButton}>
+            {subscribing ? <BusyLabel text="Subscribing…" /> : `Subscribe — $${(priceCents / 100).toFixed(0)}/mo`}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1045,14 +1252,24 @@ function IntegrationCard({
 
 function TelegramConnectModal({
   alreadyConnected,
+  ungated,
+  subscriptionActive,
+  subscriptionWillCancel,
+  subscriptionRenewsAt,
   onClose,
   onSubmit,
   onDisconnect,
+  onCancelSubscription,
 }: {
   alreadyConnected: boolean
+  ungated: boolean
+  subscriptionActive: boolean
+  subscriptionWillCancel: boolean
+  subscriptionRenewsAt?: string
   onClose: () => void
   onSubmit: (token: string) => void | Promise<void>
   onDisconnect: () => void | Promise<void>
+  onCancelSubscription: () => void | Promise<void>
 }) {
   const [token, setToken] = useState('')
   const title = alreadyConnected ? 'Configure Telegram' : 'Connect Telegram'
@@ -1084,6 +1301,53 @@ function TelegramConnectModal({
           </p>
         )}
 
+        {ungated && (
+          <div style={{
+            background: 'rgba(251,191,36,0.08)',
+            border: '1px solid rgba(251,191,36,0.25)',
+            borderRadius: 6, padding: '8px 12px', marginBottom: 14,
+            fontSize: 12, color: 'var(--text-secondary)',
+          }}>
+            <b style={{ color: '#fbbf24' }}>Not gated yet</b> on this deployment — connect proceeds without
+            a subscription. Set <code style={codeInline}>STRIPE_TELEGRAM_AGENT_PRICE_ID</code> on the server
+            to enable the paywall.
+          </div>
+        )}
+
+        {!ungated && subscriptionActive && (
+          <div style={{
+            background: 'rgba(52,211,153,0.08)',
+            border: '1px solid rgba(52,211,153,0.2)',
+            borderRadius: 6, padding: '8px 12px', marginBottom: 14,
+            fontSize: 12, color: 'var(--text-secondary)',
+          }}>
+            {subscriptionWillCancel ? (
+              <>
+                Subscription <b>scheduled to cancel</b>
+                {subscriptionRenewsAt && ` on ${new Date(subscriptionRenewsAt).toLocaleDateString()}`}
+                . Telegram remains active until then.
+              </>
+            ) : (
+              <>
+                Subscription <b style={{ color: '#34d399' }}>active</b>
+                {subscriptionRenewsAt && ` · renews ${new Date(subscriptionRenewsAt).toLocaleDateString()}`}
+                .{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm('Cancel Telegram subscription? Service continues until period end.')) {
+                      void onCancelSubscription()
+                    }
+                  }}
+                  style={{ background: 'none', border: 'none', color: 'var(--accent-rose, #f87171)', cursor: 'pointer', padding: 0, fontSize: 12, textDecoration: 'underline' }}
+                >
+                  Cancel subscription
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
         <form
           onSubmit={(e) => { e.preventDefault(); if (token.trim()) void onSubmit(token.trim()) }}
           style={{ display: 'grid', gap: 14 }}
@@ -1105,7 +1369,7 @@ function TelegramConnectModal({
               <button
                 type="button"
                 onClick={() => {
-                  if (window.confirm('Disconnect Telegram from this agent?')) {
+                  if (window.confirm('Disconnect Telegram from this agent? Subscription remains active until cancelled separately.')) {
                     void onDisconnect()
                   }
                 }}

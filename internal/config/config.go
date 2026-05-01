@@ -106,6 +106,10 @@ type Config struct {
 	StripeSuccessURL    string
 	StripeCancelURL     string
 
+	// Per-agent paywalled-feature prices (set in Stripe dashboard, referenced
+	// by ID here). Empty = feature ungated on this deployment (dev mode).
+	StripeTelegramAgentPriceID string
+
 	// Segment analytics — if set, GB-minute usage events are shipped per org.
 	SegmentWriteKey string
 
@@ -205,8 +209,9 @@ func Load() (*Config, error) {
 		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
 		IdleReserveWorkers:  envOrDefaultInt("OPENSANDBOX_IDLE_RESERVE", 1),
 
-		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
-		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:            os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:        os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeTelegramAgentPriceID: os.Getenv("STRIPE_TELEGRAM_AGENT_PRICE_ID"),
 		StripeSuccessURL:    envOrDefault("STRIPE_SUCCESS_URL", "http://localhost:3000/billing?success=true"),
 		StripeCancelURL:     envOrDefault("STRIPE_CANCEL_URL", "http://localhost:3000/billing?cancelled=true"),
 

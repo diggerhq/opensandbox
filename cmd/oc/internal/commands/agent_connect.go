@@ -5,11 +5,27 @@ package commands
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/opensandbox/opensandbox/cmd/oc/internal/client"
+	"github.com/opensandbox/opensandbox/cmd/oc/internal/config"
 )
+
+// dashboardAgentURL builds the dashboard URL for an agent, used in the
+// CLI's paywall-redirect message. APIURL doubles as the dashboard origin
+// (the OC server serves /api/dashboard/* and the SPA from the same host).
+func dashboardAgentURL(cmd *cobra.Command, agentID string) string {
+	cfg := config.Load(cmd)
+	base := strings.TrimRight(cfg.APIURL, "/")
+	if base == "" {
+		base = config.DefaultAPIURL
+	}
+	return base + "/agents/" + url.PathEscape(agentID)
+}
 
 var agentConnectCmd = &cobra.Command{
 	Use:   "connect <id> <channel>",
@@ -62,6 +78,20 @@ var agentConnectCmd = &cobra.Command{
 
 		var result operationSubmissionResponse
 		if err := sc.Post(cmd.Context(), "/v1/agents/"+agentID+"/channels/"+channel, body, &result); err != nil {
+			// HTTP 402 → paywalled feature. The dashboard owns
+			// subscription flow (Stripe Checkout needs a browser);
+			// surface a clean message and the upgrade URL instead of
+			// a raw API error.
+			if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 402 {
+				upgradeURL := dashboardAgentURL(cmd, agentID)
+				fmt.Fprintf(os.Stderr,
+					"\nThis agent is not subscribed to %s ($20/mo per agent).\n"+
+						"Subscribe in the dashboard, then re-run this command:\n"+
+						"  %s\n\n",
+					channel, upgradeURL,
+				)
+				return fmt.Errorf("subscription required for %s on %s", channel, agentID)
+			}
 			return err
 		}
 
