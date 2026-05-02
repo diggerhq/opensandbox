@@ -1124,10 +1124,39 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 		}
 	}
 
+	// Scaling lock: refuse if the user has explicitly pinned this sandbox's
+	// resources. Same code that the autoscale endpoint and the autoscaler
+	// loop use, so SDK consumers can branch on a single error code.
+	if s.store != nil {
+		if locked, err := s.store.GetScalingLock(c.Request().Context(), id); err == nil && locked {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "scaling is locked on this sandbox — unlock via PUT /scaling-lock to allow size changes",
+				"code":  "scaling_locked",
+			})
+		}
+	}
+
 	cpuPercent := vcpus * 100
 	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
 	cpuMaxUsec := int64(cpuPercent) * 1000
 	cpuPeriodUsec := int64(100000)
+
+	// Manual scale disables autoscale. Rationale: a user explicitly setting a
+	// size has signalled they want predictability — letting the autoscaler
+	// override would surprise them. They can re-enable via PUT /autoscale.
+	// Best-effort — failure to disable is logged but doesn't fail the scale.
+	// We capture whether it WAS enabled so the response can flag the side-
+	// effect to SDK callers (otherwise autoscale silently flips off).
+	var autoscaleWasEnabled bool
+	if s.store != nil {
+		if enabled, _, _, err := s.store.GetSandboxAutoscale(c.Request().Context(), id); err == nil {
+			autoscaleWasEnabled = enabled
+		}
+		if err := s.store.SetSandboxAutoscale(c.Request().Context(), id, false, 0, 0); err != nil {
+			log.Printf("scale: failed to disable autoscale on %s after manual scale: %v", id, err)
+		}
+	}
+	c.Set("autoscaleWasEnabled", autoscaleWasEnabled)
 
 	if s.workerRegistry != nil {
 		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
@@ -1271,6 +1300,18 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 
 		log.Printf("scale-migrate %s: migrated to %s and scaled to %dMB", sandboxID, workerID, requestedMemMB)
 	} else if err != nil {
+		// OOM-floor refusal: returned by the worker when the requested limit
+		// is below the guest's current working set. This is a "user can fix
+		// it" condition (free memory in the guest, then retry) — surface it
+		// as 409 Conflict with a structured code so SDK consumers can branch
+		// on it without string-matching the wrapped gRPC error.
+		if strings.Contains(err.Error(), "oom_floor:") {
+			return c.JSON(http.StatusConflict, map[string]any{
+				"error":   "memory limit below guest working set — would OOM-kill processes",
+				"code":    "oom_floor",
+				"details": err.Error(),
+			})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "set limits failed: " + err.Error(),
 		})
@@ -1284,14 +1325,21 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		s.emitEvent("scale", sandboxID, workerID, fmt.Sprintf("scaled to %dMB (migrated=%v)", requestedMemMB, migrated))
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]any{
 		"sandboxID":  sandboxID,
 		"workerID":   workerID,
 		"memoryMB":   requestedMemMB,
 		"cpuPercent": int(cpuMaxUsec / 1000),
 		"migrated":   migrated,
 		"ok":         true,
-	})
+	}
+	// Surface the autoscale-was-disabled side-effect when the request came
+	// from /scale (scaleSandbox stashes this on the echo context). Quiet
+	// when called from /limits (no autoscale toggle there).
+	if v := c.Get("autoscaleWasEnabled"); v != nil {
+		resp["autoscaleDisabled"] = v.(bool)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // findScaleMigrationTargets finds workers with enough memory headroom for a scaled-up sandbox.

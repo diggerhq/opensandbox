@@ -166,6 +166,13 @@ func main() {
 		}
 	}
 
+	// Hoisted at function scope so the per-sandbox autoscaler (created
+	// later, after the API server) can consult IsLeader() each tick — keeps
+	// a single elector authoritative across both the cluster scaler and the
+	// per-sandbox autoscaler in HA setups. nil when there's no compute pool
+	// (combined / dev mode) — autoscaler then runs unconditionally.
+	var leaderElector *controlplane.LeaderElector
+
 	// Initialize compute pool + autoscaler (server mode)
 	if cfg.Mode == "server" && redisRegistry != nil {
 		var pool compute.Pool
@@ -305,19 +312,22 @@ func main() {
 			})
 			defer scaler.Stop()
 
-			// Leader election: only the leader runs the scaler
-			elector := controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
-			elector.OnBecomeLeader(func() {
+			// Leader election: only the leader runs the scaler. The
+			// per-sandbox autoscaler (created later) consults this same
+			// elector via IsLeader() to skip ticks when not leader, so we
+			// don't double-fire scale decisions across CPs in HA setups.
+			leaderElector = controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
+			leaderElector.OnBecomeLeader(func() {
 				scaler.Start()
 				log.Printf("opensandbox: became leader, autoscaler started (%s)", poolName)
 			})
-			elector.OnLoseLeadership(func() {
+			leaderElector.OnLoseLeadership(func() {
 				scaler.Stop()
 				log.Println("opensandbox: lost leadership, autoscaler stopped")
 			})
-			elector.Start()
-			defer elector.Stop()
-			log.Printf("opensandbox: leader election started (instance=%s)", elector.InstanceID())
+			leaderElector.Start()
+			defer leaderElector.Stop()
+			log.Printf("opensandbox: leader election started (instance=%s)", leaderElector.InstanceID())
 		}
 	}
 
@@ -383,6 +393,28 @@ func main() {
 
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
+
+	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
+	// sandbox via PUT /api/sandboxes/:id/autoscale.
+	//
+	// Leader-gated when an elector exists. With HA (multiple CPs) we don't
+	// want two instances both reading stats and double-firing scale events.
+	// SetSandboxLimits is technically idempotent for memory targets, but
+	// the cooldown CAS races and the cooldown timestamp gets clobbered if
+	// both CPs UPDATE — see ClaimAutoscaleEvent. Gating on the leader is
+	// cheaper than relying on the CAS alone. When there's no elector
+	// (single-CP / no cloud pool), isLeader is nil and the loop runs
+	// unconditionally.
+	if opts.Store != nil && redisRegistry != nil {
+		var isLeader func() bool
+		if leaderElector != nil {
+			isLeader = leaderElector.IsLeader
+		}
+		autoscaler := controlplane.NewAutoscaler(opts.Store, redisRegistry, api.NewAutoscalerSetter(server), isLeader)
+		autoscaler.Start(ctx)
+		defer autoscaler.Stop()
+		log.Println("opensandbox: per-sandbox autoscaler started (interval=30s, leader-gated)")
+	}
 
 	// Start usage reporter — reports Pro org usage to Stripe and deducts
 	// free-tier trial credits (force-hibernates on empty) every 5 min.

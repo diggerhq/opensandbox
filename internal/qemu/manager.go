@@ -188,6 +188,10 @@ type Manager struct {
 
 	secretsProxy    SecretsProxyIntegration  // nil if secrets proxy is not configured
 	checkpointStore *storage.CheckpointStore // for base image archival + checkpoint rebasing (nil until set)
+
+	// Per-sandbox stats cache populated by a background collector and read by
+	// the heartbeat path. See stats_collector.go.
+	statsCache *SandboxStatsCache
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -1923,6 +1927,45 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 	vm, err := m.getReadyVM(ctx, sandboxID)
 	if err != nil {
 		return err
+	}
+
+	// Shrink-safety: refuse any request whose total memory falls below the
+	// guest's working set + 5% headroom. This guards against:
+	//   (a) virtio-mem unplug below resident anon memory → guest OOM-killer,
+	//   (b) cgroup memory.max set below current RSS → guest OOM-killer,
+	// in both directions and across all entry points (manual /scale,
+	// per-sandbox autoscaler, post-wake, post-fork). Lifted above the
+	// virtio-mem branch so it fires regardless of the worker's own
+	// virtioMemRequestedMB bookkeeping (which fork doesn't track and wake
+	// only started tracking recently).
+	//
+	// MemUsage = MemTotal - MemAvailable from /proc/meminfo inside the
+	// guest — a conservative upper bound on resident anon (it includes some
+	// active page cache, which is fine; we'd rather refuse a few legit
+	// shrinks than silently OOM the guest).
+	//
+	// Fail-closed on stats errors during a shrink — better to bounce back
+	// to the caller (who can retry) than apply a limit we can't validate.
+	if maxMemoryBytes > 0 && vm.agent != nil {
+		newTotalMB := int(maxMemoryBytes / (1024 * 1024))
+		shrinking := newTotalMB < vm.MemoryMB
+		statsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		stats, statsErr := vm.agent.Stats(statsCtx)
+		cancel()
+		switch {
+		case statsErr != nil && shrinking:
+			log.Printf("qemu: %s shrink to %dMB refused: stats fetch failed: %v", sandboxID, newTotalMB, statsErr)
+			return fmt.Errorf("oom_floor: cannot verify guest working set: %w", statsErr)
+		case stats != nil && stats.MemUsage > 0:
+			usedMB := int(stats.MemUsage / (1024 * 1024))
+			floorMB := usedMB * 105 / 100
+			if newTotalMB < floorMB {
+				log.Printf("qemu: %s: refusing memory limit %dMB — working set %dMB requires ≥%dMB",
+					sandboxID, newTotalMB, usedMB, floorMB)
+				return fmt.Errorf("oom_floor: target %dMB below guest working set (%dMB used, %dMB floor)",
+					newTotalMB, usedMB, floorMB)
+			}
+		}
 	}
 
 	// virtio-mem: adjust pluggable memory to match requested total

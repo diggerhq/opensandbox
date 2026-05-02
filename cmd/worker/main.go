@@ -436,6 +436,27 @@ func main() {
 				hb.SetMemoryInfoFunc(func() (int, int) {
 					return qemuMgr.HostMemoryMB(), qemuMgr.TotalCommittedMemoryMB()
 				})
+				// Per-sandbox stats for the CP autoscaler. The stats collector
+				// runs on a 10s tick (matching heartbeat cadence) and the
+				// heartbeat reads the cached snapshot non-blockingly.
+				qemuMgr.StartStatsCollector(ctx, 10*time.Second)
+				hb.SetSandboxStatsFunc(func() map[string]worker.SandboxStatsWire {
+					raw := qemuMgr.GetAllSandboxStats()
+					out := make(map[string]worker.SandboxStatsWire, len(raw))
+					for id, s := range raw {
+						memPct := 0.0
+						if s.MemLimit > 0 {
+							memPct = float64(s.MemUsage) / float64(s.MemLimit) * 100
+						}
+						out[id] = worker.SandboxStatsWire{
+							MemUsage: s.MemUsage,
+							MemLimit: s.MemLimit,
+							MemPct:   memPct,
+							CPUPct:   s.CPUPercent,
+						}
+					}
+					return out
+				})
 			}
 			// On reconnect after outage, reconcile sandbox state with DB
 			if store != nil {

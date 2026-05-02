@@ -231,6 +231,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Resource limits
 	api.PUT("/sandboxes/:id/limits", s.setLimits)
 	api.POST("/sandboxes/:id/scale", s.scaleSandbox)
+	api.PUT("/sandboxes/:id/autoscale", s.setAutoscale)
+	api.GET("/sandboxes/:id/autoscale", s.getAutoscale)
+	api.PUT("/sandboxes/:id/scaling-lock", s.setScalingLock)
+	api.GET("/sandboxes/:id/scaling-lock", s.getScalingLock)
 
 	// Checkpoints
 	api.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)
