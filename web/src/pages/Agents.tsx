@@ -249,17 +249,63 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
     <div
       style={{
         textAlign: 'center',
-        padding: '60px 24px',
-        border: '1px dashed var(--border-subtle)',
-        borderRadius: 12,
+        padding: '56px 24px 64px',
+        border: '1px solid rgba(255,77,77,0.22)',
+        borderRadius: 14,
+        background:
+          'radial-gradient(ellipse at top, rgba(255,77,77,0.10), transparent 60%), rgba(255,255,255,0.015)',
+        position: 'relative',
+        overflow: 'hidden',
       }}
     >
-      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>No agents yet</div>
-      <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 20 }}>
-        Spin up a managed OpenClaw agent and connect it to Telegram. Add gbrain to give it long-term memory.
+      <ClawLogo />
+      <div style={{ fontSize: 22, fontWeight: 700, marginTop: 18, fontFamily: 'var(--font-display)' }}>
+        Deploy an OpenClaw managed agent
+      </div>
+      <p style={{
+        color: 'var(--text-secondary)', fontSize: 14, marginTop: 10, marginBottom: 26,
+        maxWidth: 520, marginLeft: 'auto', marginRight: 'auto', lineHeight: 1.55,
+      }}>
+        OpenClaw runs the gateway, model routing, and tool execution inside a sandbox we
+        manage for you. Connect Telegram, install gbrain for long-term memory, and you're
+        live in under a minute.
       </p>
       <button onClick={onCreate} style={primaryButton}>Create your first agent</button>
     </div>
+  )
+}
+
+// OpenClaw lobster mark — pulled from openclaw.ai/favicon.svg so the dashboard
+// and agents-empty-state both use the same brand asset as the marketing site.
+// Inlined so it ships with the bundle. Gradient id is scoped (`agents-…`) to
+// avoid colliding with the same logo on other pages.
+function ClawLogo() {
+  return (
+    <svg
+      width="80"
+      height="80"
+      viewBox="0 0 120 120"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      style={{ filter: 'drop-shadow(0 0 22px rgba(255,77,77,0.40))' }}
+    >
+      <defs>
+        <linearGradient id="agents-lobster-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#ff4d4d" />
+          <stop offset="100%" stopColor="#991b1b" />
+        </linearGradient>
+      </defs>
+      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#agents-lobster-gradient)" />
+      <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#agents-lobster-gradient)" />
+      <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#agents-lobster-gradient)" />
+      <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      <circle cx="45" cy="35" r="6" fill="#050810" />
+      <circle cx="75" cy="35" r="6" fill="#050810" />
+      <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
+      <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
+    </svg>
   )
 }
 
