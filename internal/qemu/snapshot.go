@@ -491,6 +491,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts)
 		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(meta.SealedTokens))
 	}
+	// Refresh the proxy CA in the guest's trust store. Wake may land on a
+	// different worker than the one that hibernated the sandbox, in which
+	// case the cert in the guest's trust store no longer matches what this
+	// worker's proxy presents. Idempotent on same-worker wake.
+	m.reinstallProxyCA(context.Background(), sandboxID, agentClient)
 
 	log.Printf("qemu: wake %s: golden restore complete (port=%d, tap=%s)",
 		sandboxID, hostPort, netCfg.TAPName)

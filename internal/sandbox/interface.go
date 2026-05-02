@@ -15,6 +15,22 @@ type HibernateResult struct {
 	SizeBytes      int64  `json:"sizeBytes"`
 }
 
+// MigrationSecrets is the per-sandbox secrets-proxy state that must move
+// with the VM during a live migration. The proxy keeps these in-process
+// per-worker (see internal/secretsproxy), so without an explicit handoff
+// the destination has no substitution map and the guest's env vars
+// (`osb_sealed_xxx`) leak verbatim to upstream services. Hibernate
+// persists the same data into snapshot-meta.json; live migration carries
+// it through the PreCopyDrives → PrepareMigrationIncoming RPC chain.
+//
+// Lives in package sandbox (not qemu) so the worker grpc layer can name
+// it without importing qemu (which would create a cycle).
+type MigrationSecrets struct {
+	SealedTokens    map[string]string
+	EgressAllowlist []string
+	TokenHosts      map[string][]string
+}
+
 // SandboxStats holds live resource usage for a sandbox.
 // Runtime-agnostic interface for sandbox resource stats.
 type SandboxStats struct {
