@@ -127,6 +127,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{34, "migrations/031_orgs_billing_mode.up.sql"},
 		{35, "migrations/035_sandbox_autoscale.up.sql"},
 		{36, "migrations/036_sandbox_scaling_lock.up.sql"},
+		{37, "migrations/037_agent_subscriptions.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -2118,4 +2119,170 @@ func (s *Store) DecryptSecretEntries(ctx context.Context, storeID uuid.UUID) ([]
 		})
 	}
 	return secrets, nil
+}
+
+// --- Agent feature subscriptions (per-agent paywalled features) ---
+
+type AgentSubscription struct {
+	ID                   uuid.UUID  `json:"id"`
+	OrgID                uuid.UUID  `json:"orgId"`
+	AgentID              string     `json:"agentId"`
+	Feature              string     `json:"feature"`
+	StripeCustomerID     string     `json:"stripeCustomerId"`
+	StripeSubscriptionID string     `json:"stripeSubscriptionId"`
+	StripePriceID        string     `json:"stripePriceId"`
+	Status               string     `json:"status"`
+	CurrentPeriodEnd     *time.Time `json:"currentPeriodEnd,omitempty"`
+	CancelAtPeriodEnd    bool       `json:"cancelAtPeriodEnd"`
+	CanceledAt           *time.Time `json:"canceledAt,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AgentSubscriptionIsActive returns true for statuses where the feature
+// should be enabled. Mirrors the partial-unique-index condition in
+// migration 032; keep them in sync.
+func AgentSubscriptionIsActive(status string) bool {
+	switch status {
+	case "active", "trialing", "past_due", "incomplete":
+		// past_due/incomplete are grace-period states — Stripe still
+		// considers them billable. We let the bot run during grace and
+		// rely on the webhook to flip to canceled when Stripe gives up.
+		return true
+	default:
+		return false
+	}
+}
+
+// GetActiveAgentSubscription returns the single active subscription for
+// (agent_id, feature) if one exists. Used for entitlement checks.
+func (s *Store) GetActiveAgentSubscription(ctx context.Context, agentID, feature string) (*AgentSubscription, error) {
+	var sub AgentSubscription
+	var currentPeriodEnd, canceledAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE agent_id = $1 AND feature = $2
+		   AND status NOT IN ('canceled','incomplete_expired','unpaid')
+		 LIMIT 1`, agentID, feature).Scan(
+		&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+		&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+		&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+		&sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sub.CurrentPeriodEnd = currentPeriodEnd
+	sub.CanceledAt = canceledAt
+	return &sub, nil
+}
+
+// ListAgentSubscriptionsByOrg returns all subscriptions for an org, used
+// by the billing page's per-agent-features section.
+func (s *Store) ListAgentSubscriptionsByOrg(ctx context.Context, orgID uuid.UUID) ([]AgentSubscription, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE org_id = $1
+		 ORDER BY created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subs []AgentSubscription
+	for rows.Next() {
+		var sub AgentSubscription
+		var currentPeriodEnd, canceledAt *time.Time
+		if err := rows.Scan(
+			&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+			&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+			&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+			&sub.CreatedAt, &sub.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		sub.CurrentPeriodEnd = currentPeriodEnd
+		sub.CanceledAt = canceledAt
+		subs = append(subs, sub)
+	}
+	return subs, rows.Err()
+}
+
+// GetAgentSubscriptionByStripeID is the lookup path used by the Stripe
+// webhook handler — it gets a subscription_id from Stripe and needs to
+// find the matching internal row.
+func (s *Store) GetAgentSubscriptionByStripeID(ctx context.Context, stripeSubscriptionID string) (*AgentSubscription, error) {
+	var sub AgentSubscription
+	var currentPeriodEnd, canceledAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE stripe_subscription_id = $1
+		 LIMIT 1`, stripeSubscriptionID).Scan(
+		&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+		&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+		&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+		&sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sub.CurrentPeriodEnd = currentPeriodEnd
+	sub.CanceledAt = canceledAt
+	return &sub, nil
+}
+
+// CreateAgentSubscription records a fresh Stripe subscription. Caller
+// is responsible for ensuring the Stripe-side object exists first.
+func (s *Store) CreateAgentSubscription(ctx context.Context, sub AgentSubscription) (*AgentSubscription, error) {
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO agent_subscriptions
+		    (org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		     stripe_price_id, status, current_period_end, cancel_at_period_end)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		RETURNING id, created_at, updated_at`,
+		sub.OrgID, sub.AgentID, sub.Feature, sub.StripeCustomerID,
+		sub.StripeSubscriptionID, sub.StripePriceID, sub.Status,
+		sub.CurrentPeriodEnd, sub.CancelAtPeriodEnd,
+	)
+	if err := row.Scan(&sub.ID, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+// UpdateAgentSubscriptionFromStripe applies status/period/cancel fields
+// from a Stripe webhook event onto the local row. Identifies by stripe
+// subscription_id.
+func (s *Store) UpdateAgentSubscriptionFromStripe(
+	ctx context.Context,
+	stripeSubscriptionID, status string,
+	currentPeriodEnd *time.Time,
+	cancelAtPeriodEnd bool,
+	canceledAt *time.Time,
+) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_subscriptions
+		   SET status = $2,
+		       current_period_end = $3,
+		       cancel_at_period_end = $4,
+		       canceled_at = $5,
+		       updated_at = now()
+		 WHERE stripe_subscription_id = $1`,
+		stripeSubscriptionID, status, currentPeriodEnd, cancelAtPeriodEnd, canceledAt,
+	)
+	return err
 }

@@ -136,7 +136,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		// on the fork. User envs override checkpoint's stored envs.
 		// Secret store: if checkpoint has none, user can attach one at fork time.
 		// If checkpoint already has one, user cannot override it.
-		result, status, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore)
+		result, status, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore, cfg.Metadata)
 		if cpErr != nil {
 			return c.JSON(status, map[string]string{"error": cpErr.Error()})
 		}
@@ -292,7 +292,7 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 
 	c.SetParamNames("checkpointId")
 	c.SetParamValues(checkpointID.String())
-	result, _, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore)
+	result, _, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore, cfg.Metadata)
 	if cpErr != nil {
 		emit("error", map[string]string{"error": cpErr.Error()})
 		return nil
@@ -2149,15 +2149,19 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 
 // createFromCheckpoint creates a new sandbox from an existing checkpoint (fork).
 func (s *Server) createFromCheckpoint(c echo.Context) error {
-	// Direct route (POST /sandboxes/from-checkpoint/:checkpointId): only the
-	// envs override is currently supported on the fork path; everything else
-	// is inherited from the checkpoint's stored config.
+	// Direct route (POST /sandboxes/from-checkpoint/:checkpointId): the
+	// envs / secretStore / metadata fields are supported on the fork path;
+	// everything else is inherited from the checkpoint's stored config.
+	// Metadata is merged onto the checkpoint's persisted metadata
+	// (caller wins) so callers can stamp identifiers like agent_id without
+	// losing whatever the snapshot author originally set.
 	var body struct {
 		Envs        map[string]string `json:"envs"`
 		SecretStore string            `json:"secretStore"`
+		Metadata    map[string]string `json:"metadata"`
 	}
 	_ = c.Bind(&body)
-	result, httpStatus, err := s.createFromCheckpointCore(c, body.Envs, body.SecretStore)
+	result, httpStatus, err := s.createFromCheckpointCore(c, body.Envs, body.SecretStore, body.Metadata)
 	if err != nil {
 		return c.JSON(httpStatus, map[string]string{"error": err.Error()})
 	}
@@ -2178,7 +2182,12 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 //
 // userEnvs (may be nil) overrides the envs from the checkpoint's stored config.
 // User keys win over keys re-resolved from the secret store.
-func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]string, userSecretStore string) (map[string]interface{}, int, error) {
+//
+// userMetadata (may be nil) is merged into the checkpoint's persisted
+// metadata before the sandbox session row is recorded — so callers can
+// stamp request-time identifiers (e.g. agent_id) without losing whatever
+// the snapshot author baked in.
+func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]string, userSecretStore string, userMetadata map[string]string) (map[string]interface{}, int, error) {
 	checkpointIDStr := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
@@ -2437,7 +2446,17 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 			template = "default"
 		}
 		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
-		metadataJSON, _ := json.Marshal(originalCfg.Metadata)
+		// Merge user-supplied metadata onto the snapshot's metadata (user wins)
+		// so request-time labels (e.g. agent_id) end up on the session row,
+		// where the billing path can find them via metadata->>'agent_id'.
+		mergedMeta := map[string]string{}
+		for k, v := range originalCfg.Metadata {
+			mergedMeta[k] = v
+		}
+		for k, v := range userMetadata {
+			mergedMeta[k] = v
+		}
+		metadataJSON, _ := json.Marshal(mergedMeta)
 		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
 		// Set golden version from worker heartbeat
 		if s.workerRegistry != nil {

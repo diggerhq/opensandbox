@@ -44,6 +44,16 @@ const icons = {
       <line x1="1" y1="10" x2="23" y2="10" />
     </svg>
   ),
+  bot: (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="7" width="16" height="12" rx="2" />
+      <path d="M12 7V3" />
+      <circle cx="12" cy="3" r="1" />
+      <circle cx="9" cy="13" r="1" fill="currentColor" />
+      <circle cx="15" cy="13" r="1" fill="currentColor" />
+      <path d="M9 17h6" />
+    </svg>
+  ),
   gear: (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="3" />
@@ -62,6 +72,7 @@ const icons = {
 const navItems = [
   { to: '/', label: 'Dashboard', end: true, icon: icons.grid },
   { to: '/sessions', label: 'Sessions', icon: icons.clock },
+  { to: '/agents', label: 'Agents', icon: icons.bot },
   { to: '/checkpoints', label: 'Checkpoints', icon: icons.layers },
   { to: '/templates', label: 'Templates', icon: icons.box },
   { to: '/api-keys', label: 'API Keys', icon: icons.key },

@@ -53,7 +53,13 @@ func GetUserID(c echo.Context) *uuid.UUID {
 
 // PGAPIKeyMiddleware validates API keys against PostgreSQL.
 // Falls back to static API key comparison if store is nil (combined/dev mode).
-func PGAPIKeyMiddleware(store *db.Store, staticKey string) echo.MiddlewareFunc {
+//
+// Also accepts an identity JWT (aud=opencomputer-api) when jwtIssuer is non-nil.
+// The JWT can arrive either in `Authorization: Bearer <jwt>` or as the X-API-Key
+// value (JWTs are detected by the two-dot signature: "header.payload.signature").
+// This lets sessions-api act on behalf of a dashboard user without holding a
+// long-lived API key — see internal/auth/jwt.go for the audience constants.
+func PGAPIKeyMiddleware(store *db.Store, staticKey string, jwtIssuer *JWTIssuer) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			// Try static API key first (backward compat for combined mode)
@@ -61,10 +67,30 @@ func PGAPIKeyMiddleware(store *db.Store, staticKey string) echo.MiddlewareFunc {
 				return APIKeyMiddleware(staticKey)(next)(c)
 			}
 
+			// Identity-JWT path: Authorization: Bearer <jwt> with aud=opencomputer-api.
+			if jwtIssuer != nil {
+				authHeader := c.Request().Header.Get("Authorization")
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+					if claims, err := jwtIssuer.ValidateIdentityToken(tokenStr, AudOpenComputerAPI); err == nil {
+						return applyIdentityClaims(c, claims, next)
+					}
+				}
+			}
+
 			// Get API key from header or query
 			key := c.Request().Header.Get("X-API-Key")
 			if key == "" {
 				key = c.QueryParam("api_key")
+			}
+
+			// JWTs may also arrive in the X-API-Key slot (the OC SDK takes a single
+			// `apiKey` field and ships it as X-API-Key — no Authorization option).
+			// Detect JWT by the two-dot signature; opaque API keys never contain dots.
+			if jwtIssuer != nil && key != "" && strings.Count(key, ".") == 2 {
+				if claims, err := jwtIssuer.ValidateIdentityToken(key, AudOpenComputerAPI); err == nil {
+					return applyIdentityClaims(c, claims, next)
+				}
 			}
 
 			// If no key and no store, pass through (dev mode)
@@ -97,6 +123,25 @@ func PGAPIKeyMiddleware(store *db.Store, staticKey string) echo.MiddlewareFunc {
 			return APIKeyMiddleware(staticKey)(next)(c)
 		}
 	}
+}
+
+func applyIdentityClaims(c echo.Context, claims *IdentityClaims, next echo.HandlerFunc) error {
+	orgID, err := uuid.Parse(claims.OrgID)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, map[string]string{
+			"error": "identity token: invalid org_id",
+		})
+	}
+	SetOrgID(c, orgID)
+	if claims.UserID != nil {
+		if userID, err := uuid.Parse(*claims.UserID); err == nil {
+			SetUserID(c, userID)
+		}
+	}
+	if claims.Email != nil {
+		c.Set("user_email", *claims.Email)
+	}
+	return next(c)
 }
 
 // SandboxJWTMiddleware validates sandbox-scoped JWTs for direct worker access.

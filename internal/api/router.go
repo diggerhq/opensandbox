@@ -189,10 +189,15 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 
 	// API routes (with API key auth)
 	api := e.Group("/api")
-	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey, s.jwtIssuer))
 
 	// Identity
 	api.POST("/auth/token", s.createAuthToken)
+
+	// Per-agent paywalled-feature entitlement check, callable from
+	// sessions-api with a JWT (aud=opencomputer-api) right before
+	// allowing a connect-channel operation.
+	api.GET("/agents/:agentId/entitlements/:feature", s.apiAgentEntitlement)
 
 	// Sandbox lifecycle
 	api.POST("/sandboxes", s.createSandbox)
@@ -411,8 +416,23 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/billing/invoices", s.billingInvoices)
 		dash.POST("/billing/redeem", s.billingRedeem)
 		dash.POST("/billing/portal", s.billingPortal)
+		dash.GET("/billing/agent-subscriptions", s.dashboardListOrgAgentSubscriptions)
 
 		// Admin endpoints
+
+		// Agents — reverse-proxy to sessions-api. Mints short-lived identity
+		// JWTs for the inbound (sessions-api) and downstream (OC API) hops so
+		// no API key is needed end-to-end. CLI users bypass this and hit
+		// sessions-api directly with X-API-Key.
+		dash.Any("/agents", s.dashboardAgentsProxy)
+		// Per-agent paywalled-feature subscriptions (telegram et al).
+		// Mounted BEFORE the catch-all /agents/* proxy so they don't
+		// get forwarded to sessions-api.
+		dash.GET("/agents/:agentId/entitlements", s.dashboardListAgentEntitlements)
+		dash.POST("/agents/:agentId/subscriptions/:feature", s.dashboardSubscribeAgentFeature)
+		dash.DELETE("/agents/:agentId/subscriptions/:feature", s.dashboardCancelAgentFeature)
+
+		dash.Any("/agents/*", s.dashboardAgentsProxy)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
