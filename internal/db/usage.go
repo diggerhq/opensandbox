@@ -172,14 +172,35 @@ type OrgUsageSummary struct {
 }
 
 // GetOrgUsage returns billing summary for an org.
+//
+// Sandboxes that back a managed agent with an active per-agent subscription
+// (e.g. the $20/mo Telegram plan) are *excluded* from this aggregation —
+// the subscription is meant to cover the underlying compute, so we mustn't
+// also bill the org's compute meter or deduct trial credits for it.
+//
+// The link is sandbox_sessions.metadata.agent_id, which sessions-api stamps
+// at sandbox-create time for managed agents. If a sandbox row is missing
+// (rare race during creation) or has no agent_id, the EXISTS check
+// short-circuits and the scale event is billed normally — i.e. the default
+// is "bill it", which keeps us safe in all the unknown cases.
 func (s *Store) GetOrgUsage(ctx context.Context, orgID string, from, to time.Time) ([]OrgUsageSummary, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT memory_mb, cpu_percent, disk_mb,
 		       SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, LEAST(now(), $3)) - GREATEST(started_at, $2)))) as total_seconds
-		FROM sandbox_scale_events
+		FROM sandbox_scale_events se
 		WHERE org_id = $1
 		  AND started_at < $3
 		  AND (ended_at IS NULL OR ended_at > $2)
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM sandbox_sessions ss
+		    JOIN agent_subscriptions asub
+		      ON asub.org_id = ss.org_id
+		     AND asub.agent_id = ss.metadata->>'agent_id'
+		     AND asub.status IN ('active', 'trialing', 'past_due', 'incomplete')
+		    WHERE ss.sandbox_id = se.sandbox_id
+		      AND ss.metadata->>'agent_id' IS NOT NULL
+		  )
 		GROUP BY memory_mb, cpu_percent, disk_mb
 		ORDER BY memory_mb, disk_mb`,
 		orgID, from, to)
