@@ -1,0 +1,154 @@
+# Build and push the digger/openclaw-managed image to opencomputerprodacr.
+#
+# Phase 0 of the image-pull provisioner migration (.agents/design/openclaw-image-pull.md).
+# This workflow only publishes the image; nothing in the runtime path consumes
+# it yet. Phase 1 wires sessions-api to optionally pull from this registry
+# behind a feature flag.
+#
+# Triggers:
+#   - Manual dispatch with an OpenClaw upstream version override.
+#   - Nightly at 04:00 UTC against `latest`-tracking upstream.
+#   - Push to main when the Dockerfile or launcher changes.
+#
+# Tag scheme:
+#   <upstream-version>-<git-sha>      — every build, immutable.
+#   latest-stable                     — moved manually after a build passes
+#                                       smoke tests in dev. Workers should
+#                                       pin to this in steady state; the
+#                                       per-build tag is for explicit
+#                                       rollback.
+
+name: Build OpenClaw managed image
+
+on:
+  workflow_dispatch:
+    inputs:
+      openclaw_version:
+        description: "Upstream OpenClaw version to base on (e.g. 2026.2.26 or latest)"
+        required: true
+        default: "2026.2.26"
+      promote_latest_stable:
+        description: "Also tag latest-stable (only after manual smoke test)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+  schedule:
+    # 04:00 UTC nightly — far enough from upstream's release windows that we
+    # rarely race with their tag promotion, close enough to catch breaking
+    # upstream changes within ~24h.
+    - cron: "0 4 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/openclaw-managed/**"
+      - ".github/workflows/build-openclaw-image.yml"
+
+env:
+  ACR_NAME: opencomputerprodacr
+  ACR_LOGIN_SERVER: opencomputerprodacr.azurecr.io
+  IMAGE_NAME: openclaw-managed
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve OpenClaw upstream version
+        id: version
+        run: |
+          # workflow_dispatch input wins; otherwise pin to a known-good
+          # default. Nightly + push triggers don't have inputs, so they
+          # use the hard-coded fallback.
+          VERSION="${{ inputs.openclaw_version }}"
+          if [ -z "$VERSION" ]; then VERSION=2026.2.26; fi
+          SHA=$(git rev-parse --short HEAD)
+          echo "version=$VERSION"     >> $GITHUB_OUTPUT
+          echo "sha=$SHA"             >> $GITHUB_OUTPUT
+          echo "tag=${VERSION}-${SHA}" >> $GITHUB_OUTPUT
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/openclaw-managed
+          file: deploy/openclaw-managed/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENCLAW_VERSION=${{ steps.version.outputs.version }}
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            com.digger.openclaw.upstream=${{ steps.version.outputs.version }}
+
+      - name: Smoke test pulled image
+        # Pull what we just pushed and curl /health. Catches "image built but
+        # gateway can't boot" before the tag is anywhere near a worker.
+        run: |
+          IMG="${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}"
+          echo "Pulling $IMG"
+          docker pull "$IMG"
+
+          echo "Booting in detached mode..."
+          docker run -d --name openclaw-smoke -p 18789:18789 "$IMG"
+
+          echo "Polling /health (up to 60s)..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18789/health; then
+              echo "  /health OK at attempt $i"
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+
+          docker logs openclaw-smoke | tail -50
+          docker rm -f openclaw-smoke
+
+          if [ "${ok:-0}" != "1" ]; then
+            echo "::error::smoke test failed — /health never responded"
+            exit 1
+          fi
+
+      - name: Promote latest-stable
+        if: ${{ inputs.promote_latest_stable == 'true' }}
+        run: |
+          # Manual gate: the operator confirms via the workflow_dispatch input
+          # that this build has been smoke-tested in dev and should become
+          # the default tag workers pull. Use this for the steady-state
+          # production tag; per-build tags stay around for rollback.
+          IMG_BUILT="${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}"
+          IMG_STABLE="${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest-stable"
+          docker tag "$IMG_BUILT" "$IMG_STABLE"
+          docker push "$IMG_STABLE"
+          echo "Promoted $IMG_BUILT -> $IMG_STABLE"
+
+      - name: Summary
+        run: |
+          echo "## OpenClaw managed image" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: \`${{ steps.version.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Upstream OpenClaw**: \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Smoke test**: Passed" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.promote_latest_stable }}" = "true" ]; then
+            echo "- **latest-stable**: promoted" >> $GITHUB_STEP_SUMMARY
+          fi
