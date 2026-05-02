@@ -91,6 +91,80 @@ export interface PreviewURLResult {
   createdAt: string;
 }
 
+/**
+ * Thrown by `scale`, `setAutoscale`, and resource-changing calls when the
+ * sandbox has a scaling lock active. Catch this to handle the lock case
+ * specifically — typically by surfacing a clear message to the user, or
+ * unlocking via `sandbox.setScalingLock(false)` first.
+ */
+export class ScalingLockedError extends Error {
+  readonly code = "scaling_locked";
+  constructor(message?: string) {
+    super(message ?? "scaling is locked on this sandbox");
+    this.name = "ScalingLockedError";
+  }
+}
+
+/**
+ * Thrown by `scale` and `setAutoscale` when the requested size exceeds the
+ * organization's plan cap (e.g. free tier blocks > 4 GB). The HTTP layer
+ * returns 402 Payment Required for this case.
+ */
+export class PlanLimitError extends Error {
+  constructor(message?: string) {
+    super(message ?? "plan limit exceeded for requested resources");
+    this.name = "PlanLimitError";
+  }
+}
+
+/**
+ * Inspect a non-OK response from a scaling endpoint and throw the most
+ * specific error type. Falls back to a generic Error when the response
+ * doesn't match a known shape so callers still see the status + body.
+ */
+async function throwScalingError(resp: Response, action: string): Promise<never> {
+  const text = await resp.text();
+  let body: { error?: string; code?: string } = {};
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // Non-JSON body — fall through to generic Error below.
+  }
+  if (resp.status === 403 && body.code === "scaling_locked") {
+    throw new ScalingLockedError(body.error);
+  }
+  if (resp.status === 402) {
+    throw new PlanLimitError(body.error);
+  }
+  throw new Error(`Failed to ${action}: ${resp.status} ${text}`);
+}
+
+export interface ScaleResult {
+  sandboxID: string;
+  memoryMB: number;
+  cpuPercent: number;
+}
+
+export interface AutoscaleConfig {
+  enabled: boolean;
+  /** Minimum tier the autoscaler will shrink to. Must be an allowed memory tier (1024, 4096, 8192, 16384, 32768, 65536). */
+  minMemoryMB?: number;
+  /** Maximum tier the autoscaler will grow to. Must be an allowed memory tier and ≥ minMemoryMB. */
+  maxMemoryMB?: number;
+}
+
+export interface AutoscaleStatus {
+  sandboxID: string;
+  enabled: boolean;
+  minMemoryMB: number;
+  maxMemoryMB: number;
+}
+
+export interface ScalingLockStatus {
+  sandboxID: string;
+  locked: boolean;
+}
+
 export class Sandbox {
   readonly sandboxId: string;
   readonly agent: Agent;
@@ -324,6 +398,127 @@ export class Sandbox {
       const text = await resp.text();
       throw new Error(`Failed to power-cycle sandbox: ${resp.status} ${text}`);
     }
+  }
+
+  /**
+   * Manually resize the sandbox to a specific memory tier. CPU is bundled
+   * with memory per the platform's tier table (e.g. 8 GB → 4 vCPU). Allowed
+   * tiers: 1024, 4096, 8192, 16384, 32768, 65536 MB.
+   *
+   * Side effect: a manual scale disables autoscale on this sandbox. If you
+   * want size to track load again, call `setAutoscale({ enabled: true, ... })`
+   * after.
+   *
+   * Throws `ScalingLockedError` if the sandbox has a scaling lock; throws
+   * `PlanLimitError` if the requested size exceeds your plan cap.
+   *
+   * [HTTP API →](/api-reference/sandboxes/scale)
+   */
+  async scale(opts: { memoryMB: number }): Promise<ScaleResult> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/scale`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+      body: JSON.stringify({ memoryMB: opts.memoryMB }),
+    });
+
+    if (!resp.ok) {
+      await throwScalingError(resp, "scale sandbox");
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * Enable or disable per-sandbox autoscale. When enabled, the platform
+   * resizes the sandbox between `minMemoryMB` and `maxMemoryMB` based on
+   * observed memory pressure — scaling up fast on a 1-min spike, down
+   * slowly after sustained idle.
+   *
+   * Both bounds must be allowed memory tiers (1024, 4096, 8192, 16384,
+   * 32768, 65536). Pass `enabled: false` to turn autoscale off (bounds
+   * are ignored in that case).
+   *
+   * Throws `ScalingLockedError` if the sandbox has a scaling lock; throws
+   * `PlanLimitError` if `maxMemoryMB` exceeds your plan cap.
+   */
+  async setAutoscale(opts: AutoscaleConfig): Promise<AutoscaleStatus> {
+    const body: Record<string, unknown> = { enabled: opts.enabled };
+    if (opts.minMemoryMB != null) body.minMemoryMB = opts.minMemoryMB;
+    if (opts.maxMemoryMB != null) body.maxMemoryMB = opts.maxMemoryMB;
+
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/autoscale`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      await throwScalingError(resp, "set autoscale");
+    }
+
+    return resp.json();
+  }
+
+  /**
+   * Get the current autoscale configuration for the sandbox.
+   */
+  async getAutoscale(): Promise<AutoscaleStatus> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/autoscale`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to get autoscale: ${resp.status} ${text}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * Lock or unlock the sandbox's resources against scaling. When locked:
+   *
+   *   - `scale()` rejects with `ScalingLockedError`.
+   *   - `setAutoscale({ enabled: true })` rejects with `ScalingLockedError`.
+   *   - The platform autoscaler skips this sandbox entirely.
+   *
+   * Locking ALSO disables autoscale as a side effect (single-knob
+   * semantics — "I don't want this scaling, period"). Unlocking does NOT
+   * re-enable autoscale; call `setAutoscale({ enabled: true, ... })`
+   * explicitly if you want it back.
+   */
+  async setScalingLock(locked: boolean): Promise<ScalingLockStatus> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/scaling-lock`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...(this.apiKey ? { "X-API-Key": this.apiKey } : {}),
+      },
+      body: JSON.stringify({ locked }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to set scaling lock: ${resp.status} ${text}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * Get the current scaling-lock state for the sandbox.
+   */
+  async getScalingLock(): Promise<ScalingLockStatus> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/scaling-lock`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to get scaling lock: ${resp.status} ${text}`);
+    }
+    return resp.json();
   }
 
   async setTimeout(timeout: number): Promise<void> {

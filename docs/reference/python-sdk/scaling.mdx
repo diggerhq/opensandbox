@@ -1,0 +1,171 @@
+---
+title: "Scaling"
+description: "Resize a sandbox manually, autoscale on memory pressure, or freeze its resources."
+---
+
+OpenComputer sandboxes can change size at runtime. There are three knobs:
+
+| What you want | Use |
+| --- | --- |
+| Resize once, predictably | [`scale()`](#sandbox-scale-memory-mb) |
+| Track memory pressure automatically | [`set_autoscale()`](#sandbox-set-autoscale) |
+| Freeze the current size | [`set_scaling_lock()`](#sandbox-set-scaling-lock-locked) |
+
+Memory tiers are fixed: `1024`, `4096`, `8192`, `16384`, `32768`, `65536` MB. CPU follows memory per the platform's tier table (e.g. 8 GB → 4 vCPU). You don't pick CPU separately.
+
+## How the three interact
+
+- **Manual `scale()`** disables autoscale on the sandbox as a side effect — explicit user intent overrides the loop. Re-enable with `set_autoscale(enabled=True, ...)` after if you want.
+- **Setting a scaling lock** disables autoscale at the same time (single knob: "I don't want this scaling, period"). While locked, both `scale()` and `set_autoscale(enabled=True)` raise `ScalingLockedError`. Unlocking does NOT auto-re-enable autoscale.
+- **Plan caps** apply everywhere. Free-tier orgs are capped at 4 GB. Calls above the cap raise `PlanLimitError`.
+
+---
+
+## `sandbox.scale(memory_mb)`
+
+Manually resize the sandbox. [HTTP API →](/api-reference/sandboxes/scale)
+
+<ParamField body="memory_mb" type="int" required>
+  Target memory tier in MB. Must be one of the allowed tiers.
+</ParamField>
+
+**Returns:** `dict` with `sandboxID`, `memoryMB`, `cpuPercent`.
+
+**Raises:**
+
+- `ScalingLockedError` — sandbox has a scaling lock active.
+- `PlanLimitError` — `memory_mb` exceeds the org's plan cap.
+
+```python
+from opencomputer import Sandbox, ScalingLockedError, PlanLimitError
+
+sandbox = await Sandbox.connect("sb-abc123")
+
+try:
+    result = await sandbox.scale(memory_mb=8192)
+    print(f"scaled to {result['memoryMB']}MB / {result['cpuPercent']}% CPU")
+except ScalingLockedError:
+    print("sandbox is locked — unlock to scale")
+except PlanLimitError:
+    print("upgrade required for larger instances")
+```
+
+---
+
+## `sandbox.set_autoscale(enabled, *, min_memory_mb=None, max_memory_mb=None)`
+
+Enable or disable per-sandbox autoscale.
+
+<ParamField body="enabled" type="bool" required>
+  Whether autoscale should be active.
+</ParamField>
+
+<ParamField body="min_memory_mb" type="int">
+  Lower bound when `enabled=True`. Must be an allowed tier.
+</ParamField>
+
+<ParamField body="max_memory_mb" type="int">
+  Upper bound when `enabled=True`. Must be an allowed tier and ≥ `min_memory_mb`.
+</ParamField>
+
+**Returns:** `dict` with `sandboxID`, `enabled`, `minMemoryMB`, `maxMemoryMB`.
+
+**Raises:**
+
+- `ScalingLockedError` — sandbox has a scaling lock active.
+- `PlanLimitError` — `max_memory_mb` exceeds the org's plan cap.
+
+When `enabled=True`, the platform watches the sandbox's memory pressure and resizes it within the bounds:
+
+- **Scale up** on a single 1-min sample above 75% memory utilization. Cooldown 60s between up-scales.
+- **Scale down** only when 1-min, 5-min, AND 15-min averages all sit below 25%. Cooldown 5 min between down-scales.
+
+The asymmetry matches user perception: rapid response when the user notices lag, conservative shrink after sustained idle. The 15-min window is the dominant constraint on shrink, so a sandbox that briefly idles and resumes won't sawtooth.
+
+```python
+await sandbox.set_autoscale(
+    enabled=True,
+    min_memory_mb=1024,
+    max_memory_mb=16384,
+)
+```
+
+To turn off:
+
+```python
+await sandbox.set_autoscale(enabled=False)
+```
+
+---
+
+## `sandbox.get_autoscale()`
+
+Get the current autoscale configuration.
+
+**Returns:** `dict` with `sandboxID`, `enabled`, `minMemoryMB`, `maxMemoryMB`.
+
+```python
+cfg = await sandbox.get_autoscale()
+if cfg["enabled"]:
+    print(f"autoscale {cfg['minMemoryMB']}–{cfg['maxMemoryMB']} MB")
+```
+
+---
+
+## `sandbox.set_scaling_lock(locked)`
+
+Lock or unlock the sandbox's resources against any size change.
+
+<ParamField body="locked" type="bool" required>
+  `True` to freeze, `False` to allow scaling again.
+</ParamField>
+
+**Returns:** `dict` with `sandboxID`, `locked`.
+
+While locked:
+
+- `scale()` raises `ScalingLockedError`.
+- `set_autoscale(enabled=True)` raises `ScalingLockedError`.
+- The platform autoscaler skips this sandbox entirely.
+
+Locking ALSO disables autoscale (single knob — "I don't want this scaling"). Unlocking does **not** re-enable autoscale; call `set_autoscale(enabled=True, ...)` explicitly if you want it back.
+
+```python
+# Pin a sandbox at its current size during a critical workload
+await sandbox.set_scaling_lock(True)
+
+# ...
+
+# Allow scaling again after
+await sandbox.set_scaling_lock(False)
+```
+
+---
+
+## `sandbox.get_scaling_lock()`
+
+Get the current scaling-lock state.
+
+**Returns:** `dict` with `sandboxID`, `locked`.
+
+---
+
+## Errors
+
+### `ScalingLockedError`
+
+Raised when the sandbox has a scaling lock active. Has a class attribute `code = "scaling_locked"` for parity with the HTTP API's error code.
+
+```python
+from opencomputer import ScalingLockedError
+
+try:
+    await sandbox.scale(memory_mb=8192)
+except ScalingLockedError:
+    # unlock first, or surface to user
+    ...
+```
+
+### `PlanLimitError`
+
+Raised when the requested size exceeds the org's plan cap. The HTTP API returns 402 Payment Required for this case.

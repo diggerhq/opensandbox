@@ -33,8 +33,8 @@ import (
 // LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
 type LiveMigrator interface {
 	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
-	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error)
-	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, err error)
+	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string, secrets sandbox.MigrationSecrets) (incomingAddr string, hostPort int, err error)
+	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, secrets sandbox.MigrationSecrets, err error)
 	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
 	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
 }
@@ -989,18 +989,31 @@ func (s *GRPCServer) PreCopyDrives(ctx context.Context, req *pb.PreCopyDrivesReq
 	if s.migrator == nil {
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
-	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
+	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, secrets, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("pre-copy drives: %w", err)
 	}
-	return &pb.PreCopyDrivesResponse{
+	resp := &pb.PreCopyDrivesResponse{
 		RootfsKey:      rootfsKey,
 		WorkspaceKey:   workspaceKey,
 		GoldenVersion:  goldenVersion,
 		BaseMemoryMb:   int32(baseMem),
 		BaseCpuCount:   int32(baseCPU),
 		ActualMemoryMb: int32(actualMem),
-	}, nil
+	}
+	// Marshal the secrets-proxy session into the proto. Skipped silently
+	// when the sandbox has no secret store registered (empty maps).
+	if len(secrets.SealedTokens) > 0 {
+		resp.SealedTokens = secrets.SealedTokens
+		resp.EgressAllowlist = secrets.EgressAllowlist
+		if len(secrets.TokenHosts) > 0 {
+			resp.TokenHosts = make(map[string]*pb.HostList, len(secrets.TokenHosts))
+			for tok, hosts := range secrets.TokenHosts {
+				resp.TokenHosts[tok] = &pb.HostList{Hosts: hosts}
+			}
+		}
+	}
+	return resp, nil
 }
 
 func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.PrepareMigrationIncomingRequest) (*pb.PrepareMigrationIncomingResponse, error) {
@@ -1028,6 +1041,23 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 		}
 	}
 
+	// Unmarshal the secrets-proxy session from the request, if any. The
+	// orchestrator will have copied this from PreCopyDrives. Empty when
+	// the sandbox has no secret store.
+	var secrets sandbox.MigrationSecrets
+	if len(req.SealedTokens) > 0 {
+		secrets.SealedTokens = req.SealedTokens
+		secrets.EgressAllowlist = req.EgressAllowlist
+		if len(req.TokenHosts) > 0 {
+			secrets.TokenHosts = make(map[string][]string, len(req.TokenHosts))
+			for tok, hl := range req.TokenHosts {
+				if hl != nil {
+					secrets.TokenHosts[tok] = hl.Hosts
+				}
+			}
+		}
+	}
+
 	var (
 		addr     string
 		hostPort int
@@ -1036,7 +1066,7 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 	if req.RootfsS3Key != "" && req.WorkspaceS3Key != "" {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigrationWithS3(ctx,
 			req.SandboxId, req.RootfsS3Key, req.WorkspaceS3Key,
-			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion)
+			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion, secrets)
 	} else {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigration(ctx,
 			req.SandboxId, req.RootfsPath, req.WorkspacePath,

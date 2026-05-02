@@ -35,6 +35,21 @@ type WorkerEntry struct {
 	GoldenVersion     string  `json:"golden_version,omitempty"`
 	WorkerVersion     string  `json:"worker_version,omitempty"`
 	Draining          bool    `json:"draining,omitempty"`
+
+	// Per-sandbox stats published by the worker. Bounded by per-host sandbox
+	// capacity (~50-150 entries) so the heartbeat doesn't grow unboundedly.
+	// Consumed by the autoscaler — see GetSandboxStats accessor below.
+	Sandboxes map[string]SandboxStats `json:"sandboxes,omitempty"`
+}
+
+// SandboxStats is the per-sandbox snapshot ingested from worker heartbeats.
+// Mirrors internal/worker.SandboxStatsWire — kept separate to avoid an
+// import cycle (CP shouldn't depend on the worker package).
+type SandboxStats struct {
+	MemUsage uint64  `json:"mem_usage"`
+	MemLimit uint64  `json:"mem_limit"`
+	MemPct   float64 `json:"mem_pct"`
+	CPUPct   float64 `json:"cpu_pct"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -48,11 +63,32 @@ type RedisWorkerRegistry struct {
 	clients    map[string]pb.SandboxWorkerClient // cached gRPC clients
 	rrCounter  uint64                        // round-robin counter for tie-breaking
 	stop       chan struct{}
+
+	// Per-sandbox stats indexed by sandboxID for O(1) autoscaler lookup. Updated
+	// from each worker heartbeat. Lock-protected separately from workers so the
+	// autoscaler doesn't contend with the routing path (which holds workersMu).
+	sandboxStatsMu  sync.RWMutex
+	sandboxStats    map[string]SandboxStats // sandboxID → latest snapshot
+	sandboxOnWorker map[string]string       // sandboxID → workerID (for prune-on-disappear)
 }
 
 // RedisClient returns the underlying Redis client (for health checks, shared state, etc.).
 func (r *RedisWorkerRegistry) RedisClient() *redis.Client {
 	return r.rdb
+}
+
+// GetSandboxStats returns the latest cached stats for a sandbox along with
+// its host worker, or ok=false if no recent heartbeat has carried that
+// sandbox. The autoscaler's per-tick fetchMemPct uses this — replaces the
+// previous gRPC fan-out which scaled O(total sandboxes) per tick.
+func (r *RedisWorkerRegistry) GetSandboxStats(sandboxID string) (SandboxStats, string, bool) {
+	r.sandboxStatsMu.RLock()
+	defer r.sandboxStatsMu.RUnlock()
+	stats, ok := r.sandboxStats[sandboxID]
+	if !ok {
+		return SandboxStats{}, "", false
+	}
+	return stats, r.sandboxOnWorker[sandboxID], true
 }
 
 // NewRedisWorkerRegistry connects to Redis and returns a new registry.
@@ -77,11 +113,13 @@ func NewRedisWorkerRegistry(redisURL string) (*RedisWorkerRegistry, error) {
 	}
 
 	return &RedisWorkerRegistry{
-		rdb:     rdb,
-		workers: make(map[string]*WorkerEntry),
-		conns:   make(map[string]*grpc.ClientConn),
-		clients: make(map[string]pb.SandboxWorkerClient),
-		stop:    make(chan struct{}),
+		rdb:             rdb,
+		workers:         make(map[string]*WorkerEntry),
+		conns:           make(map[string]*grpc.ClientConn),
+		clients:         make(map[string]pb.SandboxWorkerClient),
+		sandboxStats:    make(map[string]SandboxStats),
+		sandboxOnWorker: make(map[string]string),
+		stop:            make(chan struct{}),
 	}, nil
 }
 
@@ -239,6 +277,33 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		r.workers[entry.ID] = &entry
 		log.Printf("redis_registry: new worker registered: %s (region=%s, grpc=%s)", entry.ID, entry.Region, entry.GRPCAddr)
 	}
+
+	// Per-sandbox stats indexing. Update fresh entries; prune sandboxes that
+	// the worker reported last time but didn't this time (sandbox destroyed
+	// between heartbeats). Done under a separate mutex so the autoscaler's
+	// stats lookups don't contend with the routing path's worker map updates.
+	r.sandboxStatsMu.Lock()
+	if len(entry.Sandboxes) > 0 {
+		for sbID, stats := range entry.Sandboxes {
+			r.sandboxStats[sbID] = stats
+			r.sandboxOnWorker[sbID] = entry.ID
+		}
+	}
+	// Prune: any sandbox previously associated with this worker that's no
+	// longer in the heartbeat is gone (destroyed/migrated). We don't prune on
+	// `len(entry.Sandboxes) == 0` because that may legitimately mean "0
+	// sandboxes on this worker right now" (after dance drained it) — and we
+	// still want to remove our stale memories.
+	for sbID, wID := range r.sandboxOnWorker {
+		if wID != entry.ID {
+			continue
+		}
+		if _, still := entry.Sandboxes[sbID]; !still {
+			delete(r.sandboxStats, sbID)
+			delete(r.sandboxOnWorker, sbID)
+		}
+	}
+	r.sandboxStatsMu.Unlock()
 
 	// Ensure gRPC connection exists and is healthy.
 	// Re-dial if address changed, connection is failed/idle, or worker is newly registered.

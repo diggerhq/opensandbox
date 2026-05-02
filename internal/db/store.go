@@ -125,7 +125,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{32, "migrations/029_orgs_max_memory_gb.up.sql"},
 		{33, "migrations/030_billable_events.up.sql"},
 		{34, "migrations/031_orgs_billing_mode.up.sql"},
-		{35, "migrations/032_agent_subscriptions.up.sql"},
+		{35, "migrations/035_sandbox_autoscale.up.sql"},
+		{36, "migrations/036_sandbox_scaling_lock.up.sql"},
+		{37, "migrations/037_agent_subscriptions.up.sql"},
 	}
 
 	for _, m := range migrations {
