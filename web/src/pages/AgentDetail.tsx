@@ -1060,6 +1060,14 @@ function PluginsTab({
 }) {
   const hasGbrain = detail.packages.some((p) => p.name === 'gbrain')
   const canMutate = detail.core !== null
+  const gbrainStatus = detail.package_status?.gbrain
+  // package_status reflects the latest install attempt; agent.packages
+  // only contains successfully-installed packages. Surface install
+  // progress and failures from package_status here, scoped to this card,
+  // since the agent itself stays "ready" (the failure is plugin-local).
+  const gbrainInstalling = gbrainStatus?.status === 'installing'
+  const gbrainErrored = gbrainStatus?.status === 'error'
+  const gbrainErrorMessage = gbrainErrored ? (gbrainStatus?.message ?? 'Install failed') : undefined
 
   if (!canMutate) {
     return (
@@ -1067,6 +1075,24 @@ function PluginsTab({
         This agent has no managed core, so plugins aren't applicable.
       </p>
     )
+  }
+
+  // Card shape for gbrain depends on three independent signals:
+  //   - hasGbrain (agent.packages has it → the success terminal state)
+  //   - gbrainInstalling (in-flight)
+  //   - gbrainErrored (last attempt failed, packageStatus carries the reason)
+  let gbrainCardStatus: IntegrationStatus = hasGbrain ? 'connected' : 'available'
+  let gbrainStatusLabel: string | undefined = hasGbrain ? 'installed' : undefined
+  let gbrainActionLabel: string | undefined = hasGbrain ? 'Uninstall' : 'Install'
+  let gbrainActionTone: ActionTone = hasGbrain ? 'danger' : 'primary'
+  if (gbrainInstalling) {
+    gbrainStatusLabel = 'installing…'
+    gbrainActionLabel = undefined  // no action while in-flight
+  } else if (gbrainErrored) {
+    gbrainCardStatus = 'error'
+    gbrainStatusLabel = 'install failed'
+    gbrainActionLabel = 'Retry'
+    gbrainActionTone = 'primary'
   }
 
   return (
@@ -1077,16 +1103,30 @@ function PluginsTab({
         icon="🧠"
         name="gbrain"
         description="Long-term memory + vector recall."
-        status={hasGbrain ? 'connected' : 'available'}
-        statusLabel={hasGbrain ? 'installed' : undefined}
-        actionLabel={hasGbrain ? 'Uninstall' : 'Install'}
-        actionTone={hasGbrain ? 'danger' : 'primary'}
-        busy={acting === 'install gbrain' || acting === 'uninstall gbrain'}
+        status={gbrainCardStatus}
+        statusLabel={gbrainStatusLabel}
+        errorMessage={gbrainErrorMessage}
+        actionLabel={gbrainActionLabel}
+        actionTone={gbrainActionTone}
+        // The "Clear" button on errored state runs uninstall — that's the
+        // only path that wipes packageStatus.gbrain on the backend, since
+        // install never resets the previous error before queuing.
+        secondaryActionLabel={gbrainErrored ? 'Clear' : undefined}
+        secondaryActionTone="secondary"
+        onSecondaryAction={
+          gbrainErrored
+            ? () => onAction('clear gbrain error', () => uninstallGbrain(detail.id), 'gbrain install state cleared.')
+            : undefined
+        }
+        busy={acting === 'install gbrain' || acting === 'uninstall gbrain' || acting === 'clear gbrain error'}
         disabled={!!acting}
-        onAction={() =>
-          hasGbrain
-            ? onAction('uninstall gbrain', () => uninstallGbrain(detail.id), 'gbrain uninstalled.')
-            : onAction('install gbrain', () => installGbrain(detail.id), 'gbrain install queued.')
+        onAction={
+          gbrainActionLabel
+            ? () =>
+                hasGbrain
+                  ? onAction('uninstall gbrain', () => uninstallGbrain(detail.id), 'gbrain uninstalled.')
+                  : onAction('install gbrain', () => installGbrain(detail.id), 'gbrain install queued.')
+            : undefined
         }
       />
 
@@ -1134,7 +1174,7 @@ const COMING_SOON_CHANNELS: Array<{ icon: string; name: string; description: str
   { icon: '✉️', name: 'Email', description: 'IMAP / inbound webhook.' },
 ]
 
-type IntegrationStatus = 'connected' | 'available' | 'coming'
+type IntegrationStatus = 'connected' | 'available' | 'coming' | 'error'
 type IntegrationAccent = 'indigo' | 'sky' | 'muted'
 type ActionTone = 'primary' | 'secondary' | 'danger'
 
@@ -1146,8 +1186,12 @@ function IntegrationCard({
   description,
   status,
   statusLabel,
+  errorMessage,
   actionLabel,
   actionTone,
+  secondaryActionLabel,
+  secondaryActionTone,
+  onSecondaryAction,
   busy,
   disabled,
   onAction,
@@ -1159,8 +1203,12 @@ function IntegrationCard({
   description: string
   status: IntegrationStatus
   statusLabel?: string
+  errorMessage?: string
   actionLabel?: string
   actionTone?: ActionTone
+  secondaryActionLabel?: string
+  secondaryActionTone?: ActionTone
+  onSecondaryAction?: () => void
   busy?: boolean
   disabled?: boolean
   onAction?: () => void
@@ -1217,6 +1265,9 @@ function IntegrationCard({
       {status === 'connected' && (
         <span style={pill('emerald')}>{statusLabel ?? 'connected'}</span>
       )}
+      {status === 'error' && (
+        <span style={pill('rose')}>{statusLabel ?? 'error'}</span>
+      )}
       {status === 'coming' && (
         <span style={{
           alignSelf: 'flex-start',
@@ -1231,18 +1282,52 @@ function IntegrationCard({
         </span>
       )}
 
-      {actionLabel && status !== 'coming' && (
-        <button
-          onClick={onAction}
-          disabled={disabled || busy}
-          style={
-            actionTone === 'danger' ? dangerButton
-              : actionTone === 'secondary' ? secondaryButton
-                : primaryButton
-          }
-        >
-          {busy ? <BusyLabel text="Working…" /> : actionLabel}
-        </button>
+      {errorMessage && (
+        <div style={{
+          fontSize: 11,
+          color: 'rgba(252,165,165,0.95)',
+          background: 'rgba(239,68,68,0.08)',
+          border: '1px solid rgba(239,68,68,0.25)',
+          borderRadius: 6,
+          padding: '6px 8px',
+          lineHeight: 1.4,
+          fontFamily: 'var(--font-mono)',
+          whiteSpace: 'pre-wrap',
+          wordBreak: 'break-word',
+        }}>
+          {errorMessage}
+        </div>
+      )}
+
+      {(actionLabel || secondaryActionLabel) && status !== 'coming' && (
+        <div style={{ display: 'flex', gap: 8 }}>
+          {actionLabel && (
+            <button
+              onClick={onAction}
+              disabled={disabled || busy}
+              style={
+                actionTone === 'danger' ? dangerButton
+                  : actionTone === 'secondary' ? secondaryButton
+                    : primaryButton
+              }
+            >
+              {busy ? <BusyLabel text="Working…" /> : actionLabel}
+            </button>
+          )}
+          {secondaryActionLabel && (
+            <button
+              onClick={onSecondaryAction}
+              disabled={disabled || busy}
+              style={
+                secondaryActionTone === 'danger' ? dangerButton
+                  : secondaryActionTone === 'primary' ? primaryButton
+                    : secondaryButton
+              }
+            >
+              {secondaryActionLabel}
+            </button>
+          )}
+        </div>
       )}
     </div>
   )
