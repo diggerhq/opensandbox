@@ -231,10 +231,12 @@ export default function Agents() {
       {showCreate && (
         <CreateAgentModal
           onClose={() => setShowCreate(false)}
-          onCreated={(msg) => {
+          onCreated={(agentId) => {
             setShowCreate(false)
-            setBanner({ kind: 'success', text: msg })
-            void refresh()
+            // Drop the user straight onto the agent's detail page so they
+            // see the booting lobster animation while the sandbox provisions,
+            // rather than landing back on the list with a flat success banner.
+            navigate(`/agents/${encodeURIComponent(agentId)}`)
           }}
           onError={(msg) => setBanner({ kind: 'error', text: msg })}
         />
@@ -315,7 +317,7 @@ function CreateAgentModal({
   onError,
 }: {
   onClose: () => void
-  onCreated: (msg: string) => void
+  onCreated: (agentId: string) => void
   onError: (msg: string) => void
 }) {
   const [id, setId] = useState('')
@@ -336,7 +338,7 @@ function CreateAgentModal({
         display_name: displayName || id,
         core,
       })
-      onCreated(`Agent "${id}" created. Sandbox is provisioning.`)
+      onCreated(id)
     } catch (err) {
       onError(`Create failed: ${(err as Error).message}`)
     } finally {
