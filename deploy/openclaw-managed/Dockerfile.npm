@@ -28,7 +28,13 @@ RUN apt-get update \
 
 ARG OPENCLAW_VERSION
 RUN npm install -g openclaw@${OPENCLAW_VERSION} --omit=dev \
- && npm cache clean --force
+ && npm cache clean --force \
+ # Channel/provider extensions install their runtime deps (grammy, undici, ...)
+ # lazily on first activation. The runtime is the `node` user (uid 1000), but
+ # `npm install -g` ran as root, so /usr/lib/node_modules/openclaw is root-owned
+ # and lazy installs EACCES out. Hand the tree to node so first-activation
+ # installs land cleanly.
+ && chown -R node:node /usr/local/lib/node_modules/openclaw
 
 # Match the upstream image's user layout. node:22-slim already provides
 # a `node` user at uid 1000, but the home dir layout differs — we create
