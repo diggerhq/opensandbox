@@ -1,0 +1,53 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "lan",
+    "port": 18789,
+    "auth": { "mode": "token", "token": "${OPENCLAW_GATEWAY_TOKEN}" },
+    "controlUi": { "dangerouslyAllowHostHeaderOriginFallback": true },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true }
+      }
+    },
+    "reload": { "mode": "hybrid", "debounceMs": 300 }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "openrouter": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "api": "openai-completions",
+        "apiKey": "${OPENROUTER_API_KEY}",
+        "models": [
+          {
+            "id": "auto",
+            "name": "OpenRouter Auto",
+            "reasoning": false,
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": { "primary": "openrouter/anthropic/claude-opus-4.7" },
+      "models": { "openrouter/anthropic/claude-opus-4.7": {} }
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "openrouter":   { "enabled": true },
+      "acpx":         { "enabled": false },
+      "browser":      { "enabled": false },
+      "device-pair":  { "enabled": false },
+      "phone-control":{ "enabled": false },
+      "talk-voice":   { "enabled": false },
+      "voice-call":   { "enabled": false }
+    }
+  }
+}

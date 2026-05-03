@@ -34,6 +34,16 @@ RUN apt-get update \
 COPY launcher.sh /usr/local/bin/openclaw-launcher
 RUN chmod 0755 /usr/local/bin/openclaw-launcher
 
+# Default openclaw.json baked into the image. Sets the runtime knobs we need
+# for managed-agent operation (LAN bind so docker-publish reaches the
+# gateway, control-UI origin fallback because we're non-loopback, OpenAI-
+# compat chat-completions endpoint enabled, OpenRouter provider). The
+# sessions-api adapter MAY override this by writing its own
+# /home/node/.openclaw/openclaw.json on the host bind mount; per-agent
+# settings (model, channels, plugins) layer on top of this baseline.
+RUN mkdir -p /home/node/.openclaw && chown -R node:node /home/node/.openclaw
+COPY --chown=node:node openclaw.json /home/node/.openclaw/openclaw.json
+
 USER node
 WORKDIR /home/node
 
