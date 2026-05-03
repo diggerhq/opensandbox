@@ -177,15 +177,9 @@ export default function AgentDetailPage() {
             {sandboxId && <span>sandbox: <code style={codeInline}>{sandboxId}</code></span>}
           </div>
           {detail.current_operation && (
-            <div style={{ fontSize: 12, color: 'var(--accent-amber, #fbbf24)', marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span
-                className="loading-spinner"
-                style={{ width: 11, height: 11, borderWidth: 1.5, borderColor: 'rgba(251,191,36,0.25)', borderTopColor: 'var(--accent-amber, #fbbf24)' }}
-              />
-              <span>
-                {detail.current_operation.kind} · {detail.current_operation.phase}
-                {detail.current_operation.message ? ` — ${detail.current_operation.message}` : ''}
-              </span>
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8, fontFamily: 'var(--font-mono)' }}>
+              {detail.current_operation.kind} · {detail.current_operation.phase}
+              {detail.current_operation.message ? ` — ${detail.current_operation.message}` : ''}
             </div>
           )}
           {detail.last_error && detail.status !== 'ready' && (
@@ -250,6 +244,10 @@ export default function AgentDetailPage() {
           </button>
         </div>
       </div>
+
+      {detail.current_operation && detail.status !== 'ready' && (
+        <BootingClawPanel operation={detail.current_operation} />
+      )}
 
       {banner && (
         <div
@@ -1565,4 +1563,245 @@ const input1: React.CSSProperties = {
 const codeInline: React.CSSProperties = {
   fontFamily: 'var(--font-mono)', background: 'rgba(255,255,255,0.04)',
   padding: '1px 5px', borderRadius: 3, fontSize: 10.5,
+}
+
+// ── Booting claw panel ─────────────────────────────────────────────────
+//
+// Shown while a managed agent has an in-flight current_operation. Existing
+// raw-status copy is intentionally engineery ("create_instance · pull_image
+// — pulling opencomputerdeveuacr.azurecr.io/openclaw-managed:2026.5.2-npm")
+// — perfect for debugging, miserable to stare at for ~30s on cold start.
+// This panel translates that into something with a heartbeat: the OpenClaw
+// lobster mark animated, a friendly per-phase headline, and a rotating
+// flavour-text subtitle so the page feels alive rather than stuck.
+//
+// Psychology: research on progress-bar perception (Harrison et al, CHI '07)
+// suggests that *any* movement reduces perceived wait time, and rotating
+// micro-copy creates the illusion of forward progress even when the
+// underlying step is genuinely slow (a 4 GB docker pull doesn't move per-
+// frame). We just need to look busy convincingly.
+const PHASE_LABELS: Record<string, string> = {
+  queued: 'Queued',
+  provision_sandbox: 'Carving out a fresh tide pool',
+  pull_image: 'Reeling in the lobster',
+  start_entrypoint: 'Lighting the burner',
+  wait_core_ready: 'Warming up the gateway',
+  materialize_declared_state: 'Dressing the claw',
+  install_gbrain: 'Wiring up the long-term memory',
+  uninstall_gbrain: 'Pulling out the memory module',
+  connect_telegram: 'Threading the Telegram leash',
+  disconnect_telegram: 'Unhooking Telegram',
+  configure_channel: 'Configuring the channel',
+}
+
+// Rotating subtitles by phase. Random selection on each tick keeps the
+// page feeling lively without claiming progress that hasn't happened.
+const PHASE_FLAVOUR: Record<string, string[]> = {
+  queued: [
+    'In line behind some other lobsters…',
+    'Politely waiting our turn',
+    'The maître d\' is checking the list',
+  ],
+  provision_sandbox: [
+    'Booting a microVM just for you',
+    'Stretching the sandbox awake',
+    'Wiring up the pretend internet',
+    'Tuning the network qdisc',
+  ],
+  pull_image: [
+    'Tracking down a fresh claw image',
+    'Negotiating with the registry',
+    'Thawing 953 MB of OpenClaw',
+    'Decompressing layers, one at a time',
+    'The lobster is doing leg day',
+    'Pinching some bytes from the cache',
+    'Still pulling — bigger than it looks',
+  ],
+  wait_core_ready: [
+    'OpenClaw is checking its config',
+    'Booting the OpenAI-compat gateway',
+    'Loading 3 plugins (and not 39)',
+    'Waiting on /health to turn green',
+    'The lobster cleared its throat',
+  ],
+  start_entrypoint: [
+    'Launching the gateway process',
+    'Sourcing the per-agent env',
+    'Telling supervisord to do its thing',
+  ],
+  materialize_declared_state: [
+    'Reconciling channels and packages',
+    'Snapping things into place',
+    'Almost there, just dressing it up',
+  ],
+  install_gbrain: [
+    'Spinning up a Postgres for memories',
+    'Teaching the agent how to remember',
+    'Plumbing in pgvector',
+  ],
+  connect_telegram: [
+    'Registering the Telegram webhook',
+    'Bot meets API, API meets bot',
+    'Confirming the bot can phone home',
+  ],
+  default: [
+    'The lobster is busy. Please clap softly.',
+    'Crustacean cogs turning',
+    'Working on it',
+    'Just a moment, the claws are tangled',
+  ],
+}
+
+function friendlyPhase(phase: string | null | undefined): string {
+  if (!phase) return 'Working on it'
+  return PHASE_LABELS[phase] ?? phase.replace(/_/g, ' ')
+}
+
+function flavourFor(phase: string | null | undefined): string[] {
+  return (phase && PHASE_FLAVOUR[phase]) || PHASE_FLAVOUR.default
+}
+
+function BootingClawPanel({ operation }: { operation: AgentOperation }) {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 2600)
+    return () => clearInterval(id)
+  }, [])
+  const lines = flavourFor(operation.phase)
+  const flavour = lines[tick % lines.length]
+
+  // Approximate elapsed time since the operation was created — gives the
+  // user a sense of "how much longer". AgentOperation only carries
+  // created_at; if it's ever omitted we fall through to "now" so the UI
+  // doesn't crash, just shows 0s.
+  const startedMs = operation.created_at ? new Date(operation.created_at).getTime() : Date.now()
+  const elapsedSec = Math.max(0, Math.round((Date.now() - startedMs) / 1000))
+
+  return (
+    <div
+      style={{
+        display: 'flex', alignItems: 'center', gap: 18,
+        padding: '20px 24px',
+        borderRadius: 14,
+        border: '1px solid rgba(255,77,77,0.22)',
+        background:
+          'radial-gradient(ellipse at 0% 50%, rgba(255,77,77,0.10), transparent 55%), rgba(255,77,77,0.025)',
+        marginBottom: 14,
+      }}
+    >
+      <ScuttlingClaw />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 17, fontWeight: 700, fontFamily: 'var(--font-display)', color: 'var(--text-primary)' }}>
+          {friendlyPhase(operation.phase)}
+        </div>
+        <div
+          key={tick}
+          style={{
+            fontSize: 13, color: 'var(--text-secondary)', marginTop: 5,
+            animation: 'fadeUp 380ms ease-out',
+          }}
+        >
+          {flavour}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8, fontFamily: 'var(--font-mono)' }}>
+          {operation.kind} · {operation.phase} · {elapsedSec}s elapsed
+        </div>
+      </div>
+      <ProgressDots />
+
+      {/* Animations defined inline so this component is self-contained;
+          if we end up reusing them, lift to web/src/index.css. */}
+      <style>{`
+        @keyframes fadeUp {
+          from { opacity: 0; transform: translateY(4px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes claw-wave-left {
+          0%, 100% { transform: rotate(-4deg) translateX(0); }
+          50%      { transform: rotate(8deg) translateX(-1px); }
+        }
+        @keyframes claw-wave-right {
+          0%, 100% { transform: rotate(4deg) translateX(0); }
+          50%      { transform: rotate(-8deg) translateX(1px); }
+        }
+        @keyframes lobster-bob {
+          0%, 100% { transform: translateY(0); }
+          50%      { transform: translateY(-3px); }
+        }
+        @keyframes eye-blink {
+          0%, 92%, 100% { transform: scaleY(1); }
+          95%           { transform: scaleY(0.1); }
+        }
+        @keyframes dot-pulse {
+          0%, 80%, 100% { opacity: 0.25; transform: scale(0.7); }
+          40%           { opacity: 1;    transform: scale(1); }
+        }
+      `}</style>
+    </div>
+  )
+}
+
+// Animated lobster — derived from openclaw.ai/favicon.svg, with the two
+// claws split into separate <g> tags so they can wave independently and the
+// body bobs gently.
+function ScuttlingClaw() {
+  return (
+    <svg
+      width="68"
+      height="68"
+      viewBox="0 0 120 120"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      style={{
+        flexShrink: 0,
+        filter: 'drop-shadow(0 0 18px rgba(255,77,77,0.45))',
+        animation: 'lobster-bob 2.4s ease-in-out infinite',
+      }}
+    >
+      <defs>
+        <linearGradient id="boot-lobster-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#ff4d4d" />
+          <stop offset="100%" stopColor="#991b1b" />
+        </linearGradient>
+      </defs>
+      {/* body */}
+      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#boot-lobster-gradient)" />
+      {/* left claw — waves */}
+      <g style={{ transformOrigin: '20px 55px', animation: 'claw-wave-left 1.4s ease-in-out infinite' }}>
+        <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#boot-lobster-gradient)" />
+      </g>
+      {/* right claw — waves opposite */}
+      <g style={{ transformOrigin: '100px 55px', animation: 'claw-wave-right 1.4s ease-in-out infinite' }}>
+        <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#boot-lobster-gradient)" />
+      </g>
+      {/* antennae */}
+      <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      {/* eyes — blink */}
+      <g style={{ transformOrigin: 'center 35px', animation: 'eye-blink 4.6s ease-in-out infinite' }}>
+        <circle cx="45" cy="35" r="6" fill="#050810" />
+        <circle cx="75" cy="35" r="6" fill="#050810" />
+        <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
+        <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
+      </g>
+    </svg>
+  )
+}
+
+function ProgressDots() {
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+      {[0, 1, 2].map((i) => (
+        <span
+          key={i}
+          style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: 'rgba(255,77,77,0.85)',
+            animation: `dot-pulse 1.4s ease-in-out ${i * 0.18}s infinite`,
+          }}
+        />
+      ))}
+    </div>
+  )
 }
