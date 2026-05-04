@@ -152,7 +152,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		Envs:               req.Envs,
 		MemoryMB:           int(req.MemoryMb),
 		CpuCount:           int(req.CpuCount),
-		NetworkEnabled:     req.NetworkEnabled,
+		NetworkEnabled:     &req.NetworkEnabled,
 		ImageRef:           req.ImageRef,
 		Port:               int(req.Port),
 		SandboxID:          req.SandboxId,    // use server-assigned ID if provided

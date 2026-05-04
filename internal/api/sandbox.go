@@ -26,6 +26,9 @@ func (s *Server) createSandbox(c echo.Context) error {
 			"error": "invalid request body: " + err.Error(),
 		})
 	}
+	// Default networkEnabled=true when caller omits it, so the value persisted
+	// to sandbox_sessions.config_json is explicit and forks inherit it correctly.
+	cfg.EnsureNetworkEnabledDefault()
 
 	// Validate CPU/memory against allowed tiers.
 	// Allowed tiers (memoryMB → vCPU): 1024→1, 4096→1, 8192→2, 16384→4, 32768→8, 65536→16.
@@ -485,7 +488,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
-		NetworkEnabled:       cfg.NetworkEnabled,
+		NetworkEnabled:       cfg.IsNetworkEnabled(),
 		Port:                 int32(cfg.Port),
 		TemplateRootfsKey:    templateRootfsKey,
 		TemplateWorkspaceKey: templateWorkspaceKey,
@@ -2254,6 +2257,10 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	// Parse the original sandbox config to reuse settings
 	var originalCfg types.SandboxConfig
 	_ = json.Unmarshal(cp.SandboxConfig, &originalCfg)
+	// Older checkpoints predate the networkEnabled default-to-true normalization
+	// and persisted no value (or false from the old non-pointer bool). Forks
+	// should still come up with networking on.
+	originalCfg.EnsureNetworkEnabledDefault()
 
 	// Secret store resolution — supports layering:
 	// Resolve stores in order: BaseSecretStore → SecretStore → user's store.
@@ -2396,7 +2403,7 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 			Envs:                 originalCfg.Envs,
 			MemoryMb:             int32(originalCfg.MemoryMB),
 			CpuCount:             int32(originalCfg.CpuCount),
-			NetworkEnabled:       originalCfg.NetworkEnabled,
+			NetworkEnabled:       originalCfg.IsNetworkEnabled(),
 			Port:                 int32(originalCfg.Port),
 			TemplateRootfsKey:    *cp.RootfsS3Key,
 			TemplateWorkspaceKey: *cp.WorkspaceS3Key,
