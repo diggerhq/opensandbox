@@ -382,7 +382,6 @@ export default function SessionDetail() {
           <DetailRow label="Timeout" value={session.config?.timeout ? `${session.config.timeout}s` : '300s'} />
           <DetailRow label="CPUs" value={String(session.config?.cpuCount ?? 1)} />
           <DetailRow label="Memory" value={`${session.config?.memoryMB ?? 512} MB`} />
-          <DetailRow label="Network" value={session.config?.networkEnabled ? 'Enabled' : 'Disabled'} />
           <DetailRow label="Started" value={new Date(session.startedAt).toLocaleString()} />
           {session.stoppedAt && (
             <DetailRow label="Stopped" value={new Date(session.stoppedAt).toLocaleString()} />
