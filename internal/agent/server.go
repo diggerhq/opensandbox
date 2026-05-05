@@ -56,6 +56,12 @@ type Server struct {
 	ptySessions map[string]*ptySession
 	nextPTYPort uint32
 
+	// Sandbox session log shipping configuration. Set once via the
+	// ConfigureLogship RPC, called by the worker right after VM boot.
+	// If never set, the forwarder stays dormant.
+	logshipMu  sync.RWMutex
+	logshipCfg LogshipConfig
+
 	// gRPC server reference for hibernate GracefulStop
 	mu         sync.Mutex
 	grpcServer *grpc.Server

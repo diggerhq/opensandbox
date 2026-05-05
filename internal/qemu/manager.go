@@ -3169,6 +3169,22 @@ func (m *Manager) GetAgent(sandboxID string) (*AgentClient, error) {
 	return vm.agent, nil
 }
 
+// ConfigureLogship hands the in-VM agent its sandbox session log-shipping
+// configuration. Called by the worker right after a sandbox is created
+// (or warm-forked from a checkpoint) so the agent's forwarder knows
+// where to ship and how to tag events. Empty ingestToken disables
+// shipping for this sandbox (kill-switch).
+func (m *Manager) ConfigureLogship(ctx context.Context, sandboxID, ingestToken, dataset, orgID string) error {
+	agent, err := m.GetAgent(sandboxID)
+	if err != nil {
+		return err
+	}
+	if agent == nil {
+		return fmt.Errorf("agent client not ready for sandbox %s", sandboxID)
+	}
+	return agent.ConfigureLogship(ctx, ingestToken, dataset, sandboxID, orgID)
+}
+
 // GetWorkspacePath returns the host path to a sandbox's workspace qcow2.
 // Used by the autosave loop to gate SyncFS on mtime — no point syncing if
 // the workspace hasn't been touched since the last successful sync.

@@ -57,6 +57,15 @@ type GoldenRebuilder interface {
 	GoldenVersion() string
 }
 
+// LogshipConfigurator is implemented by VM managers that can deliver
+// log-shipping configuration to the in-VM agent over the existing
+// worker→agent gRPC channel. Managers without an agent channel just
+// don't implement this — the worker silently skips configuration for
+// those sandboxes.
+type LogshipConfigurator interface {
+	ConfigureLogship(ctx context.Context, sandboxID, ingestToken, dataset, orgID string) error
+}
+
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
@@ -69,6 +78,20 @@ type GRPCServer struct {
 	checkpointStore    *storage.CheckpointStore
 	store              *db.Store // nil if no DB configured
 	server             *grpc.Server
+
+	// Axiom log-shipping config. Empty token = log shipping disabled
+	// (kill-switch). Set via SetAxiomConfig at startup.
+	axiomIngestToken string
+	axiomDataset     string
+}
+
+// SetAxiomConfig wires Axiom log-shipping credentials. The worker
+// passes them down to each sandbox's agent on create via the
+// LogshipConfigurator interface (implemented by the QEMU manager).
+// Empty token disables shipping for every sandbox this worker boots.
+func (s *GRPCServer) SetAxiomConfig(ingestToken, dataset string) {
+	s.axiomIngestToken = ingestToken
+	s.axiomDataset = dataset
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
@@ -127,6 +150,28 @@ func (s *GRPCServer) Stop() {
 	s.server.GracefulStop()
 }
 
+// configureLogshipForSandbox delivers Axiom log-shipping configuration
+// to the in-VM agent. Best-effort: a failure here does not fail the
+// sandbox-create — log shipping just stays dormant for this sandbox.
+// No-op if the worker has no Axiom token set or the manager doesn't
+// implement LogshipConfigurator.
+func (s *GRPCServer) configureLogshipForSandbox(ctx context.Context, sandboxID string) {
+	if s.axiomIngestToken == "" {
+		return
+	}
+	cfger, ok := s.manager.(LogshipConfigurator)
+	if !ok {
+		return
+	}
+	var orgID string
+	if s.store != nil {
+		orgID, _ = s.store.GetSandboxOrgID(ctx, sandboxID)
+	}
+	if err := cfger.ConfigureLogship(ctx, sandboxID, s.axiomIngestToken, s.axiomDataset, orgID); err != nil {
+		log.Printf("grpc: ConfigureLogship for %s failed: %v (logs disabled for this sandbox)", sandboxID, err)
+	}
+}
+
 // parseSecretAllowedHosts converts the proto map (env var → comma-separated hosts)
 // to the internal map (env var → host slice). Returns nil if input is empty.
 func parseSecretAllowedHosts(m map[string]string) map[string][]string {
@@ -176,6 +221,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
+			s.configureLogshipForSandbox(ctx, sb.ID)
 			return &pb.CreateSandboxResponse{
 				SandboxId: sb.ID,
 				Status:    string(sb.Status),
@@ -198,6 +244,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 						}
 						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 					}
+					s.configureLogshipForSandbox(ctx, sb.ID)
 					return &pb.CreateSandboxResponse{
 						SandboxId: sb.ID,
 						Status:    string(sb.Status),
@@ -268,6 +315,8 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 			}
 		}
 	}
+
+	s.configureLogshipForSandbox(ctx, sb.ID)
 
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,

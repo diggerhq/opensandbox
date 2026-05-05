@@ -122,6 +122,13 @@ type Config struct {
 	// Segment analytics — if set, GB-minute usage events are shipped per org.
 	SegmentWriteKey string
 
+	// Axiom — log shipping for sandbox session logs.
+	// AxiomIngestToken empty = log shipping disabled (kill-switch).
+	// Only the worker needs these; the agent receives them via the
+	// ConfigureLogship RPC at sandbox boot.
+	AxiomIngestToken string
+	AxiomDataset     string
+
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
 	// Env vars take precedence over secret values (for local overrides).
@@ -226,6 +233,9 @@ func Load() (*Config, error) {
 		StripeCancelURL:     envOrDefault("STRIPE_CANCEL_URL", "http://localhost:3000/billing?cancelled=true"),
 
 		SegmentWriteKey: os.Getenv("SEGMENT_WRITE_KEY"),
+
+		AxiomIngestToken: os.Getenv("AXIOM_INGEST_TOKEN"),
+		AxiomDataset:     envOrDefault("AXIOM_DATASET", "oc-sandbox-logs"),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 
