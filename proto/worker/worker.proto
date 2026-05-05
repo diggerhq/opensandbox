@@ -375,6 +375,27 @@ message PreCopyDrivesResponse {
   // Used for actual-memory-based scheduling instead of committed/configured
   // memory (which over-reserves on idle sandboxes).
   int32 actual_memory_mb = 6;
+  // Secrets-proxy session state for the migrating sandbox. Live migration
+  // moves the QEMU process (which carries the in-VM env vars containing
+  // sealed token IDs) but the proxy's plaintext-substitution map is
+  // per-worker in-process state. Without these the destination worker has
+  // no way to substitute the literal `osb_sealed_xxx` strings on outbound
+  // HTTPS, so the guest's first secret-using call after migration fails
+  // auth. Mirrors the SealedTokens/EgressAllowlist/TokenHosts fields the
+  // hibernate path persists into snapshot-meta.json.
+  map<string, string> sealed_tokens = 7;       // sealed_id -> plaintext secret value
+  repeated string egress_allowlist = 8;        // host allowlist for the secrets proxy
+  map<string, HostList> token_hosts = 9;       // sealed_id -> per-token allowed hosts
+  // env-var-name -> sealed_id index. Required so refresh-by-name
+  // (UpdateSandboxSecret) keeps working on the destination worker after
+  // migration. Without it, post-migration secret-store updates would silently
+  // miss because the destination's session has no name → token mapping.
+  map<string, string> sealed_names = 10;
+}
+
+// HostList is a wrapper because proto3 maps cannot have a repeated value type.
+message HostList {
+  repeated string hosts = 1;
 }
 
 message PrepareMigrationIncomingRequest {
@@ -390,6 +411,14 @@ message PrepareMigrationIncomingRequest {
   bool overlay_mode = 10;       // if true, rootfs is thin overlay — rebase to local golden on target
   int32 target_memory_mb = 11;  // final memory after scale — worker checks capacity and reserves atomically
   string source_golden_version = 12;  // source's golden version — target rebases overlay if different from its own
+  // Secrets-proxy session state captured from the source by PreCopyDrives.
+  // Target re-registers these on its in-process secrets proxy BEFORE the
+  // VM resumes (Cont) so the first outbound HTTPS request after migration
+  // has its `osb_sealed_xxx` env vars correctly substituted.
+  map<string, string> sealed_tokens = 13;
+  repeated string egress_allowlist = 14;
+  map<string, HostList> token_hosts = 15;
+  map<string, string> sealed_names = 16;
 }
 
 message PrepareMigrationIncomingResponse {

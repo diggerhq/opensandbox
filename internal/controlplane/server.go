@@ -52,7 +52,7 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 
 	// Auth middleware
 	api := e.Group("")
-	api.Use(auth.PGAPIKeyMiddleware(store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(store, apiKey, jwtIssuer))
 
 	// Sandbox lifecycle (control plane only handles create/destroy/discover)
 	api.POST("/sandboxes", s.createSandbox)

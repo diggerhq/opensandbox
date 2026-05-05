@@ -37,7 +37,14 @@ func (s *Server) Shutdown(ctx context.Context, req *pb.ShutdownRequest) (*pb.Shu
 func (s *Server) Stats(ctx context.Context, req *pb.StatsRequest) (*pb.StatsResponse, error) {
 	resp := &pb.StatsResponse{}
 
-	// Memory from /proc/meminfo
+	// Memory from /proc/meminfo. Note we use MemAvailable, not MemFree —
+	// MemAvailable is the kernel's own working-set estimate that subtracts
+	// reclaimable page cache + slab. So MemTotal-MemAvailable already
+	// excludes file-cache pressure (e.g. a `dd` workload won't make this
+	// climb to 100% even though page cache fills RAM). The autoscaler reads
+	// this value via mem_pct; treating it as a working-set proxy is correct.
+	// It is also an upper bound on resident anon memory, so the worker's
+	// scale-down OOM floor uses MemUsage * 1.05 as a safe lower bound.
 	memTotal, memAvail := readMemInfo()
 	resp.MemLimit = memTotal
 	resp.MemUsage = memTotal - memAvail

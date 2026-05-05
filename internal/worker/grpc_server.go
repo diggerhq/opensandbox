@@ -33,8 +33,8 @@ import (
 // LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
 type LiveMigrator interface {
 	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
-	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error)
-	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, err error)
+	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string, secrets sandbox.MigrationSecrets) (incomingAddr string, hostPort int, err error)
+	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, secrets sandbox.MigrationSecrets, err error)
 	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
 	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
 }
@@ -152,7 +152,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		Envs:               req.Envs,
 		MemoryMB:           int(req.MemoryMb),
 		CpuCount:           int(req.CpuCount),
-		NetworkEnabled:     req.NetworkEnabled,
+		NetworkEnabled:     &req.NetworkEnabled,
 		ImageRef:           req.ImageRef,
 		Port:               int(req.Port),
 		SandboxID:          req.SandboxId,    // use server-assigned ID if provided
@@ -176,6 +176,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
+			s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 			return &pb.CreateSandboxResponse{
 				SandboxId: sb.ID,
 				Status:    string(sb.Status),
@@ -198,6 +199,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 						}
 						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 					}
+					s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 					return &pb.CreateSandboxResponse{
 						SandboxId: sb.ID,
 						Status:    string(sb.Status),
@@ -247,32 +249,47 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		}
 	}
 
-	// Record initial scale event for billing
-	if s.store != nil {
-		memMB := cfg.MemoryMB
-		if memMB <= 0 {
-			memMB = 1024 // default
-		}
-		cpuPct := (memMB * 100) / 1024
-		if cpuPct < 100 {
-			cpuPct = 100
-		}
-		diskMB := cfg.DiskMB
-		if diskMB <= 0 {
-			diskMB = 20480
-		}
-		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
-		if orgID != "" {
-			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct, diskMB); err != nil {
-				log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
-			}
-		}
-	}
+	s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
+}
+
+// recordInitialScaleEvent writes a sandbox_scale_events row marking the start
+// of billable usage for a freshly-created sandbox. Called from every successful
+// CreateSandbox return path — fork from checkpoint (local + S3-fallback) and
+// from-scratch — so billing accounting works for forks too. Without this on
+// the fork paths, sandbox_scale_events stays empty for the org, the
+// usage-reporter excludes it from ListFreeOrgIDsWithOpenUsage / ListBillableOrgIDs,
+// and no credits/usage are deducted or reported to Stripe.
+//
+// Best-effort: never returns an error. Defaults mirror the worker's own
+// fallbacks for unset CPU/memory/disk so downstream pricing math is consistent.
+func (s *GRPCServer) recordInitialScaleEvent(ctx context.Context, sandboxID string, cfg types.SandboxConfig) {
+	if s.store == nil {
+		return
+	}
+	memMB := cfg.MemoryMB
+	if memMB <= 0 {
+		memMB = 1024
+	}
+	cpuPct := (memMB * 100) / 1024
+	if cpuPct < 100 {
+		cpuPct = 100
+	}
+	diskMB := cfg.DiskMB
+	if diskMB <= 0 {
+		diskMB = 20480
+	}
+	orgID, _ := s.store.GetSandboxOrgID(ctx, sandboxID)
+	if orgID == "" {
+		return
+	}
+	if err := s.store.RecordScaleEvent(ctx, sandboxID, orgID, memMB, cpuPct, diskMB); err != nil {
+		log.Printf("grpc: failed to record initial scale event for %s: %v", sandboxID, err)
+	}
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxRequest) (*pb.DestroySandboxResponse, error) {
@@ -1000,18 +1017,32 @@ func (s *GRPCServer) PreCopyDrives(ctx context.Context, req *pb.PreCopyDrivesReq
 	if s.migrator == nil {
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
-	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
+	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, secrets, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("pre-copy drives: %w", err)
 	}
-	return &pb.PreCopyDrivesResponse{
+	resp := &pb.PreCopyDrivesResponse{
 		RootfsKey:      rootfsKey,
 		WorkspaceKey:   workspaceKey,
 		GoldenVersion:  goldenVersion,
 		BaseMemoryMb:   int32(baseMem),
 		BaseCpuCount:   int32(baseCPU),
 		ActualMemoryMb: int32(actualMem),
-	}, nil
+	}
+	// Marshal the secrets-proxy session into the proto. Skipped silently
+	// when the sandbox has no secret store registered (empty maps).
+	if len(secrets.SealedTokens) > 0 {
+		resp.SealedTokens = secrets.SealedTokens
+		resp.EgressAllowlist = secrets.EgressAllowlist
+		resp.SealedNames = secrets.SealedNames
+		if len(secrets.TokenHosts) > 0 {
+			resp.TokenHosts = make(map[string]*pb.HostList, len(secrets.TokenHosts))
+			for tok, hosts := range secrets.TokenHosts {
+				resp.TokenHosts[tok] = &pb.HostList{Hosts: hosts}
+			}
+		}
+	}
+	return resp, nil
 }
 
 func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.PrepareMigrationIncomingRequest) (*pb.PrepareMigrationIncomingResponse, error) {
@@ -1039,6 +1070,24 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 		}
 	}
 
+	// Unmarshal the secrets-proxy session from the request, if any. The
+	// orchestrator will have copied this from PreCopyDrives. Empty when
+	// the sandbox has no secret store.
+	var secrets sandbox.MigrationSecrets
+	if len(req.SealedTokens) > 0 {
+		secrets.SealedTokens = req.SealedTokens
+		secrets.EgressAllowlist = req.EgressAllowlist
+		secrets.SealedNames = req.SealedNames
+		if len(req.TokenHosts) > 0 {
+			secrets.TokenHosts = make(map[string][]string, len(req.TokenHosts))
+			for tok, hl := range req.TokenHosts {
+				if hl != nil {
+					secrets.TokenHosts[tok] = hl.Hosts
+				}
+			}
+		}
+	}
+
 	var (
 		addr     string
 		hostPort int
@@ -1047,7 +1096,7 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 	if req.RootfsS3Key != "" && req.WorkspaceS3Key != "" {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigrationWithS3(ctx,
 			req.SandboxId, req.RootfsS3Key, req.WorkspaceS3Key,
-			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion)
+			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion, secrets)
 	} else {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigration(ctx,
 			req.SandboxId, req.RootfsPath, req.WorkspacePath,

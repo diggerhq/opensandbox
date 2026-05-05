@@ -170,6 +170,29 @@ func (c *Client) Post(ctx context.Context, path string, body, result interface{}
 	return nil
 }
 
+// PostStream performs a POST request and returns the raw response so the
+// caller can stream chunks (e.g. SSE / chat-completions). Caller is
+// responsible for closing resp.Body.
+func (c *Client) PostStream(ctx context.Context, path string, body interface{}) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyReader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	return c.do(req)
+}
+
 // Put performs a PUT request with a raw body.
 func (c *Client) Put(ctx context.Context, path string, body io.Reader) error {
 	req, err := http.NewRequestWithContext(ctx, "PUT", c.baseURL+path, body)

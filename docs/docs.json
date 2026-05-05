@@ -122,6 +122,7 @@
         "pages": [
           "reference/typescript-sdk/overview",
           "reference/typescript-sdk/sandbox",
+          "reference/typescript-sdk/scaling",
           "reference/typescript-sdk/exec",
           "reference/typescript-sdk/filesystem",
           "reference/typescript-sdk/pty",
@@ -135,6 +136,7 @@
         "pages": [
           "reference/python-sdk/overview",
           "reference/python-sdk/sandbox",
+          "reference/python-sdk/scaling",
           "reference/python-sdk/exec",
           "reference/python-sdk/filesystem",
           "reference/python-sdk/pty",
@@ -149,6 +151,7 @@
           "reference/cli/overview",
           "reference/cli/agent",
           "reference/cli/sandbox",
+          "reference/cli/scaling",
           "reference/cli/exec",
           "reference/cli/shell",
           "reference/cli/checkpoint",

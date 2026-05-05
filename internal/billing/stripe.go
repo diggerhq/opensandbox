@@ -43,6 +43,11 @@ type StripeClient struct {
 	OverageMeterEventName  string // "sandbox_compute_sandbox_overage"
 	ReservedPriceID        string // flat reserved Price for `reserved_usage` events
 	ReservedMeterEventName string // "sandbox_compute_sandbox_reserved"
+
+	// Per-agent paywalled-feature prices. Configured from env and
+	// referenced by name from the dashboard subscribe handlers. Empty
+	// string means the feature is not gated on this deployment (dev mode).
+	TelegramAgentPriceID string // recurring $20/mo price for the per-agent Telegram feature
 }
 
 // NewStripeClient creates a new Stripe client.
@@ -476,6 +481,13 @@ func (s *StripeClient) ReportDiskOverageUsage(customerID string, gbSeconds int64
 	return nil
 }
 
+// SuccessURL returns the configured Stripe Checkout success URL. Public
+// because per-feature subscribe handlers reuse the same redirect targets.
+func (s *StripeClient) SuccessURL() string { return s.successURL }
+
+// CancelURL returns the configured Stripe Checkout cancel URL.
+func (s *StripeClient) CancelURL() string { return s.cancelURL }
+
 // GetCustomerBalance returns the customer's balance in cents (negative = credit).
 func (s *StripeClient) GetCustomerBalance(customerID string) (int64, error) {
 	c, err := customer.Get(customerID, nil)
@@ -483,6 +495,138 @@ func (s *StripeClient) GetCustomerBalance(customerID string) (int64, error) {
 		return 0, err
 	}
 	return c.Balance, nil
+}
+
+// GetCustomerDefaultPaymentMethod returns the saved default payment
+// method ID for a customer, or "" if none is on file. Used by the
+// per-agent subscribe flow: with a card on file we can call subscriptions.New
+// directly; without one we have to bounce through Stripe Checkout.
+func (s *StripeClient) GetCustomerDefaultPaymentMethod(customerID string) (string, error) {
+	c, err := customer.Get(customerID, nil)
+	if err != nil {
+		return "", err
+	}
+	if c.InvoiceSettings != nil && c.InvoiceSettings.DefaultPaymentMethod != nil {
+		return c.InvoiceSettings.DefaultPaymentMethod.ID, nil
+	}
+	return "", nil
+}
+
+// CreateAgentFeatureSubscription creates a per-agent paywalled-feature
+// subscription using a saved payment method. Caller must have verified
+// a default payment method exists (via GetCustomerDefaultPaymentMethod).
+//
+// metadata is stamped onto the Stripe Subscription so the webhook
+// handler can route updates back to the right (org, agent, feature)
+// triple without a DB lookup. Caller passes (org_id, agent_id, feature, type).
+//
+// Returns the Stripe subscription. Status will typically be "active"
+// (paid immediately), or "incomplete" if the saved card was declined —
+// callers should check.
+func (s *StripeClient) CreateAgentFeatureSubscription(
+	customerID, priceID string,
+	metadata map[string]string,
+) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{
+		Customer: stripe.String(customerID),
+		Items: []*stripe.SubscriptionItemsParams{{
+			Price: stripe.String(priceID),
+		}},
+		// Charge the saved card immediately. Subscription becomes
+		// active on first invoice payment success.
+		PaymentBehavior: stripe.String("error_if_incomplete"),
+	}
+	for k, v := range metadata {
+		params.AddMetadata(k, v)
+	}
+	sub, err := subscription.New(params)
+	if err != nil {
+		return nil, fmt.Errorf("create agent-feature subscription: %w", err)
+	}
+	return sub, nil
+}
+
+// CreateAgentFeatureCheckoutSession redirects the customer to Stripe
+// Checkout to add a payment method AND start the subscription
+// atomically. Used when the customer has no card on file.
+//
+// metadata is propagated to both the Checkout Session and (via
+// SubscriptionData) the resulting Subscription so the webhook can wire
+// it back to the right agent on completion.
+func (s *StripeClient) CreateAgentFeatureCheckoutSession(
+	customerID, priceID string,
+	successURL, cancelURL string,
+	metadata map[string]string,
+) (string, error) {
+	params := &stripe.CheckoutSessionParams{
+		Customer:   stripe.String(customerID),
+		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{{
+			Price:    stripe.String(priceID),
+			Quantity: stripe.Int64(1),
+		}},
+		SubscriptionData: &stripe.CheckoutSessionSubscriptionDataParams{},
+	}
+	for k, v := range metadata {
+		params.AddMetadata(k, v)
+		params.SubscriptionData.AddMetadata(k, v)
+	}
+	sess, err := checkoutsession.New(params)
+	if err != nil {
+		return "", fmt.Errorf("create agent-feature checkout: %w", err)
+	}
+	return sess.URL, nil
+}
+
+// FindAgentFeatureSubscription looks up an active subscription on a
+// customer for a given (agent_id, feature) combo, identified by the
+// metadata stamps we set at create time. Used by the reconciliation
+// path: if our local DB lost a row (webhook never arrived because
+// STRIPE_WEBHOOK_SECRET wasn't set, network blip, etc.), Stripe is
+// the source of truth and we re-import from there.
+func (s *StripeClient) FindAgentFeatureSubscription(customerID, agentID, feature string) (*stripe.Subscription, error) {
+	iter := subscription.List(&stripe.SubscriptionListParams{
+		Customer: stripe.String(customerID),
+		Status:   stripe.String("all"), // include past_due/incomplete; caller decides
+	})
+	for iter.Next() {
+		sub := iter.Subscription()
+		if sub.Metadata == nil {
+			continue
+		}
+		if sub.Metadata["agent_id"] == agentID && sub.Metadata["feature"] == feature {
+			// Return the first (most recent — Stripe lists newest-first).
+			// Caller handles status filtering.
+			return sub, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("list subscriptions: %w", err)
+	}
+	return nil, nil
+}
+
+// CancelAgentFeatureSubscription cancels a Stripe subscription. By
+// default cancels at period end so the customer keeps the feature
+// until the end of what they've paid for. Pass immediate=true to cut
+// service off now (used by the disconnect-on-payment-failure flow).
+func (s *StripeClient) CancelAgentFeatureSubscription(subscriptionID string, immediate bool) (*stripe.Subscription, error) {
+	if immediate {
+		sub, err := subscription.Cancel(subscriptionID, nil)
+		if err != nil {
+			return nil, fmt.Errorf("cancel subscription: %w", err)
+		}
+		return sub, nil
+	}
+	sub, err := subscription.Update(subscriptionID, &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("schedule subscription cancel: %w", err)
+	}
+	return sub, nil
 }
 
 // ListInvoices returns past invoices for a customer.

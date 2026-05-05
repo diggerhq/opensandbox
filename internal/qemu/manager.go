@@ -197,6 +197,10 @@ type Manager struct {
 
 	secretsProxy    SecretsProxyIntegration  // nil if secrets proxy is not configured
 	checkpointStore *storage.CheckpointStore // for base image archival + checkpoint rebasing (nil until set)
+
+	// Per-sandbox stats cache populated by a background collector and read by
+	// the heartbeat path. See stats_collector.go.
+	statsCache *SandboxStatsCache
 }
 
 // NewManager creates a new QEMU-backed sandbox manager.
@@ -305,7 +309,7 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 		}
 		return merged
 	}
-	if len(cfg.Envs) == 0 && len(cfg.SecretEnvs) == 0 {
+	if len(cfg.Envs) == 0 && len(cfg.SecretEnvs) == 0 && len(cfg.EgressAllowlist) == 0 {
 		return cfg.Envs
 	}
 	sealed := m.secretsProxy.CreateSealedEnvs(sandboxID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.SecretEnvs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
@@ -320,6 +324,42 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 		cancel()
 	}
 	return sealed
+}
+
+// reinstallProxyCA overwrites the proxy CA cert in the guest's trust store
+// with the destination worker's current CA. Called from any handoff path
+// where the sandbox can land on a different worker than it was created on:
+// live migration, hibernate→wake (cross-worker), checkpoint fork.
+//
+// The guest's env vars (SSL_CERT_FILE / REQUESTS_CA_BUNDLE / NODE_EXTRA_CA_CERTS)
+// point at the fixed path the proxy injected at sandbox creation, so we
+// only need to overwrite the file content; no update-ca-certificates run
+// is required because the consuming libraries read the file directly.
+//
+// Idempotent: in steady state where every worker shares the same CA via KV,
+// the destination's CA equals the source's and this is a no-op write. The
+// value is in the transition window (sandboxes created before shared-CA
+// rollout) and any future "the destination's CA differs" scenario (cross-
+// cell migration, planned CA rotation, etc.).
+//
+// Best-effort — errors are logged but don't fail the handoff. A migration
+// that successfully moves the workload but fails to refresh the cert is
+// strictly better than refusing the migration.
+func (m *Manager) reinstallProxyCA(ctx context.Context, sandboxID string, agent *AgentClient) {
+	if m.secretsProxy == nil || agent == nil {
+		return
+	}
+	certPEM := m.secretsProxy.CACertPEM()
+	if len(certPEM) == 0 {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := agent.WriteFile(writeCtx, "/usr/local/share/ca-certificates/opensandbox-proxy.crt", certPEM); err != nil {
+		log.Printf("qemu: %s: reinstall proxy CA failed: %v (sandbox is alive but TLS substitution may break until next handoff)", sandboxID, err)
+		return
+	}
+	log.Printf("qemu: %s: reinstalled proxy CA on guest", sandboxID)
 }
 
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
@@ -1898,6 +1938,45 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		return err
 	}
 
+	// Shrink-safety: refuse any request whose total memory falls below the
+	// guest's working set + 5% headroom. This guards against:
+	//   (a) virtio-mem unplug below resident anon memory → guest OOM-killer,
+	//   (b) cgroup memory.max set below current RSS → guest OOM-killer,
+	// in both directions and across all entry points (manual /scale,
+	// per-sandbox autoscaler, post-wake, post-fork). Lifted above the
+	// virtio-mem branch so it fires regardless of the worker's own
+	// virtioMemRequestedMB bookkeeping (which fork doesn't track and wake
+	// only started tracking recently).
+	//
+	// MemUsage = MemTotal - MemAvailable from /proc/meminfo inside the
+	// guest — a conservative upper bound on resident anon (it includes some
+	// active page cache, which is fine; we'd rather refuse a few legit
+	// shrinks than silently OOM the guest).
+	//
+	// Fail-closed on stats errors during a shrink — better to bounce back
+	// to the caller (who can retry) than apply a limit we can't validate.
+	if maxMemoryBytes > 0 && vm.agent != nil {
+		newTotalMB := int(maxMemoryBytes / (1024 * 1024))
+		shrinking := newTotalMB < vm.MemoryMB
+		statsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		stats, statsErr := vm.agent.Stats(statsCtx)
+		cancel()
+		switch {
+		case statsErr != nil && shrinking:
+			log.Printf("qemu: %s shrink to %dMB refused: stats fetch failed: %v", sandboxID, newTotalMB, statsErr)
+			return fmt.Errorf("oom_floor: cannot verify guest working set: %w", statsErr)
+		case stats != nil && stats.MemUsage > 0:
+			usedMB := int(stats.MemUsage / (1024 * 1024))
+			floorMB := usedMB * 105 / 100
+			if newTotalMB < floorMB {
+				log.Printf("qemu: %s: refusing memory limit %dMB — working set %dMB requires ≥%dMB",
+					sandboxID, newTotalMB, usedMB, floorMB)
+				return fmt.Errorf("oom_floor: target %dMB below guest working set (%dMB used, %dMB floor)",
+					newTotalMB, usedMB, floorMB)
+			}
+		}
+	}
+
 	// virtio-mem: adjust pluggable memory to match requested total
 	if maxMemoryBytes > 0 && vm.qmp != nil {
 		totalDesiredMB := int(maxMemoryBytes) / (1024 * 1024)
@@ -2651,10 +2730,11 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		log.Printf("qemu: RestoreFromCheckpoint %s: clock sync failed: %v", sandboxID, err)
 	}
 
-	// Re-register secrets proxy session from checkpoint metadata.
-	if m.secretsProxy != nil && len(cpMeta.SealedTokens) > 0 {
+	// Re-register secrets proxy session from checkpoint metadata. An allowlist
+	// alone is enough — without a session the proxy 407s every request.
+	if m.secretsProxy != nil && (len(cpMeta.SealedTokens) > 0 || len(cpMeta.EgressAllowlist) > 0) {
 		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, cpMeta.SealedTokens, cpMeta.EgressAllowlist, cpMeta.TokenHosts, cpMeta.SealedNames)
-		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(cpMeta.SealedTokens))
+		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens, %d allowlist, %d names)", sandboxID, len(cpMeta.SealedTokens), len(cpMeta.EgressAllowlist), len(cpMeta.SealedNames))
 	}
 
 	// Step 8: Update VM instance
@@ -3002,6 +3082,12 @@ func (m *Manager) ForkFromCheckpoint(ctx context.Context, checkpointID string, c
 	m.mu.Lock()
 	m.vms[id] = vm
 	m.mu.Unlock()
+
+	// Refresh the proxy CA in the forked guest's trust store. The fork
+	// inherits the source checkpoint's disk + RAM, so its trust store has
+	// whatever CA the original sandbox was created against — which is
+	// probably a different worker. Idempotent in the shared-CA case.
+	m.reinstallProxyCA(ctx, id, agent)
 
 	// Notify metadata server
 	if m.onSandboxReady != nil {
