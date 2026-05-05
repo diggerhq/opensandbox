@@ -1069,3 +1069,27 @@ phase-4 turn-on watch.
      agent rather than the on-disk one. Invalidate by `rm -rf
      /data/sandboxes/golden && systemctl restart opensandbox-
      worker` — worker rebuilds it on first sandbox create.
+- *2026-05-05* — final cleanup before review. Bug fix `217da20`:
+  the SSE tail handler subtracted 1s from the cursor before the
+  first poll, intending to catch events ingested in the gap
+  between the historical query and tail-start. In practice Axiom
+  returns stable `_time` so the overlap re-fetched events already
+  in the historical batch and the UI rendered them twice (visible
+  on the dev host: "hello-from-claude" + step-1/2/3 + "oops"
+  duplicated; EOFs were spared because LogsPanel dedups them by
+  exec_id, but content rows have no equivalent identity hook).
+  Removed the overlap. Tradeoff: events ingested out-of-order
+  with `_time` before the historical batch's last event are now
+  missed. Until we add a server-side seen-set, no overlap.
+- *2026-05-05* — merged `origin/main` (`12b4e7c`). Two clean
+  conflicts in `internal/worker/grpc_server.go` where main's
+  PR #222 added `s.recordInitialScaleEvent(ctx, sb.ID, cfg)` and
+  this branch added `s.configureLogshipForSandbox(ctx, sb.ID)` at
+  the same two return points (the warm-fork and S3-fork paths in
+  `CreateSandbox`). Resolved by keeping both — they're orthogonal
+  and the order doesn't matter. Other main changes pulled in:
+  PR #219 (network-enabled-default), #220 (UI hide network field),
+  #221 (secret-proxy allowlist-only stores) — all fixes from a
+  recent customer-support investigation, fittingly merging into
+  this branch alongside the feature that would have made that
+  ticket self-serve.
