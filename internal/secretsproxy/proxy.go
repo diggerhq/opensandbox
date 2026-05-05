@@ -198,12 +198,14 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 // CreateSealedEnvs generates sealed tokens for the given env vars, registers a
 // proxy session, and returns the complete env map to inject into the VM.
 // Includes sealed tokens + proxy config vars (HTTP_PROXY, CA certs, etc.).
-// Returns nil if envVars is empty.
+// Returns nil only if there is nothing to enforce: no envs, no secrets, and no
+// allowlist. An allowlist alone is still enough to require routing through the
+// proxy so the allowlist actually gates egress.
 //
 // allowlist controls which hosts the sandbox can reach (nil = all).
 // secretAllowedHosts maps env var name → allowed hosts for that secret (nil = all allowed hosts).
 func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, plaintextEnvs, secretEnvs map[string]string, allowlist []string, secretAllowedHosts map[string][]string) map[string]string {
-	if len(plaintextEnvs) == 0 && len(secretEnvs) == 0 {
+	if len(plaintextEnvs) == 0 && len(secretEnvs) == 0 && len(allowlist) == 0 {
 		return nil
 	}
 
@@ -237,8 +239,11 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, pl
 		}
 	}
 
-	// Only register a proxy session if there's actually something to substitute.
-	if len(tokenMap) > 0 {
+	// Register a proxy session whenever the sandbox has anything for the proxy
+	// to act on: tokens to substitute OR an egress allowlist to enforce. Without
+	// a session the proxy rejects every CONNECT with 407 no_session, so an
+	// allowlist-only store would otherwise leave the sandbox with zero egress.
+	if len(tokenMap) > 0 || len(allowlist) > 0 {
 		p.RegisterSession(guestIP, &Session{
 			SandboxID:  sandboxID,
 			Secrets:    tokenMap,
