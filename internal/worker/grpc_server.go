@@ -176,6 +176,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
+			s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 			return &pb.CreateSandboxResponse{
 				SandboxId: sb.ID,
 				Status:    string(sb.Status),
@@ -198,6 +199,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 						}
 						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 					}
+					s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 					return &pb.CreateSandboxResponse{
 						SandboxId: sb.ID,
 						Status:    string(sb.Status),
@@ -247,32 +249,47 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		}
 	}
 
-	// Record initial scale event for billing
-	if s.store != nil {
-		memMB := cfg.MemoryMB
-		if memMB <= 0 {
-			memMB = 1024 // default
-		}
-		cpuPct := (memMB * 100) / 1024
-		if cpuPct < 100 {
-			cpuPct = 100
-		}
-		diskMB := cfg.DiskMB
-		if diskMB <= 0 {
-			diskMB = 20480
-		}
-		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
-		if orgID != "" {
-			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct, diskMB); err != nil {
-				log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
-			}
-		}
-	}
+	s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
+}
+
+// recordInitialScaleEvent writes a sandbox_scale_events row marking the start
+// of billable usage for a freshly-created sandbox. Called from every successful
+// CreateSandbox return path — fork from checkpoint (local + S3-fallback) and
+// from-scratch — so billing accounting works for forks too. Without this on
+// the fork paths, sandbox_scale_events stays empty for the org, the
+// usage-reporter excludes it from ListFreeOrgIDsWithOpenUsage / ListBillableOrgIDs,
+// and no credits/usage are deducted or reported to Stripe.
+//
+// Best-effort: never returns an error. Defaults mirror the worker's own
+// fallbacks for unset CPU/memory/disk so downstream pricing math is consistent.
+func (s *GRPCServer) recordInitialScaleEvent(ctx context.Context, sandboxID string, cfg types.SandboxConfig) {
+	if s.store == nil {
+		return
+	}
+	memMB := cfg.MemoryMB
+	if memMB <= 0 {
+		memMB = 1024
+	}
+	cpuPct := (memMB * 100) / 1024
+	if cpuPct < 100 {
+		cpuPct = 100
+	}
+	diskMB := cfg.DiskMB
+	if diskMB <= 0 {
+		diskMB = 20480
+	}
+	orgID, _ := s.store.GetSandboxOrgID(ctx, sandboxID)
+	if orgID == "" {
+		return
+	}
+	if err := s.store.RecordScaleEvent(ctx, sandboxID, orgID, memMB, cpuPct, diskMB); err != nil {
+		log.Printf("grpc: failed to record initial scale event for %s: %v", sandboxID, err)
+	}
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxRequest) (*pb.DestroySandboxResponse, error) {

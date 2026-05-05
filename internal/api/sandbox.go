@@ -2379,6 +2379,30 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 	}
 
+	// Pre-write the sandbox_sessions row with status='pending' so the worker
+	// can resolve org_id during CreateSandbox — the worker's
+	// recordInitialScaleEvent looks up sandbox→org via this row. Without the
+	// pre-write, fork-path scale events are silently skipped and both free-tier
+	// credit deduction and pro-tier Stripe metering miss the usage. Mirrors
+	// the from-scratch path's CreateSandboxSessionWithStatus(..., "pending")
+	// call. Status flips to 'running' on success / 'failed' on error below.
+	template := originalCfg.Template
+	if template == "" {
+		template = "default"
+	}
+	mergedMeta := map[string]string{}
+	for k, v := range originalCfg.Metadata {
+		mergedMeta[k] = v
+	}
+	for k, v := range userMetadata {
+		mergedMeta[k] = v
+	}
+	if s.store != nil {
+		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
+		metadataJSON, _ := json.Marshal(mergedMeta)
+		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON, "pending")
+	}
+
 	// Boot VM synchronously so the worker's in-memory sandbox map is populated
 	// before we respond or record the session. Previously this ran in a goroutine
 	// with the session row written first as status=running, which allowed
@@ -2433,31 +2457,18 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	}
 
 	if createErr != nil {
+		if s.store != nil {
+			errMsg := createErr.Error()
+			_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "failed", &errMsg)
+		}
 		s.pendingCreates.Delete(sandboxID)
 		log.Printf("api: fork %s failed: %v", sandboxID, createErr)
 		return nil, http.StatusInternalServerError, fmt.Errorf("fork from checkpoint: %w", createErr)
 	}
 
-	// Record session only after the worker has the VM registered so the session
-	// row never points at a worker that does not yet own the VM.
+	// Flip the pre-written session row to 'running' and stamp lineage fields.
 	if s.store != nil {
-		template := originalCfg.Template
-		if template == "" {
-			template = "default"
-		}
-		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
-		// Merge user-supplied metadata onto the snapshot's metadata (user wins)
-		// so request-time labels (e.g. agent_id) end up on the session row,
-		// where the billing path can find them via metadata->>'agent_id'.
-		mergedMeta := map[string]string{}
-		for k, v := range originalCfg.Metadata {
-			mergedMeta[k] = v
-		}
-		for k, v := range userMetadata {
-			mergedMeta[k] = v
-		}
-		metadataJSON, _ := json.Marshal(mergedMeta)
-		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
+		_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "running", nil)
 		// Set golden version from worker heartbeat
 		if s.workerRegistry != nil {
 			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {
