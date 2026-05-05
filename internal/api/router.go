@@ -218,6 +218,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
 
+	// Sandbox session logs — SDK / curl variant. Same handler as the
+	// dashboard's /api/dashboard/sessions/:sandboxId/logs route below;
+	// auth here is X-API-Key (or identity-JWT) instead of cookie.
+	// Useful for headless testing and SDK consumers.
+	api.GET("/sandboxes/:id/logs", s.getSandboxLogs)
+
 	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
 	api.POST("/capacity/reservations", s.createCapacityReservation)

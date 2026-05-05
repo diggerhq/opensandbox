@@ -65,7 +65,14 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
 
+	// Both routes mount this handler:
+	//   /api/sandboxes/:id/logs                       (SDK/X-API-Key)
+	//   /api/dashboard/sessions/:sandboxId/logs       (browser/cookie)
+	// Try both names — Echo will only set whichever is in the URL pattern.
 	sandboxID := c.Param("sandboxId")
+	if sandboxID == "" {
+		sandboxID = c.Param("id")
+	}
 	if sandboxID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing sandbox id"})
 	}
@@ -98,7 +105,8 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 	c.Response().Flush()
 
 	// Initial historical batch.
-	rows, err := s.queryAxiom(ctx, q.toAPL(s.axiomDataset, false))
+	histStart, histEnd := q.timeWindow(false)
+	rows, err := s.queryAxiom(ctx, q.toAPL(s.axiomDataset, false), histStart, histEnd)
 	if err != nil {
 		log.Printf("api: sandbox %s logs: initial query failed: %v", sandboxID, err)
 		writeSSEComment(c.Response(), "initial query failed")
@@ -139,7 +147,8 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 			tailQ := q
 			tailQ.since = cursor
 			tailQ.until = time.Time{} // open-ended
-			newRows, err := s.queryAxiom(ctx, tailQ.toAPL(s.axiomDataset, true))
+			tailStart, tailEnd := tailQ.timeWindow(true)
+			newRows, err := s.queryAxiom(ctx, tailQ.toAPL(s.axiomDataset, true), tailStart, tailEnd)
 			if err != nil {
 				// Don't kill the stream on a single failed poll — log
 				// and try again next tick. Persistent failures will
@@ -247,6 +256,21 @@ func parseLogQuery(sandboxID string, sandboxStarted time.Time, qs url.Values) (l
 	return q, nil
 }
 
+// timeWindow returns (startTime, endTime) suitable for Axiom's APL
+// API body fields. Axiom requires them; we send them separately and
+// also embed `_time >=` filters in the APL so the query plan is
+// equivalent regardless of which the engine prefers.
+//
+// Historical: since..until (until defaults to now if unset).
+// Tail: since..now (no upper bound logically; Axiom needs a value).
+func (q logQuery) timeWindow(tail bool) (time.Time, time.Time) {
+	end := q.until
+	if tail || end.IsZero() {
+		end = time.Now().UTC().Add(1 * time.Minute) // small skew tolerance
+	}
+	return q.since, end
+}
+
 // toAPL renders the query into a KQL/APL string. The sandbox_id filter
 // is the FIRST predicate after the dataset and is unconditionally
 // applied — there is no path that omits it. Every interpolated string
@@ -306,10 +330,19 @@ type logEvent struct {
 //	}
 //
 // We don't need format=tabular; the default object form is what we want.
-func (s *Server) queryAxiom(ctx context.Context, apl string) ([]logEvent, error) {
-	body, _ := json.Marshal(map[string]any{"apl": apl})
+func (s *Server) queryAxiom(ctx context.Context, apl string, startTime, endTime time.Time) ([]logEvent, error) {
+	body, _ := json.Marshal(map[string]any{
+		"apl":       apl,
+		"startTime": startTime.UTC().Format(time.RFC3339Nano),
+		"endTime":   endTime.UTC().Format(time.RFC3339Nano),
+	})
+	// Axiom's APL endpoint. /_apl/query takes the APL string verbatim
+	// (the dataset name is encoded inside the APL itself, e.g.
+	// `['oc-sandbox-logs'] | ...`). Tried the per-dataset
+	// /v1/datasets/<dataset>/query path first but that returned 404
+	// for APL-shaped bodies.
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		"https://api.axiom.co/v1/datasets/_apl/query?format=legacy",
+		fmt.Sprintf("https://api.axiom.co/v1/datasets/%s/query", url.PathEscape(s.axiomDataset)),
 		bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -328,8 +361,13 @@ func (s *Server) queryAxiom(ctx context.Context, apl string) ([]logEvent, error)
 		return nil, fmt.Errorf("axiom %d: %s", resp.StatusCode, string(raw))
 	}
 
+	// Axiom's per-dataset /query response surfaces `_time` at the match
+	// level, NOT inside `data`. Parse both and use the match-level time
+	// when present (the data-level time is often the zero value because
+	// Axiom strips _time from the indexed event body on ingest).
 	var parsed struct {
 		Matches []struct {
+			Time time.Time       `json:"_time"`
 			Data json.RawMessage `json:"data"`
 		} `json:"matches"`
 	}
@@ -342,6 +380,9 @@ func (s *Server) queryAxiom(ctx context.Context, apl string) ([]logEvent, error)
 		var ev logEvent
 		if err := json.Unmarshal(m.Data, &ev); err != nil {
 			continue // skip malformed, don't fail the whole batch
+		}
+		if !m.Time.IsZero() {
+			ev.Time = m.Time
 		}
 		out = append(out, ev)
 	}
