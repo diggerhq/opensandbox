@@ -128,6 +128,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{35, "migrations/035_sandbox_autoscale.up.sql"},
 		{36, "migrations/036_sandbox_scaling_lock.up.sql"},
 		{37, "migrations/037_agent_subscriptions.up.sql"},
+		{38, "migrations/038_hibernation_upload_status.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -1031,6 +1032,8 @@ type SandboxHibernation struct {
 	HibernatedAt   time.Time       `json:"hibernatedAt"`
 	RestoredAt     *time.Time      `json:"restoredAt,omitempty"`
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
+	UploadedAt     *time.Time      `json:"uploadedAt,omitempty"`
+	UploadError    *string         `json:"uploadError,omitempty"`
 }
 
 // CreateHibernation inserts a new hibernation record, marking any prior active
@@ -1079,11 +1082,11 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 func (s *Store) GetActiveHibernation(ctx context.Context, sandboxID string) (*SandboxHibernation, error) {
 	cp := &SandboxHibernation{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at
+		`SELECT id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at, uploaded_at, upload_error
 		 FROM sandbox_hibernations
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`, sandboxID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
-		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt, &cp.RestoredAt, &cp.ExpiredAt)
+		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt, &cp.RestoredAt, &cp.ExpiredAt, &cp.UploadedAt, &cp.UploadError)
 	if err != nil {
 		return nil, fmt.Errorf("active hibernation not found: %w", err)
 	}
@@ -1096,6 +1099,31 @@ func (s *Store) MarkHibernationRestored(ctx context.Context, sandboxID string) e
 		`UPDATE sandbox_hibernations SET restored_at = now()
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`,
 		sandboxID)
+	return err
+}
+
+// MarkHibernationUploaded records that the async S3 archive upload completed
+// for a specific hibernation_key. Matches by key (not sandbox_id) because a
+// sandbox can have multiple hibernation rows in flight when hibernate→wake→
+// hibernate cycles run faster than the upload goroutine.
+func (s *Store) MarkHibernationUploaded(ctx context.Context, hibernationKey string, sizeBytes int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_hibernations
+		   SET uploaded_at = now(), size_bytes = $2, upload_error = NULL
+		 WHERE hibernation_key = $1`,
+		hibernationKey, sizeBytes)
+	return err
+}
+
+// MarkHibernationUploadFailed records the failure reason for an upload that
+// did not land in S3. Without this, async upload failures were silent and the
+// row stayed in a misleading "hibernated, blob present" state.
+func (s *Store) MarkHibernationUploadFailed(ctx context.Context, hibernationKey, errMsg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_hibernations
+		   SET upload_error = $2
+		 WHERE hibernation_key = $1`,
+		hibernationKey, errMsg)
 	return err
 }
 

@@ -186,6 +186,13 @@ type Manager struct {
 	onSandboxReady   func(sandboxID, guestIP, template string, startedAt time.Time)
 	onSandboxDestroy func(sandboxID string)
 
+	// Hibernation upload status callback (set via SetHibernationUploadCallback).
+	// Invoked from the async archive+upload goroutine in doHibernate exactly once
+	// per hibernation, with err=nil on success or non-nil on archive/upload
+	// failure. The worker uses this to write uploaded_at / upload_error in the
+	// sandbox_hibernations row so missing-blob failures stop being silent.
+	onHibernationUpload func(sandboxID, hibernationKey string, sizeBytes int64, uploadErr error)
+
 	secretsProxy    SecretsProxyIntegration  // nil if secrets proxy is not configured
 	checkpointStore *storage.CheckpointStore // for base image archival + checkpoint rebasing (nil until set)
 
@@ -273,6 +280,15 @@ func (m *Manager) SetSecretsProxy(sp SecretsProxyIntegration) {
 // on-demand checkpoint rebasing across golden versions.
 func (m *Manager) SetCheckpointStore(cs *storage.CheckpointStore) {
 	m.checkpointStore = cs
+}
+
+// SetHibernationUploadCallback registers a callback invoked from the async
+// hibernation archive+upload goroutine when it finishes. err is nil on
+// success; sizeBytes is the archive size (only meaningful on success). The
+// worker uses this to update sandbox_hibernations.uploaded_at / upload_error
+// so silent upload failures become visible.
+func (m *Manager) SetHibernationUploadCallback(cb func(sandboxID, hibernationKey string, sizeBytes int64, uploadErr error)) {
+	m.onHibernationUpload = cb
 }
 
 // GoldenVersion returns the hash identifying this worker's golden snapshot base image.

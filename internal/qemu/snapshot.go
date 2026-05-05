@@ -159,7 +159,16 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		os.Remove(vm.qmpSockPath)
 	}
 
-	checkpointKey := fmt.Sprintf("checkpoints/%s/%d.tar.zst", vm.ID, time.Now().Unix())
+	// Per-hibernation unique paths. Pre-fix used a single sandbox-scoped
+	// `archive-staging/` and `checkpoint.tar.zst`, so back-to-back
+	// hibernate→wake→hibernate cycles raced: the second hibernate's
+	// copyFileReflink overwrote the first goroutine's staging files mid-tar,
+	// and both goroutines wrote the same checkpoint.tar.zst path. End state:
+	// neither blob landed in S3, the DB still showed both rows as hibernated,
+	// and cross-worker wake failed with "blob: object not found". Including
+	// UnixNano in the staging dir name is enough to make the paths unique.
+	epochSec := time.Now().Unix()
+	checkpointKey := fmt.Sprintf("checkpoints/%s/%d.tar.zst", vm.ID, epochSec)
 	localElapsed := time.Since(t0)
 	log.Printf("qemu: hibernate %s: local snapshot complete (%dms), starting async S3 upload",
 		vm.ID, localElapsed.Milliseconds())
@@ -174,7 +183,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	workspaceFile := filepath.Base(detectDrivePath(sandboxDir, "workspace"))
 	rootfsFile := filepath.Base(detectDrivePath(sandboxDir, "rootfs"))
 
-	archiveDir := filepath.Join(sandboxDir, "archive-staging")
+	archiveDir := filepath.Join(sandboxDir, fmt.Sprintf("archive-staging-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir archive-staging: %w", err)
 	}
@@ -203,19 +212,31 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		log.Printf("qemu: hibernate %s: rootfs rebase failed (archive may not be portable): %v (%s)",
 			sandboxID, err, strings.TrimSpace(string(out)))
 	}
-	log.Printf("qemu: hibernate %s: archive staging ready", sandboxID)
+	log.Printf("qemu: hibernate %s: archive staging ready (dir=%s)", sandboxID, filepath.Base(archiveDir))
 
 	// Signal channel so destroyVM can wait for archive completion before deleting files.
 	archiveDone := make(chan struct{})
 	vm.archiveDone = archiveDone
 
+	uploadCb := m.onHibernationUpload
 	m.uploadWg.Add(1)
 	go func() {
 		defer m.uploadWg.Done()
 		defer close(archiveDone)
 		defer os.RemoveAll(archiveDir) // clean up staging copies when done
+
+		var sizeBytes int64
+		var goroutineErr error
+		defer func() {
+			if uploadCb != nil {
+				uploadCb(sandboxID, checkpointKey, sizeBytes, goroutineErr)
+			}
+		}()
+
 		t1 := time.Now()
-		archivePath := filepath.Join(sandboxDir, "checkpoint.tar.zst")
+		// Tar lives inside the per-hibernation staging dir so concurrent
+		// hibernations of the same sandbox don't write to the same path.
+		archivePath := filepath.Join(archiveDir, "checkpoint.tar.zst")
 
 		// Archive from the staging copies — originals are free for wake/QEMU.
 		if err := createArchive(archivePath, archiveDir, []string{
@@ -223,29 +244,30 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 			rootfsFile,
 			workspaceFile,
 		}); err != nil {
+			goroutineErr = fmt.Errorf("archive: %w", err)
 			log.Printf("qemu: async archive failed for %s: %v", sandboxID, err)
 			return
 		}
 		archiveInfo, err := os.Stat(archivePath)
 		if err != nil {
+			goroutineErr = fmt.Errorf("stat archive: %w", err)
 			log.Printf("qemu: async archive stat failed for %s: %v", sandboxID, err)
 			return
 		}
+		sizeBytes = archiveInfo.Size()
 		log.Printf("qemu: hibernate %s: archive created (%dms, %.1f MB)",
-			sandboxID, time.Since(t1).Milliseconds(), float64(archiveInfo.Size())/(1024*1024))
+			sandboxID, time.Since(t1).Milliseconds(), float64(sizeBytes)/(1024*1024))
 
 		t2 := time.Now()
 		uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		if _, err := checkpointStore.Upload(uploadCtx, checkpointKey, archivePath); err != nil {
+			goroutineErr = fmt.Errorf("upload: %w", err)
 			log.Printf("qemu: async S3 upload failed for %s: %v", sandboxID, err)
-			os.Remove(archivePath) // clean up — local qcow2 files are the source of truth for same-worker wake
-			return
+			return // archiveDir cleanup via defer takes the tar with it
 		}
 		log.Printf("qemu: hibernate %s: S3 upload complete (%dms, key=%s)",
 			sandboxID, time.Since(t2).Milliseconds(), checkpointKey)
-
-		os.Remove(archivePath) // only delete after successful upload
 	}()
 
 	return &sandbox.HibernateResult{
@@ -273,25 +295,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	snapshotDir := filepath.Join(sandboxDir, "snapshot")
 	metaPath := filepath.Join(snapshotDir, "snapshot-meta.json")
 
-	// Wait for any in-flight hibernate archive to finish before proceeding.
-	// Same-worker wake: archive reads from staging copies (safe), but we need
-	// archive-staging/ cleaned up before starting QEMU to avoid disk waste.
-	// Cross-worker wake: S3 upload must complete before download can succeed.
-	archiveStagingDir := filepath.Join(sandboxDir, "archive-staging")
-	if fileExists(archiveStagingDir) {
-		log.Printf("qemu: wake %s: waiting for in-flight archive to complete", sandboxID)
-		for i := 0; i < 60; i++ { // up to 30 seconds
-			if !fileExists(archiveStagingDir) {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if fileExists(archiveStagingDir) {
-			// Don't force-remove — the archive goroutine's defer will clean up.
-			// Removing while tar is mid-read corrupts the S3 archive.
-			log.Printf("qemu: wake %s: archive staging still present after 30s, proceeding (goroutine will clean up)", sandboxID)
-		}
-	}
+	// Per-hibernation archive staging dirs are named `archive-staging-<nano>` and
+	// each goroutine cleans up its own dir via defer. Wake doesn't need the
+	// archive (same-worker uses local qcow2; cross-worker downloads from S3),
+	// so there is nothing to wait for here. Pre-fix this loop watched a single
+	// fixed `archive-staging/` path — irrelevant under the new scheme.
 
 	// Step 1: Ensure qcow2 files are local
 	t0 := time.Now()

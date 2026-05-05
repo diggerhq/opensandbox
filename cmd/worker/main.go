@@ -319,6 +319,27 @@ func main() {
 					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent, 0)
 				})
 			}
+
+			// Wire hibernation upload completion → DB so silent S3 upload
+			// failures stop hiding behind a "hibernated" row that points at a
+			// blob that was never written. The callback runs from the async
+			// archive goroutine in qemu/snapshot.go after upload finishes.
+			if qemuMgr != nil {
+				st := store // capture for closure
+				qemuMgr.SetHibernationUploadCallback(func(sandboxID, hibernationKey string, sizeBytes int64, uploadErr error) {
+					ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if uploadErr != nil {
+						if err := st.MarkHibernationUploadFailed(ctx2, hibernationKey, uploadErr.Error()); err != nil {
+							log.Printf("opensandbox-worker: failed to record hibernation upload error for %s: %v", sandboxID, err)
+						}
+						return
+					}
+					if err := st.MarkHibernationUploaded(ctx2, hibernationKey, sizeBytes); err != nil {
+						log.Printf("opensandbox-worker: failed to mark hibernation uploaded for %s: %v", sandboxID, err)
+					}
+				})
+			}
 		}
 	}
 
