@@ -395,6 +395,14 @@ func main() {
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
 
+	// Wire Axiom read-only token for the sandbox session logs API.
+	// Token never leaves this process; the UI proxies its queries through
+	// /api/sandboxes/:id/logs. Empty token disables the endpoint (503).
+	server.SetAxiomQueryConfig(cfg.AxiomQueryToken, cfg.AxiomDataset)
+	if cfg.AxiomQueryToken != "" {
+		log.Printf("opensandbox: sandbox session logs read API enabled (dataset=%s)", cfg.AxiomDataset)
+	}
+
 	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
 	// sandbox via PUT /api/sandboxes/:id/autoscale.
 	//

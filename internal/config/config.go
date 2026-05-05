@@ -124,9 +124,11 @@ type Config struct {
 
 	// Axiom — log shipping for sandbox session logs.
 	// AxiomIngestToken empty = log shipping disabled (kill-switch).
-	// Only the worker needs these; the agent receives them via the
-	// ConfigureLogship RPC at sandbox boot.
+	// Worker uses AxiomIngestToken + AxiomDataset to deliver via the
+	// ConfigureLogship RPC at sandbox boot. Server uses
+	// AxiomQueryToken + AxiomDataset to serve the read API.
 	AxiomIngestToken string
+	AxiomQueryToken  string
 	AxiomDataset     string
 
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
@@ -235,6 +237,7 @@ func Load() (*Config, error) {
 		SegmentWriteKey: os.Getenv("SEGMENT_WRITE_KEY"),
 
 		AxiomIngestToken: os.Getenv("AXIOM_INGEST_TOKEN"),
+		AxiomQueryToken:  os.Getenv("AXIOM_QUERY_TOKEN"),
 		AxiomDataset:     envOrDefault("AXIOM_DATASET", "oc-sandbox-logs"),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),

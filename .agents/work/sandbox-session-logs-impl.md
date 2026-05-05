@@ -948,3 +948,22 @@ phase-4 turn-on watch.
 - *2026-05-05* — design doc merged-pending (PR #226 draft).
   Implementation plan written. No code changes yet. Phase 0 is
   next.
+- *2026-05-05* — Phase 0 shipped (`f49de82`): config + ConfigureLogship
+  RPC plumbing. No behaviour change yet. Mid-implementation pivot:
+  the design's "existing env-injection mechanism" assumption was
+  wrong — `SetEnvs` is for user commands, not the agent process —
+  so we added one new RPC instead. Both docs updated.
+- *2026-05-05* — Phase 1 shipped (`9d0804b`): in-VM forwarder +
+  exec tee. Package moved from `cmd/agent/internal/logship/` to
+  `internal/logship/` because of Go's `internal/` visibility rule
+  (the original location couldn't be imported by `internal/agent/`,
+  which we need). Unit tests for LineWriter / drop-oldest / pre-
+  Activate hold all pass.
+- *2026-05-05* — Phase 2 shipped: read API at
+  `GET /api/sandboxes/:id/logs` (SSE). Adds `AxiomQueryToken` to
+  config (server-only; never reaches the browser). Auth via
+  existing dashboard middleware + `GetSandboxSessionInOrg` for
+  org ownership. APL builder pins `sandbox_id == :id` as the first
+  predicate (security-load-bearing — covered by unit test). Live
+  tail polls Axiom every 1s with a moving `_time` cursor; SSE
+  keepalive every 15s. Phase 3 (UI tab) is next.

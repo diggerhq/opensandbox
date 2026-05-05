@@ -56,6 +56,19 @@ type Server struct {
 	redisClient     *redis.Client                     // nil if Redis not configured (for health checks)
 	adminEvents     *AdminEventBus                    // real-time event bus for admin dashboard
 	ready           int32                             // atomic: 1 = ready, 0 = not ready
+
+	// Axiom log query (sandbox session logs read API).
+	// Empty token = endpoint returns 503.
+	axiomQueryToken string
+	axiomDataset    string
+}
+
+// SetAxiomQueryConfig wires the read-only Axiom token and dataset for
+// the sandbox session logs read API. Token never leaves the control
+// plane; the UI proxies through us.
+func (s *Server) SetAxiomQueryConfig(queryToken, dataset string) {
+	s.axiomQueryToken = queryToken
+	s.axiomDataset = dataset
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -204,6 +217,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes", s.listSandboxes)
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
+
+	// Sandbox session logs (design + work in .agents/sandbox-session-logs).
+	// SSE: historical batch + 1s-poll live tail. Query token never leaves
+	// the control plane; the UI talks to us, we talk to Axiom.
+	api.GET("/sandboxes/:id/logs", s.getSandboxLogs)
 
 	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
