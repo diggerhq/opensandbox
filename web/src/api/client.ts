@@ -1,3 +1,5 @@
+import posthog from 'posthog-js'
+
 const API_BASE = '/api/dashboard'
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -39,6 +41,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
 // Logout: clears server session, then navigates to login
 export async function logout(): Promise<void> {
   await fetch('/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {})
+  posthog.reset()
   // Navigate to login page — use replace to prevent back-button loop
   window.location.replace('/login')
 }

@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react'
+import posthog from 'posthog-js'
 import { getMe, switchOrg as switchOrgApi, type OrgInfo } from '../api/client'
 
 interface AuthUser {
@@ -33,6 +34,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await getMe()
       setUser(me)
+      if (me?.id) {
+        posthog.identify(me.id, { email: me.email, org_id: me.orgId })
+      }
     } catch (err: unknown) {
       if (err instanceof Error && !err.message.includes('Unauthorized')) {
         setError(err.message)
