@@ -1725,13 +1725,52 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox is not hibernated"})
 	}
 
-	// Pick ANY worker in the same region
+	// Prefer the source worker (where hibernation actually happened) so wake
+	// can use the local qcow2 files instead of downloading from S3. Two reasons:
+	//
+	//   1. Same-worker wake is dramatically faster (~300ms vs. 30+s for a 1GB
+	//      download+extract).
+	//   2. Avoids a wake-vs-upload race: hibernate's S3 upload is async and
+	//      takes tens of seconds for a 4GB sandbox. A wake routed to a
+	//      different worker that runs before the upload finishes fails with
+	//      "blob: object not found" because it tries HEAD before the goroutine
+	//      finished writing. uploaded_at is the canonical signal — if it's
+	//      NULL, the source worker is the only safe target.
+	//
+	// Fall back to least-loaded only when source is gone, draining, or under
+	// resource pressure. If upload isn't complete yet, prefer source even at
+	// the cost of some imbalance — the alternative is a 500 to the user.
 	region := hibernation.Region
-	worker, grpcClient, err := s.workerRegistry.GetLeastLoadedWorker(region)
-	if err != nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "no workers available in region " + region,
-		})
+	var worker *controlplane.WorkerEntry
+	var grpcClient pb.SandboxWorkerClient
+	uploadComplete := hibernation.UploadedAt != nil
+	if session.WorkerID != "" {
+		if src := s.workerRegistry.GetWorker(session.WorkerID); src != nil &&
+			!src.Draining && src.CPUPct < 90 && src.MemPct < 90 && src.DiskPct < 90 {
+			if cli, cerr := s.workerRegistry.GetWorkerClient(session.WorkerID); cerr == nil {
+				worker = src
+				grpcClient = cli
+				log.Printf("wake %s: routing to source worker %s (upload_complete=%v)",
+					sandboxID, session.WorkerID, uploadComplete)
+			}
+		}
+	}
+	if worker == nil {
+		// Source unavailable. Cross-worker wake will need to download from S3,
+		// so refuse if upload hasn't completed — better a clear error than a
+		// confusing "blob: object not found" once the worker actually tries.
+		if !uploadComplete {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "source worker unavailable and hibernation upload not yet complete; retry shortly",
+			})
+		}
+		var lerr error
+		worker, grpcClient, lerr = s.workerRegistry.GetLeastLoadedWorker(region)
+		if lerr != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "no workers available in region " + region,
+			})
+		}
 	}
 
 	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 60*time.Second)
