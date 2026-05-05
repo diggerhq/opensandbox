@@ -43,30 +43,40 @@ needed.
 ├── design/sandbox-session-logs.md             (design doc — same PR)
 └── work/sandbox-session-logs-impl.md          (this file)
 
+proto/agent/
+└── agent.proto                                (one new RPC: ConfigureLogship)
+
 cmd/agent/                                     (the in-guest agent)
-├── main.go                                    (entry point — unchanged)
+├── main.go                                    (wire shipper + tailer at startup)
 └── internal/logship/                          (new package, all forwarder code)
     ├── shipper.go                             (Axiom HTTP client + batcher + drop-oldest)
     ├── varlog.go                              (fsnotify tail of /var/log/**)
     ├── tee.go                                 (io.Writer adapter for exec output)
     └── shipper_test.go                        (unit tests)
 
-internal/agent/                                (worker-side agent client)
-└── exec.go                                    (no change — exec contract unchanged)
+internal/agent/                                (in-VM agent server)
+├── server.go                                  (add logshipCfg + shipper handle)
+├── logship.go                                 (new: ConfigureLogship handler)
+└── exec.go                                    (existing — wrap pipes with tee in Phase 1)
+
+internal/config/
+└── config.go                                  (add AxiomIngestToken + AxiomDataset)
 
 internal/api/
 ├── router.go                                  (one new line: register sandbox_logs route)
 └── sandbox_logs.go                            (new: SSE handler + APL query builder)
 
-internal/worker/                               (worker that boots sandboxes)
-└── sandbox_create.go                          (inject AXIOM_INGEST_TOKEN/DATASET/SANDBOX_ID/ORG_ID into agent env)
+internal/worker/
+└── grpc_server.go                             (call ConfigureLogship after sandbox create)
 
 web/src/pages/SessionDetail.tsx                (add Logs tab)
 ```
 
-No new tables in OC's Postgres. No new RPCs in `agent.proto`. The
-forwarder is a pure addition to the agent binary; the read API is a
-single new HTTP handler; the UI gain is one tab.
+No new tables in OC's Postgres. **One** new RPC in `agent.proto`
+(additive — `ConfigureLogship` for config delivery; log bytes never
+flow over this channel, only configuration). The forwarder is a
+pure addition to the agent binary; the read API is a single new
+HTTP handler; the UI gain is one tab.
 
 ## Pre-flight (do once, before any phase)
 
@@ -77,7 +87,7 @@ single new HTTP handler; the UI gain is one tab.
      **Default: new workspace.** Agentbox is a different product
      with different retention/cost tradeoffs and shouldn't share
      blast radius.
-   - Create dataset `oc_sandbox_logs` (default 30-day retention).
+   - Create dataset `oc-sandbox-logs` (default 30-day retention).
    - Create one **ingest-only** API token, scoped to the dataset.
      Note this is the ingest token that goes into every worker.
    - Create one **read-only** API token, scoped to the dataset.
@@ -88,67 +98,180 @@ single new HTTP handler; the UI gain is one tab.
    pattern, but actually wired through Azure Key Vault per the
    existing convention):
    - `AXIOM_INGEST_TOKEN` (workers need this)
-   - `AXIOM_DATASET` (= `oc_sandbox_logs`)
+   - `AXIOM_DATASET` (= `oc-sandbox-logs`)
    - `AXIOM_QUERY_TOKEN` (control plane needs this)
 
 Phase 0 (next section) is the engineering work that consumes these.
 
 ---
 
-## Phase 0 — wiring without behaviour change
+## Phase 0 — config + new RPC plumbing (no behaviour change)
 
-Goal: get tokens into the worker process and verify they propagate
-to a sandbox env, with **no log shipping yet**. This is purely
-config plumbing; rolling it out is a deploy-only change.
+Goal: token reaches the worker process, `ConfigureLogship` RPC is
+defined and wired through worker→agent, and the agent stores the
+config in memory. **No actual shipping yet** — Phase 1 introduces
+the forwarder that consumes the config.
 
-### 0.1 Worker config
+### 0.1 Why a new RPC (and not env injection)
 
-Add three fields to the worker config struct
-([`internal/config/config.go:19`](../../internal/config/config.go)
-or wherever worker env is parsed — verify before editing):
+Initial assumption was "inject env vars at sandbox boot via the
+existing mechanism." Verified false:
+
+- The agent's own `os.Environ()` at PID 1 startup is minimal —
+  only `PATH` is set explicitly in
+  [`cmd/agent/main.go:26`](../../cmd/agent/main.go).
+- The existing `SetEnvs` RPC
+  ([`proto/agent/agent.proto:78-79`](../../proto/agent/agent.proto))
+  stores envs in agent memory **for user commands only**
+  (injected into `Exec`/`ExecStream`); it does not modify the
+  agent's own process env.
+- Implementations live in `internal/agent/server.go` and
+  `internal/agent/exec.go:58-66, 88-96` — they append the stored
+  envs to each user `cmd.Env`, never to the agent itself.
+
+So the cleanest fix is one new RPC that the worker calls right
+after VM boot. Additive proto change, allowed under the agent.proto
+stability contract (`proto/agent/agent.proto:11-34`).
+
+### 0.2 Worker config
+
+Add two fields to OC's `Config` struct
+([`internal/config/config.go:140`](../../internal/config/config.go)),
+near the existing external-service config (Segment / Stripe):
 
 ```go
-type WorkerConfig struct {
-    // ... existing fields
-    AxiomIngestToken string `env:"AXIOM_INGEST_TOKEN"`
-    AxiomDataset     string `env:"AXIOM_DATASET" envDefault:"oc_sandbox_logs"`
+// Axiom — log shipping for sandbox session logs.
+// Empty token = log shipping disabled (kill-switch).
+AxiomIngestToken string
+AxiomDataset     string
+```
+
+In `Load()` (around line 228, near `SegmentWriteKey`):
+
+```go
+AxiomIngestToken: os.Getenv("AXIOM_INGEST_TOKEN"),
+AxiomDataset:     envOrDefault("AXIOM_DATASET", "oc-sandbox-logs"),
+```
+
+### 0.3 New proto RPC
+
+Add to [`proto/agent/agent.proto`](../../proto/agent/agent.proto)
+(near the `SetEnvs` RPC for adjacency, since they're conceptually
+related):
+
+```proto
+// ConfigureLogship sets log-shipping configuration. Worker calls
+// this immediately after VM boot, before any user-facing operations.
+// If never called, the forwarder stays dormant — this is the
+// kill-switch (worker doesn't call when ingest_token is unset).
+rpc ConfigureLogship(ConfigureLogshipRequest) returns (ConfigureLogshipResponse);
+```
+
+```proto
+// --- Logship ---
+
+message ConfigureLogshipRequest {
+  string ingest_token = 1;
+  string dataset      = 2;
+  string sandbox_id   = 3;
+  string org_id       = 4;
+}
+
+message ConfigureLogshipResponse {}
+```
+
+Regenerate via the existing proto-gen pipeline (likely a `make
+proto` or equivalent — verify in the Makefile / scripts before
+running).
+
+### 0.4 Agent-side handler
+
+Add to `internal/agent/server.go` (or a new `logship.go` in the
+same package) a handler that stores the config and exposes it to
+the forwarder:
+
+```go
+type LogshipConfig struct {
+    IngestToken string
+    Dataset     string
+    SandboxID   string
+    OrgID       string
+}
+
+func (s *Server) ConfigureLogship(ctx context.Context, req *pb.ConfigureLogshipRequest) (*pb.ConfigureLogshipResponse, error) {
+    s.logshipMu.Lock()
+    s.logshipCfg = LogshipConfig{
+        IngestToken: req.IngestToken,
+        Dataset:     req.Dataset,
+        SandboxID:   req.SandboxId,
+        OrgID:       req.OrgId,
+    }
+    s.logshipMu.Unlock()
+
+    // Phase 1 will: signal the forwarder goroutine that config is ready.
+    // Phase 0 just stores the config.
+
+    return &pb.ConfigureLogshipResponse{}, nil
 }
 ```
 
-### 0.2 Inject into agent env at sandbox-create
+Add `logshipMu sync.Mutex` and `logshipCfg LogshipConfig` fields to
+the server struct.
 
-The worker sets up the guest agent's environment when it boots a
-sandbox. Find the path that does this — likely
-[`internal/worker/grpc_server.go`](../../internal/worker/grpc_server.go)
-in or near `CreateSandbox` / `BootSandbox`. We add four env entries:
+### 0.5 Worker calls `ConfigureLogship` at sandbox boot
+
+In `internal/worker/grpc_server.go`, in `CreateSandbox` after `sb,
+err := s.manager.Create(ctx, cfg)` succeeds (around line 224 — verify
+before editing), add:
 
 ```go
-agentEnv := map[string]string{
-    // ... existing entries
-    "AXIOM_INGEST_TOKEN": cfg.AxiomIngestToken,
-    "AXIOM_DATASET":      cfg.AxiomDataset,
-    "OC_SANDBOX_ID":      sandbox.ID,
-    "OC_ORG_ID":          sandbox.OrgID,
+if s.cfg.AxiomIngestToken != "" {
+    orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
+    if err := s.callConfigureLogship(ctx, sb.ID, orgID); err != nil {
+        // Don't fail sandbox create on a logship config failure —
+        // shipping just stays dormant for this sandbox. Log loudly.
+        log.Printf("grpc: ConfigureLogship for %s failed: %v", sb.ID, err)
+    }
 }
 ```
 
-If `AxiomIngestToken == ""`, **don't inject any of them.** The
-forwarder treats `AXIOM_INGEST_TOKEN` empty as the kill-switch.
+`callConfigureLogship` opens a (probably-cached) gRPC connection to
+the agent inside the sandbox and calls the new RPC. The exact
+plumbing follows whatever pattern the manager already uses for
+agent RPCs (manager exposes an `agent client` per sandbox; reuse).
 
-### 0.3 Verify
+Same insertion in the `ForkFromCheckpoint` paths (lines ~169 and
+~191) — restored sandboxes also need their forwarder configured.
+
+### 0.6 Verify
 
 Boot a dev sandbox with `AXIOM_INGEST_TOKEN=test-token` set on the
-worker. Inside the sandbox, `printenv | grep -E '^(AXIOM|OC_)'`
-shows all four. **Do not** ship a token to the real Axiom dataset
-yet — phase 1 introduces the actual ingest path.
+worker. Inside the sandbox, no env vars appear yet (correct — that
+was the old design). Instead:
 
-### 0.4 Verification checklist
+- Check the worker log shows `ConfigureLogship for <sb_id>` did not
+  fail.
+- Add temporary debug logging in the agent's `ConfigureLogship`
+  handler to confirm it received the call with the right values.
+- Remove the debug logging before commit.
 
-- [ ] Worker config struct has the two new fields with defaults
-- [ ] Worker injects all four env vars when token is set
-- [ ] Worker injects none when token is unset (kill-switch works)
-- [ ] Existing sandbox boot path is unchanged — no behavioural
-      regression on a sandbox that doesn't care about logs
+### 0.7 Verification checklist
+
+- [ ] Config struct has `AxiomIngestToken` and `AxiomDataset`
+      fields, populated from env in `Load()`
+- [ ] `proto/agent/agent.proto` has `ConfigureLogship` RPC and
+      `ConfigureLogshipRequest` / `ConfigureLogshipResponse`
+      messages with the right field numbers
+- [ ] Generated proto code committed (`agent.pb.go` /
+      `agent_grpc.pb.go`)
+- [ ] Agent server handles `ConfigureLogship` and stores the
+      config in `s.logshipCfg`
+- [ ] Worker calls `ConfigureLogship` when token is set, both in
+      fresh-create and fork-from-checkpoint paths
+- [ ] Worker skips the call when token is unset (kill-switch works)
+- [ ] Worker tolerates a `ConfigureLogship` failure (logs loudly,
+      sandbox still boots successfully)
+- [ ] No regression in existing sandbox boot path
 - [ ] Three secrets visible in deploy templates / vault config
 
 ---
@@ -372,7 +495,10 @@ the buffered stdout/stderr after `cmd.Run()`) and to
 `ExecSessionAttach` (wraps the session-internal pty/pipe; needs
 care because exec sessions can outlive a single attach call).
 
-### 1.7 Wiring into agent main
+### 1.7 Wiring into agent main and the ConfigureLogship handler
+
+The shipper is created up-front but **dormant** — it doesn't start
+shipping until `ConfigureLogship` arrives from the worker.
 
 ```go
 // cmd/agent/main.go (sketch)
@@ -380,29 +506,51 @@ care because exec sessions can outlive a single attach call).
 func main() {
     // ... existing init
 
-    var shipper *logship.Shipper
-    if tok := os.Getenv("AXIOM_INGEST_TOKEN"); tok != "" {
-        cfg := logship.Config{
-            IngestToken: tok,
-            Dataset:     getenv("AXIOM_DATASET", "oc_sandbox_logs"),
-            SandboxID:   os.Getenv("OC_SANDBOX_ID"),
-            OrgID:       os.Getenv("OC_ORG_ID"),
-        }
-        shipper = logship.New(cfg)
-        go shipper.Run(ctx)
+    shipper := logship.New() // dormant; no token yet
+    go shipper.Run(ctx)      // run loop is a no-op until Activate is called
 
-        tailer := logship.NewVarLogTailer(shipper, "/var/log")
-        go tailer.Run(ctx)
-    }
+    tailer := logship.NewVarLogTailer(shipper, "/var/log")
+    go tailer.Run(ctx)       // tails always; events queue but don't ship
 
-    srv := newAgentServer(shipper /* may be nil */)
-    // ... existing serve loop
+    srv := newAgentServer(shipper)
+    // ... existing serve loop (existing flow registers the new
+    // ConfigureLogship handler alongside the rest)
 }
 ```
 
-`shipper` is nullable. The exec handlers check `if s.shipper != nil`
-before constructing tees; if nil they behave exactly as today. This
-keeps the killswitch (env unset → no shipping) clean.
+The agent's `ConfigureLogship` handler (added in Phase 0; activated
+in Phase 1) calls `shipper.Activate(cfg)`:
+
+```go
+// internal/agent/logship.go
+func (s *Server) ConfigureLogship(ctx context.Context, req *pb.ConfigureLogshipRequest) (*pb.ConfigureLogshipResponse, error) {
+    if req.IngestToken == "" {
+        return &pb.ConfigureLogshipResponse{}, nil // kill-switch
+    }
+    s.shipper.Activate(logship.Config{
+        IngestToken: req.IngestToken,
+        Dataset:     req.Dataset,
+        SandboxID:   req.SandboxId,
+        OrgID:       req.OrgId,
+    })
+    return &pb.ConfigureLogshipResponse{}, nil
+}
+```
+
+Why dormant-then-activate (vs. lazy-create-on-first-Configure):
+
+- The `/var/log` tailer wants to start as early as possible (catch
+  appends from supervisord, OS init scripts, etc.). Creating it
+  only after `ConfigureLogship` arrives means we miss the boot
+  window entirely.
+- Pre-Activate, `shipper.Send(ev)` queues into the bounded ring
+  exactly as it would otherwise; the run loop just doesn't POST
+  yet. Once Activate fires, the buffered events get flushed
+  with the worker-supplied `sandbox_id` / `org_id` populated
+  on each event at flush time (not at Send time).
+- If Activate is never called (kill-switch case), the ring drops
+  oldest indefinitely. Negligible memory cost since `/var/log`
+  on an idle sandbox is quiet.
 
 ### 1.8 Verification
 
@@ -413,7 +561,7 @@ dataset:
 2. From the host: `oc exec <sbx> -- echo "hello world"`.
 3. Query Axiom:
    ```
-   ['oc_sandbox_logs']
+   ['oc-sandbox-logs']
      | where sandbox_id == "<sbx_id>" and source == "exec_stdout"
      | sort by _time desc
      | limit 5
@@ -537,7 +685,7 @@ func buildAPL(sandboxID string, qs url.Values) aplQuery {
 
 func (q aplQuery) historical() string {
     var b strings.Builder
-    fmt.Fprintf(&b, "['oc_sandbox_logs']\n")
+    fmt.Fprintf(&b, "['oc-sandbox-logs']\n")
     fmt.Fprintf(&b, "  | where sandbox_id == %q\n", q.sandboxID)
     fmt.Fprintf(&b, "  | where _event_source startswith \"worker-\"\n")
     if !q.since.IsZero() {

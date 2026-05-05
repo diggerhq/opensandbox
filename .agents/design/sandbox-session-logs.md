@@ -84,15 +84,16 @@ Five components, three new:
 │                                                        │   │
 └────────────────────────────────────────────────────────┼───┘
                                                          │
-              env: AXIOM_INGEST_TOKEN                    │
-                   AXIOM_DATASET=oc_sandbox_logs         │ HTTPS
-                   OC_SANDBOX_ID=sb-...                  │ POST
-                   OC_ORG_ID=org-...                     │
+    worker → agent gRPC at boot:                        │
+      ConfigureLogship(                                  │
+        ingest_token, dataset,                           │ HTTPS
+        sandbox_id, org_id)                              │ POST
+                                                         │
                                                          ▼
                                               ┌──────────────────┐
                                               │      Axiom       │
                                               │ dataset:         │
-                                              │ oc_sandbox_logs  │
+                                              │ oc-sandbox-logs  │
                                               └────────┬─────────┘
                                                        │
                                                        │ APL query
@@ -223,7 +224,7 @@ buffer. Zero new buffering, ~20 lines of code per entry point.
 
 ### 3. Axiom dataset & schema
 
-One dataset: `oc_sandbox_logs`. Same dataset across all OC
+One dataset: `oc-sandbox-logs`. Same dataset across all OC
 sandboxes (per-sandbox isolation enforced at query time, not
 storage time — a separate dataset per sandbox would not scale).
 
@@ -245,7 +246,7 @@ adding `_event_source` on ingest equal to the sandbox's worker
 hostname, validated server-side at query time:
 
 ```apl
-['oc_sandbox_logs']
+['oc-sandbox-logs']
   | where sandbox_id == "sb-0a1b2c3d"
   | where _event_source startswith "worker-"   // dropped events that
                                                 // claim to be from
@@ -261,24 +262,58 @@ Retention: whatever Axiom's default is for the plan we're on
 (30 days at the time of writing). Out of scope for v1; we'll
 revisit when we look at cost.
 
-### 4. Credential injection at sandbox boot
+### 4. Configuration injection at sandbox boot
 
-The Axiom ingest token is a static config value, not a per-sandbox
-secret. Injection path:
+There is no existing path to inject env vars into the *agent
+process's own* environment at PID 1 startup. The existing `SetEnvs`
+RPC (`proto/agent/agent.proto:78-79`) stores envs in agent memory
+**for user commands run via Exec/ExecStream** — it does not modify
+the agent's own `os.Environ()`. The agent at PID 1 startup has only
+the kernel-supplied minimal env (`PATH` is set explicitly in
+`cmd/agent/main.go:26`, nothing else).
+
+So we add **one new RPC** to `proto/agent/agent.proto` —
+the only proto change in this design. Additive, allowed under the
+proto stability contract:
+
+```proto
+// ConfigureLogship sets log-shipping configuration. Worker calls
+// this immediately after VM boot, before any user-facing operations.
+// Sandboxes whose worker doesn't call this never ship logs (kill-
+// switch by omission).
+rpc ConfigureLogship(ConfigureLogshipRequest) returns (ConfigureLogshipResponse);
+
+message ConfigureLogshipRequest {
+  string ingest_token = 1; // empty = disable; treated as kill-switch
+  string dataset      = 2;
+  string sandbox_id   = 3;
+  string org_id       = 4;
+}
+
+message ConfigureLogshipResponse {}
+```
+
+Flow:
 
 1. Add `AXIOM_INGEST_TOKEN` and `AXIOM_DATASET` to the worker's
-   environment (deploy/server.env-equivalent for workers).
-2. Worker passes them to the agent at sandbox-create via the
-   existing env-injection mechanism (cmd/worker — env vars are
-   already plumbed through to the guest agent's startup env).
-3. Worker also injects the per-sandbox identifiers at create time:
-   `OC_SANDBOX_ID`, `OC_ORG_ID`. These already flow through the
-   same path as billing-related env (e.g. `meter.sandbox_id`
-   in billable_events).
-4. The forwarder reads all four on agent start; if
-   `AXIOM_INGEST_TOKEN` is unset, log shipping is disabled silently.
-   This is the rollback / kill-switch — clear the env var, redeploy
-   workers, new sandboxes don't ship.
+   environment (deploy plumbing — the worker process reads these
+   at startup, not the agent).
+2. Worker calls `ConfigureLogship` over the worker→agent gRPC
+   channel right after sandbox boot, passing the token, dataset,
+   and the per-sandbox `sandbox_id` / `org_id` identifiers it
+   already has in scope.
+3. The agent receives the call and hands the four values to the
+   forwarder, which lazy-initialises and starts shipping.
+4. If `AXIOM_INGEST_TOKEN` is unset on the worker, the worker
+   skips the call. Agent's forwarder stays dormant. This is the
+   rollback / kill-switch — clear the env var, redeploy workers,
+   new sandboxes don't ship.
+
+**Brief startup window where shipping is inactive** (~50–100ms
+between agent ready and worker's `ConfigureLogship` call). Logs
+written in that window are not captured. Acceptable: we don't
+backfill `/var/log` history anyway (we tail from current EOF), and
+no exec runs before the worker is talking to the agent.
 
 ### 5. Read API: control-plane-proxied SSE
 
@@ -412,7 +447,7 @@ Phased so each phase is independently shippable and revertible.
 **Phase 0 — Axiom plumbing (no user-visible change).**
 1. Provision the Axiom workspace (or add a dataset to the existing
    one used by agentbox, if we share). Create:
-   - Dataset `oc_sandbox_logs` (30-day retention default).
+   - Dataset `oc-sandbox-logs` (30-day retention default).
    - One ingest token, dataset-scoped, ingest-only.
    - One query token, dataset-scoped, read-only — stored in OC
      control plane secret store.
@@ -467,14 +502,16 @@ schema migrations on our DB.
 - The egress proxy (`internal/secretsproxy/`) — no proposed
   changes. We do propose teeing the proxy's request log to Axiom
   too as a follow-up (Tier-2), but it's not in v1 scope.
-- The `osb-agent` ↔ worker proto — no new RPCs needed. Logs flow
-  out a separate egress path entirely (HTTPS to Axiom).
+- The `osb-agent` ↔ worker proto — exactly **one** new RPC
+  (`ConfigureLogship`, see §4). Log bytes themselves do not flow
+  over this channel; they go out a separate egress path entirely
+  (HTTPS to Axiom). The proto change is configuration only.
 - Per-sandbox secret store — no new secrets per sandbox.
   `AXIOM_INGEST_TOKEN` is a single global config value.
 
 ## Decisions needed before phase 0
 
-- **Dataset name and shape.** Proposed: `oc_sandbox_logs` (one
+- **Dataset name and shape.** Proposed: `oc-sandbox-logs` (one
   dataset, one shape, every sandbox writes to it).
 - **Reuse agentbox's Axiom workspace, or stand up our own?**
   Proposed: stand up our own — different product, different
