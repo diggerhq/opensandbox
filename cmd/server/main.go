@@ -221,7 +221,9 @@ func main() {
 					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
 					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
-					"SEGMENT_WRITE_KEY=%s\n",
+					"SEGMENT_WRITE_KEY=%s\n"+
+					"AXIOM_INGEST_TOKEN=%s\n"+
+					"AXIOM_DATASET=%s\n",
 				cfg.JWTSecret,
 				cfg.Region,
 				cfg.MaxCapacity,
@@ -239,6 +241,8 @@ func main() {
 				cfg.DefaultSandboxDiskMB,
 				cfg.AzureKeyVaultName,
 				cfg.SegmentWriteKey,
+				cfg.AxiomIngestToken,
+				cfg.AxiomDataset,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 
