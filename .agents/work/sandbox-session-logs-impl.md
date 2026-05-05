@@ -1032,3 +1032,40 @@ phase-4 turn-on watch.
   - **Native search-input clear button** swapped for a custom thin
     SVG X — macOS default has a heavy blue gradient that clashes
     with the dashboard palette.
+- *2026-05-05* — ExecSession tee shipped. Phase 1 originally
+  covered `Exec` and `ExecStream` only, leaving the most-used path
+  uncovered: every command run via `POST /api/sandboxes/:id/exec`
+  goes through `ExecSession{Create,Attach}`, so users couldn't see
+  their own command output. Added a per-session pair of
+  `LineWriter`s (`stdoutTee`/`stderrTee`) created in
+  `ExecSessionCreate` via the existing `newExecLineWriters` helper;
+  the two pipe-pumping goroutines write to the LineWriter alongside
+  the existing scrollback; on cmd.Wait() + pipeWg.Wait(),
+  `closeExecLineWriters` flushes any partial trailing line and
+  emits the synthesised EOF event with exit_code. Verified on the
+  EC2 dev host: bash exec via the API now produces visible content
+  rows in the dashboard. PTY content stays excluded.
+- *2026-05-05* — three deploy-side gotchas caught during the e2e:
+  1. `deploy/ec2/deploy-qemu-dev.sh` writes `worker.env` /
+     `server.env` but doesn't `systemctl daemon-reload`. New env
+     entries (we added `AXIOM_*`) silently don't propagate to the
+     running service env until daemon-reload — confirmed by reading
+     `/proc/$pid/environ` and seeing AXIOM_* missing despite the
+     file having them. The diagnostic log in
+     `configureLogshipForSandbox` now reports
+     "ConfigureLogship skipped … no axiom ingest token set on
+     worker" so this misconfiguration is loud, not silent.
+  2. The deploy script only builds the rootfs ext4 image when it
+     doesn't exist on disk (`if [ ! -f .../default.ext4 ]`). After
+     the first deploy, freshly-built `osb-agent` binaries land at
+     `/usr/local/bin/` but the rootfs keeps the old one. Need
+     either an explicit `delete + redeploy` or a manual splice
+     (mount loop, cp, umount). Worth either re-baking on every
+     deploy or surfacing a `--rebuild-rootfs` flag.
+  3. Even with a fresh rootfs, the `golden` snapshot under
+     `/data/sandboxes/golden/` caches a memory snapshot of the
+     agent process from the *initial* boot. New sandboxes restore
+     from that snapshot, so they keep running the snapshotted
+     agent rather than the on-disk one. Invalidate by `rm -rf
+     /data/sandboxes/golden && systemctl restart opensandbox-
+     worker` — worker rebuilds it on first sandbox create.

@@ -157,10 +157,12 @@ func (s *GRPCServer) Stop() {
 // implement LogshipConfigurator.
 func (s *GRPCServer) configureLogshipForSandbox(ctx context.Context, sandboxID string) {
 	if s.axiomIngestToken == "" {
+		log.Printf("grpc: ConfigureLogship skipped for %s: no axiom ingest token set on worker", sandboxID)
 		return
 	}
 	cfger, ok := s.manager.(LogshipConfigurator)
 	if !ok {
+		log.Printf("grpc: ConfigureLogship skipped for %s: manager %T does not implement LogshipConfigurator", sandboxID, s.manager)
 		return
 	}
 	var orgID string
@@ -169,7 +171,9 @@ func (s *GRPCServer) configureLogshipForSandbox(ctx context.Context, sandboxID s
 	}
 	if err := cfger.ConfigureLogship(ctx, sandboxID, s.axiomIngestToken, s.axiomDataset, orgID); err != nil {
 		log.Printf("grpc: ConfigureLogship for %s failed: %v (logs disabled for this sandbox)", sandboxID, err)
+		return
 	}
+	log.Printf("grpc: ConfigureLogship sent for %s (org=%s, dataset=%s)", sandboxID, orgID, s.axiomDataset)
 }
 
 // parseSecretAllowedHosts converts the proto map (env var → comma-separated hosts)
