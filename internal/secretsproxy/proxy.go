@@ -57,6 +57,7 @@ const (
 type Session struct {
 	SandboxID  string
 	Secrets    map[string]string   // "osb_sealed_xxx" → real value
+	Names      map[string]string   // envVarName → "osb_sealed_xxx" — lets us update by name without re-sealing
 	TokenHosts map[string][]string // sealed token → allowed hosts; nil/empty entry = all allowed hosts
 	Allowlist  []string            // nil = all hosts allowed; supports "*." prefix wildcards
 	ExpiresAt  time.Time
@@ -178,12 +179,26 @@ func (p *SecretsProxy) GetSessionTokenHosts(guestIP string) map[string][]string 
 	return session.TokenHosts
 }
 
+// GetSessionNames returns the env-var-name → sealed-token map for the given
+// guest IP's session. Used to persist the name index across hibernate/wake
+// and live migration so secret-refresh-by-name keeps working after a handoff.
+func (p *SecretsProxy) GetSessionNames(guestIP string) map[string]string {
+	p.mu.RLock()
+	session := p.sessions[guestIP]
+	p.mu.RUnlock()
+	if session == nil {
+		return nil
+	}
+	return session.Names
+}
+
 // ReregisterSession creates a new proxy session from a previously persisted token map.
 // Used on wake to restore the proxy session without re-generating tokens.
-func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string) {
+func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string, names map[string]string) {
 	session := &Session{
 		SandboxID:  sandboxID,
 		Secrets:    tokens,
+		Names:      names,
 		TokenHosts: tokenHosts,
 		Allowlist:  allowlist,
 		ExpiresAt:  time.Now().Add(defaultSessionTTL),
@@ -191,8 +206,38 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 	p.mu.Lock()
 	p.sessions[guestIP] = session
 	p.mu.Unlock()
-	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d tokenHosts=%d",
-		sandboxID, guestIP, len(tokens), len(allowlist), len(tokenHosts))
+	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d tokenHosts=%d names=%d",
+		sandboxID, guestIP, len(tokens), len(allowlist), len(tokenHosts), len(names))
+}
+
+// UpdateSecretValue replaces the value the sealed token for `secretName` resolves
+// to, on the session for the given sandbox. The sealed token ID itself stays
+// the same — sandbox env vars don't change, but the next outbound HTTPS that
+// the proxy substitutes uses the new value.
+//
+// Returns true if the update landed (session found, name matched a known
+// sealed token, value replaced). Returns false if there's no session for the
+// sandbox or the name isn't in the session — caller can use this to log a
+// stale/missed update.
+func (p *SecretsProxy) UpdateSecretValue(sandboxID, secretName, newValue string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, session := range p.sessions {
+		if session.SandboxID != sandboxID {
+			continue
+		}
+		token, ok := session.Names[secretName]
+		if !ok {
+			return false
+		}
+		if session.Secrets == nil {
+			session.Secrets = make(map[string]string, 1)
+		}
+		session.Secrets[token] = newValue
+		log.Printf("secrets-proxy: updated value for sandbox=%s name=%s (token unchanged)", sandboxID, secretName)
+		return true
+	}
+	return false
 }
 
 // CreateSealedEnvs generates sealed tokens for the given env vars, registers a
@@ -239,9 +284,16 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, pl
 
 	// Only register a proxy session if there's actually something to substitute.
 	if len(tokenMap) > 0 {
+		// Build the env-var-name → sealed-token index. Required for
+		// UpdateSecretValue (refresh-by-name without re-sealing).
+		names := make(map[string]string, len(sealed))
+		for envVar, token := range sealed {
+			names[envVar] = token
+		}
 		p.RegisterSession(guestIP, &Session{
 			SandboxID:  sandboxID,
 			Secrets:    tokenMap,
+			Names:      names,
 			TokenHosts: tokenHosts,
 			Allowlist:  allowlist,
 		})

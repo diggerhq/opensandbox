@@ -82,7 +82,11 @@ type SecretsProxyIntegration interface {
 	// GetSessionTokenHosts returns the per-token host restrictions for persisting during hibernate.
 	GetSessionTokenHosts(guestIP string) map[string][]string
 	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
-	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string)
+	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string, names map[string]string)
+	// GetSessionNames returns the env-var-name → sealed-token index for persistence.
+	GetSessionNames(guestIP string) map[string]string
+	// UpdateSecretValue replaces the value the sealed token for secretName resolves to.
+	UpdateSecretValue(sandboxID, secretName, newValue string) bool
 	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
 	CACertPEM() []byte
 }

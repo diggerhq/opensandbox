@@ -975,6 +975,17 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	return &pb.SetSandboxLimitsResponse{}, nil
 }
 
+func (s *GRPCServer) UpdateSandboxSecret(ctx context.Context, req *pb.UpdateSandboxSecretRequest) (*pb.UpdateSandboxSecretResponse, error) {
+	if req.SandboxId == "" || req.SecretName == "" {
+		return nil, fmt.Errorf("sandbox_id and secret_name required")
+	}
+	updated, err := s.manager.UpdateSandboxSecret(ctx, req.SandboxId, req.SecretName, req.Value)
+	if err != nil {
+		return nil, fmt.Errorf("update secret: %w", err)
+	}
+	return &pb.UpdateSandboxSecretResponse{Updated: updated}, nil
+}
+
 // SetMigrator sets the live migration handler (call after NewGRPCServer if the manager supports it).
 func (s *GRPCServer) SetMigrator(m LiveMigrator) {
 	s.migrator = m

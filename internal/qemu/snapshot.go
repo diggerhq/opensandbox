@@ -36,6 +36,10 @@ type SnapshotMeta struct {
 	GoldenVersion    string              `json:"goldenVersion,omitempty"`
 	SnapshotedAt     time.Time           `json:"snapshotedAt,omitempty"`
 	SealedTokens     map[string]string   `json:"sealedTokens,omitempty"`
+	// SealedNames is the env-var-name → sealed-token index. Persisted alongside
+	// SealedTokens so secret-store refresh-by-name (UpdateSecretValue) keeps
+	// working after a wake or migration handoff.
+	SealedNames      map[string]string   `json:"sealedNames,omitempty"`
 	EgressAllowlist  []string            `json:"egressAllowlist,omitempty"`
 	TokenHosts       map[string][]string `json:"tokenHosts,omitempty"`
 }
@@ -130,6 +134,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Persist secrets proxy state so wake can re-register the session.
 	if m.secretsProxy != nil && vm.network != nil {
 		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.SealedNames = m.secretsProxy.GetSessionNames(vm.network.GuestIP)
 		meta.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
 		meta.TokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
 	}
@@ -488,7 +493,7 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 
 	// Re-register secrets proxy session from persisted tokens.
 	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
-		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts)
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts, meta.SealedNames)
 		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(meta.SealedTokens))
 	}
 

@@ -55,6 +55,13 @@ type Manager interface {
 	// Resource limits
 	SetResourceLimits(ctx context.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error
 
+	// UpdateSandboxSecret refreshes the proxy session value for one secret name
+	// (env var name) without changing the sealed token id seen by the sandbox.
+	// Used by the secret-store-update flow to push new values to running
+	// sandboxes. Returns (true, nil) on success; (false, nil) if no session
+	// or no name match (transient miss e.g. mid-migration; caller logs).
+	UpdateSandboxSecret(ctx context.Context, sandboxID, secretName, value string) (bool, error)
+
 	// Monitoring
 	Stats(ctx context.Context, sandboxID string) (*SandboxStats, error)
 	HostPort(ctx context.Context, sandboxID string) (int, error)

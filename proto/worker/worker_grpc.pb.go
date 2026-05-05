@@ -43,6 +43,7 @@ const (
 	SandboxWorker_BuildTemplate_FullMethodName             = "/worker.SandboxWorker/BuildTemplate"
 	SandboxWorker_GetSandboxStats_FullMethodName           = "/worker.SandboxWorker/GetSandboxStats"
 	SandboxWorker_SetSandboxLimits_FullMethodName          = "/worker.SandboxWorker/SetSandboxLimits"
+	SandboxWorker_UpdateSandboxSecret_FullMethodName       = "/worker.SandboxWorker/UpdateSandboxSecret"
 	SandboxWorker_PreCopyDrives_FullMethodName             = "/worker.SandboxWorker/PreCopyDrives"
 	SandboxWorker_PrepareMigrationIncoming_FullMethodName  = "/worker.SandboxWorker/PrepareMigrationIncoming"
 	SandboxWorker_LiveMigrate_FullMethodName               = "/worker.SandboxWorker/LiveMigrate"
@@ -87,6 +88,13 @@ type SandboxWorkerClient interface {
 	BuildTemplate(ctx context.Context, in *BuildTemplateRequest, opts ...grpc.CallOption) (*BuildTemplateResponse, error)
 	GetSandboxStats(ctx context.Context, in *GetSandboxStatsRequest, opts ...grpc.CallOption) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(ctx context.Context, in *SetSandboxLimitsRequest, opts ...grpc.CallOption) (*SetSandboxLimitsResponse, error)
+	// UpdateSandboxSecret refreshes the value the proxy substitutes for a
+	// sealed token, by env-var name. Used by the secret-store update flow:
+	// when a customer PUTs a new value, the CP fans out this RPC to every
+	// worker hosting a sandbox that uses the store. Sealed token IDs and
+	// sandbox env vars are unchanged — only the proxy session's value map
+	// updates, so the next outbound HTTPS substitution uses the new value.
+	UpdateSandboxSecret(ctx context.Context, in *UpdateSandboxSecretRequest, opts ...grpc.CallOption) (*UpdateSandboxSecretResponse, error)
 	// Live migration between workers
 	PreCopyDrives(ctx context.Context, in *PreCopyDrivesRequest, opts ...grpc.CallOption) (*PreCopyDrivesResponse, error)
 	PrepareMigrationIncoming(ctx context.Context, in *PrepareMigrationIncomingRequest, opts ...grpc.CallOption) (*PrepareMigrationIncomingResponse, error)
@@ -356,6 +364,16 @@ func (c *sandboxWorkerClient) SetSandboxLimits(ctx context.Context, in *SetSandb
 	return out, nil
 }
 
+func (c *sandboxWorkerClient) UpdateSandboxSecret(ctx context.Context, in *UpdateSandboxSecretRequest, opts ...grpc.CallOption) (*UpdateSandboxSecretResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateSandboxSecretResponse)
+	err := c.cc.Invoke(ctx, SandboxWorker_UpdateSandboxSecret_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxWorkerClient) PreCopyDrives(ctx context.Context, in *PreCopyDrivesRequest, opts ...grpc.CallOption) (*PreCopyDrivesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PreCopyDrivesResponse)
@@ -443,6 +461,13 @@ type SandboxWorkerServer interface {
 	BuildTemplate(context.Context, *BuildTemplateRequest) (*BuildTemplateResponse, error)
 	GetSandboxStats(context.Context, *GetSandboxStatsRequest) (*GetSandboxStatsResponse, error)
 	SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error)
+	// UpdateSandboxSecret refreshes the value the proxy substitutes for a
+	// sealed token, by env-var name. Used by the secret-store update flow:
+	// when a customer PUTs a new value, the CP fans out this RPC to every
+	// worker hosting a sandbox that uses the store. Sealed token IDs and
+	// sandbox env vars are unchanged — only the proxy session's value map
+	// updates, so the next outbound HTTPS substitution uses the new value.
+	UpdateSandboxSecret(context.Context, *UpdateSandboxSecretRequest) (*UpdateSandboxSecretResponse, error)
 	// Live migration between workers
 	PreCopyDrives(context.Context, *PreCopyDrivesRequest) (*PreCopyDrivesResponse, error)
 	PrepareMigrationIncoming(context.Context, *PrepareMigrationIncomingRequest) (*PrepareMigrationIncomingResponse, error)
@@ -531,6 +556,9 @@ func (UnimplementedSandboxWorkerServer) GetSandboxStats(context.Context, *GetSan
 }
 func (UnimplementedSandboxWorkerServer) SetSandboxLimits(context.Context, *SetSandboxLimitsRequest) (*SetSandboxLimitsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetSandboxLimits not implemented")
+}
+func (UnimplementedSandboxWorkerServer) UpdateSandboxSecret(context.Context, *UpdateSandboxSecretRequest) (*UpdateSandboxSecretResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateSandboxSecret not implemented")
 }
 func (UnimplementedSandboxWorkerServer) PreCopyDrives(context.Context, *PreCopyDrivesRequest) (*PreCopyDrivesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PreCopyDrives not implemented")
@@ -982,6 +1010,24 @@ func _SandboxWorker_SetSandboxLimits_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxWorker_UpdateSandboxSecret_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateSandboxSecretRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxWorkerServer).UpdateSandboxSecret(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxWorker_UpdateSandboxSecret_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxWorkerServer).UpdateSandboxSecret(ctx, req.(*UpdateSandboxSecretRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxWorker_PreCopyDrives_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PreCopyDrivesRequest)
 	if err := dec(in); err != nil {
@@ -1166,6 +1212,10 @@ var SandboxWorker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetSandboxLimits",
 			Handler:    _SandboxWorker_SetSandboxLimits_Handler,
+		},
+		{
+			MethodName: "UpdateSandboxSecret",
+			Handler:    _SandboxWorker_UpdateSandboxSecret_Handler,
 		},
 		{
 			MethodName: "PreCopyDrives",
