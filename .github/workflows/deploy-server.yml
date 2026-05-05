@@ -42,6 +42,9 @@ jobs:
             -o bin/opensandbox-server ./cmd/server/
 
       - name: Build web dashboard
+        env:
+          VITE_PUBLIC_POSTHOG_PROJECT_TOKEN: ${{ secrets.POSTHOG_PROJECT_TOKEN }}
+          VITE_PUBLIC_POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
         run: cd web && npm ci && npm run build
 
       - name: Package web assets
