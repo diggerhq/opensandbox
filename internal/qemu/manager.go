@@ -300,7 +300,7 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 		}
 		return merged
 	}
-	if len(cfg.Envs) == 0 && len(cfg.SecretEnvs) == 0 {
+	if len(cfg.Envs) == 0 && len(cfg.SecretEnvs) == 0 && len(cfg.EgressAllowlist) == 0 {
 		return cfg.Envs
 	}
 	sealed := m.secretsProxy.CreateSealedEnvs(sandboxID, netCfg.GuestIP, netCfg.HostIP, cfg.Envs, cfg.SecretEnvs, cfg.EgressAllowlist, cfg.SecretAllowedHosts)
@@ -2709,10 +2709,11 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 		log.Printf("qemu: RestoreFromCheckpoint %s: clock sync failed: %v", sandboxID, err)
 	}
 
-	// Re-register secrets proxy session from checkpoint metadata.
-	if m.secretsProxy != nil && len(cpMeta.SealedTokens) > 0 {
+	// Re-register secrets proxy session from checkpoint metadata. An allowlist
+	// alone is enough — without a session the proxy 407s every request.
+	if m.secretsProxy != nil && (len(cpMeta.SealedTokens) > 0 || len(cpMeta.EgressAllowlist) > 0) {
 		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, cpMeta.SealedTokens, cpMeta.EgressAllowlist, cpMeta.TokenHosts)
-		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(cpMeta.SealedTokens))
+		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens, %d allowlist)", sandboxID, len(cpMeta.SealedTokens), len(cpMeta.EgressAllowlist))
 	}
 
 	// Step 8: Update VM instance

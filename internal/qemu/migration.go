@@ -748,11 +748,12 @@ func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID,
 	// returning so the source can issue the LiveMigrate RPC immediately
 	// without a races window where the migrated VM is running but the
 	// proxy has no substitution map.
-	if m.secretsProxy != nil && len(secrets.SealedTokens) > 0 {
+	// An allowlist alone is enough — without a session the proxy 407s every request.
+	if m.secretsProxy != nil && (len(secrets.SealedTokens) > 0 || len(secrets.EgressAllowlist) > 0) {
 		if vm, getErr := m.getVM(sandboxID); getErr == nil && vm.network != nil && vm.network.GuestIP != "" {
 			m.secretsProxy.ReregisterSession(sandboxID, vm.network.GuestIP, secrets.SealedTokens, secrets.EgressAllowlist, secrets.TokenHosts)
-			log.Printf("qemu: migration %s: re-registered secrets proxy session (%d tokens, guestIP=%s)",
-				sandboxID, len(secrets.SealedTokens), vm.network.GuestIP)
+			log.Printf("qemu: migration %s: re-registered secrets proxy session (%d tokens, %d allowlist, guestIP=%s)",
+				sandboxID, len(secrets.SealedTokens), len(secrets.EgressAllowlist), vm.network.GuestIP)
 		}
 	}
 
