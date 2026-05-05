@@ -442,7 +442,9 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		if workerID == "" {
 			workerID = "w-local-1"
 		}
-		_, _ = s.store.CreateSandboxSession(ctx, buildSandboxID, orgID, nil, cfg.Template, region, workerID, cfgJSON, []byte("{}"))
+		// Image-builder sandboxes never bind to a customer secret store —
+		// secret_store_id stays NULL. They run a Dockerfile build, not user code.
+		_, _ = s.store.CreateSandboxSession(ctx, buildSandboxID, orgID, nil, cfg.Template, region, workerID, cfgJSON, []byte("{}"), nil)
 		if s.workerRegistry != nil {
 			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {
 				_ = s.store.SetSandboxGoldenVersion(ctx, buildSandboxID, w.GoldenVersion)

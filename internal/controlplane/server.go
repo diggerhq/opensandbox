@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"google.golang.org/grpc"
@@ -132,11 +133,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 	// Resolve secret store: decrypt secrets + inherit egress allowlist
 	var egressAllowlist []string
 	var secretAllowedHosts map[string]string // env var name → comma-separated hosts (for proto)
+	var secretStoreID *uuid.UUID             // populated below; passed to CreateSandboxSession so the row's secret_store_id column is set for the refresh fanout
 	if req.SecretStore != "" {
 		store, err := s.store.GetSecretStoreByName(c.Request().Context(), orgID, req.SecretStore)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret store not found: " + req.SecretStore})
 		}
+		secretStoreID = &store.ID
 
 		egressAllowlist = store.EgressAllowlist
 
@@ -217,7 +220,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 	}
 	cfgJSON, _ := json.Marshal(req)
 	metadataJSON, _ := json.Marshal(req.Metadata)
-	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
+	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, secretStoreID)
 
 	// Persist golden version from worker heartbeat so the scaler can read it
 	// from PG instead of relying on in-memory state via gRPC.
