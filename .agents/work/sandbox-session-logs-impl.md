@@ -967,3 +967,21 @@ phase-4 turn-on watch.
   predicate (security-load-bearing — covered by unit test). Live
   tail polls Axiom every 1s with a moving `_time` cursor; SSE
   keepalive every 15s. Phase 3 (UI tab) is next.
+- *2026-05-05* — Phase 2 route moved: was on the `api` group
+  (`/api/sandboxes/:id/logs`, X-API-Key auth) but the dashboard
+  uses cookie auth via `/api/dashboard/sessions/:sandboxId/...`.
+  Browser EventSource can't auth there. Moved to
+  `dash.GET("/sessions/:sandboxId/logs", s.getSandboxLogs)`. SDK
+  consumers can be added later as a separate route if asked.
+- *2026-05-05* — Phase 3 shipped: UI Logs panel on
+  `web/src/pages/SessionDetail.tsx`. New `Logs` button next to
+  `Terminal` toggles a `<LogsPanel>` (new component at
+  `web/src/components/LogsPanel.tsx`). EventSource via
+  `streamSessionLogs` in `web/src/api/client.ts`; source-color-
+  coded rows; debounced search re-opens the SSE with `?q=`;
+  source filter chips re-open with `?source=`; pause toggle is
+  client-side (stream keeps running); auto-scroll to bottom
+  unless the user scrolled up; visible-event cap of 3000 to
+  bound memory. Synthetic exec EOF events render as "✓ exited 0"
+  /  "✗ exited 1" rows inline. PTY content remains excluded from
+  this view — different consent surface (per design doc).

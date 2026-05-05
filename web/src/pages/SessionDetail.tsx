@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getSessionDetail, getSessionStats, rebootSession, powerCycleSession } from '../api/client'
 import Terminal from '../components/Terminal'
+import LogsPanel from '../components/LogsPanel'
 
 function StatusBadge({ status }: { status: string }) {
   const cls =
@@ -62,6 +63,7 @@ export default function SessionDetail() {
   const queryClient = useQueryClient()
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null)
   const [showTerminal, setShowTerminal] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
   const [showInternal, setShowInternal] = useState(false)
   const [resetState, setResetState] = useState<'idle' | 'rebooting' | 'power-cycling'>('idle')
   const [resetError, setResetError] = useState<string | null>(null)
@@ -190,6 +192,21 @@ export default function SessionDetail() {
                   Terminal
                 </button>
                 <button
+                  className={showLogs ? 'btn-primary' : 'btn-ghost'}
+                  onClick={() => setShowLogs(!showLogs)}
+                  title="Live logs from /var/log + every exec'd command"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="8" y1="6" x2="21" y2="6" />
+                    <line x1="8" y1="12" x2="21" y2="12" />
+                    <line x1="8" y1="18" x2="21" y2="18" />
+                    <line x1="3" y1="6" x2="3.01" y2="6" />
+                    <line x1="3" y1="12" x2="3.01" y2="12" />
+                    <line x1="3" y1="18" x2="3.01" y2="18" />
+                  </svg>
+                  Logs
+                </button>
+                <button
                   className="btn-ghost"
                   onClick={handleReboot}
                   disabled={resetState !== 'idle'}
@@ -236,6 +253,13 @@ export default function SessionDetail() {
       {showTerminal && session.status === 'running' && (
         <div className="glass-card animate-in" style={{ padding: 20, marginBottom: 16 }}>
           <Terminal sandboxId={sandboxId!} onClose={() => setShowTerminal(false)} />
+        </div>
+      )}
+
+      {/* Logs */}
+      {showLogs && (
+        <div className="glass-card animate-in" style={{ padding: 20, marginBottom: 16 }}>
+          <LogsPanel sandboxId={sandboxId!} onClose={() => setShowLogs(false)} />
         </div>
       )}
 

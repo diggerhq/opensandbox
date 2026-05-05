@@ -218,11 +218,6 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
 
-	// Sandbox session logs (design + work in .agents/sandbox-session-logs).
-	// SSE: historical batch + 1s-poll live tail. Query token never leaves
-	// the control plane; the UI talks to us, we talk to Axiom.
-	api.GET("/sandboxes/:id/logs", s.getSandboxLogs)
-
 	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
 	api.POST("/capacity/reservations", s.createCapacityReservation)
@@ -458,6 +453,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Reset operations
 		dash.POST("/sessions/:sandboxId/reboot", s.dashboardRebootSession)
 		dash.POST("/sessions/:sandboxId/power-cycle", s.dashboardPowerCycleSession)
+		// Sandbox session logs (SSE; historical + 1s-poll live tail).
+		// Server queries Axiom server-side with a read-only token that
+		// never reaches the browser. Org-ownership enforced via
+		// GetSandboxSessionInOrg (404 on mismatch — no cross-org leak).
+		dash.GET("/sessions/:sandboxId/logs", s.getSandboxLogs)
 		// PTY (terminal)
 		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
 		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)

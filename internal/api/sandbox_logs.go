@@ -65,7 +65,7 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	}
 
-	sandboxID := c.Param("id")
+	sandboxID := c.Param("sandboxId")
 	if sandboxID == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing sandbox id"})
 	}
