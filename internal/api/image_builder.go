@@ -399,7 +399,8 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		}
 		_ = resp
 	} else if s.manager != nil {
-		cfg.NetworkEnabled = true
+		t := true
+		cfg.NetworkEnabled = &t
 		sb, err := s.manager.Create(ctx, cfg)
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to create build sandbox: %w", err)
