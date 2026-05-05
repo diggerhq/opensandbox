@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/logship"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 	"google.golang.org/grpc"
 )
@@ -61,6 +62,12 @@ type Server struct {
 	// If never set, the forwarder stays dormant.
 	logshipMu  sync.RWMutex
 	logshipCfg LogshipConfig
+
+	// Shipper is the in-VM forwarder that ships /var/log + exec output
+	// to Axiom. Set by cmd/agent/main.go before Serve. Nil = log
+	// shipping not wired (the forwarder package isn't built into this
+	// agent binary). The exec handlers tolerate nil and skip teeing.
+	Shipper *logship.Shipper
 
 	// gRPC server reference for hibernate GracefulStop
 	mu         sync.Mutex

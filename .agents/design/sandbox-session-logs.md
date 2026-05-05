@@ -118,7 +118,7 @@ Five components, three new:
 ### 1. In-guest log forwarder (in `osb-agent`)
 
 A new goroutine pool inside the existing `osb-agent` (PID 1 of every
-sandbox VM). Lives in `cmd/agent/internal/logship/` (new package).
+sandbox VM). Lives in `internal/logship/` (new package).
 
 **Why in-process, not a separate binary:** half the data we want to
 ship — exec stdout/stderr — is already produced inside the agent
@@ -455,7 +455,7 @@ Phased so each phase is independently shippable and revertible.
    to the deploy env templates.
 
 **Phase 1 — osb-agent forwarder behind a flag.**
-1. Implement `cmd/agent/internal/logship/` with `/var/log` tail and
+1. Implement `internal/logship/` with `/var/log` tail and
    one `io.Writer` interface that wraps stdout/stderr.
 2. Implement the in-`Exec` / `ExecStream` / `ExecSessionAttach`
    tees as a `io.MultiWriter` chain.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 
+	"github.com/opensandbox/opensandbox/internal/logship"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
@@ -39,6 +40,14 @@ func (s *Server) ConfigureLogship(ctx context.Context, req *pb.ConfigureLogshipR
 		log.Printf("agent: ConfigureLogship received empty ingest_token (kill-switch); shipping disabled")
 	} else {
 		log.Printf("agent: ConfigureLogship received (sandbox_id=%s, dataset=%s)", cfg.SandboxID, cfg.Dataset)
+		if s.Shipper != nil {
+			s.Shipper.Activate(logship.Config{
+				IngestToken: cfg.IngestToken,
+				Dataset:     cfg.Dataset,
+				SandboxID:   cfg.SandboxID,
+				OrgID:       cfg.OrgID,
+			})
+		}
 	}
 	return &pb.ConfigureLogshipResponse{}, nil
 }

@@ -47,12 +47,13 @@ proto/agent/
 └── agent.proto                                (one new RPC: ConfigureLogship)
 
 cmd/agent/                                     (the in-guest agent)
-├── main.go                                    (wire shipper + tailer at startup)
-└── internal/logship/                          (new package, all forwarder code)
-    ├── shipper.go                             (Axiom HTTP client + batcher + drop-oldest)
-    ├── varlog.go                              (fsnotify tail of /var/log/**)
-    ├── tee.go                                 (io.Writer adapter for exec output)
-    └── shipper_test.go                        (unit tests)
+└── main.go                                    (wire shipper + tailer at startup)
+
+internal/logship/                              (new package, all forwarder code)
+├── shipper.go                                 (Axiom HTTP client + batcher + drop-oldest)
+├── varlog.go                                  (fsnotify tail of /var/log/**)
+├── tee.go                                     (io.Writer adapter for exec output)
+└── shipper_test.go                            (unit tests)
 
 internal/agent/                                (in-VM agent server)
 ├── server.go                                  (add logshipCfg + shipper handle)
@@ -284,7 +285,7 @@ Axiom under the schema in the design doc.
 
 ### 1.1 Package layout
 
-`cmd/agent/internal/logship/`:
+`internal/logship/`:
 
 - **`shipper.go`** — owns the Axiom HTTP client, the in-memory
   ring buffer (drop-oldest), and the batch flusher.
