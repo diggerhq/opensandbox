@@ -121,18 +121,25 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 		return nil
 	}
 
-	// Live tail. Cursor advances as new events arrive. Use a tiny
-	// (~1s) overlap on the first tail tick to avoid losing events that
-	// were ingested between the historical query and now — the
-	// duplicates are harmless because each event has a unique _time +
-	// content (and the UI dedupes by _time/content if it cares).
+	// Live tail. Cursor starts at the last historical event's _time.
+	// Tail polls strictly require `ev.Time.After(cursor)`, so events
+	// at exactly the cursor are skipped — no double-emit of historical
+	// rows.
+	//
+	// Tradeoff: events ingested after the historical query window
+	// closed but with _time falling before the historical batch's
+	// last event (out-of-order ingest, e.g. network jitter on the
+	// shipper) are missed. Earlier we tried subtracting a 1s overlap
+	// to catch those, but Axiom returns events with stable _time so
+	// the overlap re-fetched events already emitted in the
+	// historical batch — visible duplicates in the UI. Until we add
+	// a server-side seen-set, no overlap.
 	var cursor time.Time
 	if len(rows) > 0 {
 		cursor = rows[len(rows)-1].Time
 	} else {
 		cursor = q.since
 	}
-	cursor = cursor.Add(-1 * time.Second)
 
 	tick := time.NewTicker(1 * time.Second)
 	defer tick.Stop()
