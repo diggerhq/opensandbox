@@ -30,11 +30,14 @@ const visibleCap = 3000        // hard cap on retained events
 const debounceMs = 200         // search-box debounce
 const nearBottomPx = 40        // "auto-scroll if within this many px of bottom"
 
+// One colour per source. Distinct hues across the four; no overlap
+// with the green used for success-EOF rows (✓ exited 0) and the rose
+// used for failure-EOF rows.
 const sources: { value: LogEvent['source']; label: string; color: string }[] = [
-  { value: 'exec_stdout', label: 'stdout', color: 'var(--text-secondary)' },
-  { value: 'exec_stderr', label: 'stderr', color: 'var(--accent-rose)' },
-  { value: 'var_log',     label: 'var/log', color: 'var(--text-tertiary)' },
-  { value: 'agent',       label: 'agent', color: 'var(--accent-violet)' },
+  { value: 'exec_stdout', label: 'stdout',  color: 'var(--text-secondary)' },
+  { value: 'exec_stderr', label: 'stderr',  color: 'var(--accent-rose)' },
+  { value: 'var_log',     label: 'var/log', color: '#f59e0b' /* amber — distinct from emerald used for ✓ exited */ },
+  { value: 'agent',       label: 'agent',   color: 'var(--accent-violet)' },
 ]
 
 function useDebouncedValue<T>(value: T, delayMs: number): T {
@@ -54,7 +57,9 @@ interface LogsPanelProps {
 export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
   const [query, setQuery] = useState('')
   const [paused, setPaused] = useState(false)
-  const [activeSources, setActiveSources] = useState<Set<LogEvent['source']>>(new Set())
+  // Subtractive filter: every source is shown by default. Clicking a
+  // chip *hides* that source; clicking again brings it back.
+  const [hiddenSources, setHiddenSources] = useState<Set<LogEvent['source']>>(new Set())
   const [events, setEvents] = useState<LogEvent[]>([])
   const [connState, setConnState] = useState<'connecting' | 'open' | 'error' | 'closed'>('connecting')
 
@@ -65,21 +70,19 @@ export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
 
-  // (Re)open the EventSource whenever filter inputs change. Each new
-  // open clears the local buffer because the historical batch will
-  // re-stream from the start.
+  // Open the EventSource ONCE per sandbox. Search and source filters
+  // are applied client-side against the in-memory buffer — no SSE
+  // re-open on filter change, no flicker. The historical batch is
+  // bounded by visibleCap so memory stays cheap; if a user really
+  // wants to search beyond the current buffer they can adjust the
+  // since= URL param later.
   useEffect(() => {
     setEvents([])
     pausedBufRef.current = []
     stickToBottomRef.current = true
     setConnState('connecting')
 
-    const sourceParam = activeSources.size > 0 ? Array.from(activeSources).join(',') : undefined
-    const es = streamSessionLogs(sandboxId, {
-      tail: true,
-      q: debouncedQuery || undefined,
-      source: sourceParam,
-    })
+    const es = streamSessionLogs(sandboxId, { tail: true })
 
     es.onopen = () => setConnState('open')
     es.onerror = () => setConnState('error')
@@ -109,10 +112,8 @@ export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
       es.close()
       setConnState('closed')
     }
-    // We intentionally re-subscribe whenever query/source change. We
-    // do NOT include `paused` here — pausing is purely client-side.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sandboxId, debouncedQuery, activeSources])
+  }, [sandboxId])
 
   // When unpausing, drain the paused buffer into events.
   useEffect(() => {
@@ -144,7 +145,7 @@ export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
   }
 
   const toggleSource = (src: LogEvent['source']) => {
-    setActiveSources((prev) => {
+    setHiddenSources((prev) => {
       const next = new Set(prev)
       if (next.has(src)) next.delete(src)
       else next.add(src)
@@ -152,7 +153,37 @@ export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
     })
   }
 
-  const visible = useMemo(() => events, [events])
+  // Client-side filter pipeline: source filter → text search → EOF
+  // dedup. Each command emits one EOF event per stream (stdout AND
+  // stderr) so without dedup the timeline shows "exited 0" twice for
+  // the same exec. We collapse them to one per exec_id.
+  const visible = useMemo(() => {
+    const lowerQuery = debouncedQuery.trim().toLowerCase()
+
+    // Two-pass:
+    //  1. Dedupe EOFs by exec_id — agent emits one EOF on stdout AND
+    //     one on stderr per exec; we keep the first (stdout, by emit
+    //     order), drop the rest. Must happen BEFORE the source filter
+    //     — otherwise hiding stdout lets the suppressed stderr-EOF
+    //     through and the row "moves" from stdout-coloured to stderr.
+    //  2. Apply source + text filters to the deduped list.
+    const seenEofExecIDs = new Set<string>()
+    const deduped: LogEvent[] = []
+    for (const ev of events) {
+      const isEof = ev.line === '' && ev.exit_code !== undefined
+      if (isEof && ev.exec_id) {
+        if (seenEofExecIDs.has(ev.exec_id)) continue
+        seenEofExecIDs.add(ev.exec_id)
+      }
+      deduped.push(ev)
+    }
+
+    return deduped.filter((ev) => {
+      if (hiddenSources.has(ev.source)) return false
+      if (lowerQuery && !searchCorpus(ev).includes(lowerQuery)) return false
+      return true
+    })
+  }, [events, hiddenSources, debouncedQuery])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: 480 }}>
@@ -170,42 +201,84 @@ export default function LogsPanel({ sandboxId, onClose }: LogsPanelProps) {
 
         <ConnectionDot state={connState} />
 
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search…"
-          style={{
-            flex: 1,
-            minWidth: 160,
-            background: 'var(--bg-deep)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-sm)',
-            color: 'var(--text-primary)',
-            fontSize: 13,
-            padding: '6px 10px',
-            fontFamily: 'inherit',
-          }}
-        />
+        <div style={{ flex: 1, minWidth: 160, position: 'relative' }}>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search…"
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              background: 'var(--bg-deep)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-sm)',
+              color: 'var(--text-primary)',
+              fontSize: 13,
+              padding: '6px 28px 6px 10px',
+              fontFamily: 'inherit',
+            }}
+          />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              aria-label="Clear search"
+              title="Clear"
+              style={{
+                position: 'absolute',
+                right: 6,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'none',
+                border: 'none',
+                padding: 4,
+                cursor: 'pointer',
+                color: 'var(--text-tertiary)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                lineHeight: 0,
+                opacity: 0.7,
+                transition: 'opacity 0.1s',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.7')}
+            >
+              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+                <line x1="2" y1="2" x2="10" y2="10" />
+                <line x1="10" y1="2" x2="2" y2="10" />
+              </svg>
+            </button>
+          )}
+        </div>
 
         <div style={{ display: 'flex', gap: 4 }}>
           {sources.map((src) => {
-            const isActive = activeSources.has(src.value)
-            const noFilters = activeSources.size === 0
+            // Subtractive filter: chip ON = source visible (the
+            // default); chip OFF = source hidden. Click toggles.
+            // ON state uses a subtle ~18% tint of the source color
+            // rather than a full fill — keeps the four chips legible
+            // when all four are active by default.
+            const isVisible = !hiddenSources.has(src.value)
+            const tinted = `color-mix(in srgb, ${src.color} 18%, transparent)`
             return (
               <button
                 key={src.value}
                 onClick={() => toggleSource(src.value)}
-                title={`Filter to ${src.label}`}
+                title={isVisible ? `Hide ${src.label}` : `Show ${src.label}`}
                 style={{
-                  background: isActive ? src.color : 'transparent',
-                  color: isActive ? 'var(--bg-deep)' : (noFilters ? src.color : 'var(--text-tertiary)'),
-                  border: `1px solid ${isActive ? src.color : 'var(--border-subtle)'}`,
+                  background: isVisible ? tinted : 'transparent',
+                  color: src.color,
+                  border: `1px solid ${src.color}`,
                   borderRadius: 'var(--radius-sm)',
                   fontSize: 11,
+                  fontWeight: isVisible ? 600 : 400,
+                  opacity: isVisible ? 1 : 0.45,
                   padding: '3px 8px',
                   cursor: 'pointer',
                   fontFamily: 'var(--font-mono)',
+                  transition: 'background 0.1s, opacity 0.1s',
                 }}
               >
                 {src.label}
@@ -296,7 +369,19 @@ function ConnectionDot({ state }: { state: 'connecting' | 'open' | 'error' | 'cl
 
 function Row({ ev }: { ev: LogEvent }) {
   const sourceMeta = sources.find((s) => s.value === ev.source)
+  const sourceColor = sourceMeta?.color || 'var(--text-tertiary)'
   const time = formatTime(ev._time)
+
+  // 3px left border in the source color so the chip palette and the
+  // row palette obviously share a key. Padding matches the
+  // non-bordered baseline so rows of different sources align.
+  const baseStyle: React.CSSProperties = {
+    display: 'flex',
+    gap: 10,
+    padding: '1px 14px',
+    borderLeft: `3px solid ${sourceColor}`,
+    paddingLeft: 11, // 14 - 3 to keep content alignment
+  }
 
   // Exec EOF marker: line is empty + exit_code is present. Render as a
   // synthetic system row so users can see "command X exited 0/1" inline.
@@ -304,9 +389,8 @@ function Row({ ev }: { ev: LogEvent }) {
     const ok = ev.exit_code === 0
     return (
       <div style={{
-        display: 'flex',
-        gap: 10,
-        padding: '2px 14px',
+        ...baseStyle,
+        padding: '2px 14px 2px 11px',
         color: ok ? 'var(--accent-emerald, #10b981)' : 'var(--accent-rose)',
         fontStyle: 'italic',
         opacity: 0.85,
@@ -321,16 +405,14 @@ function Row({ ev }: { ev: LogEvent }) {
 
   return (
     <div style={{
-      display: 'flex',
-      gap: 10,
-      padding: '1px 14px',
+      ...baseStyle,
       whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
     }}>
       <span style={{ color: 'var(--text-tertiary)', flexShrink: 0 }}>{time}</span>
       <span
         style={{
-          color: sourceMeta?.color || 'var(--text-tertiary)',
+          color: sourceColor,
           flexShrink: 0,
           minWidth: 56,
           fontSize: 11,
@@ -344,6 +426,20 @@ function Row({ ev }: { ev: LogEvent }) {
       </span>
     </div>
   )
+}
+
+// searchCorpus returns the text the search box matches against for a
+// given event, lower-cased. For real lines it's just `line`; for EOF
+// markers (which have line=='' and a synthesized "X exited N"
+// rendering) we include the synthesized text plus the command name +
+// argv so users can search for "exit", a command, or its args.
+function searchCorpus(ev: LogEvent): string {
+  if (ev.line === '' && ev.exit_code !== undefined) {
+    const cmd = ev.command || 'command'
+    const argv = ev.argv ? ev.argv.join(' ') : ''
+    return `${cmd} ${argv} exited ${ev.exit_code}`.toLowerCase()
+  }
+  return ev.line.toLowerCase()
 }
 
 function formatTime(rfc3339: string): string {

@@ -985,3 +985,50 @@ phase-4 turn-on watch.
   bound memory. Synthetic exec EOF events render as "✓ exited 0"
   /  "✗ exited 1" rows inline. PTY content remains excluded from
   this view — different consent surface (per design doc).
+- *2026-05-05* — first end-to-end on EC2 dev host caught three
+  Axiom integration bugs, fixed in `0da0bcc`: (1) Axiom's per-dataset
+  `/query` endpoint requires `startTime` + `endTime` in the body —
+  earlier code only sent `apl` and got a 422; (2) the URL was
+  `/v1/datasets/_apl/query?format=legacy` which 404'd — switched to
+  `/v1/datasets/<dataset>/query` matching the agentbox precedent;
+  (3) Axiom's response surfaces `_time` at the match level not
+  inside `data` (event body has zero-value time). Same commit added
+  the SDK-side `GET /api/sandboxes/:id/logs` (X-API-Key auth) next
+  to the dashboard variant — handler reads either `:id` or
+  `:sandboxId` so a single function backs both routes.
+- *2026-05-05* — UI iteration: first user-driven testing surfaced
+  a pile of UX issues. Captured fixes in LogsPanel.tsx:
+  - **Filter-flicker.** Re-opening the SSE on every search keystroke
+    or chip toggle made events disappear and reappear. Switched to
+    a single SSE per sandbox with all filtering done client-side
+    against the in-memory buffer. The `?q=` and `?source=` SSE
+    params still exist server-side but the UI doesn't currently use
+    them.
+  - **Filter semantics inverted** from "additive (show only)" to
+    "subtractive (hide selected)" — matches Datadog / Cypress /
+    typical log-viewer mental model. Default = all four sources
+    visible; click a chip to hide that source.
+  - **Chip styling** collapsed from tri-state to two clear states.
+    ON uses an 18% color-mix tint (not a full solid fill — too
+    bright when four chips are on by default); OFF is transparent
+    + dim.
+  - **Color palette** — `var/log` moved from emerald to amber so it
+    doesn't clash with the emerald used for `✓ exited 0` rows.
+  - **Row left-border** — each row gets a 3px colored left bar
+    matching its source. Previously only the small label inside the
+    row carried the source color, which made the chip-to-row visual
+    link weak.
+  - **EOF dedup must run BEFORE the source filter.** Agent emits one
+    EOF on stdout AND one on stderr per exec (closeExecLineWriters
+    closes both); previously the second-pass dedup happened after
+    source filtering, so hiding stdout let the suppressed stderr-EOF
+    leak through and the row appeared to "switch" sources. Reordered
+    to dedup-first; canonical EOF is the first one in time order
+    (always stdout under current emit ordering).
+  - **Search corpus** for EOF rows: `line` is empty but the rendered
+    text is "command argv exited N". Search now matches against the
+    rendered string, so typing "exit" or a command name finds the
+    EOF rows users expect.
+  - **Native search-input clear button** swapped for a custom thin
+    SVG X — macOS default has a heavy blue gradient that clashes
+    with the dashboard palette.
