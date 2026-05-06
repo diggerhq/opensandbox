@@ -143,9 +143,8 @@ designed to surface.
 
 ## Expected post-merge result
 
-Re-run the same three-call sequence on a sandbox created **after
-the deploy completes and rolling-replace has finished recycling
-the worker pool**. Expected:
+Re-run the same three-call sequence (create → exec → read logs)
+post-deploy. Expected:
 
 - Sandbox create → 201
 - Exec → 201
@@ -162,7 +161,31 @@ opensandbox: workers spawned by this server will ship sandbox
 
 If `WARNING: AXIOM_INGEST_TOKEN empty` shows up instead, the
 rollout is unsafe — the secret is missing from KV and pre-deploy
-state holds.
+state holds. Stop and fix KV before continuing.
+
+### When can we verify
+
+- **Server-side log line:** instant — fires the moment
+  `opensandbox-server` finishes its restart.
+- **First fresh worker in the pool:** ~3-5 min post-deploy
+  (server restart → first drain → terminate → scaleUp). Drain
+  time depends on sandbox count on the lightest stale worker.
+- **First-attempt verification reliable:** **only after the full
+  pool is replaced.** During the rolling-replace window, both
+  stale and fresh workers exist; placement avoids drained
+  workers but stale-not-yet-drained ones still take new
+  sandboxes. A test sandbox can land on either.
+- **Full pool replacement:** minutes to hours, dominated by
+  per-worker drain (live-migrate sandboxes off, hard cap 45 min
+  per `scaler.go:41`). 5-worker pool light load: ~10-20 min.
+  20-worker pool heavy load: 2-4 hours. Off-peak is much faster.
+
+**Pragmatic verification protocol:** start trying ~5 min after
+deploy; retry every 2-3 minutes until any one create+exec+logs
+returns content. The first hit confirms the fix — no need to
+wait for full pool replacement to declare success. If the
+dashboard or `/admin/workers` exposes per-worker `WorkerVersion`,
+"all workers report the new SHA" is the deterministic signal.
 
 ## Verification (dev)
 
