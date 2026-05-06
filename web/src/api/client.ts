@@ -220,6 +220,13 @@ export interface CheckpointItem {
   activeForks: number
   totalForks: number
   createdAt: string
+  // errorMsg / failedAt are populated when status === 'failed'.
+  // Pre-fix the API returned status='failed' with no detail; now the row
+  // carries the actual reason (timeout, archive failure, S3 upload failure,
+  // etc.) and the failure timestamp. Server-side: db.Checkpoint.ErrorMsg /
+  // FailedAt (sandbox_checkpoints columns added in migration 039).
+  errorMsg?: string
+  failedAt?: string
 }
 
 export interface CheckpointsResponse {

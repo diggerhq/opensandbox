@@ -95,8 +95,13 @@ type Manager interface {
 	// or "" if the template is not cached locally. Used to skip S3 download when creating from template.
 	TemplateCachePath(templateID, filename string) string
 
-	// Checkpointing
-	CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error)
+	// Checkpointing.
+	// CreateCheckpoint returns rootfs/workspace S3 keys, the actual archive
+	// size in bytes (0 when no checkpoint store is configured or upload
+	// failed), and any error. sizeBytes plumbs through to
+	// store.SetCheckpointReady so the DB row carries the truthful archive
+	// size instead of the previous hardcoded 0.
+	CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, sizeBytes int64, err error)
 	RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpointID string) error
 	ForkFromCheckpoint(ctx context.Context, checkpointID string, cfg types.SandboxConfig) (*types.Sandbox, error)
 	CheckpointCachePath(checkpointID, filename string) string

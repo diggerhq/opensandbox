@@ -2275,24 +2275,32 @@ func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
 // CreateCheckpoint creates an internal VM snapshot using QEMU's savevm.
 // The snapshot is stored inside the qcow2 drive files — no external migration file needed.
 // The VM pauses briefly for the snapshot, then resumes automatically.
-func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
+//
+// Returns the S3 keys, the actual archive size in bytes (or 0 when no
+// checkpointStore is configured / the upload failed), and any error. The
+// archive size replaces the previous hardcoded 0 stamped on the
+// sandbox_checkpoints row so operators and customers can see how big a
+// checkpoint actually is. Upload failures now propagate as an error rather
+// than being silently logged — the control plane gets the reason and
+// persists it via SetCheckpointFailed (migration 039 added error_msg).
+func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, sizeBytes int64, err error) {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 
 	// Reject if another destructive operation (checkpoint, hibernate, restore) is in progress.
 	// Without this, rapid-fire checkpoints queue up and the agent gets into a bad state
 	// from overlapping SIGUSR1/reconnect cycles.
 	if !vm.opMu.TryLock() {
-		return "", "", fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
+		return "", "", 0, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
 	defer vm.opMu.Unlock()
 
 	t0 := time.Now()
 
 	if vm.qmp == nil {
-		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
+		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	// Sync filesystem, quiesce virtio-serial, close host conn, and WAIT for
@@ -2318,13 +2326,13 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// (close agent + let SIGUSR1 reset the virtio-serial listener before
 	// savevm) is preserved above.
 	if vm.qmp == nil {
-		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
+		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	stagingDir := cacheDir + ".staging"
 	if mkErr := os.MkdirAll(filepath.Join(stagingDir, "snapshot"), 0755); mkErr != nil {
-		return "", "", fmt.Errorf("mkdir staging: %w", mkErr)
+		return "", "", 0, fmt.Errorf("mkdir staging: %w", mkErr)
 	}
 
 	// savevm pauses the VM, writes memory+device+disk-delta into every qcow2
@@ -2333,7 +2341,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	snapshotName := "cp-" + checkpointID
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("savevm: %w", err)
+		return "", "", 0, fmt.Errorf("savevm: %w", err)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 
@@ -2345,11 +2353,11 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.qcow2")
 	if err := copyFileReflink(srcRootfs, filepath.Join(stagingDir, "rootfs.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("copy rootfs: %w", err)
+		return "", "", 0, fmt.Errorf("copy rootfs: %w", err)
 	}
 	if err := copyFileReflink(srcWorkspace, filepath.Join(stagingDir, "workspace.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("copy workspace: %w", err)
+		return "", "", 0, fmt.Errorf("copy workspace: %w", err)
 	}
 	// Record the savevm snapshot name so ForkFromCheckpoint / RestoreFromCheckpoint
 	// know which internal snapshot to loadvm.
@@ -2454,26 +2462,43 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 
 		t1 := time.Now()
 		archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
-		if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
-			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
-		} else {
-			uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			if _, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); uerr != nil {
-				log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
-			} else {
-				log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v)",
-					checkpointID, time.Since(t1).Milliseconds(), archiveFiles)
-			}
-			cancel()
-			os.Remove(archivePath)
+		if archErr := createArchive(archivePath, cacheDir, archiveFiles); archErr != nil {
+			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, archErr)
+			// Surface as the function's error so the API can persist it via
+			// SetCheckpointFailed instead of silently logging.
+			return rootfsKey, workspaceKey, 0, fmt.Errorf("create checkpoint archive: %w", archErr)
 		}
+		// 15-min upload budget. Pre-fix this was 5 min, which combined with
+		// the API's 5-min gRPC ctx left no headroom for ~5+ GB compressed
+		// archives under any blob-side contention. Customer hit this on a
+		// 7–9 GB sandbox: status flipped to `failed` after ~280 s (≈ the
+		// 5-min ceiling) with no error detail, since SetCheckpointFailed
+		// also dropped the reason. Migration 039 + the 20-min API gRPC
+		// timeout + this 15-min upload give a generous flat budget without
+		// memory-scaling complexity.
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		_, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath)
+		cancel()
+		// Stat the archive before deleting so we can return the actual size
+		// even on success (the upload doesn't return it). Any stat error here
+		// is non-fatal — we'd rather report 0 than fail the checkpoint.
+		if info, statErr := os.Stat(archivePath); statErr == nil {
+			sizeBytes = info.Size()
+		}
+		os.Remove(archivePath)
+		if uerr != nil {
+			log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+			return rootfsKey, workspaceKey, sizeBytes, fmt.Errorf("upload checkpoint to S3: %w", uerr)
+		}
+		log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, %.1f MB, files=%v)",
+			checkpointID, time.Since(t1).Milliseconds(), float64(sizeBytes)/(1024*1024), archiveFiles)
 	}
 
 	if onReady != nil {
 		onReady()
 	}
 
-	return rootfsKey, workspaceKey, nil
+	return rootfsKey, workspaceKey, sizeBytes, nil
 }
 
 // RestoreFromCheckpoint reverts a sandbox to a checkpoint by killing the current
