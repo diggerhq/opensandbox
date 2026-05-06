@@ -389,6 +389,11 @@ func main() {
 
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)
+	// Wire up Axiom log-shipping. Empty token disables shipping (kill-switch).
+	grpcServer.SetAxiomConfig(cfg.AxiomIngestToken, cfg.AxiomDataset)
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox-worker: sandbox session log shipping enabled (dataset=%s)", cfg.AxiomDataset)
+	}
 	// Wire up live migration if using QEMU manager
 	if migrator, ok := mgr.(worker.LiveMigrator); ok {
 		grpcServer.SetMigrator(migrator)

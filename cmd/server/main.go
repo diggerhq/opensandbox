@@ -221,7 +221,9 @@ func main() {
 					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
 					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
-					"SEGMENT_WRITE_KEY=%s\n",
+					"SEGMENT_WRITE_KEY=%s\n"+
+					"AXIOM_INGEST_TOKEN=%s\n"+
+					"AXIOM_DATASET=%s\n",
 				cfg.JWTSecret,
 				cfg.Region,
 				cfg.MaxCapacity,
@@ -239,6 +241,8 @@ func main() {
 				cfg.DefaultSandboxDiskMB,
 				cfg.AzureKeyVaultName,
 				cfg.SegmentWriteKey,
+				cfg.AxiomIngestToken,
+				cfg.AxiomDataset,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 
@@ -394,6 +398,14 @@ func main() {
 
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
+
+	// Wire Axiom read-only token for the sandbox session logs API.
+	// Token never leaves this process; the UI proxies its queries through
+	// /api/sandboxes/:id/logs. Empty token disables the endpoint (503).
+	server.SetAxiomQueryConfig(cfg.AxiomQueryToken, cfg.AxiomDataset)
+	if cfg.AxiomQueryToken != "" {
+		log.Printf("opensandbox: sandbox session logs read API enabled (dataset=%s)", cfg.AxiomDataset)
+	}
 
 	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
 	// sandbox via PUT /api/sandboxes/:id/autoscale.

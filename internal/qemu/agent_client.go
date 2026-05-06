@@ -195,6 +195,18 @@ func (c *AgentClient) SetEnvs(ctx context.Context, envs map[string]string) error
 	return err
 }
 
+// ConfigureLogship hands the in-VM agent its log-shipping configuration.
+// Empty ingestToken is a no-op on the agent side (kill-switch).
+func (c *AgentClient) ConfigureLogship(ctx context.Context, ingestToken, dataset, sandboxID, orgID string) error {
+	_, err := c.client.ConfigureLogship(ctx, &pb.ConfigureLogshipRequest{
+		IngestToken: ingestToken,
+		Dataset:     dataset,
+		SandboxId:   sandboxID,
+		OrgId:       orgID,
+	})
+	return err
+}
+
 // Ping verifies the agent is responsive.
 func (c *AgentClient) Ping(ctx context.Context) (*pb.PingResponse, error) {
 	return c.client.Ping(ctx, &pb.PingRequest{})

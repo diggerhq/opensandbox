@@ -28,6 +28,9 @@ truth they come from.
 
 - `README.md` — product overview and human quick start
 - `Makefile` — local dev, build, test, and common run targets
+- `deploy/ec2/README.md` — personal end-to-end dev host on EC2 bare metal
+  (real QEMU VMs, server + worker + UI); use when in-process Makefile tiers
+  aren't enough
 - `internal/config/config.go` — environment variables and runtime config
 - `proto/` — inter-tier contracts
 - `docs/mint.json` — docs navigation
