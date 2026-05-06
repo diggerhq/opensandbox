@@ -128,3 +128,7 @@ In prod (after merge + deploy):
 
 - *2026-05-06* — branch + working doc created. No code yet.
   Awaiting review before implementation.
+- *2026-05-06* — code changes landed: startup log + spawn-time
+  warning in `cmd/server/main.go`, README rotation note in
+  `deploy/ec2/README.md`. ~15 lines net. `go build ./cmd/server/...`
+  clean. Ready for review.

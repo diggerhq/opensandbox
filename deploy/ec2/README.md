@@ -80,6 +80,14 @@ token** and a **read/query token**, both scoped to the dataset. The default
 dataset name is `oc-sandbox-logs` — override `AXIOM_DATASET` only if you want
 isolation from other developers.
 
+> ⚠️ Rotating any `AXIOM_*` value (ingest token, query token, dataset)
+> requires a **server restart** to take effect — the values are read from
+> the environment once at `config.Load` and frozen for the process lifetime.
+> Workers spawned by a server with a stale `cfg.AxiomIngestToken` silently
+> bake an empty value into their cloud-init. Watch for the
+> `WARNING: AXIOM_INGEST_TOKEN empty` line in `journalctl -u
+> opensandbox-server` after any rotation.
+
 ### 4. Get WorkOS staging keys + register the redirect URI
 
 From the team WorkOS staging project, grab the API key (`sk_test_...`) and

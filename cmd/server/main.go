@@ -194,6 +194,15 @@ func main() {
 				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
 			}
 
+			// Warn loud if we're about to bake an empty AXIOM_INGEST_TOKEN
+			// into a worker. Reachable when the server's cfg was empty at
+			// startup but the secret has since been added to KV and no
+			// restart has happened yet — every worker minted from here will
+			// silently skip log shipping.
+			if cfg.AxiomIngestToken == "" {
+				log.Printf("opensandbox: WARNING: spawning Azure-pool worker with empty AXIOM_INGEST_TOKEN — this worker will not ship sandbox session logs (restart this control plane after the secret is in KV)")
+			}
+
 			workerEnv := fmt.Sprintf(
 				"OPENSANDBOX_MODE=worker\n"+
 					"OPENSANDBOX_VM_BACKEND=qemu\n"+
@@ -405,6 +414,20 @@ func main() {
 	server.SetAxiomQueryConfig(cfg.AxiomQueryToken, cfg.AxiomDataset)
 	if cfg.AxiomQueryToken != "" {
 		log.Printf("opensandbox: sandbox session logs read API enabled (dataset=%s)", cfg.AxiomDataset)
+	}
+
+	// Worker-bake side: report whether sandboxes spawned by this control
+	// plane will ship logs. The token's value here is whatever cfg.Load
+	// pulled from os.Getenv at startup; it stays frozen until the next
+	// process restart. If a deployment puts the secret in KV but never
+	// restarts this process, every Azure-pool worker baked from here on
+	// will land with an empty AXIOM_INGEST_TOKEN and silently skip
+	// shipping. Logging once at startup turns the silent case into a
+	// paged-on-able journalctl line.
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox: workers spawned by this server will ship sandbox session logs to Axiom (dataset=%s)", cfg.AxiomDataset)
+	} else {
+		log.Printf("opensandbox: WARNING: AXIOM_INGEST_TOKEN empty — workers spawned by this server will NOT ship sandbox session logs (set the secret in your secret store and restart this process)")
 	}
 
 	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
