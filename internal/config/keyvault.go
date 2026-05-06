@@ -44,11 +44,11 @@ var secretMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
-	// Axiom (sandbox-session-logs): server reads via APL with the query
-	// token. Dataset is shared with the worker but mapped under both
-	// prefixes because the load filter is mode-scoped — a single
-	// "axiom-dataset" entry would be skipped when running as worker, and
-	// vice versa. The two KV entries hold the same value.
+	// Legacy Axiom mappings — kept for backwards compat with existing prod
+	// KVs that pre-date the `shared-` prefix. New deploys should use
+	// `shared-axiom-*` instead. Safe to leave: in server mode only
+	// `server-axiom-*` is loaded; in worker mode only `worker-axiom-*`. New
+	// `shared-*` mappings below win for new envs that have only those.
 	"server-axiom-query-token":      "AXIOM_QUERY_TOKEN",
 	"server-axiom-dataset":          "AXIOM_DATASET",
 
@@ -59,11 +59,14 @@ var secretMapping = map[string]string{
 	"worker-s3-access-key":      "OPENSANDBOX_S3_ACCESS_KEY_ID",
 	"worker-s3-secret-key":      "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
 	"worker-sentry-dsn":         "OPENSANDBOX_SENTRY_DSN",
-	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
-	"worker-axiom-dataset":      "AXIOM_DATASET",
+	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN", // legacy; superseded by shared-axiom-ingest-token
+	"worker-axiom-dataset":      "AXIOM_DATASET",      // legacy; superseded by shared-axiom-dataset
 
-	// Shared
-	"pg-password": "OPENSANDBOX_PG_PASSWORD",
+	// Shared (mode-agnostic — loaded in both server and worker)
+	"pg-password":               "OPENSANDBOX_PG_PASSWORD",
+	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
+	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
+	"shared-axiom-dataset":      "AXIOM_DATASET",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them
@@ -111,8 +114,18 @@ func LoadSecretsFromKeyVault() error {
 				continue
 			}
 
-			// Only load secrets matching the current mode (or shared secrets)
-			if mode != "" && !strings.HasPrefix(name, mode+"-") && !strings.HasPrefix(name, "pg-") {
+			// Only load secrets matching the current mode, or mode-agnostic
+			// "shared" secrets that both server and worker need (the `pg-`
+			// prefix is grandfathered in for the same reason). Without this
+			// bypass, a single token like AXIOM_INGEST_TOKEN — which the
+			// server needs to bake into worker.env at spawn time AND the
+			// worker needs at startup — has to be duplicated under both
+			// `server-` and `worker-` prefixes in KV. The `shared-` prefix
+			// formalizes "this secret goes to both modes" as a real concept.
+			if mode != "" &&
+				!strings.HasPrefix(name, mode+"-") &&
+				!strings.HasPrefix(name, "pg-") &&
+				!strings.HasPrefix(name, "shared-") {
 				continue
 			}
 
