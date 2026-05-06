@@ -11,10 +11,51 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 )
+
+// AnycastAddr is the link-local IP every VM uses to reach the secrets proxy.
+// One byte off the metadata server (169.254.169.254) so the two services have
+// adjacent, easy-to-remember addresses.
+//
+// Why link-local instead of the per-VM TAP gateway: HTTPS_PROXY is baked into
+// the VM env at create time. If we used the gateway IP, that env became stale
+// the moment the VM moved to a different /30 subnet (wake → reallocated
+// block, migrate → different worker's allocator). Customers saw "every
+// outbound HTTPS times out post-handoff" because the env pointed at an
+// unreachable address. Link-local is host-scoped, so each worker answers the
+// same address locally — the env is correct on whichever host the VM lives on.
+const (
+	AnycastIP   = "169.254.169.253"
+	AnycastPort = 3128
+)
+
+// AnycastEndpoint returns the proxy URL VMs should use as HTTPS_PROXY.
+func AnycastEndpoint() string {
+	return fmt.Sprintf("http://%s:%d", AnycastIP, AnycastPort)
+}
+
+// EnsureAnycastInterface assigns AnycastIP to the loopback interface so the
+// kernel answers it locally. Idempotent — succeeds even if already assigned
+// (the underlying `ip addr add` returns "File exists" which we treat as ok).
+//
+// Worker startup must call this before sandboxes are created or the proxy
+// won't be reachable at the stable address.
+func EnsureAnycastInterface() error {
+	cmd := exec.Command("ip", "addr", "add", AnycastIP+"/32", "dev", "lo")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// "RTNETLINK answers: File exists" → already configured, fine.
+		if strings.Contains(string(out), "File exists") {
+			return nil
+		}
+		return fmt.Errorf("ip addr add %s/32 dev lo: %w (%s)", AnycastIP, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // privateIPNets contains the CIDR ranges considered private/internal.
 // Connections to these ranges are blocked to prevent SSRF attacks.
@@ -307,7 +348,16 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, pl
 	}
 
 	// Merge into the env map for the VM. plaintextEnvs win on collision.
-	proxyURL := fmt.Sprintf("http://%s:3128", gatewayIP)
+	//
+	// Use the anycast link-local address (169.254.169.253:3128) instead of the
+	// per-VM gateway IP. The env value is baked into the VM at create time and
+	// must keep working through hibernate/wake (subnet may be reallocated) and
+	// live migration (target worker has its own subnet allocator). Each worker
+	// answers the anycast IP locally on lo (see EnsureAnycastInterface) so the
+	// VM reaches the right proxy regardless of which host it's currently on.
+	// gatewayIP is still a parameter for backwards compat / non-anycast paths.
+	_ = gatewayIP
+	proxyURL := AnycastEndpoint()
 	caCertPath := "/usr/local/share/ca-certificates/opensandbox-proxy.crt"
 
 	noProxy := "localhost,127.0.0.1,::1"

@@ -126,6 +126,15 @@ func main() {
 		if err != nil {
 			log.Printf("opensandbox-worker: secrets proxy listen failed: %v", err)
 		} else {
+			// Make 169.254.169.253:3128 reachable from every TAP via lo. The
+			// proxy already binds 0.0.0.0:3128 so this is just the host-side
+			// address the kernel should answer. Without this, VMs created
+			// with the new HTTPS_PROXY env (anycast) can't reach the proxy.
+			if anyErr := secretsproxy.EnsureAnycastInterface(); anyErr != nil {
+				log.Printf("opensandbox-worker: WARNING: failed to set up secrets-proxy anycast address (%v) — VMs with anycast HTTPS_PROXY env will lose outbound until this is fixed", anyErr)
+			} else {
+				log.Printf("opensandbox-worker: secrets-proxy anycast address %s assigned to lo", secretsproxy.AnycastIP)
+			}
 			secretsProxy.Start()
 			defer secretsProxy.Stop()
 			log.Println("opensandbox-worker: secrets proxy started on :3128")

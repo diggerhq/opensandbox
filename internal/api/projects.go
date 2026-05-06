@@ -11,6 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -326,6 +328,16 @@ func (s *Server) fanoutSecretRefresh(parentCtx context.Context, storeID uuid.UUI
 			Value:      newValue,
 		})
 		if err != nil {
+			// Rollout safety: a worker that hasn't picked up the new binary yet
+			// returns Unimplemented for this RPC. Treat as a soft skip — the
+			// sandbox keeps its old value until its next handoff (wake/fork/
+			// migrate) re-resolves from the store. This lets the server be
+			// deployed before the worker fleet has fully rolled over without
+			// every PUT /secrets call surfacing failures during the dance.
+			if status.Code(err) == codes.Unimplemented {
+				log.Printf("secret-refresh: worker %s on old binary (Unimplemented); skipping sandbox=%s, will refresh on next handoff", workerID, sandboxID)
+				return result{sandboxID: sandboxID, ok: false}
+			}
 			return result{sandboxID: sandboxID, err: fmt.Errorf("worker %s rpc: %w", workerID, err)}
 		}
 		return result{sandboxID: sandboxID, ok: resp.Updated}

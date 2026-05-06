@@ -371,10 +371,31 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("workspace not found at %s", workspacePath)
 	}
 
-	// Step 3: Set up network
-	netCfg, err := m.subnets.Allocate()
-	if err != nil {
-		return nil, fmt.Errorf("allocate subnet: %w", err)
+	// Step 3: Set up network. Prefer the original TAP/subnet so the gateway
+	// IP remains stable across hibernate→wake cycles. The VM's HTTPS_PROXY
+	// env var was baked at create time pointing at the original gateway IP
+	// (e.g. 172.16.0.1). If wake reallocates a fresh subnet, the env still
+	// points at the stale gateway and every outbound HTTPS through the
+	// secrets proxy times out — silent breakage of the entire proxy path
+	// for any sandbox with a secret store.
+	//
+	// Fall back to a fresh allocation if the original block was claimed by a
+	// different sandbox while this one was hibernated. The fallback path
+	// will leave HTTPS_PROXY stale, so log a clear warning — operators who
+	// see this in journal know why post-wake outbound HTTPS is broken.
+	var netCfg *NetworkConfig
+	if meta.Network != nil && meta.Network.TAPName != "" {
+		netCfg, err = m.subnets.AllocateSpecific(meta.Network.TAPName)
+		if err != nil {
+			log.Printf("qemu: wake %s: original TAP %q unavailable (%v) — falling back to fresh subnet; HTTPS_PROXY env will be stale, outbound HTTPS through proxy will fail until sandbox is recreated",
+				sandboxID, meta.Network.TAPName, err)
+		}
+	}
+	if netCfg == nil {
+		netCfg, err = m.subnets.Allocate()
+		if err != nil {
+			return nil, fmt.Errorf("allocate subnet: %w", err)
+		}
 	}
 	if err := CreateTAP(netCfg); err != nil {
 		m.subnets.Release(netCfg.TAPName)
