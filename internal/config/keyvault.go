@@ -44,14 +44,23 @@ var secretMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
+	// Axiom (sandbox-session-logs): server reads via APL with the query
+	// token. Dataset is shared with the worker but mapped under both
+	// prefixes because the load filter is mode-scoped — a single
+	// "axiom-dataset" entry would be skipped when running as worker, and
+	// vice versa. The two KV entries hold the same value.
+	"server-axiom-query-token":      "AXIOM_QUERY_TOKEN",
+	"server-axiom-dataset":          "AXIOM_DATASET",
 
 	// Worker secrets
-	"worker-jwt-secret":    "OPENSANDBOX_JWT_SECRET",
-	"worker-database-url":  "OPENSANDBOX_DATABASE_URL",
-	"worker-redis-url":     "OPENSANDBOX_REDIS_URL",
-	"worker-s3-access-key": "OPENSANDBOX_S3_ACCESS_KEY_ID",
-	"worker-s3-secret-key": "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
-	"worker-sentry-dsn":    "OPENSANDBOX_SENTRY_DSN",
+	"worker-jwt-secret":         "OPENSANDBOX_JWT_SECRET",
+	"worker-database-url":       "OPENSANDBOX_DATABASE_URL",
+	"worker-redis-url":          "OPENSANDBOX_REDIS_URL",
+	"worker-s3-access-key":      "OPENSANDBOX_S3_ACCESS_KEY_ID",
+	"worker-s3-secret-key":      "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
+	"worker-sentry-dsn":         "OPENSANDBOX_SENTRY_DSN",
+	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
+	"worker-axiom-dataset":      "AXIOM_DATASET",
 
 	// Shared
 	"pg-password": "OPENSANDBOX_PG_PASSWORD",
