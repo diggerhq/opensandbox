@@ -106,7 +106,65 @@ not a code thing.
 - **A metric.** No control-plane-side metric pipeline.
 - **Retroactive sandbox fix.** See above.
 
-## Verification
+## Pre-merge prod state (verified 2026-05-06)
+
+Confirmed the bug is live in prod, not just theoretical. Test
+ran via the public API; no SSH, no log access required.
+
+```
+SBX=$(curl -sf -X POST $PROD_URL/api/sandboxes \
+       -H "X-API-Key: $KEY" -d '{"templateID":"default"}' \
+       | jq -r .sandboxID)
+curl -X POST $PROD_URL/api/sandboxes/$SBX/exec \
+     -H "X-API-Key: $KEY" \
+     -d '{"cmd":"bash","args":["-c","echo PROD_VERIFY_$(date +%s)"]}'
+sleep 6
+curl -N $PROD_URL/api/sandboxes/$SBX/logs?tail=false \
+     -H "X-API-Key: $KEY"
+```
+
+Result on `sb-a4de01f8`:
+- Sandbox create → **201**
+- Exec → **201** (session created, command ran on worker)
+- Logs query → **HTTP 200 with empty body**
+
+What that tells us:
+- 200 (not 503) → server has `AXIOM_QUERY_TOKEN` and the read API
+  is wired. Brian's `d6c2985` landed and the control plane has
+  been restarted since.
+- Empty body → the worker that booted this sandbox shipped
+  nothing to Axiom. Not even the boot-time worker-internal exec
+  EOFs (which are unconditional in dev). The worker's
+  `cfg.AxiomIngestToken` is empty → `configureLogshipForSandbox`
+  silently bails → in-VM agent activates a dormant shipper.
+
+This is the exact failure mode this PR's WARNING lines are
+designed to surface.
+
+## Expected post-merge result
+
+Re-run the same three-call sequence on a sandbox created **after
+the deploy completes and rolling-replace has finished recycling
+the worker pool**. Expected:
+
+- Sandbox create → 201
+- Exec → 201
+- Logs query → **HTTP 200 with at least the synthesised exec EOF
+  rows** (`✓ bash exited 0`) and ideally the `PROD_VERIFY_<ts>`
+  line itself.
+
+Plus, in the control plane's journalctl right after the deploy:
+
+```
+opensandbox: workers spawned by this server will ship sandbox
+  session logs to Axiom (dataset=oc-sandbox-logs)
+```
+
+If `WARNING: AXIOM_INGEST_TOKEN empty` shows up instead, the
+rollout is unsafe — the secret is missing from KV and pre-deploy
+state holds.
+
+## Verification (dev)
 
 On the EC2 dev host:
 - Unset `AXIOM_INGEST_TOKEN`, daemon-reload, restart server →
@@ -114,15 +172,6 @@ On the EC2 dev host:
 - Re-set, restart → expect the ok line.
 - Spawn-time warning fires only on the Azure-pool path; not
   reachable from EC2 dev. Verified by code inspection.
-
-In prod (after merge + deploy):
-- Watch journalctl on control plane for the new ok line on
-  startup.
-- Watch worker journalctl as rolling-replace progresses for the
-  existing `"sandbox session log shipping enabled"` line on each
-  fresh worker.
-- Open dashboard Logs tab on a sandbox created post-rollout
-  (created on a fresh worker) → expect content rows.
 
 ## Status log
 
@@ -132,3 +181,8 @@ In prod (after merge + deploy):
   warning in `cmd/server/main.go`, README rotation note in
   `deploy/ec2/README.md`. ~15 lines net. `go build ./cmd/server/...`
   clean. Ready for review.
+- *2026-05-06* — verified in prod via public API only (no SSH /
+  KV / journalctl access needed): create-sandbox → exec → read
+  logs returned HTTP 200 + empty body, confirming workers are
+  silently not shipping. Captured in "Pre-merge prod state"
+  above.
