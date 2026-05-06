@@ -10,65 +10,119 @@ follow-up `d6c2985` (KV mapping for Axiom secrets).
 ## Context
 
 After PR #226 merged and rolled out, prod workers silently weren't
-shipping logs. Two independent gaps caused it; both were silent.
+shipping logs. Two independent gaps:
 
 1. **KV-mapping gap** — `internal/config/keyvault.go` only loads
-   secrets that exist in `secretMapping`; `AXIOM_*` weren't in the
-   map. **Closed by Brian's `d6c2985`.**
+   secrets in `secretMapping`; `AXIOM_*` weren't there. Fixed by
+   `d6c2985`.
 2. **Stale-cfg gap** — `cfg.AxiomIngestToken` is read from
    `os.Getenv` once at server startup. A server that started
-   *before* the secret was added to KV (or before any rotation)
-   keeps an empty cfg and bakes empty tokens into every worker
-   it spawns. No log line told anyone.
+   before the secret was added to KV (or before any rotation)
+   keeps an empty cfg and bakes empty tokens into every worker.
 
-The actual prod recovery is automatic: the next deploy restarts
-the control plane (re-reads cfg from KV) and bumps
-`targetWorkerVersion`; the autoscaler's rolling-replace
-(`internal/controlplane/scaler.go:823`) then recycles every stale
-worker. **No prod SSH, no manual drain. The deploy is the fix.**
+Both were silent. This PR is three log lines that make the second
+gap loud the next time it happens.
 
-This PR is **not the fix for that incident** — it's three small
-log lines so the *next* silent-empty case is paged-on-able within
-seconds instead of overnight.
-
-## Changes (all in `cmd/server/main.go`)
+## Code in this PR (all in `cmd/server/main.go`)
 
 1. **Startup log** mirroring the existing `"sandbox session logs
    read API enabled"` line on the query-token side. Empty
-   ingest-token logs `WARNING: workers spawned by this server
-   will NOT ship logs`. Populated logs the symmetric ok message.
+   ingest-token logs `WARNING`; populated logs the ok message.
 2. **Spawn-time warning** when `cfg.AxiomIngestToken == ""` and
-   the Azure-pool path is rendering `workerEnv`. Catches the
-   stale-cfg case where the server hasn't been restarted
+   the Azure-pool path renders `workerEnv` — catches stale-cfg
    post-rotation.
-3. **One-line README addition** in `deploy/ec2/README.md`: any
-   `AXIOM_*` rotation requires a server restart.
+3. **One-line `deploy/ec2/README.md` note**: any `AXIOM_*` rotation
+   requires a server restart.
 
-Total: ~10 lines of code + ~2 lines of docs. No proto, no schema,
-no UI, no tests (just `log.Printf`).
+~10 lines of code, no proto, no schema, no UI, no tests.
 
-## Deliberately out of scope
+## Rollout — what happens after this PR merges
 
-- **Re-reading `os.Getenv` per spawn.** Process env is also
-  frozen-ish; right fix for rotation-without-restart is a periodic
-  reloader, scope creep.
-- **Fail-fast on empty.** Server has many legitimate reasons to
-  run without logship (dev, combined mode, kill-switch). Warning
-  is the right level.
-- **A metric.** No control-plane-side metric pipeline yet; log
-  line is enough for ops paging on regex.
-- **Retroactive fix for already-running sandboxes.** Their in-VM
-  agent has a dormant shipper; only new sandboxes ship. No code
-  fix possible — it's a property of when ConfigureLogship was
-  called.
+The actual prod recovery doesn't need any manual ops; it falls
+out of the standard deploy. Sequence:
+
+1. **Merge + deploy.** CI builds and ships the new control-plane
+   binary. `deploy-server.sh:97` runs `systemctl restart
+   opensandbox-server`.
+2. **Server restart re-reads cfg.** With `d6c2985` already in main,
+   `LoadSecretsFromKeyVault` populates `AXIOM_INGEST_TOKEN` /
+   `AXIOM_QUERY_TOKEN` / `AXIOM_DATASET` from KV before
+   `config.Load`. New diagnostic should print
+   `"opensandbox: workers spawned by this server will ship logs
+   to Axiom (dataset=oc-sandbox-logs)"`. If `WARNING` fires
+   instead, the secret isn't in KV — fix KV before continuing.
+3. **`targetWorkerVersion` bumps.** Server learns the new SHA
+   from the deploy and the autoscaler's
+   `internal/controlplane/scaler.go:118` field updates. Every
+   currently-running worker now reports a `WorkerVersion` that
+   doesn't match.
+4. **Rolling-replace runs automatically.** `scaler.go:823
+   rollingReplace` — quota-aware loop: pick the lightest stale
+   worker, drain it (no new sandboxes routed there), live-
+   migrate its existing sandboxes onto a peer, destroy the
+   Azure VM, spawn a fresh one. Repeat until no stale workers
+   remain. Wall-clock takes minutes-to-hours depending on pool
+   size + sandbox migration latency, but unattended.
+5. **Fresh workers bake the correct env.** Each spawn renders
+   `workerEnv` from the now-populated `cfg.AxiomIngestToken`.
+   Worker boots → `cmd/worker/main.go` logs `"sandbox session log
+   shipping enabled (dataset=oc-sandbox-logs)"`.
+6. **New sandboxes ship.** Any sandbox created on a fresh worker
+   gets `ConfigureLogship` with the real token. In-VM agent
+   activates the shipper. Logs flow to Axiom and the dashboard
+   Logs panel within seconds of the events being produced.
+
+**No prod SSH, no manual drain, no admin destroy endpoint, no
+Azure CLI required.**
+
+## What stays broken — and why we're not fixing it in this PR
+
+**Existing sandboxes never start shipping.** Their in-VM agent
+already received `ConfigureLogship` once with an empty token; the
+shipper is dormant in agent memory and stays that way for the
+sandbox's lifetime. Hibernate + wake preserves the dormant state
+(memory snapshot). Live migration to a fresh worker preserves it
+too — the agent's struct moves with the VM.
+
+The only way to flip an existing sandbox to shipping is to
+recreate it. We're choosing not to push customers to do that,
+because:
+- It's not a regression — these sandboxes never shipped logs.
+- New sandboxes do ship.
+- Customer-visible only in the dashboard Logs panel; pre-fix
+  sandboxes show empty.
+
+If a customer specifically asks why their old sandbox has no
+logs, the workflow is: kill + recreate. That's a docs/CS thing,
+not a code thing.
+
+## Deliberately out of scope (PR-internal)
+
+- **Re-reading `os.Getenv` per spawn.** Right fix for
+  rotation-without-restart is a periodic config reloader; scope
+  creep.
+- **Fail-fast on empty.** Server has legit reasons to run
+  without logship (dev, combined mode, kill-switch).
+- **A metric.** No control-plane-side metric pipeline.
+- **Retroactive sandbox fix.** See above.
 
 ## Verification
 
-On the EC2 dev host: unset `AXIOM_INGEST_TOKEN`, daemon-reload,
-restart server → confirm WARNING fires once. Set the token,
-restart → confirm ok line fires. Spawn-time warning fires when
-the bake template path runs with empty token (only reachable via
-the Azure-pool spawn — verified by code inspection).
+On the EC2 dev host:
+- Unset `AXIOM_INGEST_TOKEN`, daemon-reload, restart server →
+  expect WARNING line in journalctl.
+- Re-set, restart → expect the ok line.
+- Spawn-time warning fires only on the Azure-pool path; not
+  reachable from EC2 dev. Verified by code inspection.
+
+In prod (after merge + deploy):
+- Watch journalctl on control plane for the new ok line on
+  startup.
+- Watch worker journalctl as rolling-replace progresses for the
+  existing `"sandbox session log shipping enabled"` line on each
+  fresh worker.
+- Open dashboard Logs tab on a sandbox created post-rollout
+  (created on a fresh worker) → expect content rows.
 
 ## Status log
 
