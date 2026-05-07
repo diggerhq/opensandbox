@@ -26,6 +26,24 @@ type redisHeartbeatPayload struct {
 	CommittedMemoryMB int     `json:"committed_memory_mb,omitempty"`
 	GoldenVersion     string  `json:"golden_version,omitempty"`
 	WorkerVersion     string  `json:"worker_version,omitempty"`
+
+	// Per-sandbox stats snapshot. Populated by the worker's stats collector
+	// (see internal/qemu/stats_collector.go) and consumed by the CP autoscaler
+	// (see internal/controlplane/autoscaler.go). Bounded by the worker's
+	// physical sandbox capacity (~50-150 entries on a D64 host) regardless of
+	// total cluster size, so the heartbeat payload doesn't grow unboundedly.
+	Sandboxes map[string]SandboxStatsWire `json:"sandboxes,omitempty"`
+}
+
+// SandboxStatsWire is the wire form of per-sandbox stats included in the
+// heartbeat. Subset of internal/sandbox.SandboxStats — only what the
+// autoscaler / dashboard consumers actually need. Pre-computed mem_pct
+// avoids divide-by-zero handling at every consumer.
+type SandboxStatsWire struct {
+	MemUsage uint64  `json:"mem_usage"`
+	MemLimit uint64  `json:"mem_limit"`
+	MemPct   float64 `json:"mem_pct"`
+	CPUPct   float64 `json:"cpu_pct"`
 }
 
 // RedisHeartbeat publishes periodic heartbeats to Redis for worker discovery.
@@ -39,9 +57,10 @@ type RedisHeartbeat struct {
 	region    string
 	grpcAddr  string
 	httpAddr  string
-	getStats      func() (capacity, current int, cpuPct, memPct, diskPct float64)
-	getMemoryInfo func() (totalMB, committedMB int) // optional: committed memory for dynamic capacity
-	onReconnect   func() // called when heartbeat succeeds after a previous failure
+	getStats         func() (capacity, current int, cpuPct, memPct, diskPct float64)
+	getMemoryInfo    func() (totalMB, committedMB int) // optional: committed memory for dynamic capacity
+	getSandboxStats  func() map[string]SandboxStatsWire // optional: per-sandbox stats for autoscaler
+	onReconnect      func() // called when heartbeat succeeds after a previous failure
 	goldenVersion string
 	workerVersion string
 	wasDown       bool   // true if the last publish failed (used to detect reconnect)
@@ -101,6 +120,13 @@ func (h *RedisHeartbeat) SetMemoryInfoFunc(fn func() (totalMB, committedMB int))
 	h.getMemoryInfo = fn
 }
 
+// SetSandboxStatsFunc registers a callback that returns the latest per-sandbox
+// stats snapshot. The heartbeat publishes this map under the "sandboxes" field
+// for the CP autoscaler. Wire it to qemu.Manager's stats cache.
+func (h *RedisHeartbeat) SetSandboxStatsFunc(fn func() map[string]SandboxStatsWire) {
+	h.getSandboxStats = fn
+}
+
 // OnReconnect sets a callback that fires when heartbeat succeeds after a failure.
 // Used to reconcile sandbox state after a network outage.
 func (h *RedisHeartbeat) OnReconnect(fn func()) {
@@ -152,6 +178,13 @@ func (h *RedisHeartbeat) publish() {
 		totalMB, committedMB := h.getMemoryInfo()
 		payload.TotalMemoryMB = totalMB
 		payload.CommittedMemoryMB = committedMB
+	}
+
+	// Per-sandbox stats for the CP autoscaler. Skipped silently if no
+	// collector is wired — preserves backward compat with deployments where
+	// the autoscaler is disabled.
+	if h.getSandboxStats != nil {
+		payload.Sandboxes = h.getSandboxStats()
 	}
 
 	data, err := json.Marshal(payload)

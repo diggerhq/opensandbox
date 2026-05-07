@@ -91,6 +91,15 @@ type Config struct {
 	AzureSubnetID       string // Full resource ID of the VNet subnet
 	AzureSSHPublicKey   string // SSH public key for worker VMs
 	AzureKeyVaultName   string // Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	// AzureWorkerIdentityID is the full resource ID of a UserAssigned managed
+	// identity to attach to every worker VM. The identity must already have
+	// "Key Vault Secrets Officer" on the regional KV so workers can fetch
+	// the shared secrets-proxy CA. Created once per region as a bootstrap
+	// step (see deploy/azure/bootstrap-worker-identity.sh). Without this,
+	// workers can't reach KV for the shared CA and live migration of
+	// secret-store-using sandboxes will fail TLS substitution after the
+	// migration completes (per-worker CAs don't match each other).
+	AzureWorkerIdentityID string
 
 	// Cloudflare (custom hostname for org sandbox domains)
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
@@ -108,8 +117,21 @@ type Config struct {
 	StripeSuccessURL    string
 	StripeCancelURL     string
 
+	// Per-agent paywalled-feature prices (set in Stripe dashboard, referenced
+	// by ID here). Empty = feature ungated on this deployment (dev mode).
+	StripeTelegramAgentPriceID string
+
 	// Segment analytics — if set, GB-minute usage events are shipped per org.
 	SegmentWriteKey string
+
+	// Axiom — log shipping for sandbox session logs.
+	// AxiomIngestToken empty = log shipping disabled (kill-switch).
+	// Worker uses AxiomIngestToken + AxiomDataset to deliver via the
+	// ConfigureLogship RPC at sandbox boot. Server uses
+	// AxiomQueryToken + AxiomDataset to serve the read API.
+	AxiomIngestToken string
+	AxiomQueryToken  string
+	AxiomDataset     string
 
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
@@ -200,6 +222,7 @@ func Load() (*Config, error) {
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
 		AzureKeyVaultName:   os.Getenv("OPENSANDBOX_AZURE_KEY_VAULT_NAME"),
+		AzureWorkerIdentityID: os.Getenv("OPENSANDBOX_AZURE_WORKER_IDENTITY_ID"),
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
@@ -209,12 +232,17 @@ func Load() (*Config, error) {
 		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
 		IdleReserveWorkers:  envOrDefaultInt("OPENSANDBOX_IDLE_RESERVE", 1),
 
-		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
-		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:            os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:        os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeTelegramAgentPriceID: os.Getenv("STRIPE_TELEGRAM_AGENT_PRICE_ID"),
 		StripeSuccessURL:    envOrDefault("STRIPE_SUCCESS_URL", "http://localhost:3000/billing?success=true"),
 		StripeCancelURL:     envOrDefault("STRIPE_CANCEL_URL", "http://localhost:3000/billing?cancelled=true"),
 
 		SegmentWriteKey: os.Getenv("SEGMENT_WRITE_KEY"),
+
+		AxiomIngestToken: os.Getenv("AXIOM_INGEST_TOKEN"),
+		AxiomQueryToken:  os.Getenv("AXIOM_QUERY_TOKEN"),
+		AxiomDataset:     envOrDefault("AXIOM_DATASET", "oc-sandbox-logs"),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 

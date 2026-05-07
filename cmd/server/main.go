@@ -166,6 +166,13 @@ func main() {
 		}
 	}
 
+	// Hoisted at function scope so the per-sandbox autoscaler (created
+	// later, after the API server) can consult IsLeader() each tick — keeps
+	// a single elector authoritative across both the cluster scaler and the
+	// per-sandbox autoscaler in HA setups. nil when there's no compute pool
+	// (combined / dev mode) — autoscaler then runs unconditionally.
+	var leaderElector *controlplane.LeaderElector
+
 	// Initialize compute pool + autoscaler (server mode)
 	if cfg.Mode == "server" && redisRegistry != nil {
 		var pool compute.Pool
@@ -185,6 +192,15 @@ func main() {
 				workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
 				workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
 				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
+			}
+
+			// Warn loud if we're about to bake an empty AXIOM_INGEST_TOKEN
+			// into a worker. Reachable when the server's cfg was empty at
+			// startup but the secret has since been added to KV and no
+			// restart has happened yet — every worker minted from here will
+			// silently skip log shipping.
+			if cfg.AxiomIngestToken == "" {
+				log.Printf("opensandbox: WARNING: spawning Azure-pool worker with empty AXIOM_INGEST_TOKEN — this worker will not ship sandbox session logs (restart this control plane after the secret is in KV)")
 			}
 
 			workerEnv := fmt.Sprintf(
@@ -213,7 +229,10 @@ func main() {
 					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n"+
 					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
 					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
-					"SEGMENT_WRITE_KEY=%s\n",
+					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
+					"SEGMENT_WRITE_KEY=%s\n"+
+					"AXIOM_INGEST_TOKEN=%s\n"+
+					"AXIOM_DATASET=%s\n",
 				cfg.JWTSecret,
 				cfg.Region,
 				cfg.MaxCapacity,
@@ -229,20 +248,24 @@ func main() {
 				cfg.S3ForcePathStyle,
 				cfg.SandboxDomain,
 				cfg.DefaultSandboxDiskMB,
+				cfg.AzureKeyVaultName,
 				cfg.SegmentWriteKey,
+				cfg.AxiomIngestToken,
+				cfg.AxiomDataset,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 
 			azPool, err := compute.NewAzurePool(compute.AzurePoolConfig{
-				SubscriptionID:  cfg.AzureSubscriptionID,
-				ResourceGroup:   cfg.AzureResourceGroup,
-				Region:          cfg.Region,
-				VMSize:          cfg.AzureVMSize,
-				ImageID:         cfg.AzureImageID,
-				SubnetID:        cfg.AzureSubnetID,
-				SSHPublicKey:    cfg.AzureSSHPublicKey,
-				KeyVaultName:    cfg.AzureKeyVaultName,
-				WorkerEnvBase64: workerEnvB64,
+				SubscriptionID:   cfg.AzureSubscriptionID,
+				ResourceGroup:    cfg.AzureResourceGroup,
+				Region:           cfg.Region,
+				VMSize:           cfg.AzureVMSize,
+				ImageID:          cfg.AzureImageID,
+				SubnetID:         cfg.AzureSubnetID,
+				SSHPublicKey:     cfg.AzureSSHPublicKey,
+				KeyVaultName:     cfg.AzureKeyVaultName,
+				WorkerIdentityID: cfg.AzureWorkerIdentityID,
+				WorkerEnvBase64:  workerEnvB64,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)
@@ -316,19 +339,22 @@ func main() {
 			})
 			defer scaler.Stop()
 
-			// Leader election: only the leader runs the scaler
-			elector := controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
-			elector.OnBecomeLeader(func() {
+			// Leader election: only the leader runs the scaler. The
+			// per-sandbox autoscaler (created later) consults this same
+			// elector via IsLeader() to skip ticks when not leader, so we
+			// don't double-fire scale decisions across CPs in HA setups.
+			leaderElector = controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
+			leaderElector.OnBecomeLeader(func() {
 				scaler.Start()
 				log.Printf("opensandbox: became leader, autoscaler started (%s)", poolName)
 			})
-			elector.OnLoseLeadership(func() {
+			leaderElector.OnLoseLeadership(func() {
 				scaler.Stop()
 				log.Println("opensandbox: lost leadership, autoscaler stopped")
 			})
-			elector.Start()
-			defer elector.Stop()
-			log.Printf("opensandbox: leader election started (instance=%s)", elector.InstanceID())
+			leaderElector.Start()
+			defer leaderElector.Stop()
+			log.Printf("opensandbox: leader election started (instance=%s)", leaderElector.InstanceID())
 		}
 	}
 
@@ -384,6 +410,7 @@ func main() {
 	var stripeClient *billing.StripeClient
 	if cfg.StripeSecretKey != "" {
 		stripeClient = billing.NewStripeClient(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripeSuccessURL, cfg.StripeCancelURL)
+		stripeClient.TelegramAgentPriceID = cfg.StripeTelegramAgentPriceID
 		if err := stripeClient.EnsureProducts(); err != nil {
 			log.Printf("opensandbox: Stripe product setup failed: %v (billing may not work)", err)
 		} else {
@@ -394,6 +421,50 @@ func main() {
 
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
+
+	// Wire Axiom read-only token for the sandbox session logs API.
+	// Token never leaves this process; the UI proxies its queries through
+	// /api/sandboxes/:id/logs. Empty token disables the endpoint (503).
+	server.SetAxiomQueryConfig(cfg.AxiomQueryToken, cfg.AxiomDataset)
+	if cfg.AxiomQueryToken != "" {
+		log.Printf("opensandbox: sandbox session logs read API enabled (dataset=%s)", cfg.AxiomDataset)
+	}
+
+	// Worker-bake side: report whether sandboxes spawned by this control
+	// plane will ship logs. The token's value here is whatever cfg.Load
+	// pulled from os.Getenv at startup; it stays frozen until the next
+	// process restart. If a deployment puts the secret in KV but never
+	// restarts this process, every Azure-pool worker baked from here on
+	// will land with an empty AXIOM_INGEST_TOKEN and silently skip
+	// shipping. Logging once at startup turns the silent case into a
+	// paged-on-able journalctl line.
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox: workers spawned by this server will ship sandbox session logs to Axiom (dataset=%s)", cfg.AxiomDataset)
+	} else {
+		log.Printf("opensandbox: WARNING: AXIOM_INGEST_TOKEN empty — workers spawned by this server will NOT ship sandbox session logs (set the secret in your secret store and restart this process)")
+	}
+
+	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
+	// sandbox via PUT /api/sandboxes/:id/autoscale.
+	//
+	// Leader-gated when an elector exists. With HA (multiple CPs) we don't
+	// want two instances both reading stats and double-firing scale events.
+	// SetSandboxLimits is technically idempotent for memory targets, but
+	// the cooldown CAS races and the cooldown timestamp gets clobbered if
+	// both CPs UPDATE — see ClaimAutoscaleEvent. Gating on the leader is
+	// cheaper than relying on the CAS alone. When there's no elector
+	// (single-CP / no cloud pool), isLeader is nil and the loop runs
+	// unconditionally.
+	if opts.Store != nil && redisRegistry != nil {
+		var isLeader func() bool
+		if leaderElector != nil {
+			isLeader = leaderElector.IsLeader
+		}
+		autoscaler := controlplane.NewAutoscaler(opts.Store, redisRegistry, api.NewAutoscalerSetter(server), isLeader)
+		autoscaler.Start(ctx)
+		defer autoscaler.Stop()
+		log.Println("opensandbox: per-sandbox autoscaler started (interval=30s, leader-gated)")
+	}
 
 	// Start usage reporter — reports Pro org usage to Stripe and deducts
 	// free-tier trial credits (force-hibernates on empty) every 5 min.

@@ -56,6 +56,19 @@ type Server struct {
 	redisClient     *redis.Client                     // nil if Redis not configured (for health checks)
 	adminEvents     *AdminEventBus                    // real-time event bus for admin dashboard
 	ready           int32                             // atomic: 1 = ready, 0 = not ready
+
+	// Axiom log query (sandbox session logs read API).
+	// Empty token = endpoint returns 503.
+	axiomQueryToken string
+	axiomDataset    string
+}
+
+// SetAxiomQueryConfig wires the read-only Axiom token and dataset for
+// the sandbox session logs read API. Token never leaves the control
+// plane; the UI proxies through us.
+func (s *Server) SetAxiomQueryConfig(queryToken, dataset string) {
+	s.axiomQueryToken = queryToken
+	s.axiomDataset = dataset
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -189,16 +202,27 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 
 	// API routes (with API key auth)
 	api := e.Group("/api")
-	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey, s.jwtIssuer))
 
 	// Identity
 	api.POST("/auth/token", s.createAuthToken)
+
+	// Per-agent paywalled-feature entitlement check, callable from
+	// sessions-api with a JWT (aud=opencomputer-api) right before
+	// allowing a connect-channel operation.
+	api.GET("/agents/:agentId/entitlements/:feature", s.apiAgentEntitlement)
 
 	// Sandbox lifecycle
 	api.POST("/sandboxes", s.createSandbox)
 	api.GET("/sandboxes", s.listSandboxes)
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
+
+	// Sandbox session logs — SDK / curl variant. Same handler as the
+	// dashboard's /api/dashboard/sessions/:sandboxId/logs route below;
+	// auth here is X-API-Key (or identity-JWT) instead of cookie.
+	// Useful for headless testing and SDK consumers.
+	api.GET("/sandboxes/:id/logs", s.getSandboxLogs)
 
 	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
@@ -231,6 +255,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Resource limits
 	api.PUT("/sandboxes/:id/limits", s.setLimits)
 	api.POST("/sandboxes/:id/scale", s.scaleSandbox)
+	api.PUT("/sandboxes/:id/autoscale", s.setAutoscale)
+	api.GET("/sandboxes/:id/autoscale", s.getAutoscale)
+	api.PUT("/sandboxes/:id/scaling-lock", s.setScalingLock)
+	api.GET("/sandboxes/:id/scaling-lock", s.getScalingLock)
 
 	// Checkpoints
 	api.POST("/sandboxes/:id/checkpoints", s.createCheckpoint)
@@ -407,8 +435,23 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		dash.GET("/billing/invoices", s.billingInvoices)
 		dash.POST("/billing/redeem", s.billingRedeem)
 		dash.POST("/billing/portal", s.billingPortal)
+		dash.GET("/billing/agent-subscriptions", s.dashboardListOrgAgentSubscriptions)
 
 		// Admin endpoints
+
+		// Agents — reverse-proxy to sessions-api. Mints short-lived identity
+		// JWTs for the inbound (sessions-api) and downstream (OC API) hops so
+		// no API key is needed end-to-end. CLI users bypass this and hit
+		// sessions-api directly with X-API-Key.
+		dash.Any("/agents", s.dashboardAgentsProxy)
+		// Per-agent paywalled-feature subscriptions (telegram et al).
+		// Mounted BEFORE the catch-all /agents/* proxy so they don't
+		// get forwarded to sessions-api.
+		dash.GET("/agents/:agentId/entitlements", s.dashboardListAgentEntitlements)
+		dash.POST("/agents/:agentId/subscriptions/:feature", s.dashboardSubscribeAgentFeature)
+		dash.DELETE("/agents/:agentId/subscriptions/:feature", s.dashboardCancelAgentFeature)
+
+		dash.Any("/agents/*", s.dashboardAgentsProxy)
 
 		// Session detail + stats
 		dash.GET("/sessions/:sandboxId", s.dashboardGetSession)
@@ -416,6 +459,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Reset operations
 		dash.POST("/sessions/:sandboxId/reboot", s.dashboardRebootSession)
 		dash.POST("/sessions/:sandboxId/power-cycle", s.dashboardPowerCycleSession)
+		// Sandbox session logs (SSE; historical + 1s-poll live tail).
+		// Server queries Axiom server-side with a read-only token that
+		// never reaches the browser. Org-ownership enforced via
+		// GetSandboxSessionInOrg (404 on mismatch — no cross-org leak).
+		dash.GET("/sessions/:sandboxId/logs", s.getSandboxLogs)
 		// PTY (terminal)
 		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
 		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)

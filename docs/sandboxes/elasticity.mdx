@@ -1,19 +1,156 @@
 ---
 title: "Elasticity"
-description: "Dynamically scale sandbox memory and CPU from inside the VM"
+description: "Dynamically scale sandbox memory and CPU — automatically, manually, or via the in-VM API"
 ---
 
-Sandboxes expose an internal metadata API at `http://169.254.169.254` that lets code **inside** the VM scale memory up or down on the fly. CPU scales proportionally to memory.
+A sandbox's memory and CPU can be resized at runtime. The platform's recommended path is **Autoscaling** — opt the sandbox in once and we resize it for you based on observed memory pressure. Lower-level controls are also available if you want to drive sizing yourself or freeze it.
 
-This is useful for workloads with variable resource needs — scale up before a heavy compilation or ML inference, then scale back down to save resources.
+CPU scales proportionally to memory in all modes (1 vCPU per ~4 GB up to 16 GB / 4 vCPU). The permissible memory tiers are:
+
+| Memory | vCPU |
+| --- | --- |
+| 1 GB | 1 (best-effort) |
+| 4 GB | 1 |
+| 8 GB | 2 |
+| 16 GB | 4 |
+
+If you want a sandbox to **stay at a fixed size**, see [Locking Resources](#locking-resources).
+
+## Autoscaling
+
+Opt a sandbox into the per-sandbox autoscaler and the platform resizes it for you based on observed memory pressure. Autoscale is **opt-in per sandbox** and **disabled by default**.
+
+This is the recommended way to size a sandbox: turn it on once with bounds you're comfortable with, then leave it. Manual `scale` and the in-VM API are escape hatches for cases where the autoscaler isn't a good fit (e.g. you want a hard guarantee for a benchmark, or you're scripting your own logic).
+
+### Enable
+
+<CodeGroup>
+```typescript TypeScript
+await sandbox.setAutoscale({
+  enabled: true,
+  minMemoryMB: 1024,
+  maxMemoryMB: 16384,
+});
+```
+
+```python Python
+await sandbox.set_autoscale(
+    enabled=True,
+    min_memory_mb=1024,
+    max_memory_mb=16384,
+)
+```
+
+```bash CLI
+oc sandbox autoscale sb-abc123 --on --min 1024 --max 16384
+```
+
+```bash HTTP
+curl -sf -X PUT "$API/api/sandboxes/$SANDBOX_ID/autoscale" \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true, "minMemoryMB": 1024, "maxMemoryMB": 16384}'
+```
+</CodeGroup>
+
+`minMemoryMB` and `maxMemoryMB` must be values from the tier table above. The autoscaler keeps the sandbox between these bounds, in tier steps.
+
+### Behavior
+
+- **Scale up**: when the sandbox's 1-minute average memory utilization exceeds 75 %, jump to the next tier. 60-second cooldown between up-events.
+- **Scale down**: when **all** of the 1-min, 5-min, and 15-min utilization averages stay below 25 %, drop one tier. 5-minute cooldown between down-events. Down requires at least 15 minutes of low-utilization data, so a brief idle pause won't shrink you.
+- **Manual override**: any explicit `scale` call disables autoscale on that sandbox. Re-enable explicitly via `setAutoscale({ enabled: true, ... })` (or the equivalent in any SDK) if you want it back.
+
+### Disable
+
+<CodeGroup>
+```typescript TypeScript
+await sandbox.setAutoscale({ enabled: false });
+```
+
+```python Python
+await sandbox.set_autoscale(enabled=False)
+```
+
+```bash CLI
+oc sandbox autoscale sb-abc123 --off
+```
+
+```bash HTTP
+curl -sf -X PUT "$API/api/sandboxes/$SANDBOX_ID/autoscale" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"enabled": false}'
+```
+</CodeGroup>
+
+### Inspect
+
+<CodeGroup>
+```typescript TypeScript
+const cfg = await sandbox.getAutoscale();
+// { sandboxID: "sb-...", enabled: true, minMemoryMB: 1024, maxMemoryMB: 16384 }
+```
+
+```python Python
+cfg = await sandbox.get_autoscale()
+# {"sandboxID": "sb-...", "enabled": True, "minMemoryMB": 1024, "maxMemoryMB": 16384}
+```
+
+```bash CLI
+oc sandbox autoscale sb-abc123
+# Autoscale enabled for sb-abc123 (1024–16384 MB)
+```
+
+```bash HTTP
+curl -sf "$API/api/sandboxes/$SANDBOX_ID/autoscale" -H "X-API-Key: $API_KEY"
+# {"sandboxID":"sb-...","enabled":true,"minMemoryMB":1024,"maxMemoryMB":16384}
+```
+</CodeGroup>
+
+## Manual Scaling (Control Plane)
+
+When you want to resize once — predictable size for a benchmark, a one-off scale-up before a known-heavy task, an operator response to an alert — call `scale` from your application or operator tooling:
+
+<CodeGroup>
+```typescript TypeScript
+await sandbox.scale({ memoryMB: 4096 });
+```
+
+```python Python
+await sandbox.scale(memory_mb=4096)
+```
+
+```bash CLI
+oc sandbox scale sb-abc123 4096
+```
+
+```bash HTTP
+curl -sf -X POST "$API/api/sandboxes/$SANDBOX_ID/scale" \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"memoryMB": 4096}'
+```
+</CodeGroup>
+
+A manual scale **disables autoscale** on the sandbox — explicit user intent overrides the loop. Re-enable it later if you want size to track load again.
+
+The endpoint can return:
+
+- **403 `scaling_locked`** — the sandbox is locked. See [Locking Resources](#locking-resources).
+- **409 `oom_floor`** — the requested size would force a guest OOM-kill because the current working set exceeds it. Free memory inside the guest, then retry.
+- **402 Payment Required** — the requested size exceeds your plan cap.
+
+## In-VM Scaling
+
+Sandboxes expose an internal metadata API at `http://169.254.169.254` that lets code **inside** the VM scale itself. Useful for workload-aware scripts where the workload knows its own demand better than the platform autoscaler can infer (e.g. "scale up before this build, back down after").
 
 <Note>
-  The elasticity endpoint is only accessible from inside the sandbox. It is not exposed through the control plane API or SDKs.
+  This endpoint is only reachable from inside the sandbox. It is not exposed through the control plane API or SDKs.
 </Note>
 
-## Scale Memory
+### Scale Memory
 
-Send a `POST` to `/v1/scale` with the desired memory in MB:
+Send a `POST` to `/v1/scale` with the desired memory in MB. CPU is adjusted proportionally.
 
 ```bash
 curl -s -X POST http://169.254.169.254/v1/scale \
@@ -21,22 +158,13 @@ curl -s -X POST http://169.254.169.254/v1/scale \
   -d '{"memoryMB": 4096}'
 ```
 
-CPU is adjusted proportionally — you only need to specify memory. The permissible sizes are:
-
-| Memory | vCPU |
-| --- | --- |
-| 1GB | 1 (best-effort) |
-| 4GB | 1 |
-| 8GB | 2 |
-| 16GB | 4 |
-
-## Check Current Limits
+### Check Current Limits
 
 ```bash
 curl -s http://169.254.169.254/v1/limits
 ```
 
-## Example: Rust Compilation
+### Example: Rust Compilation
 
 Rust builds are memory-hungry. You can alias `cargo` to scale up before compilation and scale back down after:
 
@@ -61,9 +189,9 @@ _cargo_scaled() {
 
 Add this to your sandbox's `~/.bashrc` or inject it via `sandbox.exec.run` so every `cargo build`, `cargo test`, etc. automatically gets the extra resources.
 
-## Example: Auto-Scaling Script
+### Example: Custom Scaling Loop
 
-A simple shell script that monitors memory pressure and scales automatically:
+A simple shell script that monitors memory pressure and scales automatically. Useful when you want fine-grained control inside the sandbox itself; for the platform-managed equivalent see [Autoscaling](#autoscaling) above.
 
 ```bash
 #!/bin/sh
@@ -108,3 +236,72 @@ while true; do
   sleep 5
 done
 ```
+
+## Locking Resources
+
+If you want a sandbox to **stay at a fixed size** — predictable billing, a benchmark, a long-running pinned workload — lock it. Locking blocks both manual scaling and autoscaling on the sandbox.
+
+<CodeGroup>
+```typescript TypeScript
+await sandbox.setScalingLock(true);
+```
+
+```python Python
+await sandbox.set_scaling_lock(True)
+```
+
+```bash CLI
+oc sandbox lock sb-abc123
+```
+
+```bash HTTP
+curl -sf -X PUT "$API/api/sandboxes/$SANDBOX_ID/scaling-lock" \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"locked": true}'
+```
+</CodeGroup>
+
+While locked:
+
+- `scale` returns **403** `scaling_locked`
+- `setAutoscale({ enabled: true })` returns **403** `scaling_locked`
+- The autoscaler skips the sandbox
+
+Locking automatically disables autoscale on the sandbox, so you have a single user-facing toggle. Unlocking does **not** auto-re-enable autoscale; turn it back on explicitly if you want it.
+
+<CodeGroup>
+```typescript TypeScript
+// Unlock
+await sandbox.setScalingLock(false);
+
+// Inspect
+const lock = await sandbox.getScalingLock();
+// { sandboxID: "sb-...", locked: false }
+```
+
+```python Python
+# Unlock
+await sandbox.set_scaling_lock(False)
+
+# Inspect
+lock = await sandbox.get_scaling_lock()
+# {"sandboxID": "sb-...", "locked": False}
+```
+
+```bash CLI
+oc sandbox unlock sb-abc123
+oc sandbox lock-status sb-abc123
+```
+
+```bash HTTP
+# Unlock
+curl -sf -X PUT "$API/api/sandboxes/$SANDBOX_ID/scaling-lock" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"locked": false}'
+
+# Inspect
+curl -sf "$API/api/sandboxes/$SANDBOX_ID/scaling-lock" -H "X-API-Key: $API_KEY"
+# {"sandboxID":"sb-...","locked":false}
+```
+</CodeGroup>

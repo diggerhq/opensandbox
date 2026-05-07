@@ -297,13 +297,28 @@ func (s *Store) GetReservedGBForBucket(ctx context.Context, orgID uuid.UUID, buc
 // overlaps `[bucketStart, bucketEnd)` for the given org. Open events
 // (`ended_at IS NULL`) are returned with `EndedAt = nil`; the caller
 // clips them to the bucket boundary.
+//
+// Sandboxes that back a managed agent with an active per-agent
+// subscription are excluded — their compute is paid for by the
+// subscription, so they must not also flow through reserved/overage
+// metering. See the same NOT EXISTS in GetOrgUsage for rationale.
 func (s *Store) GetScaleEventsForBucket(ctx context.Context, orgID uuid.UUID, bucketStart, bucketEnd time.Time) ([]ScaleEvent, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, sandbox_id, org_id, memory_mb, cpu_percent, disk_mb, started_at, ended_at
-		FROM sandbox_scale_events
+		FROM sandbox_scale_events se
 		WHERE org_id = $1
 		  AND started_at < $3
 		  AND (ended_at IS NULL OR ended_at > $2)
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM sandbox_sessions ss
+		    JOIN agent_subscriptions asub
+		      ON asub.org_id = ss.org_id
+		     AND asub.agent_id = ss.metadata->>'agent_id'
+		     AND asub.status IN ('active', 'trialing', 'past_due', 'incomplete')
+		    WHERE ss.sandbox_id = se.sandbox_id
+		      AND ss.metadata->>'agent_id' IS NOT NULL
+		  )
 		ORDER BY started_at
 	`, orgID, bucketStart, bucketEnd)
 	if err != nil {

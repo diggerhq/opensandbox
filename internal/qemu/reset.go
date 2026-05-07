@@ -172,10 +172,20 @@ func (m *Manager) PowerCycleSandbox(ctx context.Context, sandboxID string) (host
 	if cpus <= 0 {
 		cpus = m.cfg.DefaultCPUs
 	}
-	memMB := vm.MemoryMB
-	if memMB <= 0 {
-		memMB = m.cfg.DefaultMemoryMB
+	// Boot the new QEMU at the ORIGINAL base memory and re-plug virtio-mem
+	// to the prior amount after the agent comes up. Booting at vm.MemoryMB
+	// (current total) bakes the scaled-up size into the QEMU `-m` flag,
+	// which means subsequent shrinks below that size only adjust the cgroup
+	// limit (additional clamps to 0) — the host can never give back the
+	// memory until the sandbox is destroyed. Booting at base + re-plug
+	// preserves the user-visible size while keeping virtio-mem unplug
+	// available going forward.
+	bootMemMB := vm.baseMemoryMB
+	if bootMemMB <= 0 {
+		bootMemMB = m.cfg.DefaultMemoryMB
 	}
+	prevPlugMB := vm.virtioMemRequestedMB
+	memMB := bootMemMB
 	guestPort := vm.GuestPort
 	if guestPort == 0 {
 		guestPort = meta.GuestPort
@@ -260,8 +270,29 @@ func (m *Manager) PowerCycleSandbox(ctx context.Context, sandboxID string) (host
 		log.Printf("qemu: PowerCycleSandbox %s: clock sync failed: %v", sandboxID, err)
 	}
 
+	// Step 5b: Re-plug virtio-mem to match the size the sandbox had before
+	// the cycle. The fresh QEMU boots at base; we now bring it back to the
+	// pre-cycle total so the user doesn't perceive a memory shrink. If the
+	// re-plug fails, log loudly and continue at base — the sandbox is
+	// alive and the user can re-scale via the API.
+	finalMemMB := bootMemMB
+	finalPlugMB := 0
+	if prevPlugMB > 0 {
+		if err := qmpClient.SetVirtioMemSize(prevPlugMB); err != nil {
+			log.Printf("qemu: PowerCycleSandbox %s: virtio-mem re-plug %dMB failed: %v — sandbox alive at %dMB",
+				sandboxID, prevPlugMB, err, bootMemMB)
+		} else {
+			finalPlugMB = prevPlugMB
+			finalMemMB = bootMemMB + prevPlugMB
+			log.Printf("qemu: PowerCycleSandbox %s: virtio-mem re-plugged %dMB (total %dMB)",
+				sandboxID, prevPlugMB, finalMemMB)
+		}
+	}
+
 	// Step 6: Swap fresh state into the existing VMInstance so callers
-	// holding pointers to it continue to see a live sandbox.
+	// holding pointers to it continue to see a live sandbox. baseMemoryMB
+	// stays at the original boot mem (preserves virtio-mem flexibility);
+	// MemoryMB and virtioMemRequestedMB reflect the post-replug total.
 	vm.cmd = cmd
 	vm.qmp = qmpClient
 	vm.agent = agentClient
@@ -272,6 +303,9 @@ func (m *Manager) PowerCycleSandbox(ctx context.Context, sandboxID string) (host
 	vm.guestMAC = guestMAC
 	vm.bootArgs = bootArgs
 	vm.pid = cmd.Process.Pid
+	vm.MemoryMB = finalMemMB
+	vm.baseMemoryMB = bootMemMB
+	vm.virtioMemRequestedMB = finalPlugMB
 
 	log.Printf("qemu: PowerCycleSandbox %s: complete (%dms, port=%d, tap=%s)",
 		sandboxID, time.Since(t0).Milliseconds(), freshPort, netCfg.TAPName)

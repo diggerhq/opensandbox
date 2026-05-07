@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/opensandbox/opensandbox/internal/logship"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
 
@@ -102,11 +105,18 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 	}
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdoutTee, stderrTee := s.newExecLineWriters(req.Command, req.Args)
+	if stdoutTee != nil {
+		cmd.Stdout = io.MultiWriter(&stdout, stdoutTee)
+		cmd.Stderr = io.MultiWriter(&stderr, stderrTee)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
 
 	// Start + move to sandbox cgroup + wait (instead of Run)
 	if err := cmd.Start(); err != nil {
+		closeExecLineWriters(stdoutTee, stderrTee, -1)
 		return nil, fmt.Errorf("exec start: %w", err)
 	}
 	pid := cmd.Process.Pid
@@ -134,6 +144,7 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 		killCgroup()
 		<-waitDone // wait for cmd.Wait to return after kills
 		UnregisterReap(pid)
+		closeExecLineWriters(stdoutTee, stderrTee, -1)
 		return &pb.ExecResponse{
 			ExitCode: -1,
 			Stdout:   stdout.String(),
@@ -155,12 +166,14 @@ func (s *Server) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespons
 			exitCode = ws.ExitStatus()
 		default:
 			UnregisterReap(pid)
+			closeExecLineWriters(stdoutTee, stderrTee, -1)
 			return nil, fmt.Errorf("exec failed: %w", err)
 		}
 	} else {
 		UnregisterReap(pid)
 	}
 
+	closeExecLineWriters(stdoutTee, stderrTee, exitCode)
 	return &pb.ExecResponse{
 		ExitCode: int32(exitCode),
 		Stdout:   stdout.String(),
@@ -216,7 +229,16 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 		return fmt.Errorf("stderr pipe: %w", err)
 	}
 
+	stdoutTee, stderrTee := s.newExecLineWriters(req.Command, req.Args)
+	var stdoutR io.Reader = stdoutPipe
+	var stderrR io.Reader = stderrPipe
+	if stdoutTee != nil {
+		stdoutR = io.TeeReader(stdoutPipe, stdoutTee)
+		stderrR = io.TeeReader(stderrPipe, stderrTee)
+	}
+
 	if err := cmd.Start(); err != nil {
+		closeExecLineWriters(stdoutTee, stderrTee, -1)
 		return fmt.Errorf("start: %w", err)
 	}
 	moveToCgroup(cmd.Process.Pid)
@@ -227,7 +249,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := stdoutPipe.Read(buf)
+			n, err := stdoutR.Read(buf)
 			if n > 0 {
 				if sendErr := stream.Send(&pb.ExecOutputChunk{
 					Stream: pb.ExecOutputChunk_STDOUT,
@@ -247,7 +269,7 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := stderrPipe.Read(buf)
+			n, err := stderrR.Read(buf)
 			if n > 0 {
 				if sendErr := stream.Send(&pb.ExecOutputChunk{
 					Stream: pb.ExecOutputChunk_STDERR,
@@ -269,9 +291,44 @@ func (s *Server) ExecStream(req *pb.ExecRequest, stream pb.SandboxAgent_ExecStre
 	<-errCh
 
 	// Wait for command to finish
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
+	exitCode := 0
+	if waitErr != nil {
+		if isExitError(waitErr) {
+			exitCode = waitErr.(*exec.ExitError).ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	closeExecLineWriters(stdoutTee, stderrTee, exitCode)
 
 	return nil
+}
+
+// newExecLineWriters returns matching stdout/stderr LineWriters that
+// ship into the agent's logship Shipper, tagged with a fresh exec_id
+// and the command + argv. Returns (nil, nil) if logship isn't wired
+// into this agent (callers must tolerate nil and skip teeing).
+func (s *Server) newExecLineWriters(command string, args []string) (*logship.LineWriter, *logship.LineWriter) {
+	if s.Shipper == nil {
+		return nil, nil
+	}
+	execID := uuid.NewString()
+	stdoutW := logship.NewLineWriter(s.Shipper, logship.SourceExecStdout, execID, command, args)
+	stderrW := logship.NewLineWriter(s.Shipper, logship.SourceExecStderr, execID, command, args)
+	return stdoutW, stderrW
+}
+
+// closeExecLineWriters flushes any partial trailing line and emits one
+// synthetic EOF event per stream carrying the exit code. Safe to call
+// with nil writers (when logship isn't wired).
+func closeExecLineWriters(stdout, stderr *logship.LineWriter, exitCode int) {
+	if stdout != nil {
+		stdout.Close(exitCode)
+	}
+	if stderr != nil {
+		stderr.Close(exitCode)
+	}
 }
 
 // mapToEnv converts a map to KEY=VALUE slice.

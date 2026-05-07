@@ -16,6 +16,42 @@ from opencomputer.pty import Pty
 from opencomputer.sse import parse_sse_stream
 
 
+class ScalingLockedError(Exception):
+    """Raised by ``scale``, ``set_autoscale``, and other resource-changing
+    calls when the sandbox has a scaling lock active. Catch this to handle
+    the lock case specifically — typically by surfacing a clear message to
+    the user, or unlocking via ``sandbox.set_scaling_lock(False)`` first.
+    """
+
+    code = "scaling_locked"
+
+
+class PlanLimitError(Exception):
+    """Raised by ``scale`` and ``set_autoscale`` when the requested size
+    exceeds the organization's plan cap (e.g. free tier blocks > 4 GB).
+    The HTTP layer returns 402 Payment Required for this case.
+    """
+
+
+def _raise_scaling_error(resp: httpx.Response, action: str) -> None:
+    """Inspect a non-OK scaling response and raise the most specific error.
+    Falls back to ``raise_for_status`` so callers still see HTTP details for
+    unknown shapes."""
+    try:
+        body = resp.json()
+    except Exception:
+        body = {}
+    if resp.status_code == 403 and isinstance(body, dict) and body.get("code") == "scaling_locked":
+        raise ScalingLockedError(body.get("error", "scaling is locked on this sandbox"))
+    if resp.status_code == 402:
+        msg = body.get("error", "plan limit exceeded") if isinstance(body, dict) else "plan limit exceeded"
+        raise PlanLimitError(msg)
+    # Re-raise as the generic httpx error so callers get the status + body.
+    resp.raise_for_status()
+    # Defensive: shouldn't reach here on a non-OK response.
+    raise httpx.HTTPStatusError(f"failed to {action}: {resp.status_code}", request=resp.request, response=resp)
+
+
 @dataclass
 class Sandbox:
     """E2B-compatible sandbox interface."""
@@ -244,6 +280,127 @@ class Sandbox:
             return self.status == "running"
         except httpx.HTTPStatusError:
             return False
+
+    async def scale(self, memory_mb: int) -> dict:
+        """Manually resize the sandbox to a specific memory tier.
+
+        CPU is bundled with memory per the platform's tier table (e.g. 8 GB
+        → 4 vCPU). Allowed tiers: 1024, 4096, 8192, 16384, 32768, 65536 MB.
+
+        A manual scale disables autoscale on this sandbox as a side effect.
+        Re-enable with :meth:`set_autoscale` if you want size to track load.
+
+        Args:
+            memory_mb: Target memory tier in MB.
+
+        Raises:
+            ScalingLockedError: The sandbox has a scaling lock active.
+            PlanLimitError: ``memory_mb`` exceeds the org's plan cap.
+
+        Returns:
+            Dict with ``sandboxID``, ``memoryMB``, ``cpuPercent``.
+        """
+        resp = await self._client.post(
+            f"/sandboxes/{self.sandbox_id}/scale",
+            json={"memoryMB": memory_mb},
+        )
+        if resp.status_code >= 400:
+            _raise_scaling_error(resp, "scale")
+        return resp.json()
+
+    async def set_autoscale(
+        self,
+        enabled: bool,
+        *,
+        min_memory_mb: int | None = None,
+        max_memory_mb: int | None = None,
+    ) -> dict:
+        """Enable or disable per-sandbox autoscale.
+
+        When enabled, the platform resizes the sandbox between
+        ``min_memory_mb`` and ``max_memory_mb`` based on observed memory
+        pressure — scaling up fast on a 1-min spike, down slowly after
+        sustained idle.
+
+        Both bounds must be allowed memory tiers (1024, 4096, 8192, 16384,
+        32768, 65536 MB). Pass ``enabled=False`` to turn autoscale off
+        (bounds are ignored in that case).
+
+        Args:
+            enabled: Whether autoscale should be active.
+            min_memory_mb: Lower bound when ``enabled=True``.
+            max_memory_mb: Upper bound when ``enabled=True``. Must be ≥
+                ``min_memory_mb``.
+
+        Raises:
+            ScalingLockedError: The sandbox has a scaling lock active.
+            PlanLimitError: ``max_memory_mb`` exceeds the org's plan cap.
+
+        Returns:
+            Dict with ``sandboxID``, ``enabled``, ``minMemoryMB``,
+            ``maxMemoryMB``.
+        """
+        body: dict[str, Any] = {"enabled": enabled}
+        if min_memory_mb is not None:
+            body["minMemoryMB"] = min_memory_mb
+        if max_memory_mb is not None:
+            body["maxMemoryMB"] = max_memory_mb
+        resp = await self._client.put(
+            f"/sandboxes/{self.sandbox_id}/autoscale",
+            json=body,
+        )
+        if resp.status_code >= 400:
+            _raise_scaling_error(resp, "set autoscale")
+        return resp.json()
+
+    async def get_autoscale(self) -> dict:
+        """Return the current autoscale configuration.
+
+        Returns:
+            Dict with ``sandboxID``, ``enabled``, ``minMemoryMB``,
+            ``maxMemoryMB``.
+        """
+        resp = await self._client.get(f"/sandboxes/{self.sandbox_id}/autoscale")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def set_scaling_lock(self, locked: bool) -> dict:
+        """Lock or unlock the sandbox's resources against scaling.
+
+        When locked:
+
+        - :meth:`scale` raises :class:`ScalingLockedError`.
+        - :meth:`set_autoscale` with ``enabled=True`` raises
+          :class:`ScalingLockedError`.
+        - The platform autoscaler skips this sandbox entirely.
+
+        Locking ALSO disables autoscale as a side effect (single-knob
+        semantics — "I don't want this scaling, period"). Unlocking does
+        NOT re-enable autoscale; call :meth:`set_autoscale` explicitly if
+        you want it back.
+
+        Args:
+            locked: ``True`` to freeze, ``False`` to allow scaling again.
+
+        Returns:
+            Dict with ``sandboxID``, ``locked``.
+        """
+        resp = await self._client.put(
+            f"/sandboxes/{self.sandbox_id}/scaling-lock",
+            json={"locked": locked},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_scaling_lock(self) -> dict:
+        """Return the current scaling-lock state.
+
+        Returns:
+            Dict with ``sandboxID``, ``locked``.
+        """
+        resp = await self._client.get(f"/sandboxes/{self.sandbox_id}/scaling-lock")
+        resp.raise_for_status()
+        return resp.json()
 
     async def set_timeout(self, timeout: int) -> None:
         """Update the sandbox timeout in seconds."""

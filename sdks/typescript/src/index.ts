@@ -1,4 +1,16 @@
-export { Sandbox, type SandboxOpts, type CheckpointInfo, type PatchInfo, type PatchResult } from "./sandbox.js";
+export {
+  Sandbox,
+  ScalingLockedError,
+  PlanLimitError,
+  type SandboxOpts,
+  type CheckpointInfo,
+  type PatchInfo,
+  type PatchResult,
+  type ScaleResult,
+  type AutoscaleConfig,
+  type AutoscaleStatus,
+  type ScalingLockStatus,
+} from "./sandbox.js";
 export { Agent, type AgentEvent, type AgentConfig, type AgentStartOpts, type AgentSession, type McpServerConfig } from "./agent.js";
 export { Filesystem, type EntryInfo } from "./filesystem.js";
 export { Exec, type ProcessResult, type RunOpts, type ExecSession, type ExecSessionInfo, type ExecStartOpts, type ExecAttachOpts } from "./exec.js";

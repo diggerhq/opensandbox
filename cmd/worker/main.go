@@ -91,7 +91,32 @@ func main() {
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
-	secretsCA, err := secretsproxy.LoadOrCreateCA(filepath.Join(cfg.DataDir, "proxy-ca"))
+	//
+	// CA must be region-scoped (shared across all workers in the same KV)
+	// so live migration of a sandbox doesn't break TLS substitution. The
+	// guest's trust store has the source worker's CA cert baked in; if the
+	// destination presents certs signed by a different CA, every outbound
+	// HTTPS call after migration fails with "authority and subject key
+	// identifier mismatch". With KV-backed shared CA, every worker in the
+	// region presents the same cert and migration is transparent.
+	//
+	// Falls back to per-worker CA when no KV is configured (dev / EC2
+	// without SSM bridging) — single-worker setups still work, but live
+	// migration of secrets-using sandboxes will fail TLS until a shared
+	// store is wired.
+	caDir := filepath.Join(cfg.DataDir, "proxy-ca")
+	var kvStore secretsproxy.KVStore
+	if cfg.AzureKeyVaultName != "" {
+		if kv, kvErr := secretsproxy.NewAzureKVStore(cfg.AzureKeyVaultName); kvErr != nil {
+			log.Printf("opensandbox-worker: shared CA: KV client failed (%v) — falling back to per-worker CA", kvErr)
+		} else {
+			kvStore = kv
+			log.Printf("opensandbox-worker: shared CA: using Azure Key Vault %s", cfg.AzureKeyVaultName)
+		}
+	}
+	caCtx, caCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	secretsCA, err := secretsproxy.LoadOrCreateSharedCA(caCtx, kvStore, "proxy-ca-cert", "proxy-ca-key", caDir)
+	caCancel()
 	if err != nil {
 		log.Printf("opensandbox-worker: secrets proxy CA failed: %v (secrets proxy disabled)", err)
 	}
@@ -294,6 +319,27 @@ func main() {
 					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent, 0)
 				})
 			}
+
+			// Wire hibernation upload completion → DB so silent S3 upload
+			// failures stop hiding behind a "hibernated" row that points at a
+			// blob that was never written. The callback runs from the async
+			// archive goroutine in qemu/snapshot.go after upload finishes.
+			if qemuMgr != nil {
+				st := store // capture for closure
+				qemuMgr.SetHibernationUploadCallback(func(sandboxID, hibernationKey string, sizeBytes int64, uploadErr error) {
+					ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if uploadErr != nil {
+						if err := st.MarkHibernationUploadFailed(ctx2, hibernationKey, uploadErr.Error()); err != nil {
+							log.Printf("opensandbox-worker: failed to record hibernation upload error for %s: %v", sandboxID, err)
+						}
+						return
+					}
+					if err := st.MarkHibernationUploaded(ctx2, hibernationKey, sizeBytes); err != nil {
+						log.Printf("opensandbox-worker: failed to mark hibernation uploaded for %s: %v", sandboxID, err)
+					}
+				})
+			}
 		}
 	}
 
@@ -343,6 +389,11 @@ func main() {
 
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)
+	// Wire up Axiom log-shipping. Empty token disables shipping (kill-switch).
+	grpcServer.SetAxiomConfig(cfg.AxiomIngestToken, cfg.AxiomDataset)
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox-worker: sandbox session log shipping enabled (dataset=%s)", cfg.AxiomDataset)
+	}
 	// Wire up live migration if using QEMU manager
 	if migrator, ok := mgr.(worker.LiveMigrator); ok {
 		grpcServer.SetMigrator(migrator)
@@ -410,6 +461,27 @@ func main() {
 			if qemuMgr != nil {
 				hb.SetMemoryInfoFunc(func() (int, int) {
 					return qemuMgr.HostMemoryMB(), qemuMgr.TotalCommittedMemoryMB()
+				})
+				// Per-sandbox stats for the CP autoscaler. The stats collector
+				// runs on a 10s tick (matching heartbeat cadence) and the
+				// heartbeat reads the cached snapshot non-blockingly.
+				qemuMgr.StartStatsCollector(ctx, 10*time.Second)
+				hb.SetSandboxStatsFunc(func() map[string]worker.SandboxStatsWire {
+					raw := qemuMgr.GetAllSandboxStats()
+					out := make(map[string]worker.SandboxStatsWire, len(raw))
+					for id, s := range raw {
+						memPct := 0.0
+						if s.MemLimit > 0 {
+							memPct = float64(s.MemUsage) / float64(s.MemLimit) * 100
+						}
+						out[id] = worker.SandboxStatsWire{
+							MemUsage: s.MemUsage,
+							MemLimit: s.MemLimit,
+							MemPct:   memPct,
+							CPUPct:   s.CPUPercent,
+						}
+					}
+					return out
 				})
 			}
 			// On reconnect after outage, reconcile sandbox state with DB

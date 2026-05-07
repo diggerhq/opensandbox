@@ -1502,6 +1502,10 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		OverlayMode:         true,
 		SourceGoldenVersion: sourceGoldenVersion,
 		TargetMemoryMb:      actualMemMB,
+		// Carry secrets-proxy session from source to target (see PreCopyDrives).
+		SealedTokens:    preCopyResp.SealedTokens,
+		EgressAllowlist: preCopyResp.EgressAllowlist,
+		TokenHosts:      preCopyResp.TokenHosts,
 	})
 	if err != nil {
 		return fmt.Errorf("prepare target: %w", err)
