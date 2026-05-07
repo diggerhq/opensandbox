@@ -58,29 +58,33 @@ export default function Checkpoints() {
                     <code style={{ fontSize: 12 }}>{cp.sandboxId}</code>
                   </td>
                   <td>
-                    <span style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      padding: '2px 8px',
-                      borderRadius: 10,
-                      background: cp.status === 'ready'
-                        ? 'rgba(34, 197, 94, 0.08)'
-                        : cp.status === 'failed'
-                          ? 'rgba(251, 113, 133, 0.08)'
-                          : 'rgba(234, 179, 8, 0.08)',
-                      color: cp.status === 'ready'
-                        ? 'var(--accent-green)'
-                        : cp.status === 'failed'
-                          ? 'var(--accent-rose)'
-                          : '#eab308',
-                      border: `1px solid ${
-                        cp.status === 'ready'
-                          ? 'rgba(34, 197, 94, 0.15)'
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: '2px 8px',
+                        borderRadius: 10,
+                        background: cp.status === 'ready'
+                          ? 'rgba(34, 197, 94, 0.08)'
                           : cp.status === 'failed'
-                            ? 'rgba(251, 113, 133, 0.15)'
-                            : 'rgba(234, 179, 8, 0.15)'
-                      }`,
-                    }}>
+                            ? 'rgba(251, 113, 133, 0.08)'
+                            : 'rgba(234, 179, 8, 0.08)',
+                        color: cp.status === 'ready'
+                          ? 'var(--accent-green)'
+                          : cp.status === 'failed'
+                            ? 'var(--accent-rose)'
+                            : '#eab308',
+                        border: `1px solid ${
+                          cp.status === 'ready'
+                            ? 'rgba(34, 197, 94, 0.15)'
+                            : cp.status === 'failed'
+                              ? 'rgba(251, 113, 133, 0.15)'
+                              : 'rgba(234, 179, 8, 0.15)'
+                        }`,
+                        cursor: cp.status === 'failed' && cp.errorMsg ? 'help' : 'default',
+                      }}
+                      title={cp.status === 'failed' && cp.errorMsg ? cp.errorMsg : undefined}
+                    >
                       {cp.status === 'ready' ? 'Ready' : cp.status === 'failed' ? 'Failed' : 'Processing'}
                     </span>
                   </td>
