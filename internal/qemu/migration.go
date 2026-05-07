@@ -634,6 +634,7 @@ func (m *Manager) PreCopyDrives(ctx context.Context, sandboxID string, checkpoin
 		secrets.SealedTokens = m.secretsProxy.GetSessionTokens(guestIP)
 		secrets.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(guestIP)
 		secrets.TokenHosts = m.secretsProxy.GetSessionTokenHosts(guestIP)
+		secrets.SealedNames = m.secretsProxy.GetSessionNames(guestIP)
 	}
 
 	mc := &MigrationCoordinator{
@@ -751,7 +752,7 @@ func (m *Manager) PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID,
 	// An allowlist alone is enough — without a session the proxy 407s every request.
 	if m.secretsProxy != nil && (len(secrets.SealedTokens) > 0 || len(secrets.EgressAllowlist) > 0) {
 		if vm, getErr := m.getVM(sandboxID); getErr == nil && vm.network != nil && vm.network.GuestIP != "" {
-			m.secretsProxy.ReregisterSession(sandboxID, vm.network.GuestIP, secrets.SealedTokens, secrets.EgressAllowlist, secrets.TokenHosts)
+			m.secretsProxy.ReregisterSession(sandboxID, vm.network.GuestIP, secrets.SealedTokens, secrets.EgressAllowlist, secrets.TokenHosts, secrets.SealedNames)
 			log.Printf("qemu: migration %s: re-registered secrets proxy session (%d tokens, %d allowlist, guestIP=%s)",
 				sandboxID, len(secrets.SealedTokens), len(secrets.EgressAllowlist), vm.network.GuestIP)
 		}

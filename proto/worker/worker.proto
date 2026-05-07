@@ -51,6 +51,14 @@ service SandboxWorker {
 
   rpc SetSandboxLimits(SetSandboxLimitsRequest) returns (SetSandboxLimitsResponse);
 
+  // UpdateSandboxSecret refreshes the value the proxy substitutes for a
+  // sealed token, by env-var name. Used by the secret-store update flow:
+  // when a customer PUTs a new value, the CP fans out this RPC to every
+  // worker hosting a sandbox that uses the store. Sealed token IDs and
+  // sandbox env vars are unchanged — only the proxy session's value map
+  // updates, so the next outbound HTTPS substitution uses the new value.
+  rpc UpdateSandboxSecret(UpdateSandboxSecretRequest) returns (UpdateSandboxSecretResponse);
+
   // Live migration between workers
   rpc PreCopyDrives(PreCopyDrivesRequest) returns (PreCopyDrivesResponse);
   rpc PrepareMigrationIncoming(PrepareMigrationIncomingRequest) returns (PrepareMigrationIncomingResponse);
@@ -384,6 +392,11 @@ message PreCopyDrivesResponse {
   map<string, string> sealed_tokens = 7;       // sealed_id -> plaintext secret value
   repeated string egress_allowlist = 8;        // host allowlist for the secrets proxy
   map<string, HostList> token_hosts = 9;       // sealed_id -> per-token allowed hosts
+  // env-var-name -> sealed_id index. Required so refresh-by-name
+  // (UpdateSandboxSecret) keeps working on the destination worker after
+  // migration. Without it, post-migration secret-store updates would silently
+  // miss because the destination's session has no name → token mapping.
+  map<string, string> sealed_names = 10;
 }
 
 // HostList is a wrapper because proto3 maps cannot have a repeated value type.
@@ -411,11 +424,25 @@ message PrepareMigrationIncomingRequest {
   map<string, string> sealed_tokens = 13;
   repeated string egress_allowlist = 14;
   map<string, HostList> token_hosts = 15;
+  map<string, string> sealed_names = 16;
 }
 
 message PrepareMigrationIncomingResponse {
   string incoming_addr = 1;  // TCP address for source to migrate to (e.g. "10.100.1.7:49152")
   int32 host_port = 2;       // mapped host port on target worker
+}
+
+message UpdateSandboxSecretRequest {
+  string sandbox_id = 1;
+  string secret_name = 2; // env var name (the key in the secret store)
+  string value = 3;       // new plaintext value
+}
+
+message UpdateSandboxSecretResponse {
+  // updated is false if the worker has no proxy session for this sandbox
+  // or the secret_name isn't registered on the session. Caller logs +
+  // surfaces; not necessarily a hard error (sandbox may be mid-migration).
+  bool updated = 1;
 }
 
 message LiveMigrateRequest {

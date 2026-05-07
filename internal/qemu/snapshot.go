@@ -36,6 +36,10 @@ type SnapshotMeta struct {
 	GoldenVersion    string              `json:"goldenVersion,omitempty"`
 	SnapshotedAt     time.Time           `json:"snapshotedAt,omitempty"`
 	SealedTokens     map[string]string   `json:"sealedTokens,omitempty"`
+	// SealedNames is the env-var-name → sealed-token index. Persisted alongside
+	// SealedTokens so secret-store refresh-by-name (UpdateSecretValue) keeps
+	// working after a wake or migration handoff.
+	SealedNames      map[string]string   `json:"sealedNames,omitempty"`
 	EgressAllowlist  []string            `json:"egressAllowlist,omitempty"`
 	TokenHosts       map[string][]string `json:"tokenHosts,omitempty"`
 }
@@ -130,6 +134,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Persist secrets proxy state so wake can re-register the session.
 	if m.secretsProxy != nil && vm.network != nil {
 		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.SealedNames = m.secretsProxy.GetSessionNames(vm.network.GuestIP)
 		meta.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
 		meta.TokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
 	}
@@ -366,10 +371,31 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("workspace not found at %s", workspacePath)
 	}
 
-	// Step 3: Set up network
-	netCfg, err := m.subnets.Allocate()
-	if err != nil {
-		return nil, fmt.Errorf("allocate subnet: %w", err)
+	// Step 3: Set up network. Prefer the original TAP/subnet so the gateway
+	// IP remains stable across hibernate→wake cycles. The VM's HTTPS_PROXY
+	// env var was baked at create time pointing at the original gateway IP
+	// (e.g. 172.16.0.1). If wake reallocates a fresh subnet, the env still
+	// points at the stale gateway and every outbound HTTPS through the
+	// secrets proxy times out — silent breakage of the entire proxy path
+	// for any sandbox with a secret store.
+	//
+	// Fall back to a fresh allocation if the original block was claimed by a
+	// different sandbox while this one was hibernated. The fallback path
+	// will leave HTTPS_PROXY stale, so log a clear warning — operators who
+	// see this in journal know why post-wake outbound HTTPS is broken.
+	var netCfg *NetworkConfig
+	if meta.Network != nil && meta.Network.TAPName != "" {
+		netCfg, err = m.subnets.AllocateSpecific(meta.Network.TAPName)
+		if err != nil {
+			log.Printf("qemu: wake %s: original TAP %q unavailable (%v) — falling back to fresh subnet; HTTPS_PROXY env will be stale, outbound HTTPS through proxy will fail until sandbox is recreated",
+				sandboxID, meta.Network.TAPName, err)
+		}
+	}
+	if netCfg == nil {
+		netCfg, err = m.subnets.Allocate()
+		if err != nil {
+			return nil, fmt.Errorf("allocate subnet: %w", err)
+		}
 	}
 	if err := CreateTAP(netCfg); err != nil {
 		m.subnets.Release(netCfg.TAPName)
@@ -497,8 +523,8 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	// Re-register secrets proxy session from persisted tokens. An allowlist
 	// alone is enough — without a session the proxy 407s every request.
 	if m.secretsProxy != nil && (len(meta.SealedTokens) > 0 || len(meta.EgressAllowlist) > 0) {
-		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts)
-		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens, %d allowlist)", sandboxID, len(meta.SealedTokens), len(meta.EgressAllowlist))
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts, meta.SealedNames)
+		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens, %d allowlist, %d names)", sandboxID, len(meta.SealedTokens), len(meta.EgressAllowlist), len(meta.SealedNames))
 	}
 	// Refresh the proxy CA in the guest's trust store. Wake may land on a
 	// different worker than the one that hibernated the sandbox, in which

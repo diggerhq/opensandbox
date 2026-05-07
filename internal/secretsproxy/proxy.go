@@ -11,10 +11,51 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
 )
+
+// AnycastAddr is the link-local IP every VM uses to reach the secrets proxy.
+// One byte off the metadata server (169.254.169.254) so the two services have
+// adjacent, easy-to-remember addresses.
+//
+// Why link-local instead of the per-VM TAP gateway: HTTPS_PROXY is baked into
+// the VM env at create time. If we used the gateway IP, that env became stale
+// the moment the VM moved to a different /30 subnet (wake → reallocated
+// block, migrate → different worker's allocator). Customers saw "every
+// outbound HTTPS times out post-handoff" because the env pointed at an
+// unreachable address. Link-local is host-scoped, so each worker answers the
+// same address locally — the env is correct on whichever host the VM lives on.
+const (
+	AnycastIP   = "169.254.169.253"
+	AnycastPort = 3128
+)
+
+// AnycastEndpoint returns the proxy URL VMs should use as HTTPS_PROXY.
+func AnycastEndpoint() string {
+	return fmt.Sprintf("http://%s:%d", AnycastIP, AnycastPort)
+}
+
+// EnsureAnycastInterface assigns AnycastIP to the loopback interface so the
+// kernel answers it locally. Idempotent — succeeds even if already assigned
+// (the underlying `ip addr add` returns "File exists" which we treat as ok).
+//
+// Worker startup must call this before sandboxes are created or the proxy
+// won't be reachable at the stable address.
+func EnsureAnycastInterface() error {
+	cmd := exec.Command("ip", "addr", "add", AnycastIP+"/32", "dev", "lo")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// "RTNETLINK answers: File exists" → already configured, fine.
+		if strings.Contains(string(out), "File exists") {
+			return nil
+		}
+		return fmt.Errorf("ip addr add %s/32 dev lo: %w (%s)", AnycastIP, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // privateIPNets contains the CIDR ranges considered private/internal.
 // Connections to these ranges are blocked to prevent SSRF attacks.
@@ -57,6 +98,7 @@ const (
 type Session struct {
 	SandboxID  string
 	Secrets    map[string]string   // "osb_sealed_xxx" → real value
+	Names      map[string]string   // envVarName → "osb_sealed_xxx" — lets us update by name without re-sealing
 	TokenHosts map[string][]string // sealed token → allowed hosts; nil/empty entry = all allowed hosts
 	Allowlist  []string            // nil = all hosts allowed; supports "*." prefix wildcards
 	ExpiresAt  time.Time
@@ -178,12 +220,26 @@ func (p *SecretsProxy) GetSessionTokenHosts(guestIP string) map[string][]string 
 	return session.TokenHosts
 }
 
+// GetSessionNames returns the env-var-name → sealed-token map for the given
+// guest IP's session. Used to persist the name index across hibernate/wake
+// and live migration so secret-refresh-by-name keeps working after a handoff.
+func (p *SecretsProxy) GetSessionNames(guestIP string) map[string]string {
+	p.mu.RLock()
+	session := p.sessions[guestIP]
+	p.mu.RUnlock()
+	if session == nil {
+		return nil
+	}
+	return session.Names
+}
+
 // ReregisterSession creates a new proxy session from a previously persisted token map.
 // Used on wake to restore the proxy session without re-generating tokens.
-func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string) {
+func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string, names map[string]string) {
 	session := &Session{
 		SandboxID:  sandboxID,
 		Secrets:    tokens,
+		Names:      names,
 		TokenHosts: tokenHosts,
 		Allowlist:  allowlist,
 		ExpiresAt:  time.Now().Add(defaultSessionTTL),
@@ -191,8 +247,38 @@ func (p *SecretsProxy) ReregisterSession(sandboxID, guestIP string, tokens map[s
 	p.mu.Lock()
 	p.sessions[guestIP] = session
 	p.mu.Unlock()
-	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d tokenHosts=%d",
-		sandboxID, guestIP, len(tokens), len(allowlist), len(tokenHosts))
+	log.Printf("secrets-proxy: re-registered session sandbox=%s ip=%s secrets=%d allowlist=%d tokenHosts=%d names=%d",
+		sandboxID, guestIP, len(tokens), len(allowlist), len(tokenHosts), len(names))
+}
+
+// UpdateSecretValue replaces the value the sealed token for `secretName` resolves
+// to, on the session for the given sandbox. The sealed token ID itself stays
+// the same — sandbox env vars don't change, but the next outbound HTTPS that
+// the proxy substitutes uses the new value.
+//
+// Returns true if the update landed (session found, name matched a known
+// sealed token, value replaced). Returns false if there's no session for the
+// sandbox or the name isn't in the session — caller can use this to log a
+// stale/missed update.
+func (p *SecretsProxy) UpdateSecretValue(sandboxID, secretName, newValue string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, session := range p.sessions {
+		if session.SandboxID != sandboxID {
+			continue
+		}
+		token, ok := session.Names[secretName]
+		if !ok {
+			return false
+		}
+		if session.Secrets == nil {
+			session.Secrets = make(map[string]string, 1)
+		}
+		session.Secrets[token] = newValue
+		log.Printf("secrets-proxy: updated value for sandbox=%s name=%s (token unchanged)", sandboxID, secretName)
+		return true
+	}
+	return false
 }
 
 // CreateSealedEnvs generates sealed tokens for the given env vars, registers a
@@ -244,16 +330,34 @@ func (p *SecretsProxy) CreateSealedEnvs(sandboxID, guestIP, gatewayIP string, pl
 	// a session the proxy rejects every CONNECT with 407 no_session, so an
 	// allowlist-only store would otherwise leave the sandbox with zero egress.
 	if len(tokenMap) > 0 || len(allowlist) > 0 {
+		// Build the env-var-name → sealed-token index. Required for
+		// UpdateSecretValue (refresh-by-name without re-sealing). Always
+		// included on the session so allowlist-only stores can later add
+		// secrets via UpdateSecretValue without dropping the session.
+		names := make(map[string]string, len(sealed))
+		for envVar, token := range sealed {
+			names[envVar] = token
+		}
 		p.RegisterSession(guestIP, &Session{
 			SandboxID:  sandboxID,
 			Secrets:    tokenMap,
+			Names:      names,
 			TokenHosts: tokenHosts,
 			Allowlist:  allowlist,
 		})
 	}
 
 	// Merge into the env map for the VM. plaintextEnvs win on collision.
-	proxyURL := fmt.Sprintf("http://%s:3128", gatewayIP)
+	//
+	// Use the anycast link-local address (169.254.169.253:3128) instead of the
+	// per-VM gateway IP. The env value is baked into the VM at create time and
+	// must keep working through hibernate/wake (subnet may be reallocated) and
+	// live migration (target worker has its own subnet allocator). Each worker
+	// answers the anycast IP locally on lo (see EnsureAnycastInterface) so the
+	// VM reaches the right proxy regardless of which host it's currently on.
+	// gatewayIP is still a parameter for backwards compat / non-anycast paths.
+	_ = gatewayIP
+	proxyURL := AnycastEndpoint()
 	caCertPath := "/usr/local/share/ca-certificates/opensandbox-proxy.crt"
 
 	noProxy := "localhost,127.0.0.1,::1"

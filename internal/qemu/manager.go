@@ -144,7 +144,16 @@ type SecretsProxyIntegration interface {
 	// GetSessionTokenHosts returns the per-token host restrictions for persisting during hibernate.
 	GetSessionTokenHosts(guestIP string) map[string][]string
 	// ReregisterSession re-creates a proxy session from a persisted token map (used on wake).
-	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string)
+	// names is the env-var-name → sealed-token index needed for refresh-by-name
+	// (UpdateSecretValue) to keep working after a wake/migration.
+	ReregisterSession(sandboxID, guestIP string, tokens map[string]string, allowlist []string, tokenHosts map[string][]string, names map[string]string)
+	// GetSessionNames returns the env-var-name → sealed-token map; persisted alongside
+	// SealedTokens so refresh-by-name survives a handoff.
+	GetSessionNames(guestIP string) map[string]string
+	// UpdateSecretValue replaces the value the sealed token for secretName resolves
+	// to, on the session for the given sandbox. Sealed token unchanged; the
+	// next outbound HTTPS substitutes the new value. Returns true on success.
+	UpdateSecretValue(sandboxID, secretName, newValue string) bool
 	// CACertPEM returns the CA certificate PEM for injection into the VM trust store.
 	CACertPEM() []byte
 }
@@ -2037,6 +2046,18 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 	return vm.agent.SetResourceLimits(ctx, maxPids, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
 }
 
+// UpdateSandboxSecret refreshes the proxy session value for one secret name.
+// Returns (true, nil) on success, (false, nil) if there's no session for the
+// sandbox or the secret name isn't on the session — both treated as transient
+// (e.g. mid-migration); the caller may log + move on. Returns an error only
+// on hard failure (no proxy at all).
+func (m *Manager) UpdateSandboxSecret(_ context.Context, sandboxID, secretName, value string) (bool, error) {
+	if m.secretsProxy == nil {
+		return false, fmt.Errorf("secrets proxy not configured on this worker")
+	}
+	return m.secretsProxy.UpdateSecretValue(sandboxID, secretName, value), nil
+}
+
 // watchMemoryHotplug polls the guest's /proc/meminfo until at least 1GB of
 // virtio-mem memory has been onlined (or target if smaller), then closes
 // vm.memoryReady to unblock getReadyVM. Bounded by a 10s timeout so the
@@ -2814,8 +2835,8 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	// Re-register secrets proxy session from checkpoint metadata. An allowlist
 	// alone is enough — without a session the proxy 407s every request.
 	if m.secretsProxy != nil && (len(cpMeta.SealedTokens) > 0 || len(cpMeta.EgressAllowlist) > 0) {
-		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, cpMeta.SealedTokens, cpMeta.EgressAllowlist, cpMeta.TokenHosts)
-		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens, %d allowlist)", sandboxID, len(cpMeta.SealedTokens), len(cpMeta.EgressAllowlist))
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, cpMeta.SealedTokens, cpMeta.EgressAllowlist, cpMeta.TokenHosts, cpMeta.SealedNames)
+		log.Printf("qemu: RestoreFromCheckpoint %s: re-registered secrets proxy session (%d tokens, %d allowlist, %d names)", sandboxID, len(cpMeta.SealedTokens), len(cpMeta.EgressAllowlist), len(cpMeta.SealedNames))
 	}
 
 	// Step 8: Update VM instance

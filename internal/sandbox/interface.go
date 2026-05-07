@@ -29,6 +29,11 @@ type MigrationSecrets struct {
 	SealedTokens    map[string]string
 	EgressAllowlist []string
 	TokenHosts      map[string][]string
+	// SealedNames is the env-var-name → sealed-token index. Carried across
+	// migration so refresh-by-name (UpdateSecretValue) keeps working on the
+	// destination. Without it, post-migration secret-store updates would
+	// silently miss because the destination's session has no name index.
+	SealedNames map[string]string
 }
 
 // SandboxStats holds live resource usage for a sandbox.
@@ -70,6 +75,13 @@ type Manager interface {
 
 	// Resource limits
 	SetResourceLimits(ctx context.Context, sandboxID string, maxPids int32, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec int64) error
+
+	// UpdateSandboxSecret refreshes the proxy session value for one secret name
+	// (env var name) without changing the sealed token id seen by the sandbox.
+	// Used by the secret-store-update flow to push new values to running
+	// sandboxes. Returns (true, nil) on success; (false, nil) if no session
+	// or no name match (transient miss e.g. mid-migration; caller logs).
+	UpdateSandboxSecret(ctx context.Context, sandboxID, secretName, value string) (bool, error)
 
 	// Monitoring
 	Stats(ctx context.Context, sandboxID string) (*SandboxStats, error)

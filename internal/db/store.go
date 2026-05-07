@@ -518,17 +518,25 @@ type SandboxSession struct {
 	GoldenVersion        *string         `json:"goldenVersion,omitempty"`
 }
 
-func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
-	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running")
+func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, secretStoreID *uuid.UUID) (*SandboxSession, error) {
+	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running", secretStoreID)
 }
 
-func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string) (*SandboxSession, error) {
+// CreateSandboxSessionWithStatus inserts a new sandbox_sessions row.
+//
+// secretStoreID is the resolved secret_stores.id when the sandbox is bound to
+// a store (nil otherwise). The column is required for the secret-refresh
+// fan-out: ListRunningSandboxesByStore filters on it. Pre-fix the column was
+// silently NULL because the INSERT omitted it, which made the fanout a no-op
+// and meant a customer's PUT to /secret-stores/:id/entries/:name didn't
+// propagate to running sandboxes — they kept the value from create-time.
+func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string, secretStoreID *uuid.UUID) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status, secret_store_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version`,
-		sandboxID, orgID, userID, template, region, workerID, config, metadata, status,
+		sandboxID, orgID, userID, template, region, workerID, config, metadata, status, secretStoreID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
 		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
