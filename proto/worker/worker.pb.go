@@ -2644,8 +2644,14 @@ type CreateCheckpointResponse struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RootfsS3Key    string                 `protobuf:"bytes,1,opt,name=rootfs_s3_key,json=rootfsS3Key,proto3" json:"rootfs_s3_key,omitempty"`
 	WorkspaceS3Key string                 `protobuf:"bytes,2,opt,name=workspace_s3_key,json=workspaceS3Key,proto3" json:"workspace_s3_key,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Size of the uploaded checkpoint archive in bytes. The control plane
+	// persists this on the sandbox_checkpoints row instead of the previous
+	// hardcoded 0, so customers and operators can see how big a checkpoint
+	// actually is. Zero is reported when the archive failed to upload (the
+	// checkpoint is still locally usable but cross-worker forks won't work).
+	SizeBytes     int64 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateCheckpointResponse) Reset() {
@@ -2690,6 +2696,13 @@ func (x *CreateCheckpointResponse) GetWorkspaceS3Key() string {
 		return x.WorkspaceS3Key
 	}
 	return ""
+}
+
+func (x *CreateCheckpointResponse) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
 }
 
 type RestoreCheckpointRequest struct {
@@ -3928,10 +3941,12 @@ const file_proto_worker_worker_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12#\n" +
 	"\rcheckpoint_id\x18\x02 \x01(\tR\fcheckpointId\x12%\n" +
-	"\x0eprepare_golden\x18\x03 \x01(\bR\rprepareGolden\"h\n" +
+	"\x0eprepare_golden\x18\x03 \x01(\bR\rprepareGolden\"\x87\x01\n" +
 	"\x18CreateCheckpointResponse\x12\"\n" +
 	"\rrootfs_s3_key\x18\x01 \x01(\tR\vrootfsS3Key\x12(\n" +
-	"\x10workspace_s3_key\x18\x02 \x01(\tR\x0eworkspaceS3Key\"^\n" +
+	"\x10workspace_s3_key\x18\x02 \x01(\tR\x0eworkspaceS3Key\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\"^\n" +
 	"\x18RestoreCheckpointRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12#\n" +

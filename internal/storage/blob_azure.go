@@ -16,6 +16,32 @@ type azureBlobClient struct {
 	connStr string
 }
 
+// uploadStreamOpts is shared by every Upload call. The Azure SDK's nil-default
+// is BlockSize=1MB / Concurrency=1, i.e. a serial chain of small PutBlock
+// calls that's HTTP-overhead bound at 30–60 MB/s per blob — that turned a
+// 10 GB checkpoint into a 5+ minute upload. The values below are sized for a
+// 64-vCPU worker (D-series, ~30 Gbps NIC, Premium SSD ~700 MB/s read):
+//
+//   - BlockSize 8 MB: large enough that PutBlock HTTP overhead is amortized
+//     (~10x fewer round-trips than the SDK default), small enough that under
+//     concurrent uploads the per-blob in-flight memory stays bounded.
+//   - Concurrency 8: enough parallelism to keep the worker NIC fed even when
+//     HTTP latency dominates a single block. Per-upload in-flight buffer is
+//     8 × 8 MB = 64 MB, negligible against worker RAM.
+//
+// Practical ceiling per blob with these settings is ~600–1000 MB/s, which is
+// already above the disk-read rate at which we can feed bytes into the
+// uploader from the on-disk archive — meaning disk read is now the bottleneck,
+// not HTTP. Bumping further would just waste memory.
+//
+// Concurrency on the worker level: 5 simultaneous CreateCheckpoint uploads ≈
+// 320 MB total in-flight buffer + ~40 connections to blob — comfortably under
+// the worker's NIC and Azure's per-account ingress limits.
+var uploadStreamOpts = &azblob.UploadStreamOptions{
+	BlockSize:   8 * 1024 * 1024,
+	Concurrency: 8,
+}
+
 func (c *azureBlobClient) BackendName() string { return "Azure Blob" }
 
 // normalizeKey strips the container name prefix from the key if present.
@@ -46,7 +72,7 @@ func (c *azureBlobClient) Upload(ctx context.Context, container, key string, bod
 	if err := c.ensureClient(); err != nil {
 		return err
 	}
-	_, err := c.client.UploadStream(ctx, container, normalizeKey(container, key), body, nil)
+	_, err := c.client.UploadStream(ctx, container, normalizeKey(container, key), body, uploadStreamOpts)
 	return err
 }
 

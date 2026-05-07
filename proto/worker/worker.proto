@@ -337,6 +337,12 @@ message CreateCheckpointRequest {
 message CreateCheckpointResponse {
   string rootfs_s3_key = 1;
   string workspace_s3_key = 2;
+  // Size of the uploaded checkpoint archive in bytes. The control plane
+  // persists this on the sandbox_checkpoints row instead of the previous
+  // hardcoded 0, so customers and operators can see how big a checkpoint
+  // actually is. Zero is reported when the archive failed to upload (the
+  // checkpoint is still locally usable but cross-worker forks won't work).
+  int64 size_bytes = 3;
 }
 
 message RestoreCheckpointRequest {

@@ -129,6 +129,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{36, "migrations/036_sandbox_scaling_lock.up.sql"},
 		{37, "migrations/037_agent_subscriptions.up.sql"},
 		{38, "migrations/038_hibernation_upload_status.up.sql"},
+		{39, "migrations/039_checkpoint_failure_detail.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -1236,17 +1237,23 @@ func (s *Store) UpsertWorkspaceBackup(ctx context.Context, sandboxID string, org
 
 // Checkpoint represents a named checkpoint for a sandbox.
 type Checkpoint struct {
-	ID              uuid.UUID       `json:"id"`
-	SandboxID       string          `json:"sandboxId"`
-	OrgID           uuid.UUID       `json:"orgId"`
-	Name            string          `json:"name"`
-	RootfsS3Key     *string         `json:"rootfsS3Key,omitempty"`
-	WorkspaceS3Key  *string         `json:"workspaceS3Key,omitempty"`
-	SandboxConfig   json.RawMessage `json:"sandboxConfig"`
-	Status          string          `json:"status"`
-	SizeBytes       int64           `json:"sizeBytes"`
-	IsPublic        bool            `json:"isPublic"`
-	CreatedAt       time.Time       `json:"createdAt"`
+	ID             uuid.UUID       `json:"id"`
+	SandboxID      string          `json:"sandboxId"`
+	OrgID          uuid.UUID       `json:"orgId"`
+	Name           string          `json:"name"`
+	RootfsS3Key    *string         `json:"rootfsS3Key,omitempty"`
+	WorkspaceS3Key *string         `json:"workspaceS3Key,omitempty"`
+	SandboxConfig  json.RawMessage `json:"sandboxConfig"`
+	Status         string          `json:"status"`
+	SizeBytes      int64           `json:"sizeBytes"`
+	IsPublic       bool            `json:"isPublic"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	// ErrorMsg holds the failure reason when Status == "failed". Persisted by
+	// SetCheckpointFailed so customers/operators can see WHY a checkpoint
+	// failed (timeout, archive error, S3 upload error, etc.) instead of just
+	// status="failed" with no detail.
+	ErrorMsg *string    `json:"errorMsg,omitempty"`
+	FailedAt *time.Time `json:"failedAt,omitempty"`
 }
 
 // CreateCheckpoint inserts a new checkpoint record.
@@ -1259,11 +1266,23 @@ func (s *Store) CreateCheckpoint(ctx context.Context, cp *Checkpoint) error {
 	).Scan(&cp.CreatedAt)
 }
 
-// SetCheckpointReady marks a checkpoint as ready after async S3 upload completes.
+// SetCheckpointReady marks a checkpoint as ready after the S3 upload completes.
+// Also clears error_msg/failed_at so a row that previously failed and was then
+// recovered ends up in a consistent state (no leftover failure detail on a
+// "ready" row). Today no code path flips failed→ready — the API's checkpoint
+// goroutine calls either SetCheckpointFailed or SetCheckpointReady but never
+// both — but the defensive clear matches the column semantics (failed_at /
+// error_msg are only meaningful when status='failed').
 func (s *Store) SetCheckpointReady(ctx context.Context, checkpointID uuid.UUID, rootfsKey, workspaceKey string, sizeBytes int64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET status = 'ready', rootfs_s3_key = $2, workspace_s3_key = $3, size_bytes = $4
-		 WHERE id = $1`,
+		`UPDATE sandbox_checkpoints
+		    SET status           = 'ready',
+		        rootfs_s3_key    = $2,
+		        workspace_s3_key = $3,
+		        size_bytes       = $4,
+		        error_msg        = NULL,
+		        failed_at        = NULL
+		  WHERE id = $1`,
 		checkpointID, rootfsKey, workspaceKey, sizeBytes)
 	return err
 }
@@ -1276,11 +1295,18 @@ func (s *Store) UpdateCheckpointS3Keys(ctx context.Context, checkpointID uuid.UU
 	return err
 }
 
-// SetCheckpointFailed marks a checkpoint as failed.
+// SetCheckpointFailed marks a checkpoint as failed and records the reason.
+// Pre-fix the `reason` argument was silently discarded — operators saw
+// status='failed' with no detail. The error_msg / failed_at columns are
+// added in migration 039.
 func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID, reason string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET status = 'failed' WHERE id = $1`,
-		checkpointID)
+		`UPDATE sandbox_checkpoints
+		    SET status    = 'failed',
+		        error_msg = $2,
+		        failed_at = now()
+		  WHERE id = $1`,
+		checkpointID, reason)
 	return err
 }
 
@@ -1288,10 +1314,11 @@ func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID,
 func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE id = $1`, checkpointID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+		&cp.ErrorMsg, &cp.FailedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1301,7 +1328,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Che
 // ListCheckpoints returns all checkpoints for a sandbox, newest first.
 func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 ORDER BY created_at DESC`, sandboxID)
 	if err != nil {
 		return nil, err
@@ -1312,7 +1339,8 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	for rows.Next() {
 		var cp Checkpoint
 		if err := rows.Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt); err != nil {
+			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+			&cp.ErrorMsg, &cp.FailedAt); err != nil {
 			return nil, err
 		}
 		checkpoints = append(checkpoints, cp)
@@ -1339,6 +1367,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id, c.sandbox_id, c.org_id, c.name, c.rootfs_s3_key, c.workspace_s3_key,
 		        c.sandbox_config, c.status, c.size_bytes, c.is_public, c.created_at,
+		        c.error_msg, c.failed_at,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id AND ss.status IN ('running', 'hibernated')) AS active_forks,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id) AS total_forks
 		 FROM sandbox_checkpoints c WHERE c.org_id = $1
@@ -1353,6 +1382,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 		var cf CheckpointWithForks
 		if err := rows.Scan(&cf.ID, &cf.SandboxID, &cf.OrgID, &cf.Name, &cf.RootfsS3Key, &cf.WorkspaceS3Key,
 			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.IsPublic, &cf.CreatedAt,
+			&cf.ErrorMsg, &cf.FailedAt,
 			&cf.ActiveForks, &cf.TotalForks); err != nil {
 			return nil, 0, err
 		}
@@ -1365,10 +1395,11 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+		&cp.ErrorMsg, &cp.FailedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}

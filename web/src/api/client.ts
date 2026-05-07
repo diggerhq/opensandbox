@@ -89,6 +89,43 @@ export const rebootSession = (sandboxId: string) =>
 export const powerCycleSession = (sandboxId: string) =>
   apiFetch<void>(`/sessions/${sandboxId}/power-cycle`, { method: 'POST' })
 
+// Sandbox session logs: SSE stream of /var/log + exec stdout/stderr.
+// The server proxies queries through to Axiom; the read token never
+// reaches the browser. The returned EventSource emits one `message`
+// event per log line (event.data = JSON-stringified LogEvent).
+export interface LogEvent {
+  _time: string
+  source: 'var_log' | 'exec_stdout' | 'exec_stderr' | 'agent'
+  line: string
+  sandbox_id?: string
+  path?: string
+  exec_id?: string
+  command?: string
+  argv?: string[]
+  exit_code?: number
+}
+
+export interface LogStreamOptions {
+  tail?: boolean      // default true; if false, returns historical batch then closes
+  q?: string          // free-text search (server applies "line contains")
+  source?: string     // comma-separated subset of source values
+  since?: string      // RFC3339; default = sandbox.startedAt
+  limit?: number      // historical batch cap; default 1000, max 10000
+}
+
+export function streamSessionLogs(
+  sandboxId: string,
+  opts: LogStreamOptions = {},
+): EventSource {
+  const url = new URL(`${API_BASE}/sessions/${encodeURIComponent(sandboxId)}/logs`, window.location.origin)
+  if (opts.tail !== undefined) url.searchParams.set('tail', String(opts.tail))
+  if (opts.q) url.searchParams.set('q', opts.q)
+  if (opts.source) url.searchParams.set('source', opts.source)
+  if (opts.since) url.searchParams.set('since', opts.since)
+  if (opts.limit !== undefined) url.searchParams.set('limit', String(opts.limit))
+  return new EventSource(url.toString(), { withCredentials: true })
+}
+
 export const getOrg = () => apiFetch<Org>('/org')
 
 export const updateOrg = (name: string) =>
@@ -183,6 +220,13 @@ export interface CheckpointItem {
   activeForks: number
   totalForks: number
   createdAt: string
+  // errorMsg / failedAt are populated when status === 'failed'.
+  // Pre-fix the API returned status='failed' with no detail; now the row
+  // carries the actual reason (timeout, archive failure, S3 upload failure,
+  // etc.) and the failure timestamp. Server-side: db.Checkpoint.ErrorMsg /
+  // FailedAt (sandbox_checkpoints columns added in migration 039).
+  errorMsg?: string
+  failedAt?: string
 }
 
 export interface CheckpointsResponse {

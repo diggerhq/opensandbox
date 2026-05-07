@@ -6,12 +6,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 
+	"github.com/opensandbox/opensandbox/internal/logship"
 	"github.com/opensandbox/opensandbox/internal/agent"
 )
 
@@ -34,6 +36,20 @@ func main() {
 	}
 
 	srv := agent.NewServer(Version)
+
+	// Sandbox session log shipping. The shipper boots dormant — events
+	// queue in its bounded ring but don't POST anywhere until the
+	// worker delivers ConfigureLogship after VM boot. The /var/log
+	// tailer starts immediately so we don't miss the boot window.
+	// If the worker never calls ConfigureLogship (kill-switch), the
+	// ring keeps dropping oldest indefinitely; cost is negligible.
+	shipperCtx, shipperCancel := context.WithCancel(context.Background())
+	defer shipperCancel()
+	shipper := logship.New()
+	go shipper.Run(shipperCtx)
+	go logship.NewVarLogTailer(shipper, "/var/log").Run(shipperCtx)
+	srv.Shipper = shipper
+
 	// Only set ListenPort for vsock-based backends (Firecracker).
 	// For virtio-serial (QEMU), PTY I/O flows over gRPC PTYAttach instead.
 	if vsl, isVirtioSerial := lis.(*virtioSerialListener); isVirtioSerial {

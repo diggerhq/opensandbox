@@ -56,6 +56,19 @@ type Server struct {
 	redisClient     *redis.Client                     // nil if Redis not configured (for health checks)
 	adminEvents     *AdminEventBus                    // real-time event bus for admin dashboard
 	ready           int32                             // atomic: 1 = ready, 0 = not ready
+
+	// Axiom log query (sandbox session logs read API).
+	// Empty token = endpoint returns 503.
+	axiomQueryToken string
+	axiomDataset    string
+}
+
+// SetAxiomQueryConfig wires the read-only Axiom token and dataset for
+// the sandbox session logs read API. Token never leaves the control
+// plane; the UI proxies through us.
+func (s *Server) SetAxiomQueryConfig(queryToken, dataset string) {
+	s.axiomQueryToken = queryToken
+	s.axiomDataset = dataset
 }
 
 // pendingCreate tracks an async sandbox creation.
@@ -204,6 +217,12 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	api.GET("/sandboxes", s.listSandboxes)
 	api.GET("/sandboxes/:id", s.getSandbox)
 	api.DELETE("/sandboxes/:id", s.killSandbox)
+
+	// Sandbox session logs — SDK / curl variant. Same handler as the
+	// dashboard's /api/dashboard/sessions/:sandboxId/logs route below;
+	// auth here is X-API-Key (or identity-JWT) instead of cookie.
+	// Useful for headless testing and SDK consumers.
+	api.GET("/sandboxes/:id/logs", s.getSandboxLogs)
 
 	// Reserved capacity (spec: ws-pricing/design/001-reserved-capacity-squares.md)
 	api.GET("/capacity/calendar", s.getCapacityCalendar)
@@ -440,6 +459,11 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		// Reset operations
 		dash.POST("/sessions/:sandboxId/reboot", s.dashboardRebootSession)
 		dash.POST("/sessions/:sandboxId/power-cycle", s.dashboardPowerCycleSession)
+		// Sandbox session logs (SSE; historical + 1s-poll live tail).
+		// Server queries Axiom server-side with a read-only token that
+		// never reaches the browser. Org-ownership enforced via
+		// GetSandboxSessionInOrg (404 on mismatch — no cross-org leak).
+		dash.GET("/sessions/:sandboxId/logs", s.getSandboxLogs)
 		// PTY (terminal)
 		dash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
 		dash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)

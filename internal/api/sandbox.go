@@ -462,8 +462,13 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 
 	// Dispatch via persistent gRPC connection.
 	// Worker uses local cache for checkpoint forks (300ms) and downloads from S3
-	// only on cold starts (~30s). 60s is enough for both paths.
-	grpcTimeout := 60 * time.Second
+	// only on cold starts. The pre-fix 60s budget was tight for cold forks of
+	// multi-GB checkpoints — under any blob-side contention or rebase work,
+	// the call could time out before the worker finished. Bumped to a generous
+	// flat 5min so cold forks of large checkpoints land cleanly. The happy
+	// path is unchanged: this RPC returns as soon as the VM is up, so warm
+	// forks still complete in well under a second.
+	grpcTimeout := 5 * time.Minute
 	grpcCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
@@ -2024,7 +2029,13 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 		}
 
 		go func() {
-			grpcCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			// 20-min budget for the full create+archive+upload chain. Pre-fix
+			// this was 5 min — too tight for >3 GB compressed archives under
+			// any blob-side contention. Customer hit this on a 7–9 GB sandbox
+			// (status processing for ~280 s → failed, no detail). The worker
+			// internal upload is bounded at 15 min; the extra 5 min here gives
+			// headroom for archive build + worker-side tar + transit.
+			grpcCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 			defer cancel()
 
 			grpcResp, err := grpcClient.CreateCheckpoint(grpcCtx, &pb.CreateCheckpointRequest{
@@ -2039,20 +2050,23 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 
 			if err != nil {
 				log.Printf("api: async checkpoint %s failed: %v", checkpointID, err)
+				// SetCheckpointFailed now persists the reason via the
+				// error_msg/failed_at columns added in migration 039.
+				// Pre-fix the reason was silently discarded.
 				_ = s.store.SetCheckpointFailed(context.Background(), checkpointID, err.Error())
 				return
 			}
-			// Mark ready immediately — S3 upload continues async inside CreateCheckpoint
-			// but the checkpoint is locally usable now.
-			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, grpcResp.RootfsS3Key, grpcResp.WorkspaceS3Key, 0)
-			log.Printf("api: checkpoint %s ready", checkpointID)
+			// Persist the actual archive size from the worker's response.
+			// Pre-fix this was hardcoded to 0, leaving size_bytes meaningless.
+			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, grpcResp.RootfsS3Key, grpcResp.WorkspaceS3Key, grpcResp.SizeBytes)
+			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, grpcResp.SizeBytes)
 		}()
 	} else if s.manager != nil {
 		go func() {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			bgCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 			defer cancel()
 
-			rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(bgCtx, sandboxID, checkpointID.String(), s.checkpointStore, func() {})
+			rootfsKey, workspaceKey, sizeBytes, err := s.manager.CreateCheckpoint(bgCtx, sandboxID, checkpointID.String(), s.checkpointStore, func() {})
 
 			// Signal sandbox usable
 			pending.err = err
@@ -2063,8 +2077,8 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 				_ = s.store.SetCheckpointFailed(context.Background(), checkpointID, err.Error())
 				return
 			}
-			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, rootfsKey, workspaceKey, 0)
-			log.Printf("api: checkpoint %s ready", checkpointID)
+			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, rootfsKey, workspaceKey, sizeBytes)
+			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, sizeBytes)
 		}()
 	} else {
 		s.pendingCreates.Delete(sandboxID)

@@ -111,6 +111,7 @@ type VMInstance struct {
 	restoring     chan struct{}
 	opMu          sync.Mutex   // serializes destructive VM ops (checkpoint, restore, hibernate)
 	archiveDone   chan struct{} // closed when async hibernate archive completes (nil if no archive in flight)
+	memoryReady   chan struct{} // closed once virtio-mem hotplug has committed enough memory for user workloads (nil = pre-existing hotplug, treat as ready)
 	baseMemoryMB         int    // initial memory passed to -m (before virtio-mem)
 	virtioMemRequestedMB int    // additional memory via virtio-mem (beyond base)
 	goldenVersion        string // golden version this sandbox was created from (empty if cold-booted)
@@ -2025,9 +2026,19 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 				log.Printf("qemu: virtio-mem %s: set %dMB failed: %v — returning insufficient capacity error", sandboxID, additionalMB, err)
 				return fmt.Errorf("insufficient_capacity: cannot hotplug %dMB on this worker: %w", additionalMB, err)
 			} else {
+				prevRequestedMB := vm.virtioMemRequestedMB
 				vm.virtioMemRequestedMB = additionalMB
 				vm.MemoryMB = vm.baseMemoryMB + additionalMB
 				log.Printf("qemu: virtio-mem %s: %dMB additional (total %dMB)", sandboxID, additionalMB, vm.MemoryMB)
+
+				// Scaling UP? Gate exec/write until enough memory is plugged in so
+				// user workloads (git clone, npm install, etc.) don't race the
+				// hotplug and crash trying to use memory that's allocated-but-not-backed.
+				// Remaining hotplug continues in the background after the gate opens.
+				if additionalMB > prevRequestedMB {
+					vm.memoryReady = make(chan struct{})
+					go m.watchMemoryHotplug(vm, additionalMB)
+				}
 			}
 		}
 	}
@@ -2045,6 +2056,56 @@ func (m *Manager) UpdateSandboxSecret(_ context.Context, sandboxID, secretName, 
 		return false, fmt.Errorf("secrets proxy not configured on this worker")
 	}
 	return m.secretsProxy.UpdateSecretValue(sandboxID, secretName, value), nil
+}
+
+// watchMemoryHotplug polls the guest's /proc/meminfo until at least 1GB of
+// virtio-mem memory has been onlined (or target if smaller), then closes
+// vm.memoryReady to unblock getReadyVM. Bounded by a 10s timeout so the
+// channel always closes even if hotplug stalls.
+func (m *Manager) watchMemoryHotplug(vm *VMInstance, targetAdditionalMB int) {
+	defer func() {
+		if vm.memoryReady != nil {
+			select {
+			case <-vm.memoryReady:
+			default:
+				close(vm.memoryReady)
+			}
+		}
+	}()
+
+	// We only need ~1GB plugged for most workloads to have breathing room.
+	// The rest hotplugs in the background and is usually done within seconds.
+	readyThresholdMB := 1024
+	if targetAdditionalMB < readyThresholdMB {
+		readyThresholdMB = targetAdditionalMB
+	}
+	requiredTotalMB := vm.baseMemoryMB + readyThresholdMB
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if vm.agent == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := vm.agent.Exec(ctx, &pb.ExecRequest{
+			Command:        "/bin/sh",
+			Args:           []string{"-c", "awk '/MemTotal/ {print $2}' /proc/meminfo"},
+			TimeoutSeconds: 2,
+		})
+		cancel()
+		if err == nil && resp != nil {
+			// MemTotal is in kB
+			var kB int
+			fmt.Sscanf(string(resp.Stdout), "%d", &kB)
+			if kB/1024 >= requiredTotalMB {
+				log.Printf("qemu: virtio-mem %s: hotplug gate opened (%dMB onlined, needed %dMB)",
+					vm.ID, kB/1024, requiredTotalMB)
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	log.Printf("qemu: virtio-mem %s: hotplug gate timed out after 10s, unblocking anyway", vm.ID)
 }
 
 // TotalCommittedMemoryMB returns the sum of MemoryMB (base + virtio-mem) across all running VMs.
@@ -2296,24 +2357,32 @@ func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
 // CreateCheckpoint creates an internal VM snapshot using QEMU's savevm.
 // The snapshot is stored inside the qcow2 drive files — no external migration file needed.
 // The VM pauses briefly for the snapshot, then resumes automatically.
-func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, err error) {
+//
+// Returns the S3 keys, the actual archive size in bytes (or 0 when no
+// checkpointStore is configured / the upload failed), and any error. The
+// archive size replaces the previous hardcoded 0 stamped on the
+// sandbox_checkpoints row so operators and customers can see how big a
+// checkpoint actually is. Upload failures now propagate as an error rather
+// than being silently logged — the control plane gets the reason and
+// persists it via SetCheckpointFailed (migration 039 added error_msg).
+func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, sizeBytes int64, err error) {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
-		return "", "", err
+		return "", "", 0, err
 	}
 
 	// Reject if another destructive operation (checkpoint, hibernate, restore) is in progress.
 	// Without this, rapid-fire checkpoints queue up and the agent gets into a bad state
 	// from overlapping SIGUSR1/reconnect cycles.
 	if !vm.opMu.TryLock() {
-		return "", "", fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
+		return "", "", 0, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
 	defer vm.opMu.Unlock()
 
 	t0 := time.Now()
 
 	if vm.qmp == nil {
-		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
+		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	// Sync filesystem, quiesce virtio-serial, close host conn, and WAIT for
@@ -2339,13 +2408,13 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// (close agent + let SIGUSR1 reset the virtio-serial listener before
 	// savevm) is preserved above.
 	if vm.qmp == nil {
-		return "", "", fmt.Errorf("QMP connection not available for %s", sandboxID)
+		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	stagingDir := cacheDir + ".staging"
 	if mkErr := os.MkdirAll(filepath.Join(stagingDir, "snapshot"), 0755); mkErr != nil {
-		return "", "", fmt.Errorf("mkdir staging: %w", mkErr)
+		return "", "", 0, fmt.Errorf("mkdir staging: %w", mkErr)
 	}
 
 	// savevm pauses the VM, writes memory+device+disk-delta into every qcow2
@@ -2354,7 +2423,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	snapshotName := "cp-" + checkpointID
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("savevm: %w", err)
+		return "", "", 0, fmt.Errorf("savevm: %w", err)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 
@@ -2366,11 +2435,11 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.qcow2")
 	if err := copyFileReflink(srcRootfs, filepath.Join(stagingDir, "rootfs.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("copy rootfs: %w", err)
+		return "", "", 0, fmt.Errorf("copy rootfs: %w", err)
 	}
 	if err := copyFileReflink(srcWorkspace, filepath.Join(stagingDir, "workspace.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", fmt.Errorf("copy workspace: %w", err)
+		return "", "", 0, fmt.Errorf("copy workspace: %w", err)
 	}
 	// Record the savevm snapshot name so ForkFromCheckpoint / RestoreFromCheckpoint
 	// know which internal snapshot to loadvm.
@@ -2475,26 +2544,43 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 
 		t1 := time.Now()
 		archivePath := filepath.Join(cacheDir, "checkpoint.tar.zst")
-		if err := createArchive(archivePath, cacheDir, archiveFiles); err != nil {
-			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, err)
-		} else {
-			uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			if _, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath); uerr != nil {
-				log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
-			} else {
-				log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, files=%v)",
-					checkpointID, time.Since(t1).Milliseconds(), archiveFiles)
-			}
-			cancel()
-			os.Remove(archivePath)
+		if archErr := createArchive(archivePath, cacheDir, archiveFiles); archErr != nil {
+			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, archErr)
+			// Surface as the function's error so the API can persist it via
+			// SetCheckpointFailed instead of silently logging.
+			return rootfsKey, workspaceKey, 0, fmt.Errorf("create checkpoint archive: %w", archErr)
 		}
+		// 15-min upload budget. Pre-fix this was 5 min, which combined with
+		// the API's 5-min gRPC ctx left no headroom for ~5+ GB compressed
+		// archives under any blob-side contention. Customer hit this on a
+		// 7–9 GB sandbox: status flipped to `failed` after ~280 s (≈ the
+		// 5-min ceiling) with no error detail, since SetCheckpointFailed
+		// also dropped the reason. Migration 039 + the 20-min API gRPC
+		// timeout + this 15-min upload give a generous flat budget without
+		// memory-scaling complexity.
+		uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		_, uerr := checkpointStore.Upload(uploadCtx, rootfsKey, archivePath)
+		cancel()
+		// Stat the archive before deleting so we can return the actual size
+		// even on success (the upload doesn't return it). Any stat error here
+		// is non-fatal — we'd rather report 0 than fail the checkpoint.
+		if info, statErr := os.Stat(archivePath); statErr == nil {
+			sizeBytes = info.Size()
+		}
+		os.Remove(archivePath)
+		if uerr != nil {
+			log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+			return rootfsKey, workspaceKey, sizeBytes, fmt.Errorf("upload checkpoint to S3: %w", uerr)
+		}
+		log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, %.1f MB, files=%v)",
+			checkpointID, time.Since(t1).Milliseconds(), float64(sizeBytes)/(1024*1024), archiveFiles)
 	}
 
 	if onReady != nil {
 		onReady()
 	}
 
-	return rootfsKey, workspaceKey, nil
+	return rootfsKey, workspaceKey, sizeBytes, nil
 }
 
 // RestoreFromCheckpoint reverts a sandbox to a checkpoint by killing the current
@@ -3155,6 +3241,21 @@ func (m *Manager) getReadyVM(ctx context.Context, id string) (*VMInstance, error
 		}
 	}
 
+	// Block until virtio-mem has plugged in enough memory for user workloads.
+	// Sandbox is marked "running" as soon as QEMU boots, but the scaler's
+	// SetResourceLimits kicks off hotplug async — user code (e.g. git clone)
+	// running immediately can hit memory that's allocated-but-not-backed.
+	// Bounded wait so we never hang if hotplug stalls.
+	if vm.memoryReady != nil {
+		select {
+		case <-vm.memoryReady:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			log.Printf("qemu: sandbox %s: memory hotplug wait exceeded 5s, proceeding anyway", id)
+		}
+	}
+
 	if vm.agent == nil {
 		return nil, fmt.Errorf("sandbox %s: agent not available", id)
 	}
@@ -3205,6 +3306,22 @@ func (m *Manager) GetAgent(sandboxID string) (*AgentClient, error) {
 		return nil, err
 	}
 	return vm.agent, nil
+}
+
+// ConfigureLogship hands the in-VM agent its sandbox session log-shipping
+// configuration. Called by the worker right after a sandbox is created
+// (or warm-forked from a checkpoint) so the agent's forwarder knows
+// where to ship and how to tag events. Empty ingestToken disables
+// shipping for this sandbox (kill-switch).
+func (m *Manager) ConfigureLogship(ctx context.Context, sandboxID, ingestToken, dataset, orgID string) error {
+	agent, err := m.GetAgent(sandboxID)
+	if err != nil {
+		return err
+	}
+	if agent == nil {
+		return fmt.Errorf("agent client not ready for sandbox %s", sandboxID)
+	}
+	return agent.ConfigureLogship(ctx, ingestToken, dataset, sandboxID, orgID)
 }
 
 // GetWorkspacePath returns the host path to a sandbox's workspace qcow2.

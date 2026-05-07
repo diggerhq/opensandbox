@@ -78,6 +78,13 @@ service SandboxAgent {
   // between the base OS env and per-command envs.
   rpc SetEnvs(SetEnvsRequest) returns (SetEnvsResponse);
 
+  // ConfigureLogship sets sandbox session log-shipping configuration.
+  // Worker calls this immediately after VM boot, before any user-facing
+  // operations. Empty ingest_token disables shipping (kill-switch).
+  // If never called, the agent's forwarder stays dormant — log events
+  // queue in a bounded ring and are dropped oldest-first.
+  rpc ConfigureLogship(ConfigureLogshipRequest) returns (ConfigureLogshipResponse);
+
   // Shutdown gracefully terminates the agent and syncs disks.
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 
@@ -341,6 +348,17 @@ message SetEnvsRequest {
 }
 
 message SetEnvsResponse {}
+
+// --- Logship ---
+
+message ConfigureLogshipRequest {
+  string ingest_token = 1;
+  string dataset      = 2;
+  string sandbox_id   = 3;
+  string org_id       = 4;
+}
+
+message ConfigureLogshipResponse {}
 
 // --- Shutdown ---
 
