@@ -58,8 +58,14 @@ var secretMapping = map[string]string{
 	"server-cf-api-token":          "OPENSANDBOX_CF_API_TOKEN",
 	"server-cf-zone-id":            "OPENSANDBOX_CF_ZONE_ID",
 	// Stripe (billing)
-	"server-stripe-secret-key":     "STRIPE_SECRET_KEY",
-	"server-stripe-webhook-secret": "STRIPE_WEBHOOK_SECRET",
+	"server-stripe-secret-key":              "STRIPE_SECRET_KEY",
+	"server-stripe-webhook-secret":          "STRIPE_WEBHOOK_SECRET",
+	"server-stripe-success-url":             "STRIPE_SUCCESS_URL",
+	"server-stripe-cancel-url":              "STRIPE_CANCEL_URL",
+	"server-stripe-telegram-agent-price-id": "STRIPE_TELEGRAM_AGENT_PRICE_ID",
+	// Public-facing CP URL (different from per-instance worker HTTP_ADDR which
+	// stays as bootstrap)
+	"server-http-addr": "OPENSANDBOX_HTTP_ADDR",
 	// Observability
 	"server-sentry-dsn":            "OPENSANDBOX_SENTRY_DSN",
 	// Azure compute pool / autoscaler
@@ -113,6 +119,11 @@ var secretMapping = map[string]string{
 	"shared-default-sandbox-memory-mb": "OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB",
 	"shared-default-sandbox-cpus":      "OPENSANDBOX_DEFAULT_SANDBOX_CPUS",
 	"shared-default-sandbox-disk-mb":   "OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB",
+	"shared-max-capacity":              "OPENSANDBOX_MAX_CAPACITY",
+	// S3 client knob
+	"shared-s3-force-path-style": "OPENSANDBOX_S3_FORCE_PATH_STYLE",
+	// Analytics — both binaries write Segment events
+	"shared-segment-write-key": "SEGMENT_WRITE_KEY",
 	// Axiom (sandbox session logs)
 	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
 	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
