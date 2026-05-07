@@ -1,0 +1,90 @@
+name: PR Integration Test
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.check.outputs.approved }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$LABELS" | grep -q '"osb-ci-approve"'; then
+            echo "approved=true" >> "$GITHUB_OUTPUT"
+            echo "reason=labeled (osb-ci-approve)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh api "orgs/diggerhq/members/$AUTHOR" --silent 2>/dev/null; then
+            echo "approved=true" >> "$GITHUB_OUTPUT"
+            echo "reason=org-member" >> "$GITHUB_OUTPUT"
+          else
+            echo "approved=false" >> "$GITHUB_OUTPUT"
+            echo "reason=outside-contributor; maintainer must apply osb-ci-approve label to run CI" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on skip
+        if: steps.check.outputs.approved != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} -R ${{ github.repository }} \
+            --body "CI skipped: ${{ steps.check.outputs.reason }}"
+
+  ci:
+    needs: gate
+    if: needs.gate.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OPENCOMPUTER_CI_SSH_KEY }}" > ~/.ssh/opencomputer-ci
+          chmod 600 ~/.ssh/opencomputer-ci
+          # Public half is derived once from the private key.
+          ssh-keygen -y -f ~/.ssh/opencomputer-ci > ~/.ssh/opencomputer-ci.pub
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bring up PR stack
+        id: up
+        run: |
+          ./ci/pr/up.sh ${{ github.event.pull_request.number }}
+
+      # TODO: API + compat test suites go here once written.
+      # - run: go test ./ci/tests/api/... -server="$SERVER_URL"
+
+      - name: Tear down PR stack
+        if: always()
+        run: |
+          ./ci/pr/down.sh ${{ github.event.pull_request.number }} || true

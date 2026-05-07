@@ -1,0 +1,39 @@
+name: CI GC (stale PR stacks)
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # daily 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      max_age_hours:
+        description: 'Tear down PR stacks older than this many hours'
+        type: number
+        default: 24
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OPENCOMPUTER_CI_SSH_KEY }}" > ~/.ssh/opencomputer-ci
+          chmod 600 ~/.ssh/opencomputer-ci
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: GC stale PR stacks
+        env:
+          MAX_AGE_HOURS: ${{ inputs.max_age_hours || 24 }}
+        run: ./ci/persistent/gc.sh
