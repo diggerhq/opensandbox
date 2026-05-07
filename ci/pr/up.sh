@@ -83,6 +83,7 @@ if ! az vm show -g "$RG" -n "$SERVER_VM" -o none 2>/dev/null; then
     --admin-username azureuser \
     --ssh-key-values "$SSH_KEY_PUB" \
     --os-disk-size-gb 32 \
+    --nsg "" \
     --tags purpose=ci pr="$PR_NUM" \
     -o none
 fi
