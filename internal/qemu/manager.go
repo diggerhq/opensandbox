@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opensandbox/opensandbox/internal/blobstore"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -140,6 +141,17 @@ type Config struct {
 	DefaultCPUs     int
 	DefaultDiskMB   int
 	DefaultPort     int
+
+	// GlobalBlob is the abstract S3-compat backend (Tigris, R2, etc.) the
+	// worker pulls canonical golden rootfs blobs from on cache miss.
+	// Nil disables — worker falls back to local-only behavior (whatever
+	// the AMI baked in or cloud-init copied).
+	GlobalBlob              blobstore.Store
+	GlobalBlobGoldensBucket string // e.g. "opencomputer-goldens-dev"
+	// GlobalBlobGoldenKey is the path within the goldens bucket. Defaults
+	// to "default.ext4" if empty. Versioned variants (bases/{hash}/...) are
+	// resolved by the existing checkpoint-rebase path, not this fallback.
+	GlobalBlobGoldenKey string
 }
 
 // Manager implements sandbox.Manager using QEMU VMs.
@@ -298,6 +310,13 @@ func (m *Manager) sealSandboxEnvs(ctx context.Context, sandboxID string, netCfg 
 // restore from this snapshot instead of cold-booting, cutting start time
 // from ~10s to ~1-2s.
 func (m *Manager) PrepareGoldenSnapshot() error {
+	// Multi-region cache-miss fallback: if no local default.ext4 (e.g., this
+	// is a fresh worker on a new cell whose AMI didn't bake one in), try to
+	// pull from the configured global blob store before failing.
+	if err := m.ensureBaseImageFromBlob(context.Background()); err != nil {
+		log.Printf("qemu: blobstore golden fetch failed (will try local-only): %v", err)
+	}
+
 	goldenDir := filepath.Join(m.cfg.DataDir, "golden")
 	memFile := filepath.Join(goldenDir, "mem")
 	rootfsFile := filepath.Join(goldenDir, "rootfs.qcow2")

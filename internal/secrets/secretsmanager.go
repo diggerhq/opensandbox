@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -66,6 +67,36 @@ func (b *SecretsManagerBackend) Get(ctx context.Context, key string) (string, er
 		return "", err
 	}
 	return v, nil
+}
+
+// LoadAllToEnv satisfies BulkLoader. SecretsManager's bootstrap pattern
+// is "one secret holds JSON; expand to env vars by key name." Reads
+// BundledARN and Setenv each KEY=value pair from the JSON object,
+// skipping any that are already present in the env (local overrides win).
+//
+// Returns (loaded, 0, err) — SecretsManager doesn't track skipped because
+// the bundle keys are arbitrary, not enumerated through a name map.
+func (b *SecretsManagerBackend) LoadAllToEnv(ctx context.Context) (loaded, skipped int, err error) {
+	if b.bundledARN == "" {
+		return 0, 0, nil // nothing to bulk-load
+	}
+	bundleStr, err := b.getRaw(ctx, b.bundledARN)
+	if err != nil {
+		return 0, 0, err
+	}
+	pairs, err := parseBundleJSONAll(bundleStr)
+	if err != nil {
+		return 0, 0, err
+	}
+	for k, v := range pairs {
+		if os.Getenv(k) != "" {
+			skipped++
+			continue
+		}
+		os.Setenv(k, v)
+		loaded++
+	}
+	return loaded, skipped, nil
 }
 
 func (b *SecretsManagerBackend) getRaw(ctx context.Context, arn string) (string, error) {

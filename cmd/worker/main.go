@@ -15,6 +15,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/analytics"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/blobstore"
 	"github.com/opensandbox/opensandbox/internal/config"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/metrics"
@@ -53,6 +54,25 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(ver)
+		return
+	}
+
+	// "golden-upload <path-to-default.ext4>" pushes the file to the global
+	// blob store at {GoldensBucket}/default.ext4 AND {GoldensBucket}/bases/{hash}/default.ext4.
+	// One-shot bootstrap path: a fresh dev cell whose AMI baked an ext4 can
+	// upload it so other cells (especially in different clouds) can pull
+	// the same canonical bytes on cache miss. Future Packer pipelines can
+	// run this at AMI-build time. Reads OPENSANDBOX_GLOBAL_BLOB_* env vars
+	// for the destination.
+	if len(os.Args) >= 2 && os.Args[1] == "golden-upload" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "usage: opensandbox-worker golden-upload <path-to-default.ext4>")
+			os.Exit(2)
+		}
+		if err := uploadGolden(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -108,6 +128,44 @@ func main() {
 	}
 	// QEMU backend
 	{
+		// Construct global blob store (Tigris primary + optional fallback).
+		// Returns nil if endpoint+access-key are unset → manager runs in
+		// local-only mode, no cache-miss fetch.
+		blobPrimary, blobErr := blobstore.NewS3(blobstore.S3Config{
+			Name:            cfg.GlobalBlobName,
+			Endpoint:        cfg.GlobalBlobEndpoint,
+			Region:          cfg.GlobalBlobRegion,
+			AccessKeyID:     cfg.GlobalBlobAccessKeyID,
+			SecretAccessKey: cfg.GlobalBlobSecretAccessKey,
+			UsePathStyle:    cfg.GlobalBlobUsePathStyle,
+		})
+		if blobErr != nil {
+			log.Fatalf("opensandbox-worker: global blob store init failed: %v", blobErr)
+		}
+		blobFallback, fbErr := blobstore.NewS3(blobstore.S3Config{
+			Name:            cfg.GlobalBlobFallbackName,
+			Endpoint:        cfg.GlobalBlobFallbackEndpoint,
+			Region:          cfg.GlobalBlobFallbackRegion,
+			AccessKeyID:     cfg.GlobalBlobFallbackAccessKeyID,
+			SecretAccessKey: cfg.GlobalBlobFallbackSecretAccessKey,
+			UsePathStyle:    cfg.GlobalBlobFallbackUsePathStyle,
+		})
+		if fbErr != nil {
+			log.Fatalf("opensandbox-worker: global blob fallback init failed: %v", fbErr)
+		}
+		var globalBlob blobstore.Store
+		if blobPrimary != nil {
+			if blobFallback != nil {
+				globalBlob, _ = blobstore.NewFallback(blobPrimary, blobFallback)
+				log.Printf("opensandbox-worker: global blob store: %s primary, %s fallback", blobPrimary.Name(), blobFallback.Name())
+			} else {
+				globalBlob = blobPrimary
+				log.Printf("opensandbox-worker: global blob store: %s (no fallback)", blobPrimary.Name())
+			}
+		} else {
+			log.Println("opensandbox-worker: global blob store disabled (endpoint unset) — local-only goldens")
+		}
+
 		qmCfg := qm.Config{
 			DataDir:         cfg.DataDir,
 			KernelPath:      cfg.KernelPath,
@@ -118,6 +176,9 @@ func main() {
 			DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
 			DefaultCPUs:     cfg.DefaultSandboxCPUs,
 			DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
+			GlobalBlob:              globalBlob,
+			GlobalBlobGoldensBucket: cfg.GlobalBlobGoldensBucket,
+			GlobalBlobGoldenKey:     "default.ext4",
 		}
 
 		qmMgr, err := qm.NewManager(qmCfg)

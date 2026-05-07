@@ -32,6 +32,25 @@ and the migration risks we expect to bite.
 **Prod analogue (later):** zone `opencomputer.dev`, edge `app.opencomputer.dev`,
 events `events.opencomputer.workers.dev`, separate CF account.
 
+**Object storage**: **Tigris** (Region Earth — automatic global replication) for
+all canonical global blobs. Three separate buckets at `https://t3.storage.dev`:
+
+  - `opencomputer-events-dev` — events archive (gzipped batches per cell+day)
+  - `opencomputer-goldens-dev` — canonical golden rootfs blobs (`bases/{hash}/default.ext4`)
+  - `opencomputer-templates-dev` — canonical template rootfs+workspace blobs
+
+Three buckets (vs single bucket with prefixes) for blast-radius isolation —
+e.g., a 90-day TTL on events archive can't accidentally clobber goldens.
+
+R2 events bucket created during Stage 0 (`events-archive-dev`) stays until
+Phase 2 cutover replaces it.
+
+Per-cell S3-compat (Azure Blob, AWS S3) is still used as a local cache and
+for checkpoint storage — Tigris is for *canonical* global blobs only.
+
+Tigris credentials live in `~/.opensandbox-tigris-dev` (gitignored) and are
+pushed to Worker secrets / per-cell worker.env at deploy time.
+
 ## Operating principle
 
 CF-parallel mode at all times during dev validation: PG remains authoritative
