@@ -44,6 +44,12 @@ var secretMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
+	// Machine-size fallback lists (PR #209). Comma-separated ranked
+	// instance types the autoscaler tries in order on quota / capacity
+	// errors. Empty value = use the single VMSize / InstanceType
+	// configured on the pool (pre-fallback behavior).
+	"server-azure-vm-sizes":         "OPENSANDBOX_AZURE_VM_SIZES",
+	"server-ec2-instance-types":     "OPENSANDBOX_EC2_INSTANCE_TYPES",
 	// Legacy Axiom mappings — kept for backwards compat with existing prod
 	// KVs that pre-date the `shared-` prefix. New deploys should use
 	// `shared-axiom-*` instead. Safe to leave: in server mode only

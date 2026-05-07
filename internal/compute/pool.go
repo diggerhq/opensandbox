@@ -1,6 +1,17 @@
 package compute
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrQuotaExceeded indicates a provider quota or capacity constraint that may
+// be resolved by trying a different machine size. Pool implementations wrap
+// (via errors.Join or fmt.Errorf %w) when they detect provider-specific quota
+// or "no capacity in this SKU/zone" failures. The autoscaler uses errors.Is to
+// decide whether to fall through to the next size in a ranked list versus
+// abort the launch.
+var ErrQuotaExceeded = errors.New("quota or capacity exceeded")
 
 // Machine represents a worker machine in the compute pool.
 type Machine struct {
