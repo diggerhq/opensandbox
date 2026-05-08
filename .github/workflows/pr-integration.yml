@@ -79,10 +79,14 @@ jobs:
       - name: Bring up PR stack
         id: up
         run: |
-          ./ci/pr/up.sh ${{ github.event.pull_request.number }}
+          ./ci/pr/up.sh ${{ github.event.pull_request.number }} 1
 
-      # TODO: API + compat test suites go here once written.
-      # - run: go test ./ci/tests/api/... -server="$SERVER_URL"
+      - name: API test suite
+        env:
+          OSB_TEST_SERVER_URL: ${{ steps.up.outputs.server_url }}
+          OSB_TEST_API_KEY: ${{ steps.up.outputs.api_key }}
+          OSB_TEST_WORKERS: ${{ steps.up.outputs.workers }}
+        run: go test -count=1 -v ./ci/tests/api/...
 
       - name: Tear down PR stack
         if: always()
