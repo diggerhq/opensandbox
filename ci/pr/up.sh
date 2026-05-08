@@ -317,14 +317,18 @@ REMOTE
     exit 1
   fi
 
-  echo ">>> wait for worker registration via /api/workers"
+  echo ">>> wait for worker readiness via /api/workers (golden_version populated)"
   REGISTERED=0
   for i in $(seq 1 60); do
-    count=$(curl -s -m 5 -H "X-API-Key: $API_KEY" "http://$SERVER_PIP:8080/api/workers" 2>/dev/null \
-      | jq 'if type=="array" then length elif .workers then .workers|length else 0 end' 2>/dev/null || echo 0)
-    if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -ge "$WORKERS" ]]; then
+    # A worker is "ready" when it shows up in /api/workers AND has golden_version
+    # set — that field is only populated after the golden snapshot finishes
+    # building (~25s post-startup), which is when the worker can actually
+    # accept sandbox creation requests.
+    ready=$(curl -s -m 5 -H "X-API-Key: $API_KEY" "http://$SERVER_PIP:8080/api/workers" 2>/dev/null \
+      | jq '[.[] // empty | select(.golden_version != null and .golden_version != "")] | length' 2>/dev/null || echo 0)
+    if [[ "$ready" =~ ^[0-9]+$ ]] && [[ "$ready" -ge "$WORKERS" ]]; then
       REGISTERED=1
-      echo "    $count worker(s) registered after ${i}x5s"
+      echo "    $ready worker(s) ready (golden built) after ${i}x5s"
       break
     fi
     sleep 5
