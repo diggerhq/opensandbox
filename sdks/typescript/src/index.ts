@@ -10,6 +10,7 @@ export {
   type AutoscaleConfig,
   type AutoscaleStatus,
   type ScalingLockStatus,
+  type AllowedHostsInfo,
 } from "./sandbox.js";
 export { Agent, type AgentEvent, type AgentConfig, type AgentStartOpts, type AgentSession, type McpServerConfig } from "./agent.js";
 export { Filesystem, type EntryInfo } from "./filesystem.js";

@@ -234,6 +234,31 @@ Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-uploa
 
 [HTTP API →](/api-reference/preview/delete) — **Returns:** `None`
 
+### `await sandbox.get_allowed_hosts()`
+
+Return the egress allowlist + per-secret allowed hosts the sandbox's secrets proxy enforces. Useful for debugging "why is my outbound HTTP call being blocked" without having to cross-reference the [secret store](/sandboxes/secrets) config separately.
+
+Sandboxes created without a `secret_store` option return an empty allowlist with `secretStore` omitted — the sandbox has no per-store egress restriction.
+
+**Returns:** `dict` with the shape:
+
+```python
+{
+    "sandboxID": "sb-...",
+    "secretStore": "my-store",                   # omitted if no store
+    "egressAllowlist": ["api.openai.com", ...],
+    "perSecretAllowedHosts": {
+        "OPENAI_API_KEY": ["api.openai.com"],
+    },
+}
+```
+
+```python
+info = await sandbox.get_allowed_hosts()
+print(info["egressAllowlist"])          # ['api.openai.com', 'api.anthropic.com']
+print(info["perSecretAllowedHosts"])    # {'OPENAI_API_KEY': ['api.openai.com']}
+```
+
 ### `await sandbox.close()`
 
 Close HTTP clients. Called automatically by the context manager.

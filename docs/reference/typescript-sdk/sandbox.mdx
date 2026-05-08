@@ -286,6 +286,40 @@ Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-uploa
 
 ---
 
+### `sandbox.getAllowedHosts()`
+
+Return the egress allowlist + per-secret allowed hosts the sandbox's secrets proxy enforces. Useful for debugging "why is my outbound HTTP call being blocked" without having to cross-reference the [secret store](/sandboxes/secrets) config separately.
+
+Sandboxes created without a `secretStore` option return an empty allowlist with `secretStore` undefined — the sandbox has no per-store egress restriction.
+
+**Returns:** `Promise<AllowedHostsInfo>`
+
+```typescript
+const info = await sandbox.getAllowedHosts();
+console.log(info.egressAllowlist);          // ['api.openai.com', 'api.anthropic.com']
+console.log(info.perSecretAllowedHosts);    // { 'OPENAI_API_KEY': ['api.openai.com'] }
+```
+
+The returned `AllowedHostsInfo`:
+
+<ParamField body="sandboxID" type="string">
+  Sandbox ID
+</ParamField>
+
+<ParamField body="secretStore" type="string">
+  Name of the secret store the sandbox is bound to. Empty when the sandbox was created without a `secretStore` option.
+</ParamField>
+
+<ParamField body="egressAllowlist" type="string[]">
+  Cluster-wide hosts the sandbox can reach via the secrets proxy.
+</ParamField>
+
+<ParamField body="perSecretAllowedHosts" type="Record<string, string[]>">
+  Optional per-secret restrictions. When the sandbox uses a listed secret in a request, only the listed hosts are reachable for that request.
+</ParamField>
+
+---
+
 ## Properties
 
 <ParamField body="sandboxId" type="string">

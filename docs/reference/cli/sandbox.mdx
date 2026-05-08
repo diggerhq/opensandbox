@@ -91,3 +91,41 @@ oc sandbox set-timeout sb-abc123 600
 ---
 
 For commands that resize a sandbox or freeze its size — `scale`, `autoscale`, `lock`, `unlock`, `lock-status` — see [Scaling](/reference/cli/scaling).
+
+---
+
+## `oc sandbox allowed-hosts <id>`
+
+Show the egress allowlist + per-secret allowed hosts the sandbox's secrets proxy enforces. Useful for debugging "why is my outbound HTTP call being blocked" without having to cross-reference the [secret store](/sandboxes/secrets) config separately.
+
+Sandboxes created without `--secret-store` return an empty allowlist — the sandbox has no per-store egress restriction.
+
+```bash
+oc sandbox allowed-hosts sb-abc123
+# Sandbox sb-abc123 (secret store: my-store)
+#
+# Egress allowlist:
+#   • api.openai.com
+#   • api.anthropic.com
+#
+# Per-secret allowed hosts:
+#   OPENAI_API_KEY:
+#     • api.openai.com
+```
+
+Use `--json` for the structured form:
+
+```bash
+oc sandbox allowed-hosts sb-abc123 --json
+```
+
+```json
+{
+  "sandboxID": "sb-abc123",
+  "secretStore": "my-store",
+  "egressAllowlist": ["api.openai.com", "api.anthropic.com"],
+  "perSecretAllowedHosts": {
+    "OPENAI_API_KEY": ["api.openai.com"]
+  }
+}
+```

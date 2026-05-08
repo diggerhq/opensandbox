@@ -165,6 +165,26 @@ export interface ScalingLockStatus {
   locked: boolean;
 }
 
+/**
+ * Result of `sandbox.getAllowedHosts()`. Describes the egress-allowlist that
+ * a sandbox's secrets proxy enforces.
+ *
+ *   - `egressAllowlist` is the cluster-wide list of hosts the sandbox can
+ *     reach via the secrets proxy. Comes from the secret store the sandbox
+ *     was created with.
+ *   - `perSecretAllowedHosts` is an optional finer restriction per individual
+ *     secret. When the sandbox uses one of these secrets in a request, only
+ *     the listed hosts are reachable for that request.
+ *   - `secretStore` is the name of the store the sandbox is bound to. Empty
+ *     when the sandbox was created without a `secretStore` option.
+ */
+export interface AllowedHostsInfo {
+  sandboxID: string;
+  secretStore?: string;
+  egressAllowlist: string[];
+  perSecretAllowedHosts: Record<string, string[]>;
+}
+
 export class Sandbox {
   readonly sandboxId: string;
   readonly agent: Agent;
@@ -517,6 +537,27 @@ export class Sandbox {
     if (!resp.ok) {
       const text = await resp.text();
       throw new Error(`Failed to get scaling lock: ${resp.status} ${text}`);
+    }
+    return resp.json();
+  }
+
+  /**
+   * Get the egress-allowlist + per-secret allowed hosts the sandbox's
+   * secrets proxy enforces. Useful for debugging "why is my outbound HTTP
+   * call being blocked" without having to cross-reference the secret store
+   * config separately.
+   *
+   * Sandboxes created without a `secretStore` option return an empty
+   * allowlist and `secretStore` is undefined — the sandbox has no
+   * per-store egress restriction.
+   */
+  async getAllowedHosts(): Promise<AllowedHostsInfo> {
+    const resp = await fetch(`${this.apiUrl}/sandboxes/${this.sandboxId}/allowed-hosts`, {
+      headers: this.apiKey ? { "X-API-Key": this.apiKey } : {},
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Failed to get allowed hosts: ${resp.status} ${text}`);
     }
     return resp.json();
   }

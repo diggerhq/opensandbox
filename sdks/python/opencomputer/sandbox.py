@@ -402,6 +402,34 @@ class Sandbox:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_allowed_hosts(self) -> dict:
+        """Return the egress allowlist + per-secret allowed hosts the
+        sandbox's secrets proxy enforces.
+
+        Useful for debugging "why is my outbound HTTP call being blocked"
+        without having to cross-reference the secret store config separately.
+
+        Sandboxes created without a ``secret_store`` option return an empty
+        allowlist and ``secretStore`` is omitted — the sandbox has no
+        per-store egress restriction.
+
+        Returns:
+            Dict with::
+
+                {
+                    "sandboxID": "sb-...",
+                    "secretStore": "<store-name>",        # omitted if no store
+                    "egressAllowlist": ["api.openai.com", ...],
+                    "perSecretAllowedHosts": {
+                        "OPENAI_API_KEY": ["api.openai.com"],
+                        ...
+                    },
+                }
+        """
+        resp = await self._client.get(f"/sandboxes/{self.sandbox_id}/allowed-hosts")
+        resp.raise_for_status()
+        return resp.json()
+
     async def set_timeout(self, timeout: int) -> None:
         """Update the sandbox timeout in seconds."""
         # Route to worker directly (like commands/files/pty) — the control plane

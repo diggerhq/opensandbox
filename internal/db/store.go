@@ -2034,6 +2034,25 @@ func (s *Store) GetSecretStoreByName(ctx context.Context, orgID uuid.UUID, name 
 	return &ss, nil
 }
 
+// GetSandboxSecretStoreID returns the secret_stores.id bound to the given
+// sandbox, or (nil, nil) if the sandbox has no store attached. The caller's
+// org scope is enforced — sandbox IDs aren't globally unique, so a leaked
+// ID from another org won't return that org's data. Pulled into its own
+// query rather than expanding SandboxSession because most callers don't
+// need this column and we want to keep the existing struct minimal.
+func (s *Store) GetSandboxSecretStoreID(ctx context.Context, orgID uuid.UUID, sandboxID string) (*uuid.UUID, error) {
+	var storeID *uuid.UUID
+	err := s.pool.QueryRow(ctx,
+		`SELECT secret_store_id FROM sandbox_sessions
+		 WHERE org_id = $1 AND sandbox_id = $2 ORDER BY started_at DESC LIMIT 1`,
+		orgID, sandboxID,
+	).Scan(&storeID)
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox secret store id: %w", err)
+	}
+	return storeID, nil
+}
+
 // ListSecretStores returns all secret stores for an org.
 func (s *Store) ListSecretStores(ctx context.Context, orgID uuid.UUID) ([]SecretStore, error) {
 	rows, err := s.pool.Query(ctx,
