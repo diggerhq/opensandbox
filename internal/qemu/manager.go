@@ -55,31 +55,64 @@ const (
 // the virtio-serial listener. Returns nil when the guest is fully prepared — no
 // sleep needed afterward.
 //
-// Returns ErrAgentUnresponsive (wrapped) when neither the modern PrepareHibernate
-// RPC nor the legacy Exec("sync; kill -USR1 1") fallback succeeds within their
-// respective 10s timeouts. An Unimplemented response from PrepareHibernate (older
-// agent builds) is not itself a failure — the fallback is what counts.
+// On transport-class errors (Unavailable, Canceled, EOF, "client connection is
+// closing") the RPC is retried once after a Redial — matching the pattern used
+// by SyncFS / Exec / patchGuestNetwork elsewhere in this file. This handles
+// the common transient where the gRPC channel is mid-recycle (e.g. right after
+// a heavy Exec just completed). Only after redial+retry also fails do we
+// surface ErrAgentUnresponsive.
+//
+// An Unimplemented response from PrepareHibernate (older agent builds) is not
+// itself a failure — the legacy Exec("sync; kill -USR1 1") fallback is what
+// counts. ErrAgentUnresponsive (wrapped) is returned only when neither the
+// modern path nor the fallback succeeds, even after redial.
 func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) error {
 	if agent == nil {
 		return nil
 	}
-	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
+
+	prepareOnce := func() error {
+		rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
+		return err
+	}
+	err := prepareOnce()
+	if err != nil && IsTransportError(err) {
+		log.Printf("qemu: PrepareHibernate transport error (%v), redialing", err)
+		if rdErr := agent.Redial(); rdErr == nil {
+			err = prepareOnce()
+		} else {
+			log.Printf("qemu: PrepareHibernate redial failed: %v (orig: %v)", rdErr, err)
+		}
+	}
 	if err == nil {
 		return nil
 	}
+
 	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unimplemented {
 		log.Printf("qemu: PrepareHibernate RPC failed: %v (falling back to legacy path)", err)
 	}
-	// Fallback for older agents: sync + SIGUSR1 + sleep.
-	execCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel2()
-	_, fallbackErr := agent.Exec(execCtx, &pb.ExecRequest{
-		Command:   "/bin/sh",
-		Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
-		RunAsRoot: true,
-	})
+
+	execOnce := func() error {
+		execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, e := agent.Exec(execCtx, &pb.ExecRequest{
+			Command:   "/bin/sh",
+			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
+			RunAsRoot: true,
+		})
+		return e
+	}
+	fallbackErr := execOnce()
+	if fallbackErr != nil && IsTransportError(fallbackErr) {
+		log.Printf("qemu: prepareHibernate fallback Exec transport error (%v), redialing", fallbackErr)
+		if rdErr := agent.Redial(); rdErr == nil {
+			fallbackErr = execOnce()
+		} else {
+			log.Printf("qemu: prepareHibernate fallback redial failed: %v", rdErr)
+		}
+	}
 	if fallbackErr != nil {
 		return fmt.Errorf("%w: PrepareHibernate=%v, fallback Exec=%v", ErrAgentUnresponsive, err, fallbackErr)
 	}
