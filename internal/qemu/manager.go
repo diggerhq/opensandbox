@@ -28,21 +28,46 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// ErrAgentUnresponsive is returned by quiesceAndCloseAgent when the in-VM agent
+// is unreachable. Callers must not proceed to savevm when this fires: capturing
+// a snapshot of a guest with un-synced page cache and pending EXT4 journal
+// entries produces a qcow2 that won't mount on next cold-boot (inode #2
+// metadata-checksum failure → kernel panic loop). Surface a clean error to the
+// API caller instead of silently corrupting the rootfs.
+var ErrAgentUnresponsive = fmt.Errorf("guest agent unresponsive, refusing to capture potentially-inconsistent snapshot")
+
+// ErrRootfsCritical is returned when the guest's rootfs (/dev/vda) is so full
+// that destructive operations could leave it in a corrupted state. dpkg/apt
+// mid-rename of system files plus an ENOSPC trip plus a savevm is the path
+// that causes EXT4 metadata checksum failure on next cold-mount. Refuse the
+// op early; let the caller / customer free space first.
+var ErrRootfsCritical = fmt.Errorf("rootfs disk usage too high — refusing destructive operation to prevent corruption")
+
+const (
+	// rootfsRefuseThresholdPct: above this, refuse destructive operations.
+	rootfsRefuseThresholdPct = 95
+	// rootfsWarnThresholdPct: above this, log a warning on the next destructive
+	// op so the customer sees it surface in their logs / our telemetry.
+	rootfsWarnThresholdPct = 85
+)
+
 // prepareAgentForHibernate synchronously syncs the guest filesystems and quiesces
-// the virtio-serial listener. Returns when the guest is fully prepared — no sleep
-// needed afterward.
+// the virtio-serial listener. Returns nil when the guest is fully prepared — no
+// sleep needed afterward.
 //
-// On agents that don't implement the PrepareHibernate RPC (older builds), falls
-// back to the legacy Exec("sync; kill -USR1 1") path with a 1s sleep.
-func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) {
+// Returns ErrAgentUnresponsive (wrapped) when neither the modern PrepareHibernate
+// RPC nor the legacy Exec("sync; kill -USR1 1") fallback succeeds within their
+// respective 10s timeouts. An Unimplemented response from PrepareHibernate (older
+// agent builds) is not itself a failure — the fallback is what counts.
+func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) error {
 	if agent == nil {
-		return
+		return nil
 	}
 	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
 	if err == nil {
-		return
+		return nil
 	}
 	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unimplemented {
 		log.Printf("qemu: PrepareHibernate RPC failed: %v (falling back to legacy path)", err)
@@ -50,32 +75,72 @@ func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) {
 	// Fallback for older agents: sync + SIGUSR1 + sleep.
 	execCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel2()
-	_, _ = agent.Exec(execCtx, &pb.ExecRequest{
+	_, fallbackErr := agent.Exec(execCtx, &pb.ExecRequest{
 		Command:   "/bin/sh",
 		Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
 		RunAsRoot: true,
 	})
+	if fallbackErr != nil {
+		return fmt.Errorf("%w: PrepareHibernate=%v, fallback Exec=%v", ErrAgentUnresponsive, err, fallbackErr)
+	}
 	time.Sleep(1 * time.Second)
+	return nil
+}
+
+// checkRootfsPressure polls the in-guest agent for filesystem usage and
+// returns ErrRootfsCritical if rootfs use% is at or above the refuse threshold.
+// Best-effort: returns nil on agent unreachable / older agent that doesn't
+// fill the new fields (RootfsTotalBytes==0). In those cases the caller falls
+// back to the pre-existing behavior — backward compatible for long-lived
+// sandboxes whose in-guest agent predates this change.
+//
+// Logs a warning when use% crosses rootfsWarnThresholdPct so customers see
+// the early signal in their logs even when the op is allowed to proceed.
+func (m *Manager) checkRootfsPressure(ctx context.Context, vm *VMInstance) error {
+	if vm == nil || vm.agent == nil {
+		return nil
+	}
+	statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := vm.agent.Stats(statsCtx)
+	if err != nil || resp == nil || resp.RootfsTotalBytes == 0 {
+		return nil
+	}
+	pct := int(resp.RootfsUsedBytes * 100 / resp.RootfsTotalBytes)
+	if pct >= rootfsRefuseThresholdPct {
+		return fmt.Errorf("%w: rootfs at %d%% (refuse threshold %d%%) — free space and retry, or kill and respawn from a checkpoint", ErrRootfsCritical, pct, rootfsRefuseThresholdPct)
+	}
+	if pct >= rootfsWarnThresholdPct {
+		log.Printf("qemu: %s: rootfs at %d%% — destructive operations will be refused at %d%%", vm.ID, pct, rootfsRefuseThresholdPct)
+	}
+	return nil
 }
 
 // quiesceAndCloseAgent prepares the agent for hibernate, closes the host-side
 // gRPC client connection, and waits 200ms for the guest's gRPC server to
-// process the EOF and re-enter its Accept poll loop. After this returns it is
-// safe for the caller to call savevm — the captured snapshot will not have a
-// stale virtioSerialConn whose buffered HTTP/2 framer state could corrupt the
-// next host's gRPC handshake on fork/restore.
+// process the EOF and re-enter its Accept poll loop. After this returns nil it
+// is safe for the caller to call savevm — the captured snapshot will not have
+// a stale virtioSerialConn whose buffered HTTP/2 framer state could corrupt the
+// next host's gRPC handshake on fork/restore, AND the guest filesystem state is
+// known-quiesced.
 //
 // The 200ms is empirically sufficient for the guest virtio-serial driver to
 // surface EOF on /dev/virtio-ports/agent → for the gRPC server's Read goroutine
 // to drop its conn → for onClose to run (active=false). Without this wait the
 // snapshot can land mid-tear-down and the bug returns.
-func quiesceAndCloseAgent(ctx context.Context, agent *AgentClient) {
+//
+// Returns ErrAgentUnresponsive (wrapped) when the agent cannot be reached for
+// the prep step. Callers must abort their savevm path on this error.
+func quiesceAndCloseAgent(ctx context.Context, agent *AgentClient) error {
 	if agent == nil {
-		return
+		return nil
 	}
-	prepareAgentForHibernate(ctx, agent)
+	if err := prepareAgentForHibernate(ctx, agent); err != nil {
+		return err
+	}
 	_ = agent.Close()
 	time.Sleep(200 * time.Millisecond)
+	return nil
 }
 
 // Compile-time check that Manager implements sandbox.Manager.
@@ -377,6 +442,39 @@ func (m *Manager) reinstallProxyCA(ctx context.Context, sandboxID string, agent 
 		return
 	}
 	log.Printf("qemu: %s: reinstalled proxy CA on guest", sandboxID)
+}
+
+// setupAptCacheBindMount redirects /var/cache/apt/archives onto the workspace
+// disk via bind-mount, so apt's package-download traffic (commonly 1-3 GB
+// during a base build) doesn't compete with the OS for rootfs space.
+//
+// Idempotent: mountpoint -q short-circuits when the bind is already in place,
+// so re-applying on every wake/migrate/golden-create costs nothing. Lives in
+// the kernel mount table only — does NOT modify guest /etc/fstab — so it
+// re-runs on every resume through this hook. Best-effort: failure is logged
+// but doesn't fail the handoff (apt-cache stays on rootfs as before).
+//
+// Called from: golden-create (inline with the workspace mount block), wake,
+// migration. All three paths converge on a guest with /home/sandbox already
+// mounted on /dev/vdb.
+func (m *Manager) setupAptCacheBindMount(ctx context.Context, sandboxID string, agent *AgentClient) {
+	if agent == nil {
+		return
+	}
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := agent.Exec(execCtx, &pb.ExecRequest{
+		Command: "/bin/sh",
+		Args: []string{"-c", strings.Join([]string{
+			"mkdir -p /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+			"mountpoint -q /var/cache/apt/archives || mount --bind /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+		}, " && ")},
+		RunAsRoot: true,
+	})
+	if err != nil {
+		log.Printf("qemu: %s: apt-cache bind-mount failed: %v (apt cache will live on rootfs)", sandboxID, err)
+		return
+	}
 }
 
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
@@ -980,6 +1078,14 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	// golden workspace. The new sandbox has a DIFFERENT workspace qcow2 on the same
 	// virtio-blk device. Without dropping caches, the kernel uses stale superblock/
 	// journal data → ext4 checksum errors ("Bad message").
+	//
+	// After /home/sandbox is mounted, redirect /var/cache/apt/archives onto
+	// workspace via bind-mount. apt downloads packages there before installing
+	// (commonly 1-3 GB during a base build); without the redirect, that traffic
+	// lands on the 4 GiB rootfs and can fill it. The bind-mount is idempotent
+	// (mountpoint -q short-circuits) and survives only in the running kernel —
+	// re-applied on every wake/spawn through this same hook. Failure to bind-
+	// mount is non-fatal (apt-cache stays on rootfs, status quo).
 	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, mountErr := agentClient.Exec(mountCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
@@ -989,6 +1095,8 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
 			"resize2fs /dev/vdb 2>/dev/null || true",
 			"chown 1000:1000 /home/sandbox",
+			"mkdir -p /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+			"mountpoint -q /var/cache/apt/archives || mount --bind /home/sandbox/.osb-apt-cache /var/cache/apt/archives 2>/dev/null || true",
 		}, " && ")},
 		RunAsRoot: true,
 	})
@@ -2290,6 +2398,14 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 		return nil, err
 	}
 
+	// Refuse hibernate if rootfs is critically full. dpkg/apt mid-rename + an
+	// unsynced page cache + a savevm produces qcow2 EXT4 metadata corruption
+	// that won't cold-mount on the next wake. Cheap pre-flight check; the
+	// customer should free space (or kill+respawn from a checkpoint) instead.
+	if err := m.checkRootfsPressure(ctx, vm); err != nil {
+		return nil, err
+	}
+
 	if !vm.opMu.TryLock() {
 		return nil, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
@@ -2371,6 +2487,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		return "", "", 0, err
 	}
 
+	// Refuse if rootfs is critically full — same corruption risk as hibernate
+	// (dpkg/apt mid-rename + savevm = qcow2 EXT4 metadata broken on next mount).
+	if err := m.checkRootfsPressure(ctx, vm); err != nil {
+		return "", "", 0, err
+	}
+
 	// Reject if another destructive operation (checkpoint, hibernate, restore) is in progress.
 	// Without this, rapid-fire checkpoints queue up and the agent gets into a bad state
 	// from overlapping SIGUSR1/reconnect cycles.
@@ -2388,8 +2510,15 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// Sync filesystem, quiesce virtio-serial, close host conn, and WAIT for
 	// the guest to process EOF before savevm. Critical for clean snapshot
 	// state — see quiesceAndCloseAgent for the protocol details.
+	//
+	// If quiesce fails (agent unresponsive), refuse the checkpoint: a savevm
+	// against an un-synced guest captures inconsistent qcow2 metadata that
+	// becomes unbootable on next cold-mount. See ErrAgentUnresponsive.
 	if vm.agent != nil {
-		quiesceAndCloseAgent(ctx, vm.agent)
+		if err := quiesceAndCloseAgent(ctx, vm.agent); err != nil {
+			log.Printf("qemu: CreateCheckpoint %s/%s: refusing savevm — %v", sandboxID, checkpointID, err)
+			return "", "", 0, fmt.Errorf("checkpoint %s: %w", sandboxID, err)
+		}
 		vm.agent = nil
 	}
 
@@ -2420,10 +2549,24 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// savevm pauses the VM, writes memory+device+disk-delta into every qcow2
 	// drive as an internal snapshot, then resumes. The qcow2 files now carry
 	// the full VM state; no external memory file is needed.
+	//
+	// Explicit Stop() before savevm halts vCPUs to close the small race where
+	// in-flight virtio-blk writes can land in the qcow2 between the agent's
+	// `sync` (above) and the start of savevm. We Cont() unconditionally after
+	// savevm completes (success or failure) — the sandbox is supposed to keep
+	// running post-checkpoint, so we must not leave it in stopped state.
 	snapshotName := "cp-" + checkpointID
-	if err := vm.qmp.SaveVM(snapshotName); err != nil {
+	if stopErr := vm.qmp.Stop(); stopErr != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", 0, fmt.Errorf("savevm: %w", err)
+		return "", "", 0, fmt.Errorf("qmp stop before savevm: %w", stopErr)
+	}
+	saveErr := vm.qmp.SaveVM(snapshotName)
+	if contErr := vm.qmp.Cont(); contErr != nil {
+		log.Printf("qemu: CreateCheckpoint %s/%s: failed to resume VM after savevm: %v", sandboxID, checkpointID, contErr)
+	}
+	if saveErr != nil {
+		os.RemoveAll(stagingDir)
+		return "", "", 0, fmt.Errorf("savevm: %w", saveErr)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 

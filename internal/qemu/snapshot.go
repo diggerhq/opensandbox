@@ -69,8 +69,17 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Step 1: Sync filesystems, quiesce agent, close host conn, and WAIT for
 	// the guest to process EOF before savevm. See quiesceAndCloseAgent.
 	// Don't unmount /workspace — open FDs prevent clean unmount and cause ext4 corruption.
+	//
+	// If quiesce fails (agent unresponsive), DO NOT proceed to savevm: the
+	// captured qcow2 would carry un-synced page cache + pending EXT4 journal
+	// entries and become unbootable on the next cold-mount (inode #2 checksum
+	// failure → kernel panic loop). Bubble the error up so the API caller
+	// gets a clear refusal instead of a silently-corrupted sandbox.
 	if vm.agent != nil {
-		quiesceAndCloseAgent(ctx, vm.agent)
+		if err := quiesceAndCloseAgent(ctx, vm.agent); err != nil {
+			log.Printf("qemu: hibernate %s: refusing savevm — %v", vm.ID, err)
+			return nil, fmt.Errorf("hibernate %s: %w", vm.ID, err)
+		}
 		vm.agent = nil
 	}
 	log.Printf("qemu: hibernate %s: guest sync + unmount done (%dms)", vm.ID, time.Since(t0).Milliseconds())
@@ -78,12 +87,23 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Step 2: savevm — saves memory + device state INTO the qcow2 files.
 	// Same mechanism as CreateCheckpoint. On wake, loadvm restores everything
 	// including running processes, open files, and memory contents.
+	//
+	// Explicit Stop() before savevm: although savevm internally pauses and
+	// resumes the VM, the explicit pause closes the small race where in-flight
+	// virtio-blk writes from the guest can still land in the qcow2 between
+	// the agent's `sync` and the start of savevm. Halting vCPUs first makes
+	// the captured state strictly post-sync. doHibernate proceeds straight
+	// to Quit on success, so leaving the VM in stopped state is fine; only
+	// the failure path resumes (so we don't leak a wedged paused VM).
 	if vm.qmp == nil {
 		return nil, fmt.Errorf("no QMP client for VM %s", vm.ID)
 	}
 	snapshotName := "hibernate"
+	if stopErr := vm.qmp.Stop(); stopErr != nil {
+		return nil, fmt.Errorf("qmp stop before savevm: %w", stopErr)
+	}
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
-		// Try to resume VM so it's not left in a broken paused state
+		// Resume so we don't leave the VM wedged paused on the error path.
 		if contErr := vm.qmp.Cont(); contErr != nil {
 			log.Printf("qemu: hibernate %s: failed to resume after savevm failure: %v", vm.ID, contErr)
 		}
@@ -531,6 +551,12 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	// case the cert in the guest's trust store no longer matches what this
 	// worker's proxy presents. Idempotent on same-worker wake.
 	m.reinstallProxyCA(context.Background(), sandboxID, agentClient)
+
+	// Re-apply the apt-cache bind-mount. Idempotent: no-op if already in place
+	// (e.g., same-worker wake where the loadvm-restored mount table preserved
+	// the bind). On cross-worker wake or sandboxes that pre-date this fix,
+	// this is the first chance to set it up.
+	m.setupAptCacheBindMount(context.Background(), sandboxID, agentClient)
 
 	log.Printf("qemu: wake %s: golden restore complete (port=%d, tap=%s)",
 		sandboxID, hostPort, netCfg.TAPName)
