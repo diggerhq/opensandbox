@@ -79,10 +79,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Bring up PR stack
+      - name: Bring up PR stack (2 workers, cross-version baseline)
         id: up
+        env:
+          BASELINE_FROM_GALLERY: "1"
         run: |
-          ./ci/pr/up.sh ${{ github.event.pull_request.number }} 1
+          ./ci/pr/up.sh ${{ github.event.pull_request.number }} 2
 
       - name: API test suite
         env:
