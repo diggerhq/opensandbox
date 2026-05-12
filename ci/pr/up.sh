@@ -27,6 +27,7 @@ SSH_KEY_PRIV="$HOME/.ssh/opencomputer-ci"
 SSH_KEY_PUB="$HOME/.ssh/opencomputer-ci.pub"
 SSH_OPTS="-i $SSH_KEY_PRIV -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 MAX_CONCURRENT_PRS="${MAX_CONCURRENT_PRS:-8}"
+WORKER_SIZE="${WORKER_SIZE:-Standard_D16ads_v7}"
 
 # Prod gallery image — CI grants opensandbox-test-gh-action SP Reader on this.
 WORKER_IMAGE_VERSION="${WORKER_IMAGE_VERSION:-1.0.66}"
@@ -68,9 +69,22 @@ AGENT_BIN="$SCRATCH/osb-agent"
 if [[ "$WORKERS" -gt 0 ]]; then
   (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORKER_BIN" ./cmd/worker/) >/dev/null
   (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$AGENT_BIN" ./cmd/agent/) >/dev/null
-  echo "    server=$(du -h "$SERVER_BIN" | cut -f1) worker=$(du -h "$WORKER_BIN" | cut -f1) agent=$(du -h "$AGENT_BIN" | cut -f1)"
+  echo "    current: server=$(du -h "$SERVER_BIN" | cut -f1) worker=$(du -h "$WORKER_BIN" | cut -f1) agent=$(du -h "$AGENT_BIN" | cut -f1)"
 else
   echo "    server=$(du -h "$SERVER_BIN" | cut -f1) (workers=0, skipping worker+agent build)"
+fi
+
+# Optional cross-version setup: if BASELINE_FROM_GALLERY=1 and WORKERS>=2,
+# worker 1 keeps the gallery image's pre-baked agent + worker binaries (= the
+# current prod golden), while workers 2..N get the PR's overrides. Lets the
+# migrate test exercise real old-golden → new-golden upgrade on every PR.
+BASELINE_FROM_GALLERY="${BASELINE_FROM_GALLERY:-0}"
+if [[ "$BASELINE_FROM_GALLERY" == "1" && "$WORKERS" -lt 2 ]]; then
+  echo "    BASELINE_FROM_GALLERY=1 requires WORKERS>=2, ignoring"
+  BASELINE_FROM_GALLERY=0
+fi
+if [[ "$BASELINE_FROM_GALLERY" == "1" ]]; then
+  echo "    cross-version mode: worker 1 uses gallery-baked binaries (current prod golden)"
 fi
 
 echo ">>> [2/9] CREATE DATABASE $DB_NAME"
@@ -79,7 +93,25 @@ ssh $SSH_OPTS azureuser@"$DATA_VM_PIP" \
    || PGPASSWORD='$PG_PASS' psql -h localhost -U postgres -d postgres -c \"CREATE DATABASE $DB_NAME OWNER osbciuser;\""
 
 echo ">>> [3/9] storage container $CONTAINER"
-az storage container create --account-name "$STORAGE" --account-key "$STORAGE_KEY" -n "$CONTAINER" -o none 2>/dev/null || true
+# Azure soft-deletes containers and refuses recreation for ~30s after delete.
+# If down.sh just ran for this PR, the first `container create` will silently
+# fail and workers boot without a container to upload bases to. Poll until
+# the container actually exists.
+for i in $(seq 1 24); do
+  if az storage container show --account-name "$STORAGE" --account-key "$STORAGE_KEY" -n "$CONTAINER" -o none 2>/dev/null; then
+    break
+  fi
+  out=$(az storage container create --account-name "$STORAGE" --account-key "$STORAGE_KEY" -n "$CONTAINER" 2>&1 || true)
+  if echo "$out" | grep -q '"created": true'; then
+    break
+  fi
+  echo "    container not ready yet (attempt $i, retrying in 5s)"
+  sleep 5
+done
+if ! az storage container show --account-name "$STORAGE" --account-key "$STORAGE_KEY" -n "$CONTAINER" -o none 2>/dev/null; then
+  echo "FATAL: container $CONTAINER did not become available"
+  exit 1
+fi
 
 echo ">>> [4/9] provision $SERVER_VM"
 if ! az vm show -g "$RG" -n "$SERVER_VM" -o none 2>/dev/null; then
@@ -207,7 +239,7 @@ if [[ "$WORKERS" -gt 0 ]]; then
       echo "    $stage az vm create (cross-region first boot is ~3-4 min slower)"
       az vm create -g "$RG" -n "$vm_name" \
         --image "$WORKER_IMAGE_ID" \
-        --size Standard_D8ads_v7 \
+        --size "$WORKER_SIZE" \
         --vnet-name "$VNET" --subnet "$SUBNET" \
         --public-ip-address "${vm_name}-pip" \
         --public-ip-sku Standard \
@@ -255,10 +287,24 @@ OPENSANDBOX_S3_SECRET_ACCESS_KEY=$STORAGE_KEY
 OPENSANDBOX_S3_FORCE_PATH_STYLE=false
 EOF
 
-    echo "    $stage scp binaries + env"
-    scp $SSH_OPTS "$WORKER_BIN" "$AGENT_BIN" "$SCRATCH/worker-${idx}.env" azureuser@"$pip":/tmp/ >/dev/null
+    # Worker 1 uses the gallery image's pre-baked binaries when in cross-version
+    # mode — that represents the current prod golden. Other workers get the
+    # PR's freshly-built binaries.
+    local use_gallery_baseline=0
+    if [[ "$idx" == "1" && "$BASELINE_FROM_GALLERY" == "1" ]]; then
+      use_gallery_baseline=1
+      echo "    $stage cross-version mode: keeping gallery-baked binaries"
+    fi
+    echo "    $stage scp env"
+    scp $SSH_OPTS "$SCRATCH/worker-${idx}.env" azureuser@"$pip":/tmp/worker.env >/dev/null
+    if [[ "$use_gallery_baseline" == "0" ]]; then
+      echo "    $stage scp PR-built worker + agent"
+      scp $SSH_OPTS "$WORKER_BIN" azureuser@"$pip":/tmp/opensandbox-worker >/dev/null
+      scp $SSH_OPTS "$AGENT_BIN" azureuser@"$pip":/tmp/osb-agent >/dev/null
+    fi
     ssh $SSH_OPTS azureuser@"$pip" "sudo bash -se" <<REMOTE
 set -e
+USE_GALLERY_BASELINE=$use_gallery_baseline
 systemctl stop opensandbox-worker 2>/dev/null || true
 
 # Mount the local NVMe at /data2 with XFS+reflink (required by the worker's
@@ -281,20 +327,27 @@ fi
 mkdir -p /data2/sandboxes /data2/checkpoints
 chmod 0777 /data2 /data2/sandboxes /data2/checkpoints
 
-mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker
-chmod +x /usr/local/bin/opensandbox-worker
-mkdir -p /mnt/rootfs-${idx}
-mount -o loop /data/firecracker/images/default.ext4 /mnt/rootfs-${idx}
-cp /tmp/osb-agent /mnt/rootfs-${idx}/usr/local/bin/osb-agent
-chmod +x /mnt/rootfs-${idx}/usr/local/bin/osb-agent
-sync
-umount /mnt/rootfs-${idx}
-rm /tmp/osb-agent
 mkdir -p /etc/opensandbox
-mv /tmp/worker-${idx}.env /etc/opensandbox/worker.env
+mv /tmp/worker.env /etc/opensandbox/worker.env
 chmod 600 /etc/opensandbox/worker.env
-# Drop any cached golden snapshot — agent change invalidates it.
-rm -rf /data/sandboxes/golden /data2/sandboxes/golden 2>/dev/null || true
+
+if [[ "\$USE_GALLERY_BASELINE" == "1" ]]; then
+  echo "cross-version mode: keeping gallery-baked /usr/local/bin/opensandbox-worker and ext4-baked agent"
+else
+  # Override worker binary + swap PR's agent into default.ext4 via loop-mount.
+  mv /tmp/opensandbox-worker /usr/local/bin/opensandbox-worker
+  chmod +x /usr/local/bin/opensandbox-worker
+  mkdir -p /mnt/rootfs-${idx}
+  mount -o loop /data/firecracker/images/default.ext4 /mnt/rootfs-${idx}
+  cp /tmp/osb-agent /mnt/rootfs-${idx}/usr/local/bin/osb-agent
+  chmod +x /mnt/rootfs-${idx}/usr/local/bin/osb-agent
+  sync
+  umount /mnt/rootfs-${idx}
+  rm /tmp/osb-agent
+  # Drop any cached golden snapshot — agent change invalidates it.
+  rm -rf /data/sandboxes/golden /data2/sandboxes/golden 2>/dev/null || true
+fi
+
 systemctl daemon-reload
 systemctl enable opensandbox-worker >/dev/null 2>&1 || true
 systemctl restart opensandbox-worker
@@ -339,6 +392,35 @@ REMOTE
     echo "    --- worker 1 logs:"
     pip=$(az vm show -d -g "$RG" -n "pr-${PR_NUM}-worker-1" --query publicIps -o tsv 2>/dev/null || true)
     [[ -n "$pip" ]] && ssh $SSH_OPTS azureuser@"$pip" "sudo journalctl -u opensandbox-worker --no-pager -n 50 || true"
+    exit 1
+  fi
+
+  # Warmup probe: golden_version populated means the snapshot is built, but
+  # the first exec round-trip (API → gRPC → vsock → agent → process spawn)
+  # often takes longer than tests' 30s HTTP timeout on a cold worker. Spin
+  # a throwaway sandbox + echo to confirm the full exec path is hot before
+  # declaring the stack ready.
+  echo ">>> warmup probe: spawn sandbox + echo + delete"
+  WARM=0
+  for i in $(seq 1 18); do
+    sbox=$(curl -s -m 30 -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+      -d '{"cpuCount":1,"memoryMB":1024,"diskMB":20480,"timeout":60}' \
+      "http://$SERVER_PIP:8080/api/sandboxes" 2>/dev/null | jq -r '.sandboxID // empty')
+    if [[ -n "$sbox" ]]; then
+      out=$(curl -s -m 30 -X POST -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+        -d '{"cmd":"echo","args":["warmup"],"timeout":10}' \
+        "http://$SERVER_PIP:8080/api/sandboxes/$sbox/exec/run" 2>/dev/null)
+      curl -s -X DELETE -H "X-API-Key: $API_KEY" "http://$SERVER_PIP:8080/api/sandboxes/$sbox" >/dev/null 2>&1
+      if echo "$out" | grep -q '"exitCode":0'; then
+        WARM=1
+        echo "    warmup OK after ${i} attempt(s)"
+        break
+      fi
+    fi
+    sleep 5
+  done
+  if [[ "$WARM" == "0" ]]; then
+    echo "    FATAL: warmup probe never succeeded (worker exec path not ready)"
     exit 1
   fi
 fi

@@ -22,26 +22,10 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 		t.Skipf("%s<1, skipping checkpoint test", envWorkers)
 	}
 	c := newClient(t)
-
-	// Step 1: create sandbox
-	var sb struct {
-		SandboxID string `json:"sandboxID"`
-		Status    string `json:"status"`
-	}
-	code, err := c.do(t, http.MethodPost, "/api/sandboxes", map[string]any{
-		"cpuCount": 1,
-		"memoryMB": 1024,
-		"diskMB":   20480,
-		"timeout":  300,
-	}, &sb)
-	if err != nil || code/100 != 2 {
-		t.Fatalf("create sandbox: code=%d err=%v", code, err)
-	}
-	if sb.Status != "running" {
-		t.Fatalf("sandbox status=%q, want running", sb.Status)
-	}
-	t.Logf("source sandbox: %s", sb.SandboxID)
-	t.Cleanup(func() { c.do(t, http.MethodDelete, "/api/sandboxes/"+sb.SandboxID, nil, nil) })
+	sourceID, _ := createReadySandbox(t, c, map[string]any{
+		"cpuCount": 1, "memoryMB": 1024, "diskMB": 20480, "timeout": 300,
+	})
+	t.Logf("source sandbox: %s", sourceID)
 
 	// Step 2: create checkpoint
 	cpName := fmt.Sprintf("ci-cp-%d", time.Now().UnixNano())
@@ -52,8 +36,8 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 		RootfsS3Key    *string `json:"rootfsS3Key"`
 		WorkspaceS3Key *string `json:"workspaceS3Key"`
 	}
-	code, err = c.do(t, http.MethodPost,
-		"/api/sandboxes/"+sb.SandboxID+"/checkpoints",
+	code, err := c.do(t, http.MethodPost,
+		"/api/sandboxes/"+sourceID+"/checkpoints",
 		map[string]any{"name": cpName}, &cp)
 	if err != nil || code/100 != 2 {
 		t.Fatalf("create checkpoint: code=%d err=%v", code, err)
@@ -80,7 +64,7 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 			SizeBytes      int64   `json:"sizeBytes"`
 		}
 		code, err := c.do(t, http.MethodGet,
-			"/api/sandboxes/"+sb.SandboxID+"/checkpoints", nil, &cps)
+			"/api/sandboxes/"+sourceID+"/checkpoints", nil, &cps)
 		if err == nil && code == http.StatusOK {
 			for _, x := range cps {
 				if x.ID == cp.ID {
@@ -109,11 +93,8 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 	if ready.WorkspaceS3Key == nil || *ready.WorkspaceS3Key == "" {
 		t.Errorf("checkpoint status=ready but workspaceS3Key is empty (regression: empty-key checkpoint)")
 	}
-	// sizeBytes is plumbed only on some code paths (the server-mode async
-	// SetCheckpointReady call still hardcodes 0). Warn until that fix merges;
-	// the fork below still exercises the upload+download flow either way.
 	if ready.SizeBytes <= 0 {
-		t.Logf("WARN: checkpoint sizeBytes=%d (server-mode async path hardcodes 0; tracked separately)", ready.SizeBytes)
+		t.Errorf("checkpoint sizeBytes=%d (regression: size not persisted)", ready.SizeBytes)
 	}
 	if t.Failed() {
 		t.FailNow() // don't try forking against a broken checkpoint
@@ -143,7 +124,7 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 	t.Cleanup(func() {
 		c.do(t, http.MethodDelete, "/api/sandboxes/"+fork.SandboxID, nil, nil)
 		c.do(t, http.MethodDelete,
-			"/api/sandboxes/"+sb.SandboxID+"/checkpoints/"+cp.ID, nil, nil)
+			"/api/sandboxes/"+sourceID+"/checkpoints/"+cp.ID, nil, nil)
 	})
 
 	// Step 6: confirm fork shows up in list

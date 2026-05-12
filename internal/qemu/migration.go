@@ -538,6 +538,21 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 		return err
 	}
 
+	// Wait for QEMU to finish loading the migrated state before resuming.
+	// The source's `migrate` command completes when it has SENT all data;
+	// the dest's QEMU may still be in `inmigrate` parsing/applying it when
+	// the server calls CompleteIncomingMigration. On a contended or smaller
+	// dest, that load can take >10s, in which case Cont blocks waiting for
+	// QEMU to transition and our 10s response read fires before QEMU answers.
+	// Polling query-status until `paused`/`postmigrate` makes Cont a no-op
+	// from QEMU's perspective and turns this from "Cont times out, agent
+	// reconnect times out, migration fails" into a clean wait.
+	if vm.qmp != nil {
+		if err := m.waitForMigrationReady(vm.qmp, 60*time.Second); err != nil {
+			log.Printf("qemu: migration %s: waitForMigrationReady failed: %v (attempting cont anyway)", sandboxID, err)
+		}
+	}
+
 	// Resume the VM — after live migration the target is paused
 	if vm.qmp != nil {
 		if err := vm.qmp.Cont(); err != nil {

@@ -16,19 +16,9 @@ func TestExec_Run(t *testing.T) {
 		t.Skipf("%s<1, skipping exec test", envWorkers)
 	}
 	c := newClient(t)
-
-	// Create sandbox
-	var sb struct {
-		SandboxID string `json:"sandboxID"`
-		Status    string `json:"status"`
-	}
-	code, err := c.do(t, http.MethodPost, "/api/sandboxes", map[string]any{
+	sandboxID, _ := createReadySandbox(t, c, map[string]any{
 		"cpuCount": 1, "memoryMB": 1024, "diskMB": 20480, "timeout": 120,
-	}, &sb)
-	if err != nil || code/100 != 2 || sb.Status != "running" {
-		t.Fatalf("create sandbox: code=%d err=%v resp=%+v", code, err, sb)
-	}
-	t.Cleanup(func() { c.do(t, http.MethodDelete, "/api/sandboxes/"+sb.SandboxID, nil, nil) })
+	})
 
 	// Run commands and verify stdout/exit codes
 	cases := []struct {
@@ -56,7 +46,7 @@ func TestExec_Run(t *testing.T) {
 				body["args"] = tc.args
 			}
 			code, err := c.do(t, http.MethodPost,
-				"/api/sandboxes/"+sb.SandboxID+"/exec/run", body, &result)
+				"/api/sandboxes/"+sandboxID+"/exec/run", body, &result)
 			if err != nil {
 				t.Fatalf("exec: %v", err)
 			}

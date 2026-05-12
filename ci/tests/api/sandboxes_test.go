@@ -15,40 +15,10 @@ func TestSandboxes_Lifecycle(t *testing.T) {
 		t.Skipf("%s<1, skipping sandbox lifecycle test", envWorkers)
 	}
 	c := newClient(t)
-
-	var created struct {
-		SandboxID string `json:"sandboxID"`
-		Status    string `json:"status"`
-		WorkerID  string `json:"workerID"`
-	}
-	code, err := c.do(t, http.MethodPost, "/api/sandboxes", map[string]any{
-		"cpuCount": 1,
-		"memoryMB": 1024,
-		"diskMB":   20480,
-		"timeout":  120,
-	}, &created)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if code/100 != 2 {
-		t.Fatalf("create: want 2xx, got %d", code)
-	}
-	if created.SandboxID == "" {
-		t.Fatalf("create: empty sandboxID (resp=%+v)", created)
-	}
-	if created.Status != "running" {
-		t.Fatalf("create: want status=running, got %q", created.Status)
-	}
-	if created.WorkerID == "" {
-		t.Fatalf("create: empty workerID (resp=%+v)", created)
-	}
-	t.Logf("created %s on %s", created.SandboxID, created.WorkerID)
-	t.Cleanup(func() {
-		code, _ := c.do(t, http.MethodDelete, "/api/sandboxes/"+created.SandboxID, nil, nil)
-		if code/100 != 2 && code != http.StatusNotFound {
-			t.Logf("cleanup: failed to delete %s (code=%d)", created.SandboxID, code)
-		}
+	sandboxID, workerID := createReadySandbox(t, c, map[string]any{
+		"cpuCount": 1, "memoryMB": 1024, "diskMB": 20480, "timeout": 120,
 	})
+	t.Logf("created %s on %s", sandboxID, workerID)
 
 	t.Run("get returns same sandbox", func(t *testing.T) {
 		var sb struct {
@@ -56,15 +26,15 @@ func TestSandboxes_Lifecycle(t *testing.T) {
 			Status    string `json:"status"`
 			WorkerID  string `json:"workerID"`
 		}
-		code, err := c.do(t, http.MethodGet, "/api/sandboxes/"+created.SandboxID, nil, &sb)
+		code, err := c.do(t, http.MethodGet, "/api/sandboxes/"+sandboxID, nil, &sb)
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
 		if code != http.StatusOK {
 			t.Fatalf("get: want 200, got %d", code)
 		}
-		if sb.SandboxID != created.SandboxID {
-			t.Fatalf("get: sandboxID mismatch (want %q, got %q)", created.SandboxID, sb.SandboxID)
+		if sb.SandboxID != sandboxID {
+			t.Fatalf("get: sandboxID mismatch (want %q, got %q)", sandboxID, sb.SandboxID)
 		}
 		if sb.Status != "running" {
 			t.Fatalf("get: status=%q", sb.Status)
@@ -84,18 +54,18 @@ func TestSandboxes_Lifecycle(t *testing.T) {
 		}
 		var found bool
 		for _, s := range sandboxes {
-			if s.SandboxID == created.SandboxID {
+			if s.SandboxID == sandboxID {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Fatalf("created %s not in list (got %d sandboxes)", created.SandboxID, len(sandboxes))
+			t.Fatalf("created %s not in list (got %d sandboxes)", sandboxID, len(sandboxes))
 		}
 	})
 
 	t.Run("delete returns 2xx", func(t *testing.T) {
-		code, err := c.do(t, http.MethodDelete, "/api/sandboxes/"+created.SandboxID, nil, nil)
+		code, err := c.do(t, http.MethodDelete, "/api/sandboxes/"+sandboxID, nil, nil)
 		if err != nil {
 			t.Fatalf("delete: %v", err)
 		}

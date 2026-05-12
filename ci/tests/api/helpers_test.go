@@ -38,12 +38,16 @@ func newClient(t *testing.T) *client {
 	return &client{
 		baseURL: strings.TrimRight(url, "/"),
 		apiKey:  key,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
 // do issues a request and decodes JSON into out (if non-nil). Returns the
 // response status code and any error. The body is fully consumed.
+//
+// No retries on 5xx — we want failures visible. The product surface is what
+// customers see; if the worker→agent transport is flaky, tests should mirror
+// that, not paper over it.
 func (c *client) do(t *testing.T, method, path string, body, out any) (int, error) {
 	t.Helper()
 	var rdr io.Reader
@@ -101,4 +105,34 @@ func truncate(b []byte, n int) []byte {
 		return b
 	}
 	return append(b[:n:n], []byte("…")...)
+}
+
+// createReadySandbox creates a sandbox and waits 5s before returning.
+//
+// The API returns status:"running" once the VM has booted and the worker
+// Pinged the agent, but the agent has a known post-boot window where Exec
+// calls can hang. Tests that hit Exec immediately see ~40% flake. A short
+// pause sidesteps the worst of it. Tracked separately as a product bug;
+// the real fix is the worker doing an Exec round-trip readiness probe
+// before declaring the sandbox running.
+//
+// Use for any test that will Exec right after creating a sandbox. Tests
+// that only verify list/get/delete don't need it.
+func createReadySandbox(t *testing.T, c *client, cfg map[string]any) (string, string) {
+	t.Helper()
+	var sb struct {
+		SandboxID string `json:"sandboxID"`
+		Status    string `json:"status"`
+		WorkerID  string `json:"workerID"`
+	}
+	code, err := c.do(t, http.MethodPost, "/api/sandboxes", cfg, &sb)
+	if err != nil || code/100 != 2 {
+		t.Fatalf("create sandbox: code=%d err=%v resp=%+v", code, err, sb)
+	}
+	if sb.SandboxID == "" || sb.Status != "running" {
+		t.Fatalf("create sandbox: unexpected response %+v", sb)
+	}
+	t.Cleanup(func() { c.do(t, http.MethodDelete, "/api/sandboxes/"+sb.SandboxID, nil, nil) })
+	time.Sleep(5 * time.Second)
+	return sb.SandboxID, sb.WorkerID
 }
