@@ -9,9 +9,10 @@ import (
 	"testing"
 )
 
-// TestSDK_PythonImport verifies the Python SDK package is importable. Doesn't
-// instantiate against the live stack — that needs a network round-trip and
-// httpx — but catches missing-dep / syntax / package-config regressions.
+// TestSDK_PythonImport installs the Python SDK + its runtime deps (httpx,
+// websockets) into a temp venv and imports it. Catches missing-dep / syntax /
+// package-config regressions. Skipped only if python3 has no venv module —
+// in which case the runner setup is broken, not the SDK.
 func TestSDK_PythonImport(t *testing.T) {
 	py, err := exec.LookPath("python3")
 	if err != nil {
@@ -21,14 +22,25 @@ func TestSDK_PythonImport(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(sdk, "pyproject.toml")); err != nil {
 		t.Skipf("python SDK dir missing: %v", err)
 	}
-	out, err := exec.Command(py, "-c",
-		"import sys; sys.path.insert(0, '"+sdk+"'); import opencomputer; print(opencomputer.__name__)").
+
+	venv := filepath.Join(t.TempDir(), "venv")
+	if out, err := exec.Command(py, "-m", "venv", venv).CombinedOutput(); err != nil {
+		t.Skipf("python3 -m venv failed (no venv module?): %v\n%s", err, out)
+	}
+	venvPy := filepath.Join(venv, "bin", "python")
+	venvPip := filepath.Join(venv, "bin", "pip")
+
+	// Editable install pulls in httpx + websockets per pyproject.toml deps.
+	install := exec.Command(venvPip, "install", "-q", "--disable-pip-version-check", "-e", sdk)
+	if out, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("pip install -e %s: %v\n%s", sdk, err, out)
+	}
+
+	out, err := exec.Command(venvPy, "-c",
+		"import opencomputer; from opencomputer import Sandbox; print(opencomputer.__name__)").
 		CombinedOutput()
 	if err != nil {
-		// Likely a missing dep (httpx). Treat as informational — Python SDK
-		// has runtime deps a fresh runner may not have.
-		t.Logf("python import: %v\n%s", err, out)
-		t.Skip("python SDK has unsatisfied runtime deps in this env")
+		t.Fatalf("python import: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), "opencomputer") {
 		t.Errorf("python import: unexpected output: %q", out)
