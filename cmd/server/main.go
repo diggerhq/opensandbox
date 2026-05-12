@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"strings"
 	"os/signal"
 	"syscall"
 
@@ -179,28 +178,24 @@ func main() {
 		var poolName string
 
 		if cfg.AzureSubscriptionID != "" && (cfg.AzureImageID != "" || cfg.AzureKeyVaultName != "") {
-			// Build worker env template — new VMs get this via cloud-init.
-			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are patched by cloud-init
-			// with the VM's actual private IP and hostname.
-			// Workers need to reach Postgres/Redis on the control plane's private IP,
-			// not localhost. Replace localhost with the control plane's IP.
-			cpIP := os.Getenv("OPENSANDBOX_CONTROLPLANE_IP")
-			workerDBURL := cfg.DatabaseURL
-			workerRedisURL := cfg.RedisURL
-			if cpIP != "" {
-				workerDBURL = strings.ReplaceAll(workerDBURL, "localhost", cpIP)
-				workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
-				workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
-				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
-			}
-
-			// Warn loud if we're about to bake an empty AXIOM_INGEST_TOKEN
-			// into a worker. Reachable when the server's cfg was empty at
-			// startup but the secret has since been added to KV and no
-			// restart has happened yet — every worker minted from here will
-			// silently skip log shipping.
-			if cfg.AxiomIngestToken == "" {
-				log.Printf("opensandbox: WARNING: spawning Azure-pool worker with empty AXIOM_INGEST_TOKEN — this worker will not ship sandbox session logs (restart this control plane after the secret is in KV)")
+			// Build worker bootstrap env — new VMs get this via cloud-init.
+			// Only per-instance values + the SECRETS_VAULT_NAME pointer go in
+			// here. Everything else (DB/Redis URLs, JWT, S3 creds, sandbox
+			// defaults, domain, Axiom tokens) is loaded from Key Vault at
+			// worker startup by LoadSecretsFromKeyVault.
+			//
+			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are placeholders that
+			// cloud-init patches with the VM's actual private IP and hostname
+			// (see internal/compute/azure.go's user-data script).
+			//
+			// SECRETS_VAULT_NAME is the linchpin: without it the worker starts
+			// with only this bootstrap env and KV loading no-ops, which means
+			// no DB/Redis/S3 config and a fast crash. The CP's own
+			// SECRETS_VAULT_NAME is reused for spawned workers since they
+			// share a vault.
+			secretsVault := os.Getenv("SECRETS_VAULT_NAME")
+			if secretsVault == "" {
+				log.Printf("opensandbox: WARNING: spawning Azure-pool workers with empty SECRETS_VAULT_NAME — workers will fail to load DB/Redis/S3 config from Key Vault and will crash on startup")
 			}
 
 			workerEnv := fmt.Sprintf(
@@ -212,46 +207,14 @@ func main() {
 					"OPENSANDBOX_IMAGES_DIR=/data/firecracker/images\n"+
 					"OPENSANDBOX_GRPC_ADVERTISE=PLACEHOLDER:9090\n"+
 					"OPENSANDBOX_HTTP_ADDR=http://PLACEHOLDER:8081\n"+
-					"OPENSANDBOX_JWT_SECRET=%s\n"+
 					"OPENSANDBOX_WORKER_ID=PLACEHOLDER\n"+
+					"OPENSANDBOX_PORT=8081\n"+
 					"OPENSANDBOX_REGION=%s\n"+
 					"OPENSANDBOX_MAX_CAPACITY=%d\n"+
-					"OPENSANDBOX_PORT=8081\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=%d\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_CPUS=%d\n"+
-					"OPENSANDBOX_DATABASE_URL=%s\n"+
-					"OPENSANDBOX_REDIS_URL=%s\n"+
-					"OPENSANDBOX_S3_BUCKET=%s\n"+
-					"OPENSANDBOX_S3_REGION=%s\n"+
-					"OPENSANDBOX_S3_ENDPOINT=%s\n"+
-					"OPENSANDBOX_S3_ACCESS_KEY_ID=%s\n"+
-					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n"+
-					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n"+
-					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
-					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
-					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
-					"SEGMENT_WRITE_KEY=%s\n"+
-					"AXIOM_INGEST_TOKEN=%s\n"+
-					"AXIOM_DATASET=%s\n",
-				cfg.JWTSecret,
+					"SECRETS_VAULT_NAME=%s\n",
 				cfg.Region,
 				cfg.MaxCapacity,
-				cfg.DefaultSandboxMemoryMB,
-				cfg.DefaultSandboxCPUs,
-				workerDBURL,
-				workerRedisURL,
-				cfg.S3Bucket,
-				cfg.S3Region,
-				cfg.S3Endpoint,
-				cfg.S3AccessKeyID,
-				cfg.S3SecretAccessKey,
-				cfg.S3ForcePathStyle,
-				cfg.SandboxDomain,
-				cfg.DefaultSandboxDiskMB,
-				cfg.AzureKeyVaultName,
-				cfg.SegmentWriteKey,
-				cfg.AxiomIngestToken,
-				cfg.AxiomDataset,
+				secretsVault,
 			)
 			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
 

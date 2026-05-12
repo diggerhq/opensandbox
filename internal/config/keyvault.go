@@ -30,43 +30,106 @@ import (
 
 // secretMapping maps Key Vault secret names to environment variable names.
 // Only secrets in this map are loaded — unknown secrets in the vault are ignored.
+//
+// Prefix conventions:
+//
+//	server-*  — loaded only when OPENSANDBOX_MODE=server (control-plane secrets,
+//	            autoscaler/Azure config, billing/auth integrations)
+//	worker-*  — loaded only when OPENSANDBOX_MODE=worker. New worker-only
+//	            secrets are rare; most are shared with the server. Existing
+//	            entries are kept as legacy aliases until the cleanup PR drops them.
+//	shared-*  — loaded in both modes. Use this for any secret or config value
+//	            both binaries consume (DB/Redis URLs, JWT secret, S3, Axiom,
+//	            sandbox defaults, sandbox domain). Prefer this prefix for new
+//	            entries to avoid duplicating values across server-/worker-.
+//	pg-       — grandfathered shared prefix; loaded in both modes.
 var secretMapping = map[string]string{
-	// Server secrets
-	"server-database-url":           "OPENSANDBOX_DATABASE_URL",
-	"server-redis-url":              "OPENSANDBOX_REDIS_URL",
-	"server-jwt-secret":             "OPENSANDBOX_JWT_SECRET",
-	"server-api-key":                "OPENSANDBOX_API_KEY",
-	"server-secret-encryption-key":  "OPENSANDBOX_SECRET_ENCRYPTION_KEY",
-	"server-workos-api-key":         "WORKOS_API_KEY",
-	"server-workos-client-id":       "WORKOS_CLIENT_ID",
-	"server-cf-api-token":           "OPENSANDBOX_CF_API_TOKEN",
-	"server-cf-zone-id":             "OPENSANDBOX_CF_ZONE_ID",
-	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
-	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
-	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
-	// Legacy Axiom mappings — kept for backwards compat with existing prod
-	// KVs that pre-date the `shared-` prefix. New deploys should use
-	// `shared-axiom-*` instead. Safe to leave: in server mode only
-	// `server-axiom-*` is loaded; in worker mode only `worker-axiom-*`. New
-	// `shared-*` mappings below win for new envs that have only those.
-	"server-axiom-query-token":      "AXIOM_QUERY_TOKEN",
-	"server-axiom-dataset":          "AXIOM_DATASET",
+	// ── Server-only ──────────────────────────────────────────────────────
+	// Auth & API
+	"server-api-key":               "OPENSANDBOX_API_KEY",
+	"server-secret-encryption-key": "OPENSANDBOX_SECRET_ENCRYPTION_KEY",
+	// WorkOS (auth provider)
+	"server-workos-api-key":        "WORKOS_API_KEY",
+	"server-workos-client-id":      "WORKOS_CLIENT_ID",
+	"server-workos-redirect-uri":   "WORKOS_REDIRECT_URI",
+	"server-workos-cookie-domain":  "WORKOS_COOKIE_DOMAIN",
+	"server-workos-frontend-url":   "WORKOS_FRONTEND_URL",
+	// Cloudflare (custom hostnames)
+	"server-cf-api-token":          "OPENSANDBOX_CF_API_TOKEN",
+	"server-cf-zone-id":            "OPENSANDBOX_CF_ZONE_ID",
+	// Stripe (billing)
+	"server-stripe-secret-key":              "STRIPE_SECRET_KEY",
+	"server-stripe-webhook-secret":          "STRIPE_WEBHOOK_SECRET",
+	"server-stripe-success-url":             "STRIPE_SUCCESS_URL",
+	"server-stripe-cancel-url":              "STRIPE_CANCEL_URL",
+	"server-stripe-telegram-agent-price-id": "STRIPE_TELEGRAM_AGENT_PRICE_ID",
+	// Public-facing CP URL (different from per-instance worker HTTP_ADDR which
+	// stays as bootstrap)
+	"server-http-addr": "OPENSANDBOX_HTTP_ADDR",
+	// Observability
+	"server-sentry-dsn":            "OPENSANDBOX_SENTRY_DSN",
+	// Azure compute pool / autoscaler
+	"server-azure-resource-group":     "OPENSANDBOX_AZURE_RESOURCE_GROUP",
+	"server-azure-subscription-id":    "OPENSANDBOX_AZURE_SUBSCRIPTION_ID",
+	"server-azure-vm-size":            "OPENSANDBOX_AZURE_VM_SIZE",
+	"server-azure-subnet-id":          "OPENSANDBOX_AZURE_SUBNET_ID",
+	"server-azure-ssh-public-key":     "OPENSANDBOX_AZURE_SSH_PUBLIC_KEY",
+	"server-azure-worker-identity-id": "OPENSANDBOX_AZURE_WORKER_IDENTITY_ID",
+	"server-azure-key-vault-name":     "OPENSANDBOX_AZURE_KEY_VAULT_NAME",
+	"server-min-workers":              "OPENSANDBOX_MIN_WORKERS",
+	"server-max-workers":              "OPENSANDBOX_MAX_WORKERS",
+	"server-idle-reserve":             "OPENSANDBOX_IDLE_RESERVE",
+	// Legacy server-only duplicates of values now in shared-*. Kept so old KVs
+	// that pre-date the shared- prefix keep working. A follow-up cleanup PR
+	// will drop these once every deployment has a populated shared-* set.
+	"server-database-url":          "OPENSANDBOX_DATABASE_URL",
+	"server-redis-url":             "OPENSANDBOX_REDIS_URL",
+	"server-jwt-secret":            "OPENSANDBOX_JWT_SECRET",
+	"server-axiom-query-token":     "AXIOM_QUERY_TOKEN",
+	"server-axiom-dataset":         "AXIOM_DATASET",
 
-	// Worker secrets
+	// ── Worker-only ──────────────────────────────────────────────────────
+	// Observability
+	"worker-sentry-dsn": "OPENSANDBOX_SENTRY_DSN",
+	// Legacy worker-only duplicates of values now in shared-*. Same story as
+	// the server- legacy block: kept so unmigrated KVs still work; cleanup PR
+	// drops them.
 	"worker-jwt-secret":         "OPENSANDBOX_JWT_SECRET",
 	"worker-database-url":       "OPENSANDBOX_DATABASE_URL",
 	"worker-redis-url":          "OPENSANDBOX_REDIS_URL",
 	"worker-s3-access-key":      "OPENSANDBOX_S3_ACCESS_KEY_ID",
 	"worker-s3-secret-key":      "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
-	"worker-sentry-dsn":         "OPENSANDBOX_SENTRY_DSN",
-	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN", // legacy; superseded by shared-axiom-ingest-token
-	"worker-axiom-dataset":      "AXIOM_DATASET",      // legacy; superseded by shared-axiom-dataset
+	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
+	"worker-axiom-dataset":      "AXIOM_DATASET",
 
-	// Shared (mode-agnostic — loaded in both server and worker)
-	"pg-password":               "OPENSANDBOX_PG_PASSWORD",
+	// ── Shared (loaded in both modes) ────────────────────────────────────
+	// Connection strings
+	"shared-database-url": "OPENSANDBOX_DATABASE_URL",
+	"shared-redis-url":    "OPENSANDBOX_REDIS_URL",
+	// Auth
+	"shared-jwt-secret": "OPENSANDBOX_JWT_SECRET",
+	// S3 / blob (checkpoint store)
+	"shared-s3-bucket":            "OPENSANDBOX_S3_BUCKET",
+	"shared-s3-region":            "OPENSANDBOX_S3_REGION",
+	"shared-s3-endpoint":          "OPENSANDBOX_S3_ENDPOINT",
+	"shared-s3-access-key-id":     "OPENSANDBOX_S3_ACCESS_KEY_ID",
+	"shared-s3-secret-access-key": "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
+	// Sandbox defaults
+	"shared-sandbox-domain":            "OPENSANDBOX_SANDBOX_DOMAIN",
+	"shared-default-sandbox-memory-mb": "OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB",
+	"shared-default-sandbox-cpus":      "OPENSANDBOX_DEFAULT_SANDBOX_CPUS",
+	"shared-default-sandbox-disk-mb":   "OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB",
+	"shared-max-capacity":              "OPENSANDBOX_MAX_CAPACITY",
+	// S3 client knob
+	"shared-s3-force-path-style": "OPENSANDBOX_S3_FORCE_PATH_STYLE",
+	// Analytics — both binaries write Segment events
+	"shared-segment-write-key": "SEGMENT_WRITE_KEY",
+	// Axiom (sandbox session logs)
 	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
 	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
 	"shared-axiom-dataset":      "AXIOM_DATASET",
+	// Postgres (grandfathered shared prefix)
+	"pg-password": "OPENSANDBOX_PG_PASSWORD",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them
