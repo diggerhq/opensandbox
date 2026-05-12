@@ -136,3 +136,84 @@ func createReadySandbox(t *testing.T, c *client, cfg map[string]any) (string, st
 	time.Sleep(5 * time.Second)
 	return sb.SandboxID, sb.WorkerID
 }
+
+// writeMarker writes content to /home/sandbox/marker via exec. Asserts the
+// echo-back. Used by tests that need to verify workspace state survives a
+// round-trip (checkpoint, hibernate, migrate, etc.).
+func writeMarker(t *testing.T, c *client, sandboxID, content string) {
+	t.Helper()
+	body := map[string]any{
+		"cmd":     "sh",
+		"args":    []string{"-c", "echo " + content + " > /home/sandbox/marker && cat /home/sandbox/marker"},
+		"timeout": 10,
+	}
+	var r struct {
+		ExitCode int    `json:"exitCode"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	code, err := c.do(t, http.MethodPost, "/api/sandboxes/"+sandboxID+"/exec/run", body, &r)
+	if err != nil || code != http.StatusOK || r.ExitCode != 0 {
+		t.Fatalf("writeMarker(%q): code=%d err=%v exit=%d stderr=%q", content, code, err, r.ExitCode, r.Stderr)
+	}
+	if !strings.Contains(r.Stdout, content) {
+		t.Fatalf("writeMarker(%q): echo didn't return content, stdout=%q", content, r.Stdout)
+	}
+}
+
+// drainWorker marks a worker as draining (POST /admin/workers/:id/drain) so
+// the scheduler won't place new sandboxes / wakes on it. Tests use this to
+// force a wake or fork onto a specific other worker. Returns a cleanup func
+// that un-drains the worker (call via t.Cleanup).
+func drainWorker(t *testing.T, c *client, workerID string) {
+	t.Helper()
+	code, _ := c.raw(t, http.MethodPost, "/admin/workers/"+workerID+"/drain",
+		map[string]string{"X-API-Key": c.apiKey})
+	if code/100 != 2 {
+		t.Fatalf("drain %s: code=%d", workerID, code)
+	}
+	t.Cleanup(func() {
+		c.raw(t, http.MethodPost, "/admin/workers/"+workerID+"/drain?drain=false",
+			map[string]string{"X-API-Key": c.apiKey})
+	})
+}
+
+// goldenVersionOf returns the golden_version of the named worker, or "" if
+// unknown. Used by cross-golden tests to assert old/new pairs differ.
+func goldenVersionOf(t *testing.T, c *client, workerID string) string {
+	t.Helper()
+	var workers []struct {
+		WorkerID      string `json:"worker_id"`
+		GoldenVersion string `json:"golden_version"`
+	}
+	code, err := c.do(t, http.MethodGet, "/api/workers", nil, &workers)
+	if err != nil || code != http.StatusOK {
+		t.Fatalf("list workers: code=%d err=%v", code, err)
+	}
+	for _, w := range workers {
+		if w.WorkerID == workerID {
+			return w.GoldenVersion
+		}
+	}
+	return ""
+}
+
+// readMarker returns the contents of /home/sandbox/marker as read by `cat`.
+// Fails the test if the file can't be read.
+func readMarker(t *testing.T, c *client, sandboxID string) string {
+	t.Helper()
+	body := map[string]any{"cmd": "cat", "args": []string{"/home/sandbox/marker"}, "timeout": 10}
+	var r struct {
+		ExitCode int    `json:"exitCode"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+	}
+	code, err := c.do(t, http.MethodPost, "/api/sandboxes/"+sandboxID+"/exec/run", body, &r)
+	if err != nil || code != http.StatusOK {
+		t.Fatalf("readMarker: code=%d err=%v stderr=%q", code, err, r.Stderr)
+	}
+	if r.ExitCode != 0 {
+		t.Fatalf("readMarker: exit=%d stderr=%q (file missing?)", r.ExitCode, r.Stderr)
+	}
+	return strings.TrimSpace(r.Stdout)
+}

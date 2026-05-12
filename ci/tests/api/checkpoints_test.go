@@ -27,6 +27,10 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 	})
 	t.Logf("source sandbox: %s", sourceID)
 
+	// Write a marker into the workspace so we can verify the fork inherited it.
+	const marker = "ci-checkpoint-marker"
+	writeMarker(t, c, sourceID, marker)
+
 	// Step 2: create checkpoint
 	cpName := fmt.Sprintf("ci-cp-%d", time.Now().UnixNano())
 	var cp struct {
@@ -144,5 +148,97 @@ func TestCheckpoints_CreateAndFork(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("fork %s not in /api/sandboxes list", fork.SandboxID)
+	}
+
+	// Step 7: verify the workspace state survived. This catches the
+	// "fork succeeded but workspace is empty" regression class (e.g. the
+	// empty-key bug where SetCheckpointReady got "" keys and forks landed
+	// on an empty rootfs).
+	time.Sleep(5 * time.Second) // post-fork agent readiness
+	if got := readMarker(t, c, fork.SandboxID); got != marker {
+		t.Errorf("fork workspace state: want marker=%q, got %q", marker, got)
+	}
+}
+
+// TestCheckpoints_MultipleForks creates a checkpoint, then forks it twice
+// back-to-back. With WORKERS>=2 the scheduler typically lands the second fork
+// on the worker that didn't create the checkpoint — that fork has to download
+// the rootfs/workspace from blob (cold path), which is the case where the
+// empty-key regression manifested (no local cache to fall back to, must use
+// real S3 keys). Without the keys, the worker errors loudly.
+func TestCheckpoints_MultipleForks(t *testing.T) {
+	if v, _ := strconv.Atoi(os.Getenv(envWorkers)); v < 1 {
+		t.Skipf("%s<1, skipping multi-fork test", envWorkers)
+	}
+	c := newClient(t)
+	sourceID, _ := createReadySandbox(t, c, map[string]any{
+		"cpuCount": 1, "memoryMB": 1024, "diskMB": 20480, "timeout": 300,
+	})
+	const marker = "ci-multi-fork-marker"
+	writeMarker(t, c, sourceID, marker)
+
+	cpName := fmt.Sprintf("ci-multi-cp-%d", time.Now().UnixNano())
+	var cp struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	code, err := c.do(t, http.MethodPost,
+		"/api/sandboxes/"+sourceID+"/checkpoints",
+		map[string]any{"name": cpName}, &cp)
+	if err != nil || code/100 != 2 {
+		t.Fatalf("create checkpoint: code=%d err=%v", code, err)
+	}
+
+	// Wait for status=ready
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		var cps []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		}
+		c.do(t, http.MethodGet, "/api/sandboxes/"+sourceID+"/checkpoints", nil, &cps)
+		var s string
+		for _, x := range cps {
+			if x.ID == cp.ID {
+				s = x.Status
+				break
+			}
+		}
+		if s == "ready" {
+			break
+		}
+		if s == "failed" {
+			t.Fatalf("checkpoint failed during multi-fork setup")
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Cleanup(func() {
+		c.do(t, http.MethodDelete, "/api/sandboxes/"+sourceID+"/checkpoints/"+cp.ID, nil, nil)
+	})
+
+	// Two forks back-to-back. With 2+ workers the scheduler distributes,
+	// so at least one is on a worker that doesn't have the cache locally.
+	for i := 1; i <= 2; i++ {
+		var fork struct {
+			SandboxID string `json:"sandboxID"`
+			Status    string `json:"status"`
+			WorkerID  string `json:"workerID"`
+		}
+		code, err := c.do(t, http.MethodPost,
+			"/api/sandboxes/from-checkpoint/"+cp.ID,
+			map[string]any{
+				"cpuCount": 1, "memoryMB": 1024, "diskMB": 20480, "timeout": 120,
+			}, &fork)
+		if err != nil || code/100 != 2 || fork.SandboxID == "" {
+			t.Fatalf("fork %d: code=%d err=%v resp=%+v", i, code, err, fork)
+		}
+		t.Logf("fork %d: %s on %s (status=%s)", i, fork.SandboxID, fork.WorkerID, fork.Status)
+		t.Cleanup(func() {
+			c.do(t, http.MethodDelete, "/api/sandboxes/"+fork.SandboxID, nil, nil)
+		})
+		time.Sleep(5 * time.Second) // post-fork agent readiness
+		if got := readMarker(t, c, fork.SandboxID); got != marker {
+			t.Errorf("fork %d workspace: want marker=%q, got %q", i, marker, got)
+		}
 	}
 }
