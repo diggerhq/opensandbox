@@ -106,6 +106,68 @@ func (j *JWTIssuer) ValidateIdentityToken(tokenStr string) (*IdentityClaims, err
 	return claims, nil
 }
 
+// CapabilityClaims are the claims for a capability token: the short-lived JWT
+// the api-edge Worker mints and hands to a regional control plane when it
+// proxies POST /api/sandboxes. The CP trusts org_id from this token (the edge
+// is the authority on org identity now) and rejects the token if cell_id
+// doesn't match its own OPENSANDBOX_CELL_ID — so a token minted for cell A
+// can't be replayed against cell B.
+//
+// Signed with the shared session-JWT secret (SESSION_JWT_SECRET / the CP's
+// OPENSANDBOX_SESSION_JWT_SECRET). Distinguished from session JWTs by Issuer.
+type CapabilityClaims struct {
+	jwt.RegisteredClaims
+	OrgID  string  `json:"org_id"`
+	CellID string  `json:"cell_id"`
+	UserID *string `json:"user_id,omitempty"`
+}
+
+// CapabilityIssuer is the Issuer string on capability tokens — lets the CP
+// reject a session JWT presented where a capability token is expected.
+const CapabilityIssuer = "opensandbox-edge"
+
+// IssueCapabilityToken mints a capability token for (orgID, cellID). userID may
+// be nil (API-key-authenticated callers have no user).
+func (j *JWTIssuer) IssueCapabilityToken(orgID, cellID string, userID *string, ttl time.Duration) (string, error) {
+	now := time.Now()
+	claims := CapabilityClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   orgID,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			Issuer:    CapabilityIssuer,
+		},
+		OrgID:  orgID,
+		CellID: cellID,
+		UserID: userID,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(j.secret)
+}
+
+// ValidateCapabilityToken parses and validates a capability token. It checks
+// the signature, expiry, and Issuer; the caller must additionally verify that
+// claims.CellID matches the local cell.
+func (j *JWTIssuer) ValidateCapabilityToken(tokenStr string) (*CapabilityClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &CapabilityClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return j.secret, nil
+	}, jwt.WithIssuer(CapabilityIssuer))
+	if err != nil {
+		return nil, fmt.Errorf("invalid capability token: %w", err)
+	}
+	claims, ok := token.Claims.(*CapabilityClaims)
+	if !ok || !token.Valid {
+		return nil, fmt.Errorf("invalid capability token claims")
+	}
+	if claims.OrgID == "" || claims.CellID == "" {
+		return nil, fmt.Errorf("capability token missing org_id or cell_id")
+	}
+	return claims, nil
+}
+
 // SigningSecret returns the raw HMAC secret for use by other signing functions (e.g. signed URLs).
 func (j *JWTIssuer) SigningSecret() []byte { return j.secret }
 

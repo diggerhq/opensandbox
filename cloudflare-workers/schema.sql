@@ -95,6 +95,25 @@ CREATE TABLE IF NOT EXISTS secret_store_entries (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_secret_entries_unique ON secret_store_entries(store_id, name);
 CREATE INDEX IF NOT EXISTS idx_secret_entries_store ON secret_store_entries(store_id);
 
+-- Cell registry ----------------------------------------------------------
+-- One row per regional control plane. The edge Worker uses base_url to:
+--   - proxy POST /api/sandboxes  → {base_url}/internal/sandboxes/create
+--   - dispatch admin callbacks   → {base_url}/admin/halt-org, /admin/resume-org
+--   - 307-redirect dumb clients  → {base_url}/api/sandboxes/{id}/...
+-- (In production the public 307 target and the internal edge→CP URL may
+--  diverge — e.g. an internal-only hostname for /internal/*. Split into two
+--  columns then; one URL is enough while every cell exposes both on one host.)
+-- orgs.home_cell, sandboxes_index.cell_id, and events.cell_id all reference
+-- cell_id here, but D1 has no cross-table FKs so it's by convention.
+CREATE TABLE IF NOT EXISTS cells (
+  cell_id     TEXT PRIMARY KEY,                  -- "{cloud}-{region}-cell-{slot}"
+  cloud       TEXT NOT NULL,                     -- "azure" | "aws" | "gcp"
+  region      TEXT NOT NULL,
+  base_url    TEXT NOT NULL,                     -- regional CP base URL (scheme+host[:port])
+  status      TEXT NOT NULL DEFAULT 'active',    -- active | draining | down
+  created_at  INTEGER NOT NULL
+);
+
 -- Global sandbox index (cross-region routing and listing) -----------------
 
 CREATE TABLE IF NOT EXISTS sandboxes_index (

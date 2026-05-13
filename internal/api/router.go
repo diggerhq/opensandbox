@@ -39,6 +39,8 @@ type Server struct {
 	ptyManager *sandbox.PTYManager
 	store      *db.Store               // nil in combined/dev mode without PG
 	jwtIssuer  *auth.JWTIssuer         // nil if JWT not configured
+	capTokenIssuer *auth.JWTIssuer     // verifies edge→CP capability tokens; nil if SESSION_JWT_SECRET unset
+	cellID     string                  // this control plane's cell_id (for the cap-token cell check)
 	mode       string                  // "server", "worker", "combined"
 	workerID   string                  // this worker's ID
 	region     string                  // this worker's region
@@ -68,6 +70,8 @@ type pendingCreate struct {
 type ServerOpts struct {
 	Store       *db.Store
 	JWTIssuer   *auth.JWTIssuer
+	SessionJWTSecret string // shared edge↔CP HMAC secret; enables /internal/sandboxes/create
+	CellID      string // this control plane's cell_id
 	Mode        string // "server", "worker", "combined"
 	WorkerID    string
 	Region      string
@@ -102,6 +106,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	if opts != nil {
 		s.store = opts.Store
 		s.jwtIssuer = opts.JWTIssuer
+		if opts.SessionJWTSecret != "" {
+			s.capTokenIssuer = auth.NewJWTIssuer(opts.SessionJWTSecret)
+		}
+		s.cellID = opts.CellID
 		s.mode = opts.Mode
 		s.workerID = opts.WorkerID
 		s.region = opts.Region
@@ -185,6 +193,15 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	// Signed URL endpoints (self-authenticated via HMAC, no API key required)
 	e.GET("/api/sandboxes/:id/files/download", s.signedDownload)
 	e.PUT("/api/sandboxes/:id/files/upload", s.signedUpload)
+
+	// Internal routes — called by the api-edge Worker, authenticated by a
+	// capability token (HMAC with the shared session-JWT secret). Only mounted
+	// when that secret is configured and this is a server-mode CP that can
+	// dispatch to workers.
+	if s.capTokenIssuer != nil && s.workerRegistry != nil {
+		internal := e.Group("/internal", s.capTokenMiddleware)
+		internal.POST("/sandboxes/create", s.internalCreateSandbox)
+	}
 
 	// API routes (with API key auth)
 	api := e.Group("/api")

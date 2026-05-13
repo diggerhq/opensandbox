@@ -55,10 +55,12 @@ func main() {
 
 	// Build server options
 	opts := &api.ServerOpts{
-		Mode:     cfg.Mode,
-		WorkerID: cfg.WorkerID,
-		Region:   cfg.Region,
-		HTTPAddr: cfg.HTTPAddr,
+		Mode:             cfg.Mode,
+		WorkerID:         cfg.WorkerID,
+		Region:           cfg.Region,
+		HTTPAddr:         cfg.HTTPAddr,
+		CellID:           cfg.CellID,
+		SessionJWTSecret: cfg.SessionJWTSecret,
 	}
 
 	// Initialize PostgreSQL if configured
