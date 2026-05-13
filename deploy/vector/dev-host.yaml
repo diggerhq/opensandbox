@@ -89,16 +89,27 @@ transforms:
       # don't claim the dev tag.
       .environment = "dev"
 
-  # Two near-identical metric envelope transforms (one per scrape source) so
-  # we can stamp the right service / service_id without re-parsing the
-  # scrape endpoint URL. Both apply the same envelope shape as dev_parse for
-  # join-friendly events.
+  # Convert each scrape source to log shape (metric_to_log is a transform
+  # type; VRL has no `to_log` function in Vector 0.55+). Two parallel
+  # converters so we can stamp the right service label downstream without
+  # re-parsing the scrape endpoint URL.
+  dev_worker_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - dev_worker_metrics
+
+  dev_control_plane_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - dev_control_plane_metrics
+
+  # Envelopes: same shape as dev_parse for join-friendly events. event_type="metric"
+  # is the cross-type discriminator.
   dev_worker_metrics_envelope:
     type: remap
     inputs:
-      - dev_worker_metrics
+      - dev_worker_metrics_to_log
     source: |
-      . = to_log!(.)
       .event_type = "metric"
       if exists(.name) {
         .metric_name = .name
@@ -115,9 +126,8 @@ transforms:
   dev_control_plane_metrics_envelope:
     type: remap
     inputs:
-      - dev_control_plane_metrics
+      - dev_control_plane_metrics_to_log
     source: |
-      . = to_log!(.)
       .event_type = "metric"
       if exists(.name) {
         .metric_name = .name

@@ -70,21 +70,28 @@ transforms:
       if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
       if !exists(.hostname) { .hostname, _ = get_hostname() }
 
-  # Metric envelope: same envelope fields as logs (service/service_id/cell_id/
-  # region/host_ip/hostname) so dashboards can join across event_type and
-  # cross-filter by infra dimension. event_type="metric" is the discriminator
-  # vs logs — we deliberately don't reuse `kind` because Vector's metric→log
-  # already writes incremental/absolute there.
+  # Convert Prom metric events to log-shaped events so the Axiom sink can
+  # ingest them. metric_to_log is a dedicated transform type — VRL has no
+  # `to_log` function (Vector 0.55+).
+  worker_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - worker_metrics
+
+  # Envelope: same fields as logs (service/service_id/cell_id/region/host_ip/
+  # hostname) so dashboards can join across event_type and cross-filter by
+  # infra dimension. event_type="metric" is the discriminator vs logs — we
+  # deliberately don't reuse `kind`, which metric_to_log writes as
+  # "incremental"/"absolute".
   #
-  # metric_name carries the Prom name (namespaced to avoid clashes with log
+  # metric_name carries the Prom name (namespaced to dodge clashes with log
   # payloads that might contain a literal `name` field). Label values stay
   # under `.tags` (region, worker_id, template, status, ...).
   worker_metrics_envelope:
     type: remap
     inputs:
-      - worker_metrics
+      - worker_metrics_to_log
     source: |
-      . = to_log!(.)
       .event_type = "metric"
       if exists(.name) {
         .metric_name = .name

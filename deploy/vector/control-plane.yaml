@@ -47,16 +47,22 @@ transforms:
       if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
       if !exists(.hostname) { .hostname, _ = get_hostname() }
 
-  # Metric envelope: same envelope as logs so cross-event-type joins work in
-  # Axiom (event_type="metric" filter, then group by region/cell_id/...).
+  # Convert metric events to log shape (metric_to_log is a transform type;
+  # VRL has no `to_log` function in Vector 0.55+).
+  control_plane_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - control_plane_metrics
+
+  # Envelope: same fields as logs so cross-event-type joins work in Axiom
+  # (event_type="metric" filter, then group by region/cell_id/...).
   # metric_name carries the Prom name; namespaced to dodge a clash with any
   # log payload that happens to contain a literal `name` field.
   control_plane_metrics_envelope:
     type: remap
     inputs:
-      - control_plane_metrics
+      - control_plane_metrics_to_log
     source: |
-      . = to_log!(.)
       .event_type = "metric"
       if exists(.name) {
         .metric_name = .name
