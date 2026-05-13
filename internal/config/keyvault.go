@@ -67,6 +67,18 @@ var secretMapping = map[string]string{
 	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
 	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
 	"shared-axiom-dataset":      "AXIOM_DATASET",
+	// Platform-logs (this PR): Vector reads these from
+	// /etc/opensandbox/vector.env, populated by populate-vector-env.service
+	// via its own IMDS+KV REST call (not by this Go-side loader, because
+	// Vector starts as its own systemd unit before the Go binary). The
+	// entries here exist for two reasons:
+	//   1. Discoverability — secretMapping is the single source of truth
+	//      for "what shared-* secrets does this deployment need in KV".
+	//   2. Side-effect: the Go binary ALSO loads them into its own env at
+	//      startup; future Go code that wants to surface platform-stream
+	//      config (e.g. an admin endpoint) gets them for free.
+	"shared-axiom-platform-ingest-token": "AXIOM_PLATFORM_TOKEN",
+	"shared-axiom-platform-dataset":      "AXIOM_PLATFORM_DATASET",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them
