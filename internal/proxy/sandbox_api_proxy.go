@@ -266,6 +266,13 @@ func (p *SandboxAPIProxy) doHTTP(c echo.Context, sandboxID, workerURL, token str
 		r.URL.RawQuery = c.Request().URL.RawQuery
 		r.Host = target.Host
 
+		// Forward X-Request-Id so worker log lines share the same id as the
+		// control plane log line for this request. Echo's middleware.RequestID
+		// on the worker side reuses the inbound header if present.
+		if rid := c.Request().Header.Get(echo.HeaderXRequestID); rid != "" {
+			r.Header.Set(echo.HeaderXRequestID, rid)
+		}
+
 		// Set sandbox JWT auth for the worker
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)

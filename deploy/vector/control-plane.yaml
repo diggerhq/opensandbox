@@ -1,0 +1,54 @@
+# Vector config for the control plane host (EC2 with Docker).
+#
+# Reads stdout/stderr from the opensandbox-server container, parses JSON log
+# lines (emitted by internal/obslog), and ships to oc-platform-logs.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (provides AXIOM_PLATFORM_TOKEN)
+#
+# Field shape matches worker.yaml; see that file for the schema notes.
+
+data_dir: /var/lib/vector
+
+sources:
+  control_plane_docker:
+    type: docker_logs
+    # Match the container name set in user-data (deploy/terraform/modules/server).
+    include_containers:
+      - opensandbox-server
+    # Merge multi-line container output (Go panic stack traces).
+    auto_partial_merge: true
+
+transforms:
+  control_plane_parse:
+    type: remap
+    inputs:
+      - control_plane_docker
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # See dev-host.yaml — drop stringified duplicate; non-JSON lines
+        # keep .message as the readable content.
+        del(.message)
+      }
+      if !exists(.service) { .service = "control-plane" }
+      if !exists(.service_id) { .service_id, _ = get_hostname() }
+      if !exists(.cell_id) { .cell_id = "${OPENSANDBOX_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENSANDBOX_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+
+sinks:
+  axiom_platform:
+    type: axiom
+    inputs:
+      - control_plane_parse
+    dataset: "${AXIOM_PLATFORM_DATASET:-oc-platform-logs}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

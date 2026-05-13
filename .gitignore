@@ -65,4 +65,5 @@ delme
 deploy/azure/.dev-env-state-*
 deploy/azure/.dev-env-secrets*
 !deploy/azure/.dev-env-secrets.example
+deploy/azure/.dev-vector-token-*
 /server
