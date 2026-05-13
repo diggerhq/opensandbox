@@ -146,6 +146,34 @@ type Config struct {
 	SentryEnvironment      string
 	SentrySampleRate       float64 // 0.0–1.0, default 1.0 (capture every error)
 	SentryTracesSampleRate float64 // 0.0–1.0, default 0.0 (tracing off)
+
+	// Global blob store — abstract S3-compatible backend for canonical golden
+	// rootfs blobs, template blobs, and the events archive. Currently Tigris
+	// (Region Earth global replication) but works with any S3-compatible
+	// endpoint (R2, AWS S3, GCS interop, Azure Blob via S3 compat). Switching
+	// providers is a config change; see internal/blobstore.
+	//
+	// Empty Endpoint disables — workers fall back to whatever's baked into
+	// the AMI / cloud-init copy.
+	GlobalBlobName            string // logging label, e.g. "tigris" / "r2"
+	GlobalBlobEndpoint        string // e.g. "https://t3.storage.dev"
+	GlobalBlobRegion          string // "auto" for Tigris/R2; real region for AWS S3
+	GlobalBlobAccessKeyID     string
+	GlobalBlobSecretAccessKey string
+	GlobalBlobUsePathStyle    bool // true for R2/Tigris/MinIO; false for AWS S3
+	GlobalBlobGoldensBucket   string
+	GlobalBlobTemplatesBucket string
+	GlobalBlobEventsBucket    string
+
+	// Optional fallback backend used when the primary fails on transient errors
+	// (network / 5xx). NotFound from the primary is authoritative — fallbacks
+	// aren't consulted. Empty disables.
+	GlobalBlobFallbackName            string
+	GlobalBlobFallbackEndpoint        string
+	GlobalBlobFallbackRegion          string
+	GlobalBlobFallbackAccessKeyID     string
+	GlobalBlobFallbackSecretAccessKey string
+	GlobalBlobFallbackUsePathStyle    bool
 }
 
 // Load reads configuration from environment variables with sensible defaults.
@@ -248,6 +276,23 @@ func Load() (*Config, error) {
 		SentryEnvironment:      os.Getenv("OPENSANDBOX_SENTRY_ENVIRONMENT"),
 		SentrySampleRate:       envOrDefaultFloat("OPENSANDBOX_SENTRY_SAMPLE_RATE", 1.0),
 		SentryTracesSampleRate: envOrDefaultFloat("OPENSANDBOX_SENTRY_TRACES_SAMPLE_RATE", 0.0),
+
+		GlobalBlobName:            envOrDefault("OPENSANDBOX_GLOBAL_BLOB_NAME", "tigris"),
+		GlobalBlobEndpoint:        os.Getenv("OPENSANDBOX_GLOBAL_BLOB_ENDPOINT"),
+		GlobalBlobRegion:          envOrDefault("OPENSANDBOX_GLOBAL_BLOB_REGION", "auto"),
+		GlobalBlobAccessKeyID:     os.Getenv("OPENSANDBOX_GLOBAL_BLOB_ACCESS_KEY_ID"),
+		GlobalBlobSecretAccessKey: os.Getenv("OPENSANDBOX_GLOBAL_BLOB_SECRET_ACCESS_KEY"),
+		GlobalBlobUsePathStyle:    envOrDefault("OPENSANDBOX_GLOBAL_BLOB_USE_PATH_STYLE", "true") == "true",
+		GlobalBlobGoldensBucket:   os.Getenv("OPENSANDBOX_GLOBAL_BLOB_GOLDENS_BUCKET"),
+		GlobalBlobTemplatesBucket: os.Getenv("OPENSANDBOX_GLOBAL_BLOB_TEMPLATES_BUCKET"),
+		GlobalBlobEventsBucket:    os.Getenv("OPENSANDBOX_GLOBAL_BLOB_EVENTS_BUCKET"),
+
+		GlobalBlobFallbackName:            os.Getenv("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_NAME"),
+		GlobalBlobFallbackEndpoint:        os.Getenv("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_ENDPOINT"),
+		GlobalBlobFallbackRegion:          envOrDefault("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_REGION", "auto"),
+		GlobalBlobFallbackAccessKeyID:     os.Getenv("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_ACCESS_KEY_ID"),
+		GlobalBlobFallbackSecretAccessKey: os.Getenv("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_SECRET_ACCESS_KEY"),
+		GlobalBlobFallbackUsePathStyle:    envOrDefault("OPENSANDBOX_GLOBAL_BLOB_FALLBACK_USE_PATH_STYLE", "true") == "true",
 	}
 
 	if cfg.SentryEnvironment == "" {
