@@ -94,6 +94,14 @@ jobs:
             deploy/ec2/build-rootfs-docker.sh \
             scripts/claude-agent-wrapper/
 
+      - name: Package Vector configs
+        # Bundled separately so Packer's file provisioner has a known
+        # tarball path (it can't reliably upload an arbitrary directory).
+        # install.sh on the builder extracts and installs Vector + the
+        # KV-token populator into the AMI.
+        run: |
+          tar czf /tmp/packer-vector-ctx.tar.gz -C deploy vector
+
       - name: Azure Login
         uses: azure/login@v2
         with:

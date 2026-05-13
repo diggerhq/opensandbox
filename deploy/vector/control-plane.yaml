@@ -1,0 +1,52 @@
+# Vector config for the control-plane host (Azure prod: systemd binary,
+# not Docker). Reads opensandbox-server.service from journald, parses JSON
+# log lines (emitted by internal/obslog), enriches non-JSON lines with the
+# host envelope from env, and ships to oc-platform-logs.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (populated by
+#              populate-vector-env.service from Key Vault at boot)
+
+data_dir: /var/lib/vector
+
+sources:
+  control_plane_journald:
+    type: journald
+    include_units:
+      - opensandbox-server.service
+    # Default current_boot_only=true is fine — Vector tracks its own cursor
+    # in data_dir, so restarts resume cleanly without replaying the journal.
+
+transforms:
+  control_plane_parse:
+    type: remap
+    inputs:
+      - control_plane_journald
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # Drop stringified duplicate; non-JSON lines (panics, systemd boot)
+        # keep .message as the readable content.
+        del(.message)
+      }
+      if !exists(.service) { .service = "control-plane" }
+      if !exists(.service_id) { .service_id, _ = get_hostname() }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+
+sinks:
+  axiom_platform:
+    type: axiom
+    inputs:
+      - control_plane_parse
+    dataset: "${AXIOM_PLATFORM_DATASET}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

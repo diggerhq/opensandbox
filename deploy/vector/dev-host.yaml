@@ -1,0 +1,87 @@
+# Vector config for a dev host that runs BOTH opensandbox-server AND
+# opensandbox-worker as systemd services on the same VM (the layout produced
+# by deploy/azure/deploy-azure-dev.sh).
+#
+# Production hosts use worker.yaml or control-plane.yaml — one role per host.
+# This config exists so the request-id join can be validated end-to-end on a
+# single dev VM before standing up a multi-VM dev cluster.
+#
+# The journald source captures both units in one stream; the parse transform
+# tags `service` based on which unit emitted each line.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (provides AXIOM_PLATFORM_TOKEN)
+
+data_dir: /var/lib/vector
+
+sources:
+  dev_journald:
+    type: journald
+    include_units:
+      - opensandbox-server.service
+      - opensandbox-worker.service
+    # `current_boot_only: false` is rejected on systemd 250-257 (Vector
+    # limitation). Default (true) is fine — Vector tracks its own cursor in
+    # data_dir, so restarts pick up where they left off rather than replaying.
+
+transforms:
+  dev_parse:
+    type: remap
+    inputs:
+      - dev_journald
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # The structured fields (msg, level, request_id, ...) are now at
+        # root. Drop the stringified copy so events don't duplicate the
+        # payload in Axiom. Non-JSON lines (panics, kernel) fall through
+        # this branch and keep .message as the readable content.
+        del(.message)
+      }
+      # Tag service based on the systemd unit. obslog.Init already sets
+      # `service` inside JSON log lines, so this only fires for non-JSON
+      # output (panics, plain stderr, systemd boot messages).
+      if !exists(.service) {
+        unit = string(.SYSTEMD_UNIT) ?? ""
+        if unit == "opensandbox-server.service" {
+          .service = "control-plane"
+        } else if unit == "opensandbox-worker.service" {
+          .service = "worker"
+        } else {
+          .service = "unknown"
+        }
+      }
+      if !exists(.service_id) {
+        # Worker exports OPENSANDBOX_WORKER_ID; control plane has no
+        # equivalent on a binary-deployed dev host — fall back to hostname.
+        unit = string(.SYSTEMD_UNIT) ?? ""
+        if unit == "opensandbox-worker.service" {
+          .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}"
+        } else {
+          .service_id, _ = get_hostname()
+        }
+      }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+      # Stamp every event with environment so dev traffic is filterable inside
+      # a shared dataset. Only the dev-host config sets this — production
+      # worker.yaml / control-plane.yaml deliberately omit it so prod events
+      # don't claim the dev tag.
+      .environment = "dev"
+
+sinks:
+  axiom_platform:
+    type: axiom
+    inputs:
+      - dev_parse
+    dataset: "${AXIOM_PLATFORM_DATASET}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

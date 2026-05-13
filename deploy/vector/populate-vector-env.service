@@ -1,0 +1,31 @@
+# Pulls AXIOM_PLATFORM_TOKEN from Key Vault via the VM's managed identity
+# and writes /etc/opensandbox/vector.env before vector.service starts.
+#
+# Reads SECRETS_VAULT_NAME (and OPENCOMPUTER_CELL_ID/REGION for tagging)
+# from whichever role-env file exists — worker.env on workers, server.env
+# on the control plane. EnvironmentFile lines with a leading `-` are
+# silently skipped if the file is absent, so this unit works on both roles.
+
+[Unit]
+Description=Populate /etc/opensandbox/vector.env from Key Vault
+After=network-online.target
+Wants=network-online.target
+Before=vector.service
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/opensandbox/worker.env
+EnvironmentFile=-/etc/opensandbox/server.env
+ExecStart=/usr/local/bin/populate-vector-env.sh
+RemainAfterExit=yes
+# Retry a few times if KV is briefly unreachable at boot.
+Restart=on-failure
+RestartSec=10s
+# Cap retries — after this the unit fails; vector still starts (Wants=
+# from vector's drop-in, not Requires=).
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Install]
+WantedBy=multi-user.target

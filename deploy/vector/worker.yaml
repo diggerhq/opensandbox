@@ -1,0 +1,71 @@
+# Vector config for worker hosts (Azure VMs and EC2).
+#
+# Reads journald entries from the opensandbox-worker systemd unit, parses JSON
+# log lines (emitted by internal/obslog), enriches with host envelope fields
+# from /etc/opensandbox/worker.env, and ships to the oc-platform-logs Axiom
+# dataset.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (provides AXIOM_PLATFORM_TOKEN)
+#
+# Field shape after this pipeline:
+#   service        "worker"
+#   service_id     worker_id (e.g. w-oc-eastus2-1)
+#   cell_id        <region>-<pool>
+#   region         e.g. eastus2
+#   hostname       VM hostname
+#   host_ip        primary IPv4
+#   request_id     set per request by control plane, forwarded to worker
+#   sandbox_id     set per request when in scope
+#   msg, level, ts present from slog
+
+data_dir: /var/lib/vector
+
+sources:
+  worker_journald:
+    type: journald
+    include_units:
+      - opensandbox-worker.service
+    # Default current_boot_only=true. (Explicit `false` is rejected on
+    # systemd 250-257 — Vector limitation.) Vector tracks its own cursor in
+    # data_dir, so restarts pick up where they left off rather than replaying.
+
+transforms:
+  worker_parse:
+    type: remap
+    inputs:
+      - worker_journald
+    # VRL: parse_json fails for non-JSON lines (e.g. systemd boot messages,
+    # panic stack traces from Go's runtime). For those we keep the original
+    # message and just stamp the host envelope so they're still queryable.
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # See dev-host.yaml — drop stringified duplicate; non-JSON lines
+        # keep .message as the readable content.
+        del(.message)
+      }
+      if !exists(.service) { .service = "worker" }
+      if !exists(.service_id) { .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}" }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+
+sinks:
+  axiom_platform:
+    type: axiom
+    inputs:
+      - worker_parse
+    dataset: "${AXIOM_PLATFORM_DATASET}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    # Disk buffer so a network blip or Axiom outage doesn't lose worker logs.
+    # 256 MiB is enough for a few hours at typical worker rates; drop_newest
+    # keeps the most-recent context if the buffer fills (better than blocking).
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

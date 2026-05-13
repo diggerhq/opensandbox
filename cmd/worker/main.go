@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	qm "github.com/opensandbox/opensandbox/internal/qemu"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -65,6 +67,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Structured logging (JSON to stdout/journald, host envelope baked in).
+	// Installs itself as slog.Default AND redirects stdlib log.Printf through
+	// slog so existing log call sites emit JSON automatically. Vector on the
+	// host reads journald and ships to Axiom.
+	workerHostname, _ := os.Hostname()
+	obslog.Init(obslog.HostFields{
+		Service:   obslog.ServiceWorker,
+		ServiceID: cfg.WorkerID,
+		CellID:    cfg.CellID,
+		Region:    cfg.Region,
+		Hostname:  workerHostname,
+		HostIP:    cfg.HostIP,
+		Version:   WorkerVersion,
+	}, slog.LevelInfo)
 
 	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
 	flushSentry := observability.Init(cfg, "worker", WorkerVersion)

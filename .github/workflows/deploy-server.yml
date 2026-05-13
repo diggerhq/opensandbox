@@ -50,6 +50,13 @@ jobs:
       - name: Package web assets
         run: tar czf bin/web-dist.tar.gz -C web dist
 
+      - name: Package Vector configs
+        # Bundle deploy/vector/ for distribution to control-plane hosts.
+        # install.sh is idempotent: skips Vector install if already present,
+        # always refreshes config + restarts. Workers get the same files via
+        # the Packer image bake (build-worker-ami.yml).
+        run: tar czf bin/vector-deploy.tar.gz -C deploy vector
+
       - name: Azure Login
         uses: azure/login@v2
         with:
@@ -73,6 +80,14 @@ jobs:
             --container-name checkpoints \
             --name deploy/web-dist.tar.gz \
             --file bin/web-dist.tar.gz \
+            --overwrite true -o none
+
+          az storage blob upload \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT }} \
+            --account-key "${{ secrets.AZURE_STORAGE_KEY }}" \
+            --container-name checkpoints \
+            --name deploy/vector-deploy.tar.gz \
+            --file bin/vector-deploy.tar.gz \
             --overwrite true -o none
 
           echo "Artifacts uploaded to blob storage"
@@ -120,6 +135,12 @@ jobs:
                   --container-name checkpoints --name deploy/web-dist.tar.gz \
                   --file /tmp/web-dist.tar.gz --overwrite true -o none
 
+                az storage blob download \
+                  --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT }} \
+                  --account-key '${{ secrets.AZURE_STORAGE_KEY }}' \
+                  --container-name checkpoints --name deploy/vector-deploy.tar.gz \
+                  --file /tmp/vector-deploy.tar.gz --overwrite true -o none
+
                 # Stop, replace binary, extract frontend
                 systemctl stop opensandbox-server
                 sleep 1
@@ -136,6 +157,17 @@ jobs:
                 fi
 
                 systemctl start opensandbox-server
+
+                # Install/refresh Vector + the KV token populator. install.sh
+                # is idempotent (skips Vector install if already present,
+                # always refreshes config + reloads). populate-vector-env
+                # fetches AXIOM_PLATFORM_TOKEN from KV via the VM's managed
+                # identity at every boot (and on this restart).
+                mkdir -p /tmp/vector-deploy
+                tar xzf /tmp/vector-deploy.tar.gz -C /tmp/vector-deploy
+                bash /tmp/vector-deploy/vector/install.sh control-plane
+                rm -rf /tmp/vector-deploy /tmp/vector-deploy.tar.gz
+
                 echo 'Deploy complete'
               " -o none
 

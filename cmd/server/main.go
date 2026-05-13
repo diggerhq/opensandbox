@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -41,6 +43,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Structured logging (JSON to stdout, host envelope baked in). Installs
+	// itself as slog.Default AND redirects stdlib log.Printf through slog so
+	// existing log call sites emit JSON automatically. Vector reads stdout
+	// from the Docker logging driver and ships to Axiom.
+	cpHostname, _ := os.Hostname()
+	obslog.Init(obslog.HostFields{
+		Service:   obslog.ServiceControlPlane,
+		ServiceID: cpHostname, // hostname distinguishes HA replicas
+		CellID:    cfg.CellID,
+		Region:    cfg.Region,
+		Hostname:  cpHostname,
+		HostIP:    cfg.HostIP,
+		Version:   ServerVersion,
+	}, slog.LevelInfo)
 
 	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
 	flushSentry := observability.Init(cfg, "control-plane", ServerVersion)

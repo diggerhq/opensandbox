@@ -37,6 +37,18 @@ type Config struct {
 	WorkerID string // Unique worker ID (e.g., "w-iad-1")
 	HTTPAddr string // Public HTTP address for direct SDK access
 
+	// Platform observability identity (used by internal/obslog for log
+	// envelope so all logs in Axiom can be sliced by cell, host, and service
+	// ID). CellID is "<region>-<pool>"; default to "<region>-default" when
+	// unset. HostIP is auto-detected from the first non-loopback IPv4 at
+	// startup if OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
+	//
+	// These use the OPENCOMPUTER_* prefix (vs the rest of the file's
+	// OPENSANDBOX_*) intentionally — they're new fields scoped to the
+	// product-named observability envelope.
+	CellID string
+	HostIP string
+
 	// WorkOS
 	WorkOSAPIKey       string
 	WorkOSClientID     string
@@ -177,6 +189,9 @@ func Load() (*Config, error) {
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
 
+		CellID: os.Getenv("OPENCOMPUTER_CELL_ID"),
+		HostIP: os.Getenv("OPENCOMPUTER_HOST_IP"),
+
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
 		WorkOSClientID:     os.Getenv("WORKOS_CLIENT_ID"),
 		WorkOSRedirectURI:  envOrDefault("WORKOS_REDIRECT_URI", "http://localhost:8080/auth/callback"),
@@ -261,6 +276,13 @@ func Load() (*Config, error) {
 	// Default S3 region to worker region for same-region storage
 	if cfg.S3Region == "" {
 		cfg.S3Region = cfg.Region
+	}
+
+	// Default cell ID to "<region>-default" so logs always have a cell tag.
+	// Fleet can split a region into multiple cells later by setting the env
+	// var explicitly at provisioning time.
+	if cfg.CellID == "" {
+		cfg.CellID = cfg.Region + "-default"
 	}
 
 	if portStr := os.Getenv("OPENSANDBOX_PORT"); portStr != "" {

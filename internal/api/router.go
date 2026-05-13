@@ -22,6 +22,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/observability"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
@@ -152,11 +153,15 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 
 	// Global middleware. Sentry goes first so it can attach request context and
 	// observe panics before echo's Recover middleware converts them to 500s.
+	// RequestID() runs before obslog.EchoMiddleware so the X-Request-Id header
+	// is on the response by the time obslog reads it. obslog replaces Echo's
+	// built-in Logger() — same access log line, but JSON with the host
+	// envelope and request_id/sandbox_id pulled from context.
 	e.Use(observability.EchoMiddleware())
 	e.Use(middleware.Recover())
-	e.Use(middleware.Logger())
-	e.Use(middleware.CORS())
 	e.Use(middleware.RequestID())
+	e.Use(obslog.EchoMiddleware())
+	e.Use(middleware.CORS())
 
 	// Subdomain proxy middleware (before auth — subdomain traffic is public)
 	if opts != nil && opts.SandboxProxy != nil {
