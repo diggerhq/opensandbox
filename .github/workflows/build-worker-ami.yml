@@ -31,6 +31,10 @@ on:
       - 'deploy/azure/setup-azure-host.sh'
       - 'deploy/ec2/build-rootfs-docker.sh'
       - 'deploy/packer/**'
+      # Vector configs + install.sh + KV populator are all baked into the
+      # AMI by the Packer provisioner (deploy/packer/worker-ami.pkr.hcl §4.5).
+      # A change here needs to roll through a new AMI to reach prod workers.
+      - 'deploy/vector/**'
       - 'scripts/claude-agent-wrapper/**'
       - 'go.mod'
       - 'go.sum'
