@@ -41,7 +41,11 @@ type Config struct {
 	// envelope so all logs in Axiom can be sliced by cell, host, and service
 	// ID). CellID is "<region>-<pool>"; default to "<region>-default" when
 	// unset. HostIP is auto-detected from the first non-loopback IPv4 at
-	// startup if OPENSANDBOX_HOST_IP is not provisioned via cloud-init.
+	// startup if OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
+	//
+	// These use the OPENCOMPUTER_* prefix (vs the rest of the file's
+	// OPENSANDBOX_*) intentionally — they're new fields scoped to the
+	// product-named observability envelope.
 	CellID string
 	HostIP string
 
@@ -183,8 +187,8 @@ func Load() (*Config, error) {
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
 
-		CellID: os.Getenv("OPENSANDBOX_CELL_ID"),
-		HostIP: os.Getenv("OPENSANDBOX_HOST_IP"),
+		CellID: os.Getenv("OPENCOMPUTER_CELL_ID"),
+		HostIP: os.Getenv("OPENCOMPUTER_HOST_IP"),
 
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
 		WorkOSClientID:     os.Getenv("WORKOS_CLIENT_ID"),

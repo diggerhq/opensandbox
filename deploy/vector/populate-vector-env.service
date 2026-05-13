@@ -1,7 +1,7 @@
 # Pulls AXIOM_PLATFORM_TOKEN from Key Vault via the VM's managed identity
 # and writes /etc/opensandbox/vector.env before vector.service starts.
 #
-# Reads SECRETS_VAULT_NAME (and OPENSANDBOX_CELL_ID/REGION for tagging)
+# Reads SECRETS_VAULT_NAME (and OPENCOMPUTER_CELL_ID/REGION for tagging)
 # from whichever role-env file exists — worker.env on workers, server.env
 # on the control plane. EnvironmentFile lines with a leading `-` are
 # silently skipped if the file is absent, so this unit works on both roles.

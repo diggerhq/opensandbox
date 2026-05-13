@@ -32,9 +32,9 @@ transforms:
       }
       if !exists(.service) { .service = "control-plane" }
       if !exists(.service_id) { .service_id, _ = get_hostname() }
-      if !exists(.cell_id) { .cell_id = "${OPENSANDBOX_CELL_ID:-unknown}" }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
       if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
-      if !exists(.host_ip) { .host_ip = "${OPENSANDBOX_HOST_IP:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
       if !exists(.hostname) { .hostname, _ = get_hostname() }
 
 sinks:
@@ -42,7 +42,7 @@ sinks:
     type: axiom
     inputs:
       - control_plane_parse
-    dataset: "${AXIOM_PLATFORM_DATASET:-oc-platform-logs}"
+    dataset: "${AXIOM_PLATFORM_DATASET}"
     token: "${AXIOM_PLATFORM_TOKEN}"
     buffer:
       type: disk

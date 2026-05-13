@@ -48,9 +48,9 @@ transforms:
       }
       if !exists(.service) { .service = "worker" }
       if !exists(.service_id) { .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}" }
-      if !exists(.cell_id) { .cell_id = "${OPENSANDBOX_CELL_ID:-unknown}" }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
       if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
-      if !exists(.host_ip) { .host_ip = "${OPENSANDBOX_HOST_IP:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
       if !exists(.hostname) { .hostname, _ = get_hostname() }
 
 sinks:
@@ -58,7 +58,7 @@ sinks:
     type: axiom
     inputs:
       - worker_parse
-    dataset: "${AXIOM_PLATFORM_DATASET:-oc-platform-logs}"
+    dataset: "${AXIOM_PLATFORM_DATASET}"
     token: "${AXIOM_PLATFORM_TOKEN}"
     # Disk buffer so a network blip or Axiom outage doesn't lose worker logs.
     # 256 MiB is enough for a few hours at typical worker rates; drop_newest

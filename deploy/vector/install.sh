@@ -81,17 +81,17 @@ SupplementaryGroups=systemd-journal
 EOF
 
 # --- Auto-detect HOST_IP if not provisioned ---
-# Vector enriches log lines with OPENSANDBOX_HOST_IP from the env file. If the
+# Vector enriches log lines with OPENCOMPUTER_HOST_IP from the env file. If the
 # operator didn't set it (and the KV oneshot hasn't run yet), fill it in from
 # the primary interface so the field isn't "unknown" in Axiom.
 if [ -f /etc/opensandbox/vector.env ] && \
-   ! grep -q '^OPENSANDBOX_HOST_IP=' /etc/opensandbox/vector.env 2>/dev/null; then
+   ! grep -q '^OPENCOMPUTER_HOST_IP=' /etc/opensandbox/vector.env 2>/dev/null; then
     # `ip route get` returns the kernel's chosen source IP for outbound — bypasses
     # Azure's 169.254.169.253 IMDS address which is also scope=global on lo.
     HOST_IP=$(ip route get 8.8.8.8 2>/dev/null | \
         awk '/src/ {for(i=1;i<NF;i++) if($i=="src") print $(i+1); exit}')
     if [ -n "$HOST_IP" ]; then
-        echo "OPENSANDBOX_HOST_IP=$HOST_IP" >> /etc/opensandbox/vector.env
+        echo "OPENCOMPUTER_HOST_IP=$HOST_IP" >> /etc/opensandbox/vector.env
         echo "Detected HOST_IP=$HOST_IP"
     fi
 fi
@@ -115,4 +115,4 @@ echo
 echo "=== Done ==="
 echo "Check vector status:    systemctl status vector"
 echo "Tail vector logs:       journalctl -u vector -f"
-echo "Confirm Axiom ingest:   look for events in dataset \${AXIOM_PLATFORM_DATASET:-oc-platform-logs}"
+echo "Confirm Axiom ingest:   look for events in dataset \${AXIOM_PLATFORM_DATASET}"
