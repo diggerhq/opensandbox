@@ -28,10 +28,17 @@ var allowedSources = map[string]struct{}{
 }
 
 // WARNING: Axiom's /v1/datasets/<dataset>/query endpoint silently
-// ignores unknown body fields. Sending `{"apl": "..."}` returns 200
-// with every event in the dataset (no filter applied). Always send the
-// `filter` field, and verify against a real response when changing the
-// body shape.
+// ignores body it doesn't recognize — including AND-wrapped filter
+// trees. Empirically, `{"filter":{"op":"and","filters":[{...}]}}`
+// returns the unfiltered dataset (full leak); only a FLAT predicate
+// `{"filter":{"op":"==","field":"sandbox_id","value":"..."}}` actually
+// narrows. So toFilter() returns a single flat predicate on sandbox_id;
+// secondary filters (text search, source list) are applied client-side
+// in applyClientFilters after the query returns.
+//
+// The Filters slice is kept on the type for potential future
+// composition (e.g. if Axiom adds support, or if we move to /v1/datasets/_apl)
+// but is unset in the current shape.
 type queryFilter struct {
 	Op      string        `json:"op"`
 	Field   string        `json:"field,omitempty"`
@@ -137,6 +144,7 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 		writeSSEComment(c.Response(), "initial query failed")
 		return nil
 	}
+	rows = applyClientFilters(rows, q)
 	for _, ev := range rows {
 		writeSSEEvent(c.Response(), ev)
 	}
@@ -188,6 +196,7 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 				log.Printf("api: sandbox %s logs: tail poll failed: %v", sandboxID, err)
 				continue
 			}
+			newRows = applyClientFilters(newRows, tailQ)
 			for _, ev := range newRows {
 				if !ev.Time.After(cursor) {
 					continue
@@ -301,31 +310,47 @@ func (q logQuery) timeWindow(tail bool) (time.Time, time.Time) {
 	return q.since, end
 }
 
-// toFilter: sandbox_id == q.sandboxID is ALWAYS the first conjunct
-// under the top-level AND. Do not add a path that omits or mutates it;
-// the regression test in sandbox_logs_test.go pins this.
+// toFilter returns a FLAT `sandbox_id == q.sandboxID` predicate. Do not
+// wrap it in {op:"and", filters:[...]} — Axiom's per-dataset /query
+// endpoint silently drops AND-wrapped filters and returns the full
+// dataset (cross-tenant leak). The regression test in
+// sandbox_logs_test.go pins the flat shape.
+//
+// Secondary predicates (text search via `q`, source list via `source`)
+// are applied client-side in applyClientFilters after the query
+// returns — Axiom doesn't compose them in the per-dataset filter shape.
 func (q logQuery) toFilter() queryFilter {
-	root := queryFilter{
-		Op: "and",
-		Filters: []queryFilter{
-			{Op: "==", Field: "sandbox_id", Value: q.sandboxID},
-		},
+	return queryFilter{Op: "==", Field: "sandbox_id", Value: q.sandboxID}
+}
+
+// applyClientFilters narrows a row set by predicates Axiom did not apply
+// server-side (text contains, source list). The sandbox_id predicate is
+// always applied by Axiom via toFilter; this function is purely UX —
+// it must NOT be relied on for tenant isolation.
+func applyClientFilters(rows []logEvent, q logQuery) []logEvent {
+	if q.text == "" && len(q.sources) == 0 {
+		return rows
 	}
-	if q.text != "" {
-		root.Filters = append(root.Filters, queryFilter{
-			Op: "contains", Field: "line", Value: q.text,
-		})
-	}
+	var sourceSet map[string]struct{}
 	if len(q.sources) > 0 {
-		srcOr := queryFilter{Op: "or"}
+		sourceSet = make(map[string]struct{}, len(q.sources))
 		for _, s := range q.sources {
-			srcOr.Filters = append(srcOr.Filters, queryFilter{
-				Op: "==", Field: "source", Value: s,
-			})
+			sourceSet[s] = struct{}{}
 		}
-		root.Filters = append(root.Filters, srcOr)
 	}
-	return root
+	out := rows[:0]
+	for _, ev := range rows {
+		if q.text != "" && !strings.Contains(ev.Line, q.text) {
+			continue
+		}
+		if sourceSet != nil {
+			if _, ok := sourceSet[ev.Source]; !ok {
+				continue
+			}
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 // toRequest: time range goes in startTime/endTime (server-side bound);

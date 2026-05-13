@@ -8,12 +8,15 @@ import (
 	"time"
 )
 
-// TestFilter_AlwaysFiltersSandboxID is the load-bearing security test:
-// no matter what the user supplies in query params, the rendered filter
-// must have sandbox_id == the URL-path value as the first conjunct under
-// the top-level AND. Break this and a user who can hit
-// /api/sandboxes/X/logs but only owns Y could read X's logs.
-func TestFilter_AlwaysFiltersSandboxID(t *testing.T) {
+// TestFilter_AlwaysFlatSandboxID is the load-bearing security test:
+// no matter what the user supplies in query params, the filter sent
+// to Axiom must be a FLAT `sandbox_id == <url-path>` predicate.
+//
+// Axiom's per-dataset /query endpoint silently drops AND-wrapped
+// filters and returns the unfiltered dataset (verified empirically
+// against api.axiom.co), so a wrapped shape == a tenant leak. The
+// flat shape is the only one Axiom actually honors.
+func TestFilter_AlwaysFlatSandboxID(t *testing.T) {
 	cases := []struct {
 		name string
 		qs   url.Values
@@ -36,36 +39,19 @@ func TestFilter_AlwaysFiltersSandboxID(t *testing.T) {
 			}
 			f := q.toFilter()
 
-			if f.Op != "and" {
-				t.Errorf("top-level op = %q, want and", f.Op)
+			if f.Op != "==" {
+				t.Errorf("filter op = %q, want == (NEVER and/or — Axiom drops those)", f.Op)
 			}
-			if len(f.Filters) == 0 {
-				t.Fatalf("top-level filter has no sub-filters")
+			if f.Field != "sandbox_id" {
+				t.Errorf("filter field = %q, want sandbox_id", f.Field)
 			}
-			first := f.Filters[0]
-			if first.Op != "==" || first.Field != "sandbox_id" || first.Value != "sb-target" {
-				t.Errorf("first conjunct = %+v, want sandbox_id == sb-target", first)
+			if f.Value != "sb-target" {
+				t.Errorf("filter value = %v, want sb-target", f.Value)
+			}
+			if len(f.Filters) != 0 {
+				t.Errorf("filter must be flat (no nested .Filters), got %d sub-filters", len(f.Filters))
 			}
 		})
-	}
-}
-
-// TestFilter_QInjectionStaysInValue: a malicious `q` parameter ends up as
-// a plain string in the JSON value, not as a sibling predicate.
-func TestFilter_QInjectionStaysInValue(t *testing.T) {
-	mal := `" or sandbox_id != "anything`
-	q, err := parseLogQuery("sb-target", time.Now(), url.Values{"q": {mal}})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	f := q.toFilter()
-	// The text predicate is the second conjunct.
-	if len(f.Filters) < 2 {
-		t.Fatalf("expected at least 2 sub-filters, got %d", len(f.Filters))
-	}
-	txt := f.Filters[1]
-	if txt.Op != "contains" || txt.Field != "line" || txt.Value != mal {
-		t.Errorf("text predicate = %+v, expected contains(line, %q)", txt, mal)
 	}
 }
 
@@ -83,34 +69,15 @@ func TestFilter_RejectsBadSource(t *testing.T) {
 }
 
 // TestFilter_RejectsControlCharsInQ: newlines / NULs in `q` are rejected
-// at parse time to avoid any operator-side quirk with embedded control
-// characters.
+// at parse time. We rely on this since q.text is applied client-side
+// via strings.Contains — any operator-side parsing here is moot, but
+// defending against control chars protects future code paths.
 func TestFilter_RejectsControlCharsInQ(t *testing.T) {
 	for _, bad := range []string{"hello\nworld", "x\x00y", "\r"} {
 		_, err := parseLogQuery("sb-x", time.Now(), url.Values{"q": {bad}})
 		if err == nil {
 			t.Errorf("expected error for q=%q", bad)
 		}
-	}
-}
-
-// TestFilter_SourceList_Or: multiple sources become an OR subtree, not a
-// list-in-value.
-func TestFilter_SourceList_Or(t *testing.T) {
-	q, err := parseLogQuery("sb-x", time.Now(), url.Values{"source": {"exec_stdout,exec_stderr"}})
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	f := q.toFilter()
-	if len(f.Filters) < 2 {
-		t.Fatalf("expected sandbox_id + source-or, got %d sub-filters", len(f.Filters))
-	}
-	srcOr := f.Filters[1]
-	if srcOr.Op != "or" {
-		t.Errorf("source subtree op = %q, want or", srcOr.Op)
-	}
-	if len(srcOr.Filters) != 2 {
-		t.Fatalf("source OR has %d filters, want 2", len(srcOr.Filters))
 	}
 }
 
@@ -133,7 +100,7 @@ func TestRequest_TailOmitsLimit(t *testing.T) {
 
 // TestRequest_BodyShape — full marshaled-JSON smoke test. Failure here
 // likely means the body shape has drifted in a way Axiom won't
-// understand; cross-reference against the API docs before changing.
+// understand; verify with an actual Axiom probe before changing.
 func TestRequest_BodyShape(t *testing.T) {
 	q, err := parseLogQuery("sb-x", time.Now().Add(-time.Hour), url.Values{
 		"q":      {"oops"},
@@ -152,10 +119,8 @@ func TestRequest_BodyShape(t *testing.T) {
 	for _, must := range []string{
 		`"startTime":"2026-05-13T00:00:00Z"`,
 		`"endTime":"2026-05-13T01:00:00Z"`,
-		`"filter":{"op":"and",`,
-		`"op":"==","field":"sandbox_id","value":"sb-x"`,
-		`"op":"contains","field":"line","value":"oops"`,
-		`"op":"==","field":"source","value":"exec_stdout"`,
+		// Flat filter — exactly what Axiom honors.
+		`"filter":{"op":"==","field":"sandbox_id","value":"sb-x"}`,
 		`"limit":1000`,
 		`"order":[{"field":"_time"}]`,
 	} {
@@ -163,12 +128,14 @@ func TestRequest_BodyShape(t *testing.T) {
 			t.Errorf("body missing %q:\n%s", must, body)
 		}
 	}
-	// And it must NOT contain an `apl` field — the regression that
-	// caused the cross-tenant leak. The per-dataset endpoint silently
-	// ignores unknown body fields, so {"apl": "..."} comes back with
-	// every event in the dataset.
-	if strings.Contains(string(body), `"apl"`) {
-		t.Errorf("body contains an `apl` field — this is the bug we're guarding against:\n%s", body)
+	// Regression: the body must NOT carry an `apl` field (legacy bug
+	// fixed in #242) AND must NOT use the AND wrapper (broken in #242,
+	// fixed by this change — Axiom silently drops AND-wrapped filter
+	// trees and returns every event in the dataset, see commit message).
+	for _, mustNot := range []string{`"apl"`, `"op":"and"`, `"op":"or"`} {
+		if strings.Contains(string(body), mustNot) {
+			t.Errorf("body contains %q — Axiom drops this shape:\n%s", mustNot, body)
+		}
 	}
 }
 
@@ -181,5 +148,68 @@ func TestParseLogQuery_LimitClamp(t *testing.T) {
 	}
 	if q.limit != 10000 {
 		t.Errorf("expected limit clamped to 10000, got %d", q.limit)
+	}
+}
+
+// TestApplyClientFilters_NoOp: when the query has no text/source
+// narrowing, all rows pass through.
+func TestApplyClientFilters_NoOp(t *testing.T) {
+	rows := []logEvent{
+		{Line: "alpha", Source: "exec_stdout"},
+		{Line: "beta", Source: "var_log"},
+	}
+	got := applyClientFilters(rows, logQuery{})
+	if len(got) != 2 {
+		t.Errorf("got %d rows, want 2 (no narrowing)", len(got))
+	}
+}
+
+// TestApplyClientFilters_TextSubstring: q.text narrows by substring on
+// the line field, case-sensitive (matches Axiom's `contains` operator
+// semantics — we just don't trust Axiom to apply it).
+func TestApplyClientFilters_TextSubstring(t *testing.T) {
+	rows := []logEvent{
+		{Line: "hello world", Source: "exec_stdout"},
+		{Line: "goodbye", Source: "exec_stdout"},
+		{Line: "Hello again", Source: "exec_stdout"},
+	}
+	got := applyClientFilters(rows, logQuery{text: "hello"})
+	if len(got) != 1 || got[0].Line != "hello world" {
+		t.Errorf("got %v, want only 'hello world'", got)
+	}
+}
+
+// TestApplyClientFilters_SourceList: q.sources narrows to the listed
+// sources; events with other source values are dropped.
+func TestApplyClientFilters_SourceList(t *testing.T) {
+	rows := []logEvent{
+		{Line: "a", Source: "exec_stdout"},
+		{Line: "b", Source: "exec_stderr"},
+		{Line: "c", Source: "var_log"},
+		{Line: "d", Source: "agent"},
+	}
+	got := applyClientFilters(rows, logQuery{sources: []string{"exec_stdout", "exec_stderr"}})
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want 2 (exec_stdout + exec_stderr only)", len(got))
+	}
+	if got[0].Source != "exec_stdout" || got[1].Source != "exec_stderr" {
+		t.Errorf("unexpected sources: %v", got)
+	}
+}
+
+// TestApplyClientFilters_TextAndSourceComposed: both predicates apply
+// (AND semantics — row must satisfy both).
+func TestApplyClientFilters_TextAndSourceComposed(t *testing.T) {
+	rows := []logEvent{
+		{Line: "error in foo", Source: "exec_stderr"},
+		{Line: "error in bar", Source: "var_log"},
+		{Line: "ok in foo", Source: "exec_stderr"},
+	}
+	got := applyClientFilters(rows, logQuery{
+		text:    "error",
+		sources: []string{"exec_stderr"},
+	})
+	if len(got) != 1 || got[0].Line != "error in foo" {
+		t.Errorf("got %v, want only 'error in foo'", got)
 	}
 }
