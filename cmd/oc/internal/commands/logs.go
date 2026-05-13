@@ -79,7 +79,9 @@ Examples:
 			qs.Set("limit", strconv.Itoa(limit))
 		}
 
-		path := "/api/sandboxes/" + url.PathEscape(sandboxID) + "/logs"
+		// client.New() already appends /api to baseURL — use the bare
+		// path here, matching the convention in exec/sandbox commands.
+		path := "/sandboxes/" + url.PathEscape(sandboxID) + "/logs"
 		if encoded := qs.Encode(); encoded != "" {
 			path += "?" + encoded
 		}

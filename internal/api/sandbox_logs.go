@@ -159,6 +159,26 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 		return nil
 	}
 
+	// If the sandbox is not running, no new events will arrive — skip
+	// the Axiom poll loop entirely. But keep the SSE connection open
+	// with keepalive comments so the browser EventSource doesn't
+	// interpret a server-side close as a disconnect and auto-reconnect
+	// (which would re-fetch the historical batch and visibly duplicate
+	// events: see the 3× duplication report after #243).
+	if session.Status != "running" {
+		keepalive := time.NewTicker(15 * time.Second)
+		defer keepalive.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-keepalive.C:
+				writeSSEComment(c.Response(), "keepalive")
+				c.Response().Flush()
+			}
+		}
+	}
+
 	// Live tail. Cursor starts at the last historical event's _time.
 	// Tail polls strictly require `ev.Time.After(cursor)`, so events
 	// at exactly the cursor are skipped — no double-emit of historical
@@ -233,16 +253,22 @@ type logQuery struct {
 
 // applySessionState narrows a parsed query based on the sandbox's
 // lifecycle. For stopped/error/hibernated sandboxes:
-//   - tail is forced false (no new events will arrive)
-//   - until is capped at stoppedAt + 30s grace (avoid polling into a void
-//     of empty Axiom windows)
+//   - until is capped at stoppedAt + 30s grace (the in-VM shipper
+//     finishes flushing within a few seconds of process exit; 30s
+//     covers ingest latency comfortably)
+//
+// q.tail is preserved — it reflects the client's explicit intent
+// (URL ?tail=false / CLI --no-tail). The handler reads session.Status
+// separately to decide whether to actually poll Axiom; for non-running
+// sandboxes it holds the SSE connection open with keepalives instead
+// of closing, so the browser EventSource doesn't auto-reconnect and
+// re-fetch the historical batch (which visibly duplicated events).
 //
 // Pure function (no DB dep) so the lifecycle behaviour is unit-testable.
 func applySessionState(q logQuery, status string, stoppedAt *time.Time) logQuery {
 	if status == "running" {
 		return q
 	}
-	q.tail = false
 	if stoppedAt != nil {
 		bound := stoppedAt.Add(30 * time.Second)
 		if q.until.IsZero() || q.until.After(bound) {

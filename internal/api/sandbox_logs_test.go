@@ -227,15 +227,26 @@ func TestApplySessionState_RunningPassthrough(t *testing.T) {
 	}
 }
 
-// TestApplySessionState_StoppedForcesHistorical: any non-running status
-// flips tail off. New events can't arrive once the sandbox is gone.
-func TestApplySessionState_StoppedForcesHistorical(t *testing.T) {
-	for _, status := range []string{"stopped", "error", "hibernated", "migrating"} {
+// TestApplySessionState_PreservesTail: q.tail reflects the client's
+// explicit intent (URL ?tail=false / CLI --no-tail) and is NOT
+// rewritten by applySessionState. The handler reads session.Status
+// separately to decide whether to actually poll Axiom; on non-running
+// sandboxes it holds the SSE connection open with keepalives.
+//
+// History: an earlier version flipped q.tail=false for non-running
+// sandboxes. The handler then `return nil`-ed after the historical
+// batch, closing the SSE stream. Browsers' EventSource auto-reconnects
+// on close → server re-sent the same historical batch → events
+// visibly duplicated in the UI (one copy per reconnect). Reverted.
+func TestApplySessionState_PreservesTail(t *testing.T) {
+	for _, status := range []string{"running", "stopped", "error", "hibernated", "migrating"} {
 		t.Run(status, func(t *testing.T) {
-			q := logQuery{tail: true}
-			got := applySessionState(q, status, nil)
-			if got.tail {
-				t.Errorf("status=%s: tail = true, want false", status)
+			for _, clientTail := range []bool{true, false} {
+				q := logQuery{tail: clientTail}
+				got := applySessionState(q, status, nil)
+				if got.tail != clientTail {
+					t.Errorf("status=%s clientTail=%v: tail = %v, want preserved", status, clientTail, got.tail)
+				}
 			}
 		})
 	}
