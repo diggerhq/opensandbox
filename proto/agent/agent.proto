@@ -234,6 +234,15 @@ message StatsResponse {
   uint64 net_input = 4;   // bytes
   uint64 net_output = 5;  // bytes
   int32 pids = 6;
+  // Disk usage from statvfs() inside the guest. Used by the worker to refuse
+  // destructive ops (hibernate, checkpoint) before the rootfs runs out of
+  // space and corrupts. Older agents that don't fill these fields report 0,
+  // which the worker treats as "unknown" (no pressure gate, falls back to
+  // existing behavior).
+  uint64 rootfs_used_bytes = 7;
+  uint64 rootfs_total_bytes = 8;
+  uint64 workspace_used_bytes = 9;
+  uint64 workspace_total_bytes = 10;
 }
 
 // --- Ping ---

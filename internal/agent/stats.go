@@ -58,7 +58,32 @@ func (s *Server) Stats(ctx context.Context, req *pb.StatsRequest) (*pb.StatsResp
 	// Network from /proc/net/dev
 	resp.NetInput, resp.NetOutput = readNetStats()
 
+	// Disk usage via statvfs(). The worker uses these to refuse hibernate /
+	// checkpoint when rootfs is critically full, before the qcow2 ends up
+	// captured in an inconsistent state. Errors silently zero the fields —
+	// the worker treats 0/0 as "unknown" and falls back to no pressure gate.
+	resp.RootfsUsedBytes, resp.RootfsTotalBytes = diskUsage("/")
+	resp.WorkspaceUsedBytes, resp.WorkspaceTotalBytes = diskUsage("/home/sandbox")
+
 	return resp, nil
+}
+
+// diskUsage returns (used, total) in bytes for the filesystem containing path.
+// On any error, returns (0, 0) — caller treats that as "unknown".
+func diskUsage(path string) (used, total uint64) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0
+	}
+	bsize := uint64(st.Bsize)
+	total = st.Blocks * bsize
+	avail := st.Bavail * bsize
+	if avail > total {
+		// Should never happen on ext4, but guard against underflow if it does.
+		return 0, total
+	}
+	used = total - avail
+	return used, total
 }
 
 // readMemInfo parses /proc/meminfo for MemTotal and MemAvailable.

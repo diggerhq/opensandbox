@@ -590,6 +590,12 @@ func (m *Manager) CompleteIncomingMigration(ctx context.Context, sandboxID strin
 	// new content equals the old, so this is a no-op write.
 	m.reinstallProxyCA(ctx, sandboxID, agentClient)
 
+	// Re-apply the apt-cache bind-mount on the destination. Migration carries
+	// the loadvm-restored mount table, so this is normally a no-op (mountpoint
+	// -q short-circuits), but it covers sandboxes that were migrated before
+	// this fix shipped and never had the bind set up.
+	m.setupAptCacheBindMount(ctx, sandboxID, agentClient)
+
 	// Sync VM memory tracking with actual QEMU state.
 	// After migration, the QEMU process has the source's virtio-mem hotplugged memory,
 	// but the Go struct still has the prep values (virtioMemRequestedMB=0, MemoryMB=baseMem).
