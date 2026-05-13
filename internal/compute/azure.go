@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -15,7 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"github.com/opensandbox/opensandbox/internal/secrets"
 )
 
 const (
@@ -48,8 +49,8 @@ type AzurePool struct {
 	nicClient  *armnetwork.InterfacesClient
 	mu         sync.RWMutex // protects cfg.ImageID + spec
 	cfg        AzurePoolConfig
-	spec       WorkerSpec        // injected via SetWorkerSpec; copied into worker env on every CreateMachine
-	kvClient   *azsecrets.Client // Key Vault client for dynamic image refresh (nil if not configured)
+	spec       WorkerSpec               // injected via SetWorkerSpec; copied into worker env on every CreateMachine
+	kvBackend  *secrets.KeyVaultBackend // Key Vault for dynamic image refresh (nil if not configured)
 }
 
 // SetWorkerSpec injects the cloud-neutral worker config the CP wants every
@@ -97,14 +98,16 @@ func NewAzurePool(cfg AzurePoolConfig) (*AzurePool, error) {
 		cfg:        cfg,
 	}
 
-	// Initialize Key Vault client for dynamic image refresh
+	// Initialize Key Vault backend for dynamic image refresh. Empty name map +
+	// empty mode prefix means we only use the Get() path; no bulk-load happens
+	// from this backend (server/worker bootstrap their own backend separately
+	// via internal/config/keyvault.go).
 	if cfg.KeyVaultName != "" {
-		vaultURL := fmt.Sprintf("https://%s.vault.azure.net/", cfg.KeyVaultName)
-		kvClient, err := azsecrets.NewClient(vaultURL, cred, nil)
+		be, err := secrets.NewKeyVaultBackend(cfg.KeyVaultName, nil, "")
 		if err != nil {
-			log.Printf("azure: Key Vault client failed (image refresh disabled): %v", err)
-		} else {
-			pool.kvClient = kvClient
+			log.Printf("azure: Key Vault backend failed (image refresh disabled): %v", err)
+		} else if be != nil {
+			pool.kvBackend = be
 			log.Printf("azure: Key Vault image refresh enabled (vault=%s)", cfg.KeyVaultName)
 		}
 	}
@@ -423,25 +426,27 @@ func (p *AzurePool) CleanupOrphanedResources(_ context.Context) (int, error) {
 // Satisfies the controlplane.AMIRefresher interface.
 // If Key Vault is not configured, returns the static image ID with no error.
 func (p *AzurePool) RefreshAMI(ctx context.Context) (imageID string, version string, err error) {
-	if p.kvClient == nil {
+	if p.kvBackend == nil {
 		p.mu.RLock()
 		defer p.mu.RUnlock()
 		return p.cfg.ImageID, "", nil
 	}
 
-	// Fetch image ID from Key Vault
-	resp, err := p.kvClient.GetSecret(ctx, "worker-image-id", "", nil)
+	newImageID, err := p.kvBackend.Get(ctx, "worker-image-id")
 	if err != nil {
 		return "", "", fmt.Errorf("azure: Key Vault get worker-image-id: %w", err)
 	}
-	if resp.Value == nil || *resp.Value == "" {
+	if newImageID == "" {
 		return "", "", fmt.Errorf("azure: Key Vault worker-image-id is empty")
 	}
-	newImageID := *resp.Value
 
-	// Fetch version
-	if vResp, vErr := p.kvClient.GetSecret(ctx, "worker-image-version", "", nil); vErr == nil && vResp.Value != nil {
-		version = *vResp.Value
+	// Version is optional — a missing key here just means "version unknown",
+	// not a failure. Any other error (network, perm) is also non-fatal because
+	// the image-id is what actually drives the refresh.
+	if v, vErr := p.kvBackend.Get(ctx, "worker-image-version"); vErr == nil {
+		version = v
+	} else if !errors.Is(vErr, secrets.ErrNotFound) {
+		log.Printf("azure: Key Vault worker-image-version fetch failed: %v (continuing)", vErr)
 	}
 
 	p.mu.Lock()

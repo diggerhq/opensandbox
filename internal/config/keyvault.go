@@ -49,6 +49,18 @@ var kvMapping = map[string]string{
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
 
+	// Server-side cell config + shared secrets. These mirror the worker-* keys
+	// of the same name — both sides need them, and the prefix filter loads only
+	// secrets for the current mode. When dev1/prod consolidate to cell-* we can
+	// drop the duplicates; for now this keeps the layout symmetric and explicit.
+	"server-cell-id":            "OPENSANDBOX_CELL_ID",
+	"server-region":             "OPENSANDBOX_REGION",
+	"server-sandbox-domain":     "OPENSANDBOX_SANDBOX_DOMAIN",
+	"server-cf-event-endpoint":  "OPENSANDBOX_CF_EVENT_ENDPOINT",
+	"server-cf-event-secret":    "OPENSANDBOX_CF_EVENT_SECRET",
+	"server-cf-admin-secret":    "OPENSANDBOX_CF_ADMIN_SECRET",
+	"server-session-jwt-secret": "OPENSANDBOX_SESSION_JWT_SECRET",
+
 	// Worker secrets
 	"worker-jwt-secret":    "OPENSANDBOX_JWT_SECRET",
 	"worker-database-url":  "OPENSANDBOX_DATABASE_URL",

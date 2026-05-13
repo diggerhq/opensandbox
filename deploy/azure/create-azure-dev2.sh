@@ -89,6 +89,38 @@ cmd_create() {
     log "Creating resource group $RG..."
     az group create --name "$RG" --location "$REGION" -o none
 
+    # Key Vault — holds all per-cell config + secrets so the env files only
+    # need bootstrap pointers (MODE, SECRETS_VAULT_NAME, paths, per-VM identity).
+    # Re-running create may hit a soft-deleted vault from a prior destroy; if
+    # so, recover it (90-day soft-delete window with purge protection off).
+    KV_NAME="osb-dev2-$(echo "$RG" | md5sum | head -c 8)"
+    save_state "KV_NAME" "$KV_NAME"
+    log "Creating Key Vault $KV_NAME..."
+    if az keyvault show-deleted --name "$KV_NAME" --location "$REGION" &>/dev/null; then
+        log "  recovering soft-deleted Key Vault..."
+        az keyvault recover --name "$KV_NAME" --location "$REGION" -o none
+    else
+        az keyvault create \
+            --resource-group "$RG" \
+            --name "$KV_NAME" \
+            --location "$REGION" \
+            --enable-rbac-authorization false \
+            --enable-purge-protection false \
+            --retention-days 7 \
+            -o none
+    fi
+    # Grant the operator (whoever is running this script) Get/List/Set so the
+    # subsequent push_kv_bootstrap step can write secrets without needing the
+    # VMs' MIs to be set up first.
+    OPERATOR_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
+    if [ -n "$OPERATOR_OBJECT_ID" ]; then
+        az keyvault set-policy \
+            --name "$KV_NAME" \
+            --object-id "$OPERATOR_OBJECT_ID" \
+            --secret-permissions get list set delete \
+            -o none
+    fi
+
     # VNet + subnet — distinct CIDR from prod's 10.100.0.0/16
     log "Creating VNet (10.110.0.0/16)..."
     az network vnet create \
@@ -175,6 +207,7 @@ cmd_create() {
         --public-ip-sku Standard \
         --os-disk-size-gb 64 \
         --storage-sku Premium_LRS \
+        --assign-identity '[system]' \
         -o none
 
     CP_PUBLIC_IP=$(az vm show -d --resource-group "$RG" --name "$CP_VM" --query publicIps -o tsv)
@@ -198,6 +231,7 @@ cmd_create() {
         --public-ip-sku Standard \
         --os-disk-size-gb 64 \
         --storage-sku Premium_LRS \
+        --assign-identity '[system]' \
         -o none
 
     log "Attaching ${WK_DISK_SIZE}GB data disk..."
@@ -215,6 +249,19 @@ cmd_create() {
     save_state "WK_PUBLIC_IP" "$WK_PUBLIC_IP"
     save_state "WK_PRIVATE_IP" "$WK_PRIVATE_IP"
     log "Worker: public=$WK_PUBLIC_IP private=$WK_PRIVATE_IP"
+
+    # Grant the VMs' Managed Identities Get/List on the Key Vault. principalIds
+    # are populated by --assign-identity '[system]' on the create above.
+    log "Granting VM Managed Identities access to Key Vault..."
+    CP_MI=$(az vm show --resource-group "$RG" --name "$CP_VM" --query identity.principalId -o tsv)
+    WK_MI=$(az vm show --resource-group "$RG" --name "$WK_VM" --query identity.principalId -o tsv)
+    for mi in "$CP_MI" "$WK_MI"; do
+        az keyvault set-policy \
+            --name "$KV_NAME" \
+            --object-id "$mi" \
+            --secret-permissions get list \
+            -o none
+    done
 
     # ── Provision Control Plane ──
     log "Provisioning control plane..."
@@ -288,29 +335,67 @@ fi
 sudo bash /tmp/setup-azure-host.sh
 WKSETUP
 
-    # ── Write env files ──
-    log "Writing environment files (with CF-cutover env vars)..."
+    # ── Push cell config + secrets to Key Vault ──
+    # Everything that isn't bootstrap (mode + vault pointer + paths + per-VM
+    # identity) lives in KV. The kvMapping in internal/config/keyvault.go is
+    # the allowlist — secrets not in that map are silently ignored, so it's
+    # safe to push extra entries here without affecting the running services.
+    log "Populating Key Vault with cell config + secrets..."
+    set_kv() { az keyvault secret set --vault-name "$KV_NAME" --name "$1" --value "$2" --output none; }
 
-    # Control plane env — includes CF event forwarder, JWT verifier, halt reconciler
+    # Server-side bundle (server-* prefix; loaded only when MODE=server)
+    set_kv server-database-url       "postgres://opensandbox:$PG_PASSWORD@localhost:5432/opensandbox?sslmode=disable"
+    set_kv server-redis-url          "redis://localhost:6379"
+    set_kv server-jwt-secret         "$JWT_SECRET"
+    set_kv server-api-key            "$API_KEY"
+    set_kv server-region             "$REGION"
+    set_kv server-sandbox-domain     "$DOMAIN"
+    set_kv server-cell-id            "$CELL_ID"
+    set_kv server-cf-event-endpoint  "$CF_EVENT_ENDPOINT"
+    set_kv server-cf-event-secret    "$CF_EVENT_SECRET"
+    set_kv server-cf-admin-secret    "$CF_ADMIN_SECRET"
+    set_kv server-session-jwt-secret "$SESSION_JWT_SECRET"
+
+    # Worker-side bundle (worker-* prefix; loaded only when MODE=worker)
+    set_kv worker-jwt-secret             "$JWT_SECRET"
+    set_kv worker-database-url           "postgres://opensandbox:$PG_PASSWORD@$CP_PRIVATE_IP:5432/opensandbox?sslmode=disable"
+    set_kv worker-redis-url              "redis://$CP_PRIVATE_IP:6379"
+    set_kv worker-region                 "$REGION"
+    set_kv worker-cell-id                "$CELL_ID"
+    set_kv worker-max-capacity           "10"
+    set_kv worker-default-sandbox-memory-mb "1024"
+    set_kv worker-default-sandbox-cpus   "2"
+    set_kv worker-sandbox-domain         "$DOMAIN"
+    set_kv worker-s3-bucket              "$STORAGE_CONTAINER"
+    set_kv worker-s3-region              "$REGION"
+    set_kv worker-s3-endpoint            "https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net"
+    set_kv worker-s3-access-key          "$STORAGE_ACCOUNT_NAME"
+    set_kv worker-s3-secret-key          "$STORAGE_KEY"
+    set_kv worker-cf-event-endpoint      "$CF_EVENT_ENDPOINT"
+    set_kv worker-cf-event-secret        "$CF_EVENT_SECRET"
+    set_kv worker-cf-admin-secret        "$CF_ADMIN_SECRET"
+    set_kv worker-session-jwt-secret     "$SESSION_JWT_SECRET"
+
+    # Shared (loaded for any mode via the pg-* prefix bypass in keyvault.go)
+    set_kv pg-password "$PG_PASSWORD"
+
+    # ── Write bootstrap env files ──
+    # Only what the binary needs to find the KV: mode + vault pointer + paths
+    # + per-VM identity (worker_id, advertise/listen addrs). Everything else
+    # comes from KV at startup. Local overrides are still possible by adding
+    # OPENSANDBOX_* lines here — env always wins over KV.
+    log "Writing bootstrap env files..."
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$ADMIN_USER@$CP_PUBLIC_IP" "sudo tee /etc/opensandbox/server.env > /dev/null" <<CPENV
+# Bootstrap-only — secrets + cell config live in Azure Key Vault.
 OPENSANDBOX_MODE=server
+SECRETS_VAULT_NAME=$KV_NAME
 OPENSANDBOX_PORT=8080
-OPENSANDBOX_DATABASE_URL=postgres://opensandbox:$PG_PASSWORD@localhost:5432/opensandbox?sslmode=disable
-OPENSANDBOX_REDIS_URL=redis://localhost:6379
-OPENSANDBOX_JWT_SECRET=$JWT_SECRET
-OPENSANDBOX_API_KEY=$API_KEY
-OPENSANDBOX_REGION=westus2
-OPENSANDBOX_SANDBOX_DOMAIN=$DOMAIN
-OPENSANDBOX_CELL_ID=$CELL_ID
-OPENSANDBOX_CF_EVENT_ENDPOINT=$CF_EVENT_ENDPOINT
-OPENSANDBOX_CF_EVENT_SECRET=$CF_EVENT_SECRET
-OPENSANDBOX_CF_ADMIN_SECRET=$CF_ADMIN_SECRET
-OPENSANDBOX_SESSION_JWT_SECRET=$SESSION_JWT_SECRET
 CPENV
 
-    # Worker env — includes CellID so redis_event_publisher starts
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no "$ADMIN_USER@$WK_PUBLIC_IP" "sudo tee /etc/opensandbox/worker.env > /dev/null" <<WKENV
+# Bootstrap-only — secrets + cell config live in Azure Key Vault.
 OPENSANDBOX_MODE=worker
+SECRETS_VAULT_NAME=$KV_NAME
 OPENSANDBOX_VM_BACKEND=qemu
 OPENSANDBOX_QEMU_BIN=qemu-system-x86_64
 OPENSANDBOX_DATA_DIR=/data/sandboxes
@@ -318,21 +403,8 @@ OPENSANDBOX_KERNEL_PATH=/opt/opensandbox/vmlinux
 OPENSANDBOX_IMAGES_DIR=/data/firecracker/images
 OPENSANDBOX_GRPC_ADVERTISE=$WK_PRIVATE_IP:9090
 OPENSANDBOX_HTTP_ADDR=http://$WK_PRIVATE_IP:8081
-OPENSANDBOX_JWT_SECRET=$JWT_SECRET
 OPENSANDBOX_WORKER_ID=w-azure-westus2-dev2-1
-OPENSANDBOX_REGION=westus2
-OPENSANDBOX_MAX_CAPACITY=10
 OPENSANDBOX_PORT=8081
-OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=1024
-OPENSANDBOX_DEFAULT_SANDBOX_CPUS=2
-OPENSANDBOX_DATABASE_URL=postgres://opensandbox:$PG_PASSWORD@$CP_PRIVATE_IP:5432/opensandbox?sslmode=disable
-OPENSANDBOX_REDIS_URL=redis://$CP_PRIVATE_IP:6379
-OPENSANDBOX_S3_BUCKET=$STORAGE_CONTAINER
-OPENSANDBOX_S3_REGION=$REGION
-OPENSANDBOX_S3_ENDPOINT=https://$STORAGE_ACCOUNT_NAME.blob.core.windows.net
-OPENSANDBOX_S3_ACCESS_KEY_ID=$STORAGE_ACCOUNT_NAME
-OPENSANDBOX_S3_SECRET_ACCESS_KEY=$STORAGE_KEY
-OPENSANDBOX_CELL_ID=$CELL_ID
 WKENV
 
     # Open Postgres + Redis to VNet
@@ -491,6 +563,15 @@ cmd_destroy() {
     if [ "$confirm" != "yes" ]; then
         log "Aborted."
         exit 0
+    fi
+    # Purge the Key Vault first — soft-delete blocks re-creating with the same
+    # name for 90 days. Skipped on first-time destroy where the vault might not
+    # exist yet (e.g. partial provision).
+    KV_NAME=$(load_state "KV_NAME")
+    if [ -n "$KV_NAME" ]; then
+        log "Deleting + purging Key Vault $KV_NAME (async)..."
+        az keyvault delete --name "$KV_NAME" -o none 2>/dev/null || true
+        az keyvault purge --name "$KV_NAME" --no-wait -o none 2>/dev/null || true
     fi
     az group delete --name "$RG" --yes --no-wait
     rm -f "$STATE_FILE"
