@@ -85,6 +85,14 @@ var secretMapping = map[string]string{
 	//      config (e.g. an admin endpoint) gets them for free.
 	"shared-axiom-platform-ingest-token": "AXIOM_PLATFORM_TOKEN",
 	"shared-axiom-platform-dataset":      "AXIOM_PLATFORM_DATASET",
+	// Cell identifier — stamped on every log + metric event so platform
+	// dashboards can filter per cell. Same dual-consumer pattern as the
+	// platform-* secrets above: Vector reads it from /etc/opensandbox/vector.env
+	// (written by populate-vector-env.sh) for its remap substitutions, and the
+	// Go binary reads it from os.Getenv("OPENCOMPUTER_CELL_ID") (config.go) so
+	// app-side logging and metrics get the same value. Per-cell KV stores a
+	// different literal here (e.g. eastus2-default, westeurope-dev).
+	"shared-cell-id": "OPENCOMPUTER_CELL_ID",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them
