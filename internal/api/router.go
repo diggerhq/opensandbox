@@ -21,6 +21,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -161,6 +162,10 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
 	e.Use(obslog.EchoMiddleware())
+	// Prometheus instrumentation: counts requests by status, observes handler
+	// latency, tracks in-flight. Uses c.Path() (route template) for the path
+	// label so high-cardinality IDs don't blow up the metric.
+	e.Use(metrics.EchoMiddleware())
 	e.Use(middleware.CORS())
 
 	// Subdomain proxy middleware (before auth — subdomain traffic is public)

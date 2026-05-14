@@ -1,5 +1,5 @@
 #!/bin/bash
-# populate-vector-env.sh — Fetch the Axiom platform-logs ingest credentials
+# populate-vector-env.sh — Fetch the Axiom platform ingest credentials
 # (token + dataset name) from Azure Key Vault via the VM's managed identity,
 # write them to /etc/opensandbox/vector.env so Vector picks them up at start.
 #
@@ -17,19 +17,27 @@
 #   OPENSANDBOX_REGION       e.g. eastus2
 #
 # KV secrets fetched:
-#   shared-axiom-platform-ingest-token  → AXIOM_PLATFORM_TOKEN   (required)
-#   shared-axiom-platform-dataset       → AXIOM_PLATFORM_DATASET (required)
+#   shared-axiom-platform-ingest-token         → AXIOM_PLATFORM_TOKEN          (required — logs)
+#   shared-axiom-platform-dataset              → AXIOM_PLATFORM_DATASET        (required — logs)
+#   shared-axiom-platform-metrics-ingest-token → AXIOM_PLATFORM_METRICS_TOKEN  (optional — metrics)
+#   shared-axiom-platform-metrics-dataset      → AXIOM_PLATFORM_METRICS_DATASET (optional — metrics)
 #
-# Both stored under `shared-` so the same secret can be read by both
-# worker and server hosts. If either is absent, the script exits 0 — Vector
-# fails its healthcheck and events buffer to disk until the secret appears
-# (don't break the worker boot path over a missing logging credential).
+# Logs secrets are hard-required: missing → exit 0 without writing env file,
+# Vector fails healthcheck and buffers to disk until the secret appears
+# (don't break the worker boot path over a logging credential).
+#
+# Metrics secrets are soft-optional: missing → env file still gets written
+# with logs creds set, metrics ones empty. The metrics sink fails healthcheck
+# and buffers to disk independently. Lets operators roll out the metrics
+# dataset asynchronously without coordinating with the worker fleet.
 set -euo pipefail
 
 VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
 ENV_FILE=/etc/opensandbox/vector.env
 TOKEN_SECRET=shared-axiom-platform-ingest-token
 DATASET_SECRET=shared-axiom-platform-dataset
+METRICS_TOKEN_SECRET=shared-axiom-platform-metrics-ingest-token
+METRICS_DATASET_SECRET=shared-axiom-platform-metrics-dataset
 
 log() { logger -t populate-vector-env "$*"; echo "$*"; }
 
@@ -70,6 +78,16 @@ if [ -z "$DATASET_VALUE" ]; then
     exit 0
 fi
 
+# Metrics creds are soft-optional. Empty values land in the env file and the
+# axiom_metrics sink in Vector fails its healthcheck; the logs sink keeps
+# working. Lets operators provision the metrics dataset on their own schedule
+# without coordinating with worker boots.
+METRICS_TOKEN_VALUE=$(kv_get "$METRICS_TOKEN_SECRET")
+METRICS_DATASET_VALUE=$(kv_get "$METRICS_DATASET_SECRET")
+if [ -z "$METRICS_TOKEN_VALUE" ] || [ -z "$METRICS_DATASET_VALUE" ]; then
+    log "metrics secrets ($METRICS_TOKEN_SECRET / $METRICS_DATASET_SECRET) missing — metrics sink will buffer to disk until configured"
+fi
+
 # Auto-detect HOST_IP via the kernel's source-address selection (skips link-local).
 HOST_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/ {for(i=1;i<NF;i++) if($i=="src") print $(i+1); exit}' || true)
 
@@ -78,6 +96,8 @@ umask 077
 cat > "${ENV_FILE}.tmp" <<EOF
 AXIOM_PLATFORM_TOKEN=${TOKEN_VALUE}
 AXIOM_PLATFORM_DATASET=${DATASET_VALUE}
+AXIOM_PLATFORM_METRICS_TOKEN=${METRICS_TOKEN_VALUE}
+AXIOM_PLATFORM_METRICS_DATASET=${METRICS_DATASET_VALUE}
 OPENCOMPUTER_CELL_ID=${OPENCOMPUTER_CELL_ID:-unknown}
 OPENSANDBOX_REGION=${OPENSANDBOX_REGION:-unknown}
 OPENCOMPUTER_HOST_IP=${HOST_IP:-unknown}
@@ -86,4 +106,8 @@ chown root:root "${ENV_FILE}.tmp"
 chmod 0600 "${ENV_FILE}.tmp"
 mv -f "${ENV_FILE}.tmp" "$ENV_FILE"
 
-log "populated $ENV_FILE (token+dataset from $VAULT_NAME, host_ip=${HOST_IP:-unknown})"
+metrics_status="absent"
+if [ -n "$METRICS_TOKEN_VALUE" ] && [ -n "$METRICS_DATASET_VALUE" ]; then
+    metrics_status="present"
+fi
+log "populated $ENV_FILE (logs token+dataset from $VAULT_NAME, metrics=$metrics_status, host_ip=${HOST_IP:-unknown})"

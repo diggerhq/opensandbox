@@ -7,7 +7,9 @@
 # single dev VM before standing up a multi-VM dev cluster.
 #
 # The journald source captures both units in one stream; the parse transform
-# tags `service` based on which unit emitted each line.
+# tags `service` based on which unit emitted each line. Two Prometheus
+# scrape sources (9091=worker, 9092=control-plane) feed metric events through
+# the same envelope path.
 #
 # Install path: /etc/vector/vector.yaml
 # Env file:    /etc/opensandbox/vector.env (provides AXIOM_PLATFORM_TOKEN)
@@ -23,6 +25,21 @@ sources:
     # `current_boot_only: false` is rejected on systemd 250-257 (Vector
     # limitation). Default (true) is fine — Vector tracks its own cursor in
     # data_dir, so restarts pick up where they left off rather than replaying.
+
+  # Two scrape sources so each emitted metric event can carry the correct
+  # service label (worker vs control-plane). Vector doesn't expose the scrape
+  # endpoint as a field, so we split sources and tag in the transforms.
+  dev_worker_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - http://127.0.0.1:9091/metrics
+    scrape_interval_secs: 30
+
+  dev_control_plane_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - http://127.0.0.1:9092/metrics
+    scrape_interval_secs: 30
 
 transforms:
   dev_parse:
@@ -72,13 +89,83 @@ transforms:
       # don't claim the dev tag.
       .environment = "dev"
 
+  # Convert each scrape source to log shape (metric_to_log is a transform
+  # type; VRL has no `to_log` function in Vector 0.55+). Two parallel
+  # converters so we can stamp the right service label downstream without
+  # re-parsing the scrape endpoint URL.
+  dev_worker_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - dev_worker_metrics
+
+  dev_control_plane_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - dev_control_plane_metrics
+
+  # Envelopes: same shape as dev_parse for join-friendly events. event_type="metric"
+  # is the cross-type discriminator.
+  dev_worker_metrics_envelope:
+    type: remap
+    inputs:
+      - dev_worker_metrics_to_log
+    source: |
+      .event_type = "metric"
+      if exists(.name) {
+        .metric_name = .name
+        del(.name)
+      }
+      .service = "worker"
+      .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}"
+      .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}"
+      .region = "${OPENSANDBOX_REGION:-unknown}"
+      .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}"
+      .hostname, _ = get_hostname()
+      .environment = "dev"
+
+  dev_control_plane_metrics_envelope:
+    type: remap
+    inputs:
+      - dev_control_plane_metrics_to_log
+    source: |
+      .event_type = "metric"
+      if exists(.name) {
+        .metric_name = .name
+        del(.name)
+      }
+      .service = "control-plane"
+      .service_id, _ = get_hostname()
+      .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}"
+      .region = "${OPENSANDBOX_REGION:-unknown}"
+      .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}"
+      .hostname, _ = get_hostname()
+      .environment = "dev"
+
 sinks:
+  # Logs sink: ships journald (parsed + enveloped) to the platform-logs dataset.
   axiom_platform:
     type: axiom
     inputs:
       - dev_parse
     dataset: "${AXIOM_PLATFORM_DATASET}"
     token: "${AXIOM_PLATFORM_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true
+
+  # Metrics sink: separate dataset + token. Both scrape sources funnel through
+  # here. See worker.yaml for the rationale (histogram-bucket volume,
+  # independent retention/budget, independent rollout).
+  axiom_metrics:
+    type: axiom
+    inputs:
+      - dev_worker_metrics_envelope
+      - dev_control_plane_metrics_envelope
+    dataset: "${AXIOM_PLATFORM_METRICS_DATASET}"
+    token: "${AXIOM_PLATFORM_METRICS_TOKEN}"
     buffer:
       type: disk
       max_size: 268435488

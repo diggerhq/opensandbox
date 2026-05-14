@@ -166,6 +166,7 @@ func main() {
 			QEMUBin:         cfg.QEMUBin,
 			AgentBinaryPath: "/usr/local/bin/osb-agent",
 			AgentVersion:    AgentVersion,
+			Region:          cfg.Region,
 			DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
 			DefaultCPUs:     cfg.DefaultSandboxCPUs,
 			DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
@@ -413,10 +414,22 @@ func main() {
 	defer metricsSrv.Close()
 	log.Println("opensandbox-worker: metrics server started on :9091")
 
+	// Periodic resource-stats sampler: disk bytes (used/avail/total on the
+	// data mount), memory bytes (total/avail from /proc/meminfo), allocated
+	// memory (sum of MemoryMB across running VMs), CPU pressure (PSI 'some'
+	// avg10/avg60/avg300, or loadavg/nproc fallback).
+	var allocator worker.MemoryAllocator
+	if qemuMgr != nil {
+		allocator = qemuMgr
+	}
+	worker.StartResourceMetricsTick(ctx, allocator, cfg.Region, cfg.WorkerID, cfg.DataDir, 30*time.Second)
+
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)
 	// Wire up Axiom log-shipping. Empty token disables shipping (kill-switch).
 	grpcServer.SetAxiomConfig(cfg.AxiomIngestToken, cfg.AxiomDataset)
+	// Tag wake-source metrics with the worker's region.
+	grpcServer.SetRegion(cfg.Region)
 	if cfg.AxiomIngestToken != "" {
 		log.Printf("opensandbox-worker: sandbox session log shipping enabled (dataset=%s)", cfg.AxiomDataset)
 	}

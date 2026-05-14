@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -264,6 +265,7 @@ type Config struct {
 	QEMUBin         string // path to qemu-system-x86_64 binary
 	AgentBinaryPath string // path to osb-agent binary on host (for hot-upgrade)
 	AgentVersion    string // expected agent version (for hot-upgrade check)
+	Region          string // worker region (e.g. eastus2); used as a metric label
 	DefaultMemoryMB int
 	DefaultCPUs     int
 	DefaultDiskMB   int
@@ -403,6 +405,22 @@ func (m *Manager) SetHibernationUploadCallback(cb func(sandboxID, hibernationKey
 // Empty string means no golden snapshot is available.
 func (m *Manager) GoldenVersion() string {
 	return m.goldenVersion
+}
+
+// MemoryAllocatedBytes returns the sum of memory committed to currently-running
+// sandboxes, in bytes. Used by the worker's resource-stats tick to report
+// oversubscription independent of actual guest workload.
+func (m *Manager) MemoryAllocatedBytes() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var total uint64
+	for _, vm := range m.vms {
+		if vm == nil {
+			continue
+		}
+		total += uint64(vm.MemoryMB) * 1024 * 1024
+	}
+	return total
 }
 
 // sealSandboxEnvs runs cfg.Envs through the secrets proxy to swap real values
@@ -1387,7 +1405,20 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 }
 
 // Create launches a new QEMU VM.
-func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.Sandbox, error) {
+func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (sb *types.Sandbox, retErr error) {
+	t0 := time.Now()
+	template := cfg.Template
+	if template == "" || template == "base" {
+		template = "default"
+	}
+	defer func() {
+		status := "success"
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.SandboxCreateDuration.WithLabelValues(m.cfg.Region, template, status).Observe(time.Since(t0).Seconds())
+	}()
+
 	// Check disk space before creating — refuse if >95% to prevent ENOSPC corruption
 	if usage, err := diskUsagePercent(m.cfg.DataDir); err == nil && usage > 95 {
 		return nil, fmt.Errorf("disk usage at %d%%, refusing new sandbox (threshold: 95%%)", usage)
@@ -1399,10 +1430,6 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	}
 
 	// Fast path: restore from golden snapshot if available and using default template
-	template := cfg.Template
-	if template == "" || template == "base" {
-		template = "default"
-	}
 	if m.goldenDir != "" && template == "default" && cfg.TemplateRootfsKey == "" {
 		sb, err := m.createFromGolden(ctx, cfg, id)
 		if err != nil {
@@ -2445,11 +2472,24 @@ func (m *Manager) ContainerName(id string) string {
 }
 
 // Hibernate snapshots a VM and uploads to S3.
-func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (*sandbox.HibernateResult, error) {
+func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (res *sandbox.HibernateResult, retErr error) {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
+		// Pre-lookup failure — observe with an "unknown" template label so the
+		// histogram still records the failure surface without inventing a
+		// template we didn't find.
+		metrics.HibernateDuration.WithLabelValues(m.cfg.Region, "unknown", "failure").Observe(0)
 		return nil, err
 	}
+
+	t0 := time.Now()
+	defer func() {
+		status := "success"
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.HibernateDuration.WithLabelValues(m.cfg.Region, vm.Template, status).Observe(time.Since(t0).Seconds())
+	}()
 
 	// Refuse hibernate if rootfs is critically full. dpkg/apt mid-rename + an
 	// unsynced page cache + a savevm produces qcow2 EXT4 metadata corruption
@@ -2478,7 +2518,7 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 
 // Wake restores a VM from a snapshot.
 // Guards against double-wake: if the sandbox is already running, returns it.
-func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (*types.Sandbox, error) {
+func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (sb *types.Sandbox, retErr error) {
 	// Prevent double wake — if sandbox is already running, return it
 	m.mu.RLock()
 	if existing, ok := m.vms[sandboxID]; ok {
@@ -2487,6 +2527,23 @@ func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey stri
 		return vmToSandbox(existing), nil
 	}
 	m.mu.RUnlock()
+
+	// Wake = resume hibernated sandbox from S3 — by definition the checkpoint
+	// archive lives in object storage. ForkFromCheckpoint in grpc_server.go
+	// observes the warm_cache path separately.
+	t0 := time.Now()
+	defer func() {
+		status := "success"
+		template := "unknown"
+		if sb != nil {
+			template = sb.Template
+		}
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.WakeDuration.WithLabelValues(m.cfg.Region, template, "s3", status).Observe(time.Since(t0).Seconds())
+	}()
+
 	return m.doWake(ctx, sandboxID, checkpointKey, checkpointStore, timeout)
 }
 
@@ -2535,14 +2592,32 @@ func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
 // than being silently logged — the control plane gets the reason and
 // persists it via SetCheckpointFailed (migration 039 added error_msg).
 func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, sizeBytes int64, err error) {
+	tStart := time.Now()
+	// failureReason is updated at each error site below so the defer can attribute
+	// failures by cause. Stays "other" for any unclassified path (which is a
+	// signal to add an explicit classification when seen).
+	failureReason := "other"
+	template := "unknown"
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "failure"
+			metrics.CheckpointFailuresTotal.WithLabelValues(m.cfg.Region, template, failureReason).Inc()
+		}
+		metrics.CheckpointDuration.WithLabelValues(m.cfg.Region, template, status).Observe(time.Since(tStart).Seconds())
+	}()
+
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
+		failureReason = "vm_not_found"
 		return "", "", 0, err
 	}
+	template = vm.Template
 
 	// Refuse if rootfs is critically full — same corruption risk as hibernate
 	// (dpkg/apt mid-rename + savevm = qcow2 EXT4 metadata broken on next mount).
 	if err := m.checkRootfsPressure(ctx, vm); err != nil {
+		failureReason = "disk_pressure"
 		return "", "", 0, err
 	}
 
@@ -2550,6 +2625,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// Without this, rapid-fire checkpoints queue up and the agent gets into a bad state
 	// from overlapping SIGUSR1/reconnect cycles.
 	if !vm.opMu.TryLock() {
+		failureReason = "op_in_progress"
 		return "", "", 0, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
 	defer vm.opMu.Unlock()
@@ -2557,6 +2633,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	t0 := time.Now()
 
 	if vm.qmp == nil {
+		failureReason = "qmp_unavailable"
 		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
@@ -2568,9 +2645,10 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// against an un-synced guest captures inconsistent qcow2 metadata that
 	// becomes unbootable on next cold-mount. See ErrAgentUnresponsive.
 	if vm.agent != nil {
-		if err := quiesceAndCloseAgent(ctx, vm.agent); err != nil {
-			log.Printf("qemu: CreateCheckpoint %s/%s: refusing savevm — %v", sandboxID, checkpointID, err)
-			return "", "", 0, fmt.Errorf("checkpoint %s: %w", sandboxID, err)
+		if qErr := quiesceAndCloseAgent(ctx, vm.agent); qErr != nil {
+			log.Printf("qemu: CreateCheckpoint %s/%s: refusing savevm — %v", sandboxID, checkpointID, qErr)
+			failureReason = "agent_unresponsive"
+			return "", "", 0, fmt.Errorf("checkpoint %s: %w", sandboxID, qErr)
 		}
 		vm.agent = nil
 	}
@@ -2590,12 +2668,14 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// (close agent + let SIGUSR1 reset the virtio-serial listener before
 	// savevm) is preserved above.
 	if vm.qmp == nil {
+		failureReason = "qmp_unavailable"
 		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	stagingDir := cacheDir + ".staging"
 	if mkErr := os.MkdirAll(filepath.Join(stagingDir, "snapshot"), 0755); mkErr != nil {
+		failureReason = "staging_setup"
 		return "", "", 0, fmt.Errorf("mkdir staging: %w", mkErr)
 	}
 
@@ -2611,6 +2691,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	snapshotName := "cp-" + checkpointID
 	if stopErr := vm.qmp.Stop(); stopErr != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qmp_stop"
 		return "", "", 0, fmt.Errorf("qmp stop before savevm: %w", stopErr)
 	}
 	saveErr := vm.qmp.SaveVM(snapshotName)
@@ -2619,6 +2700,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	}
 	if saveErr != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qmp_savevm"
 		return "", "", 0, fmt.Errorf("savevm: %w", saveErr)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
@@ -2631,10 +2713,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.qcow2")
 	if err := copyFileReflink(srcRootfs, filepath.Join(stagingDir, "rootfs.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qcow2_copy"
 		return "", "", 0, fmt.Errorf("copy rootfs: %w", err)
 	}
 	if err := copyFileReflink(srcWorkspace, filepath.Join(stagingDir, "workspace.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qcow2_copy"
 		return "", "", 0, fmt.Errorf("copy workspace: %w", err)
 	}
 	// Record the savevm snapshot name so ForkFromCheckpoint / RestoreFromCheckpoint
@@ -2744,6 +2828,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, archErr)
 			// Surface as the function's error so the API can persist it via
 			// SetCheckpointFailed instead of silently logging.
+			failureReason = "archive"
 			return rootfsKey, workspaceKey, 0, fmt.Errorf("create checkpoint archive: %w", archErr)
 		}
 		// 15-min upload budget. Pre-fix this was 5 min, which combined with
@@ -2766,6 +2851,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		os.Remove(archivePath)
 		if uerr != nil {
 			log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+			failureReason = "s3_upload"
 			return rootfsKey, workspaceKey, sizeBytes, fmt.Errorf("upload checkpoint to S3: %w", uerr)
 		}
 		log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, %.1f MB, files=%v)",

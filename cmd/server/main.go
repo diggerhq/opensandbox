@@ -23,6 +23,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
@@ -555,6 +556,13 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("opensandbox: starting server on %s (mode=%s)", addr, cfg.Mode)
+
+	// Prometheus /metrics endpoint on a separate port. Different from the
+	// worker's :9091 so a dev-host (worker+server on one VM) doesn't collide.
+	// Vector scrapes this and ships to Axiom alongside platform logs.
+	metricsSrv := metrics.StartMetricsServer(":9092")
+	defer metricsSrv.Close()
+	log.Println("opensandbox: metrics server started on :9092")
 
 	go func() {
 		if err := server.Start(addr); err != nil {
