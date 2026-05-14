@@ -131,17 +131,22 @@ export default {
       ),
     );
 
-    // cell_capacity events: UPSERT the cells row so the api-edge's pickCell()
-    // cascade sees fresh placement metrics. Each event's payload carries the
-    // CP's view at sample time; we just write it through. Idempotent — re-
-    // applying the same event writes the same values. capacity_updated_at
-    // gates freshness (edge ignores cells stale beyond ~120s).
+    // cell_capacity events: UPDATE the cells row so api-edge's pickCell() sees
+    // fresh placement metrics. The WHERE clause makes the write **monotonic** —
+    // stale retries (e.g. an out-of-order XAUTOCLAIM replay of an older event)
+    // become no-ops because capacity_updated_at can only move forward in time.
+    // Without this guard a stale retry could briefly clobber the row with old
+    // values, making the edge cascade-fall-through a cell that's actually fine.
+    //
+    // Timestamp is the *event emit time* from the CP's envelope, not events-
+    // ingest processing time — otherwise the comparison wouldn't be apples-to-
+    // apples across retries that arrive at different times.
     const capUpdate = env.OPENCOMPUTER_DB.prepare(
       `UPDATE cells SET healthy_workers = ?1, available_workers = ?2,
                         running_sandboxes = ?3, capacity_updated_at = ?4
-         WHERE cell_id = ?5`,
+         WHERE cell_id = ?5
+           AND (capacity_updated_at IS NULL OR capacity_updated_at < ?4)`,
     );
-    const nowSec = Math.floor(Date.now() / 1000);
     const capacityBatches = fresh
       .filter((e) => e.type === "cell_capacity")
       .map((e) => {
@@ -150,11 +155,13 @@ export default {
           available_workers?: number;
           running_sandboxes?: number;
         };
+        const tsMs = Date.parse(e.timestamp) || Date.now();
+        const tsSec = Math.floor(tsMs / 1000);
         return capUpdate.bind(
           p.healthy_workers ?? 0,
           p.available_workers ?? 0,
           p.running_sandboxes ?? 0,
-          nowSec,
+          tsSec,
           e.cell_id,
         );
       });
