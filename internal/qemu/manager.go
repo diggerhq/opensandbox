@@ -435,6 +435,22 @@ func (m *Manager) MemoryAllocatedBytes() uint64 {
 	return total
 }
 
+// ActiveSandboxesByTemplate returns the count of currently-running sandboxes
+// grouped by template. Drives the opensandbox_sandboxes_active gauge from
+// the worker's resource-stats tick.
+func (m *Manager) ActiveSandboxesByTemplate() map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[string]int)
+	for _, vm := range m.vms {
+		if vm == nil {
+			continue
+		}
+		counts[vm.Template]++
+	}
+	return counts
+}
+
 // sealSandboxEnvs runs cfg.Envs through the secrets proxy to swap real values
 // for sealed tokens, registers a proxy session for the guest IP, and writes the
 // proxy CA cert into the guest trust store. Returns the env map that should be
