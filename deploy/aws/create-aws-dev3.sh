@@ -45,7 +45,7 @@ AMI_OWNER="099720109477"
 AMI_FILTER="ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
 
 # CF-cutover specifics (cell ID encodes cloud + region for clarity)
-CELL_ID="aws-us-east-1-cell-a"
+CELL_ID="aws-us-east-1-a"
 CF_EVENT_ENDPOINT="https://opensandbox-events-ingest-dev.brian-124.workers.dev/ingest"
 
 SSH_KEY="$HOME/.ssh/opensandbox-digger.pem"

@@ -131,7 +131,10 @@ type Config struct {
 
 	// Cell identity. Full deployment identifier used in Redis stream keys, event
 	// envelopes, and CF routing. Replaces Region for cell-aware code paths.
-	// Format: "{cloud}-{region}-cell-{slot}", e.g. "azure-westus2-cell-a".
+	// Format: "{cloud}-{region}-{slot}", with region in AWS-style hyphenated
+	// form (Azure's westus2 normalizes to us-west-2) so cells parse identically
+	// across clouds. Example: "azure-us-west-2-b". The slot (a/b/c/...)
+	// distinguishes multiple cells in the same region.
 	CellID string
 
 	// CF events-ingest endpoint. When set, the regional control plane runs an

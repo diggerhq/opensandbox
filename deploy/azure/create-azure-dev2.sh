@@ -45,7 +45,12 @@ ADMIN_USER="azureuser"
 DOMAIN="dev2.opensandbox.ai"
 
 # CF-cutover specifics — point dev2 at the global CF Workers we already deployed.
-CELL_ID="azure-westus2-cell-b"
+# Cell-id format: <cloud>-<aws-style-region>-<slot>. Azure-native region name
+# (REGION above) stays for `az` CLI calls; CELL_REGION is the normalized form
+# we store in the global cell registry + the CP/worker's runtime "region" so
+# every cell parses the same way regardless of cloud.
+CELL_ID="azure-us-west-2-b"
+CELL_REGION="us-west-2"
 CF_EVENT_ENDPOINT="https://opensandbox-events-ingest-dev.brian-124.workers.dev/ingest"
 
 # State file (separate from prod's so the two stacks never collide)
@@ -348,7 +353,7 @@ WKSETUP
     set_kv server-redis-url          "redis://localhost:6379"
     set_kv server-jwt-secret         "$JWT_SECRET"
     set_kv server-api-key            "$API_KEY"
-    set_kv server-region             "$REGION"
+    set_kv server-region             "$CELL_REGION"
     set_kv server-sandbox-domain     "$DOMAIN"
     set_kv server-cell-id            "$CELL_ID"
     set_kv server-cf-event-endpoint  "$CF_EVENT_ENDPOINT"
@@ -360,7 +365,7 @@ WKSETUP
     set_kv worker-jwt-secret             "$JWT_SECRET"
     set_kv worker-database-url           "postgres://opensandbox:$PG_PASSWORD@$CP_PRIVATE_IP:5432/opensandbox?sslmode=disable"
     set_kv worker-redis-url              "redis://$CP_PRIVATE_IP:6379"
-    set_kv worker-region                 "$REGION"
+    set_kv worker-region                 "$CELL_REGION"
     set_kv worker-cell-id                "$CELL_ID"
     set_kv worker-max-capacity           "10"
     set_kv worker-default-sandbox-memory-mb "1024"

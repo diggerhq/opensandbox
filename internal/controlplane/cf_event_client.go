@@ -18,7 +18,7 @@ import (
 // events-ingest Worker.
 //
 // Headers:
-//   - X-Cell-Id    full deployment identifier (e.g. azure-westus2-cell-a)
+//   - X-Cell-Id    full deployment identifier (e.g. azure-us-west-2-b)
 //   - X-Timestamp  unix seconds (used in signature, validated ±5min on the receiver)
 //   - X-Signature  hex HMAC-SHA256(secret, fmt.Sprintf("%d.%s", timestamp, body))
 //

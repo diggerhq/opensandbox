@@ -29,8 +29,8 @@ type MachineOpts struct {
 // cloud means writing a new Pool; the CP doesn't change.
 type WorkerSpec struct {
 	// Cell + region identity
-	CellID string // "{cloud}-{region}-cell-{slot}", e.g. "azure-westus2-cell-b"
-	Region string // e.g. "westus2", "us-east-1"
+	CellID string // "{cloud}-{region}-{slot}", e.g. "azure-us-west-2-b"
+	Region string // AWS-style hyphenated, e.g. "us-west-2", "us-east-1"
 
 	// Connectivity back to the control plane
 	DatabaseURL string

@@ -43,14 +43,22 @@ Everything else:
 
 ## Cell ID format
 
-`{cloud}-{region}-cell-{slot}`, e.g.:
-- `azure-eastus2-cell-a` (production)
-- `azure-westus2-cell-b` (dev2)
-- `aws-us-east-1-cell-a` (dev3, when provisioned)
-- `gcp-us-central1-cell-a` (future)
+`{cloud}-{region}-{slot}`, with region in **AWS-style hyphenated form** for
+every cloud (Azure's `westus2` normalizes to `us-west-2`, `eastus2` to
+`us-east-2`, etc.). One parse for all clouds — no per-cloud lookup table.
+The slot is `a`/`b`/`c`/... distinguishing multiple cells in the same region.
+
+Examples:
+- `azure-us-east-2-a` (production)
+- `azure-us-west-2-b` (dev2)
+- `aws-us-east-1-a` (dev3)
+- `gcp-us-central-1-a` (future)
 
 Cell ID is the only routing identity. Workers, events, sandboxes, all
-namespaced by `cell_id` everywhere.
+namespaced by `cell_id` everywhere. The Azure-native region name (e.g.
+`westus2`) is only used as the `--location` for `az` CLI calls during
+provisioning; the cell registry, capability tokens, and event envelopes
+see only the normalized form.
 
 ## Adding a new cloud (checklist)
 

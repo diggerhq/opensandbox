@@ -145,25 +145,25 @@ function isHealthy(cell: CellRow, nowSec: number): boolean {
 // Continent buckets used by distanceRank when cells span clouds. Coarse on
 // purpose — we just need "near" vs "far" for the cascade. Unknown regions
 // fall through to tier 3 (global).
+//
+// Region names follow the cell-id convention: AWS-style hyphenated form for
+// every cloud (e.g., Azure's westus2 is mapped to us-west-2 at provision
+// time, so the cells table never sees the cloud-native variant). One table
+// for all clouds.
 const REGION_CONTINENT: Record<string, string> = {
-  // Azure NA
-  westus: "na", westus2: "na", westus3: "na",
-  eastus: "na", eastus2: "na", centralus: "na", northcentralus: "na", southcentralus: "na",
-  canadacentral: "na", canadaeast: "na",
-  // Azure EU
-  westeurope: "eu", northeurope: "eu", francecentral: "eu", germanywestcentral: "eu",
-  uksouth: "eu", ukwest: "eu",
-  // Azure APAC
-  japaneast: "ap", japanwest: "ap", koreacentral: "ap",
-  southeastasia: "ap", eastasia: "ap",
-  australiaeast: "ap", australiasoutheast: "ap",
-  // AWS NA
-  "us-east-1": "na", "us-east-2": "na", "us-west-1": "na", "us-west-2": "na",
-  "ca-central-1": "na",
-  // AWS EU
-  "eu-west-1": "eu", "eu-west-2": "eu", "eu-central-1": "eu", "eu-north-1": "eu",
-  // AWS APAC
-  "ap-southeast-1": "ap", "ap-southeast-2": "ap", "ap-northeast-1": "ap", "ap-northeast-2": "ap",
+  // North America
+  "us-east-1": "na", "us-east-2": "na",
+  "us-west-1": "na", "us-west-2": "na", "us-west-3": "na",
+  "us-central-1": "na", "us-north-central-1": "na", "us-south-central-1": "na",
+  "ca-central-1": "na", "ca-east-1": "na",
+  // Europe
+  "eu-west-1": "eu", "eu-west-2": "eu", "eu-west-3": "eu",
+  "eu-north-1": "eu", "eu-central-1": "eu", "eu-south-1": "eu",
+  "uk-south-1": "eu", "uk-west-1": "eu",
+  // Asia / Pacific
+  "ap-southeast-1": "ap", "ap-southeast-2": "ap",
+  "ap-northeast-1": "ap", "ap-northeast-2": "ap", "ap-northeast-3": "ap",
+  "ap-east-1": "ap", "ap-south-1": "ap",
 };
 
 // Tier distance from `a` to `b`. Lower is closer.

@@ -13,7 +13,7 @@ and the migration risks we expect to bite.
 
 | Item | Value |
 | --- | --- |
-| Cell ID | `azure-westus2-cell-a` |
+| Cell ID | `azure-us-west-2-a` (old dev cluster, OPENSANDBOX-PROD westus2) — current testbeds are `azure-us-west-2-b` (dev2) and `aws-us-east-1-a` (dev3) |
 | Regional CP hostname | `dev.opensandbox.ai` (unchanged, DNS-only proxy off) |
 | Edge Worker hostname | `app.dev.opensandbox.ai` (after DNS) — interim: `opensandbox-edge-dev.brian-124.workers.dev` |
 | Events ingest hostname | `events.dev.opensandbox.ai` (after DNS) — interim: `opensandbox-events-ingest-dev.brian-124.workers.dev` |
@@ -100,7 +100,7 @@ parity has been clean for 24h+.
 - [ ] CreditAccount DOs lazy-init verified (first `/check` reads from D1 `orgs.free_credits_remaining_cents`)
 - [ ] Dev PG basebackup snapshot taken (point-of-no-return marker for week 5)
 - [ ] Dev CP restarted with new env vars set:
-  - `OPENSANDBOX_CELL_ID=azure-westus2-cell-a`
+  - `OPENSANDBOX_CELL_ID=azure-us-west-2-a`
   - `OPENSANDBOX_CF_EVENT_ENDPOINT=https://opensandbox-events-ingest-dev.brian-124.workers.dev/ingest`
   - `OPENSANDBOX_CF_EVENT_SECRET=<EVENT_SECRET>`
   - `OPENSANDBOX_CF_ADMIN_SECRET=<CF_ADMIN_SECRET>`
