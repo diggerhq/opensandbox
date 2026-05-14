@@ -21,6 +21,7 @@
 #   shared-axiom-platform-dataset              → AXIOM_PLATFORM_DATASET        (required — logs)
 #   shared-axiom-platform-metrics-ingest-token → AXIOM_PLATFORM_METRICS_TOKEN  (optional — metrics)
 #   shared-axiom-platform-metrics-dataset      → AXIOM_PLATFORM_METRICS_DATASET (optional — metrics)
+#   shared-cell-id                             → OPENCOMPUTER_CELL_ID          (optional — cell tag)
 #
 # Logs secrets are hard-required: missing → exit 0 without writing env file,
 # Vector fails healthcheck and buffers to disk until the secret appears
@@ -30,6 +31,11 @@
 # with logs creds set, metrics ones empty. The metrics sink fails healthcheck
 # and buffers to disk independently. Lets operators roll out the metrics
 # dataset asynchronously without coordinating with the worker fleet.
+#
+# shared-cell-id is soft-optional too: missing → fall back to whatever
+# OPENCOMPUTER_CELL_ID was already in the populator's shell env (typically
+# unset on prod), then to literal "unknown". Vector keeps shipping; events
+# just won't be tagged with the right cell until KV gets the secret.
 set -euo pipefail
 
 VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
@@ -38,6 +44,7 @@ TOKEN_SECRET=shared-axiom-platform-ingest-token
 DATASET_SECRET=shared-axiom-platform-dataset
 METRICS_TOKEN_SECRET=shared-axiom-platform-metrics-ingest-token
 METRICS_DATASET_SECRET=shared-axiom-platform-metrics-dataset
+CELL_ID_SECRET=shared-cell-id
 
 log() { logger -t populate-vector-env "$*"; echo "$*"; }
 
@@ -88,6 +95,15 @@ if [ -z "$METRICS_TOKEN_VALUE" ] || [ -z "$METRICS_DATASET_VALUE" ]; then
     log "metrics secrets ($METRICS_TOKEN_SECRET / $METRICS_DATASET_SECRET) missing — metrics sink will buffer to disk until configured"
 fi
 
+# Cell tag — fall through KV → inherited env → "unknown". KV wins so the
+# value matches what the Go binary will load via secretMapping in
+# internal/config/keyvault.go; events from both pipelines stay coherent.
+CELL_ID_VALUE=$(kv_get "$CELL_ID_SECRET")
+if [ -z "$CELL_ID_VALUE" ]; then
+    CELL_ID_VALUE="${OPENCOMPUTER_CELL_ID:-unknown}"
+    log "secret $CELL_ID_SECRET not found in $VAULT_NAME — falling back to OPENCOMPUTER_CELL_ID=$CELL_ID_VALUE"
+fi
+
 # Auto-detect HOST_IP via the kernel's source-address selection (skips link-local).
 HOST_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/ {for(i=1;i<NF;i++) if($i=="src") print $(i+1); exit}' || true)
 
@@ -98,7 +114,7 @@ AXIOM_PLATFORM_TOKEN=${TOKEN_VALUE}
 AXIOM_PLATFORM_DATASET=${DATASET_VALUE}
 AXIOM_PLATFORM_METRICS_TOKEN=${METRICS_TOKEN_VALUE}
 AXIOM_PLATFORM_METRICS_DATASET=${METRICS_DATASET_VALUE}
-OPENCOMPUTER_CELL_ID=${OPENCOMPUTER_CELL_ID:-unknown}
+OPENCOMPUTER_CELL_ID=${CELL_ID_VALUE}
 OPENSANDBOX_REGION=${OPENSANDBOX_REGION:-unknown}
 OPENCOMPUTER_HOST_IP=${HOST_IP:-unknown}
 EOF
@@ -110,4 +126,4 @@ metrics_status="absent"
 if [ -n "$METRICS_TOKEN_VALUE" ] && [ -n "$METRICS_DATASET_VALUE" ]; then
     metrics_status="present"
 fi
-log "populated $ENV_FILE (logs token+dataset from $VAULT_NAME, metrics=$metrics_status, host_ip=${HOST_IP:-unknown})"
+log "populated $ENV_FILE (logs token+dataset from $VAULT_NAME, metrics=$metrics_status, cell_id=$CELL_ID_VALUE, host_ip=${HOST_IP:-unknown})"
