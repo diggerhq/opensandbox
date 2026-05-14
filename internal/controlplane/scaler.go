@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -80,6 +81,13 @@ type ScalerConfig struct {
 	MinWorkers     int        // minimum total workers per region (0 = default 1). Always kept running.
 	MaxWorkers     int        // maximum workers per region (0 = default 10). Hard cap to prevent runaway launches.
 	IdleReserve    int        // target idle (0 sandbox) workers for burst absorption (0 = default 1). Separate from MinWorkers.
+
+	// MachineSizes is a ranked list of provider-specific machine sizes the
+	// scaler tries in order on each scale-up. On a quota or capacity error
+	// (compute.ErrQuotaExceeded), the scaler falls through to the next size.
+	// Empty → use the pool's configured default. Non-quota errors fail the
+	// launch immediately without burning the rest of the list.
+	MachineSizes []string
 }
 
 // pendingLaunch tracks an EC2 instance that was launched but hasn't registered yet.
@@ -114,6 +122,8 @@ type Scaler struct {
 	wg       sync.WaitGroup
 	running  bool
 
+	machineSizes []string // ranked list of provider-specific sizes for scale-up fallback
+
 	// Rolling replacement: version-aware AMI updates
 	targetWorkerVersion string // desired worker version (from SSM); workers not matching this get replaced
 	refreshCount        int    // tick counter for AMI refresh interval
@@ -147,16 +157,17 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 	}
 
 	return &Scaler{
-		pool:        cfg.Pool,
-		registry:    cfg.Registry,
-		store:       cfg.Store,
-		state:       stateStore,
-		image:       cfg.WorkerImage,
-		cooldown:    cooldown,
-		interval:    interval,
-		minWorkers:  minWorkers,
-		maxWorkers:  maxWorkers,
-		idleReserve: idleReserve,
+		pool:         cfg.Pool,
+		registry:     cfg.Registry,
+		store:        cfg.Store,
+		state:        stateStore,
+		image:        cfg.WorkerImage,
+		cooldown:     cooldown,
+		interval:     interval,
+		minWorkers:   minWorkers,
+		maxWorkers:   maxWorkers,
+		idleReserve:  idleReserve,
+		machineSizes: cfg.MachineSizes,
 	}
 }
 
@@ -431,12 +442,7 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 		createCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
-		opts := compute.MachineOpts{
-			Region: region,
-			Image:  s.image,
-		}
-
-		machine, err := s.pool.CreateMachine(createCtx, opts)
+		machine, usedSize, err := s.createMachineWithFallback(createCtx, region)
 		if err != nil {
 			log.Printf("scaler: failed to create machine in %s: %v", region, err)
 			s.state.RemovePendingLaunch(region, placeholderID)
@@ -461,8 +467,49 @@ func (s *Scaler) scaleUp(_ context.Context, region string) {
 			LaunchedAt: time.Now(),
 		})
 		s.state.ResetCreationFailures(region)
-		log.Printf("scaler: created machine %s in %s (addr=%s), pending registration", machine.ID, region, machine.Addr)
+		if usedSize != "" {
+			log.Printf("scaler: created machine %s in %s (addr=%s, size=%s), pending registration", machine.ID, region, machine.Addr, usedSize)
+		} else {
+			log.Printf("scaler: created machine %s in %s (addr=%s), pending registration", machine.ID, region, machine.Addr)
+		}
 	}()
+}
+
+// createMachineWithFallback walks the configured ranked size list and returns
+// on the first successful CreateMachine, or after exhausting all sizes. A
+// non-quota error short-circuits the loop — we don't burn through fallbacks
+// on a malformed image ref or a network timeout. usedSize is the size that
+// succeeded (empty when machineSizes is unset and the pool default is used).
+func (s *Scaler) createMachineWithFallback(ctx context.Context, region string) (*compute.Machine, string, error) {
+	sizes := s.machineSizes
+	if len(sizes) == 0 {
+		// Empty Size → pool falls back to its own configured default. Preserves
+		// the pre-fallback behaviour for deployments that haven't opted in.
+		sizes = []string{""}
+	}
+
+	var lastErr error
+	for i, size := range sizes {
+		opts := compute.MachineOpts{
+			Region: region,
+			Image:  s.image,
+			Size:   size,
+		}
+		machine, err := s.pool.CreateMachine(ctx, opts)
+		if err == nil {
+			return machine, size, nil
+		}
+		lastErr = err
+		if !errors.Is(err, compute.ErrQuotaExceeded) {
+			return nil, "", err
+		}
+		remaining := len(sizes) - i - 1
+		if remaining > 0 {
+			log.Printf("scaler: %s quota/capacity for size=%q, trying next (%d remaining): %v",
+				region, size, remaining, err)
+		}
+	}
+	return nil, "", fmt.Errorf("all %d machine sizes exhausted in %s: %w", len(sizes), region, lastErr)
 }
 
 // expirePending removes pending launches that have either registered or timed out.

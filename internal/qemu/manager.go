@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/opensandbox/opensandbox/internal/blobstore"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/storage"
 	"github.com/opensandbox/opensandbox/pkg/types"
@@ -29,54 +30,152 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// ErrAgentUnresponsive is returned by quiesceAndCloseAgent when the in-VM agent
+// is unreachable. Callers must not proceed to savevm when this fires: capturing
+// a snapshot of a guest with un-synced page cache and pending EXT4 journal
+// entries produces a qcow2 that won't mount on next cold-boot (inode #2
+// metadata-checksum failure → kernel panic loop). Surface a clean error to the
+// API caller instead of silently corrupting the rootfs.
+var ErrAgentUnresponsive = fmt.Errorf("guest agent unresponsive, refusing to capture potentially-inconsistent snapshot")
+
+// ErrRootfsCritical is returned when the guest's rootfs (/dev/vda) is so full
+// that destructive operations could leave it in a corrupted state. dpkg/apt
+// mid-rename of system files plus an ENOSPC trip plus a savevm is the path
+// that causes EXT4 metadata checksum failure on next cold-mount. Refuse the
+// op early; let the caller / customer free space first.
+var ErrRootfsCritical = fmt.Errorf("rootfs disk usage too high — refusing destructive operation to prevent corruption")
+
+const (
+	// rootfsRefuseThresholdPct: above this, refuse destructive operations.
+	rootfsRefuseThresholdPct = 95
+	// rootfsWarnThresholdPct: above this, log a warning on the next destructive
+	// op so the customer sees it surface in their logs / our telemetry.
+	rootfsWarnThresholdPct = 85
+)
+
 // prepareAgentForHibernate synchronously syncs the guest filesystems and quiesces
-// the virtio-serial listener. Returns when the guest is fully prepared — no sleep
-// needed afterward.
+// the virtio-serial listener. Returns nil when the guest is fully prepared — no
+// sleep needed afterward.
 //
-// On agents that don't implement the PrepareHibernate RPC (older builds), falls
-// back to the legacy Exec("sync; kill -USR1 1") path with a 1s sleep.
-func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) {
+// On transport-class errors (Unavailable, Canceled, EOF, "client connection is
+// closing") the RPC is retried once after a Redial — matching the pattern used
+// by SyncFS / Exec / patchGuestNetwork elsewhere in this file. This handles
+// the common transient where the gRPC channel is mid-recycle (e.g. right after
+// a heavy Exec just completed). Only after redial+retry also fails do we
+// surface ErrAgentUnresponsive.
+//
+// An Unimplemented response from PrepareHibernate (older agent builds) is not
+// itself a failure — the legacy Exec("sync; kill -USR1 1") fallback is what
+// counts. ErrAgentUnresponsive (wrapped) is returned only when neither the
+// modern path nor the fallback succeeds, even after redial.
+func prepareAgentForHibernate(ctx context.Context, agent *AgentClient) error {
 	if agent == nil {
-		return
+		return nil
 	}
-	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
+
+	prepareOnce := func() error {
+		rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err := agent.PrepareHibernate(rpcCtx, &pb.PrepareHibernateRequest{})
+		return err
+	}
+	err := prepareOnce()
+	if err != nil && IsTransportError(err) {
+		log.Printf("qemu: PrepareHibernate transport error (%v), redialing", err)
+		if rdErr := agent.Redial(); rdErr == nil {
+			err = prepareOnce()
+		} else {
+			log.Printf("qemu: PrepareHibernate redial failed: %v (orig: %v)", rdErr, err)
+		}
+	}
 	if err == nil {
-		return
+		return nil
 	}
+
 	if st, ok := status.FromError(err); !ok || st.Code() != codes.Unimplemented {
 		log.Printf("qemu: PrepareHibernate RPC failed: %v (falling back to legacy path)", err)
 	}
-	// Fallback for older agents: sync + SIGUSR1 + sleep.
-	execCtx, cancel2 := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel2()
-	_, _ = agent.Exec(execCtx, &pb.ExecRequest{
-		Command:   "/bin/sh",
-		Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
-		RunAsRoot: true,
-	})
+
+	execOnce := func() error {
+		execCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, e := agent.Exec(execCtx, &pb.ExecRequest{
+			Command:   "/bin/sh",
+			Args:      []string{"-c", "sync; blockdev --flushbufs /dev/vda 2>/dev/null; blockdev --flushbufs /dev/vdb 2>/dev/null; sync; kill -USR1 1"},
+			RunAsRoot: true,
+		})
+		return e
+	}
+	fallbackErr := execOnce()
+	if fallbackErr != nil && IsTransportError(fallbackErr) {
+		log.Printf("qemu: prepareHibernate fallback Exec transport error (%v), redialing", fallbackErr)
+		if rdErr := agent.Redial(); rdErr == nil {
+			fallbackErr = execOnce()
+		} else {
+			log.Printf("qemu: prepareHibernate fallback redial failed: %v", rdErr)
+		}
+	}
+	if fallbackErr != nil {
+		return fmt.Errorf("%w: PrepareHibernate=%v, fallback Exec=%v", ErrAgentUnresponsive, err, fallbackErr)
+	}
 	time.Sleep(1 * time.Second)
+	return nil
+}
+
+// checkRootfsPressure polls the in-guest agent for filesystem usage and
+// returns ErrRootfsCritical if rootfs use% is at or above the refuse threshold.
+// Best-effort: returns nil on agent unreachable / older agent that doesn't
+// fill the new fields (RootfsTotalBytes==0). In those cases the caller falls
+// back to the pre-existing behavior — backward compatible for long-lived
+// sandboxes whose in-guest agent predates this change.
+//
+// Logs a warning when use% crosses rootfsWarnThresholdPct so customers see
+// the early signal in their logs even when the op is allowed to proceed.
+func (m *Manager) checkRootfsPressure(ctx context.Context, vm *VMInstance) error {
+	if vm == nil || vm.agent == nil {
+		return nil
+	}
+	statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := vm.agent.Stats(statsCtx)
+	if err != nil || resp == nil || resp.RootfsTotalBytes == 0 {
+		return nil
+	}
+	pct := int(resp.RootfsUsedBytes * 100 / resp.RootfsTotalBytes)
+	if pct >= rootfsRefuseThresholdPct {
+		return fmt.Errorf("%w: rootfs at %d%% (refuse threshold %d%%) — free space and retry, or kill and respawn from a checkpoint", ErrRootfsCritical, pct, rootfsRefuseThresholdPct)
+	}
+	if pct >= rootfsWarnThresholdPct {
+		log.Printf("qemu: %s: rootfs at %d%% — destructive operations will be refused at %d%%", vm.ID, pct, rootfsRefuseThresholdPct)
+	}
+	return nil
 }
 
 // quiesceAndCloseAgent prepares the agent for hibernate, closes the host-side
 // gRPC client connection, and waits 200ms for the guest's gRPC server to
-// process the EOF and re-enter its Accept poll loop. After this returns it is
-// safe for the caller to call savevm — the captured snapshot will not have a
-// stale virtioSerialConn whose buffered HTTP/2 framer state could corrupt the
-// next host's gRPC handshake on fork/restore.
+// process the EOF and re-enter its Accept poll loop. After this returns nil it
+// is safe for the caller to call savevm — the captured snapshot will not have
+// a stale virtioSerialConn whose buffered HTTP/2 framer state could corrupt the
+// next host's gRPC handshake on fork/restore, AND the guest filesystem state is
+// known-quiesced.
 //
 // The 200ms is empirically sufficient for the guest virtio-serial driver to
 // surface EOF on /dev/virtio-ports/agent → for the gRPC server's Read goroutine
 // to drop its conn → for onClose to run (active=false). Without this wait the
 // snapshot can land mid-tear-down and the bug returns.
-func quiesceAndCloseAgent(ctx context.Context, agent *AgentClient) {
+//
+// Returns ErrAgentUnresponsive (wrapped) when the agent cannot be reached for
+// the prep step. Callers must abort their savevm path on this error.
+func quiesceAndCloseAgent(ctx context.Context, agent *AgentClient) error {
 	if agent == nil {
-		return
+		return nil
 	}
-	prepareAgentForHibernate(ctx, agent)
+	if err := prepareAgentForHibernate(ctx, agent); err != nil {
+		return err
+	}
 	_ = agent.Close()
 	time.Sleep(200 * time.Millisecond)
+	return nil
 }
 
 // Compile-time check that Manager implements sandbox.Manager.
@@ -167,6 +266,7 @@ type Config struct {
 	QEMUBin         string // path to qemu-system-x86_64 binary
 	AgentBinaryPath string // path to osb-agent binary on host (for hot-upgrade)
 	AgentVersion    string // expected agent version (for hot-upgrade check)
+	Region          string // worker region (e.g. eastus2); used as a metric label
 	DefaultMemoryMB int
 	DefaultCPUs     int
 	DefaultDiskMB   int
@@ -319,6 +419,22 @@ func (m *Manager) GoldenVersion() string {
 	return m.goldenVersion
 }
 
+// MemoryAllocatedBytes returns the sum of memory committed to currently-running
+// sandboxes, in bytes. Used by the worker's resource-stats tick to report
+// oversubscription independent of actual guest workload.
+func (m *Manager) MemoryAllocatedBytes() uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var total uint64
+	for _, vm := range m.vms {
+		if vm == nil {
+			continue
+		}
+		total += uint64(vm.MemoryMB) * 1024 * 1024
+	}
+	return total
+}
+
 // sealSandboxEnvs runs cfg.Envs through the secrets proxy to swap real values
 // for sealed tokens, registers a proxy session for the guest IP, and writes the
 // proxy CA cert into the guest trust store. Returns the env map that should be
@@ -389,6 +505,39 @@ func (m *Manager) reinstallProxyCA(ctx context.Context, sandboxID string, agent 
 		return
 	}
 	log.Printf("qemu: %s: reinstalled proxy CA on guest", sandboxID)
+}
+
+// setupAptCacheBindMount redirects /var/cache/apt/archives onto the workspace
+// disk via bind-mount, so apt's package-download traffic (commonly 1-3 GB
+// during a base build) doesn't compete with the OS for rootfs space.
+//
+// Idempotent: mountpoint -q short-circuits when the bind is already in place,
+// so re-applying on every wake/migrate/golden-create costs nothing. Lives in
+// the kernel mount table only — does NOT modify guest /etc/fstab — so it
+// re-runs on every resume through this hook. Best-effort: failure is logged
+// but doesn't fail the handoff (apt-cache stays on rootfs as before).
+//
+// Called from: golden-create (inline with the workspace mount block), wake,
+// migration. All three paths converge on a guest with /home/sandbox already
+// mounted on /dev/vdb.
+func (m *Manager) setupAptCacheBindMount(ctx context.Context, sandboxID string, agent *AgentClient) {
+	if agent == nil {
+		return
+	}
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := agent.Exec(execCtx, &pb.ExecRequest{
+		Command: "/bin/sh",
+		Args: []string{"-c", strings.Join([]string{
+			"mkdir -p /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+			"mountpoint -q /var/cache/apt/archives || mount --bind /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+		}, " && ")},
+		RunAsRoot: true,
+	})
+	if err != nil {
+		log.Printf("qemu: %s: apt-cache bind-mount failed: %v (apt cache will live on rootfs)", sandboxID, err)
+		return
+	}
 }
 
 // PrepareGoldenSnapshot boots a temporary VM, waits for the agent, then
@@ -999,6 +1148,14 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 	// golden workspace. The new sandbox has a DIFFERENT workspace qcow2 on the same
 	// virtio-blk device. Without dropping caches, the kernel uses stale superblock/
 	// journal data → ext4 checksum errors ("Bad message").
+	//
+	// After /home/sandbox is mounted, redirect /var/cache/apt/archives onto
+	// workspace via bind-mount. apt downloads packages there before installing
+	// (commonly 1-3 GB during a base build); without the redirect, that traffic
+	// lands on the 4 GiB rootfs and can fill it. The bind-mount is idempotent
+	// (mountpoint -q short-circuits) and survives only in the running kernel —
+	// re-applied on every wake/spawn through this same hook. Failure to bind-
+	// mount is non-fatal (apt-cache stays on rootfs, status quo).
 	mountCtx, mountCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	_, mountErr := agentClient.Exec(mountCtx, &pb.ExecRequest{
 		Command: "/bin/sh",
@@ -1008,6 +1165,8 @@ func (m *Manager) createFromGolden(ctx context.Context, cfg types.SandboxConfig,
 			"mount /dev/vdb /home/sandbox 2>/dev/null || true",
 			"resize2fs /dev/vdb 2>/dev/null || true",
 			"chown 1000:1000 /home/sandbox",
+			"mkdir -p /home/sandbox/.osb-apt-cache /var/cache/apt/archives",
+			"mountpoint -q /var/cache/apt/archives || mount --bind /home/sandbox/.osb-apt-cache /var/cache/apt/archives 2>/dev/null || true",
 		}, " && ")},
 		RunAsRoot: true,
 	})
@@ -1232,8 +1391,7 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 	// The virtio-mem backend allocates lazily (only requested-size is committed),
 	// but maxmem must exceed base+pool for QEMU to accept the device.
 	// Pool = 16GB - base, so any sandbox can scale up to 16GB total regardless of base.
-	// Round up to 128MB block alignment.
-	virtioMemPoolMB := ((16384 - memMB + 127) / 128) * 128
+	virtioMemPoolMB := alignVirtioMemBlock(16384 - memMB)
 	if virtioMemPoolMB < 1024 {
 		virtioMemPoolMB = 1024 // minimum 1GB pool
 	}
@@ -1266,7 +1424,20 @@ func (m *Manager) buildQEMUArgs(cpus, memMB int, rootfsPath, workspacePath, tapN
 }
 
 // Create launches a new QEMU VM.
-func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.Sandbox, error) {
+func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (sb *types.Sandbox, retErr error) {
+	t0 := time.Now()
+	template := cfg.Template
+	if template == "" || template == "base" {
+		template = "default"
+	}
+	defer func() {
+		status := "success"
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.SandboxCreateDuration.WithLabelValues(m.cfg.Region, template, status).Observe(time.Since(t0).Seconds())
+	}()
+
 	// Check disk space before creating — refuse if >95% to prevent ENOSPC corruption
 	if usage, err := diskUsagePercent(m.cfg.DataDir); err == nil && usage > 95 {
 		return nil, fmt.Errorf("disk usage at %d%%, refusing new sandbox (threshold: 95%%)", usage)
@@ -1278,10 +1449,6 @@ func (m *Manager) Create(ctx context.Context, cfg types.SandboxConfig) (*types.S
 	}
 
 	// Fast path: restore from golden snapshot if available and using default template
-	template := cfg.Template
-	if template == "" || template == "base" {
-		template = "default"
-	}
 	if m.goldenDir != "" && template == "default" && cfg.TemplateRootfsKey == "" {
 		sb, err := m.createFromGolden(ctx, cfg, id)
 		if err != nil {
@@ -2020,23 +2187,29 @@ func (m *Manager) SetResourceLimits(ctx context.Context, sandboxID string, maxPi
 		if additionalMB < 0 {
 			additionalMB = 0
 		}
-		// Round up to 128MB block size
-		additionalMB = ((additionalMB + 127) / 128) * 128
+		additionalMB = alignVirtioMemBlock(additionalMB)
 
-		// Check committed memory across all VMs before attempting hotplug.
-		// Reserve 20% of host RAM for OS, QEMU overhead, page cache, etc.
+		// Check actual host memory before attempting hotplug. Uses real RSS-based
+		// usage (MemTotal - MemAvailable from /proc/meminfo) rather than the
+		// committed sum: a sandbox configured with maxmem=16GB but actually
+		// using 200MB RSS holds 200MB of host RAM, not 16GB. Committed-based
+		// admission rejects grow requests on workers that have plenty of real
+		// headroom — same misleading-signal bug that was already fixed for
+		// migration admission (grpc_server.go PrepareMigrationIncoming).
+		// Reserve 20% of host RAM as a safety margin for OS, QEMU overhead,
+		// page cache, and the burst the grow request itself will pull in.
 		if additionalMB > vm.virtioMemRequestedMB {
 			deltaMB := additionalMB - vm.virtioMemRequestedMB
-			committedMB := m.totalCommittedMemoryMB()
 			hostTotalMB := m.hostMemoryMB()
+			hostUsedMB := m.hostUsedMemoryMB()
 			reserveMB := hostTotalMB / 5 // 20% safety margin
-			availableMB := hostTotalMB - committedMB - reserveMB
+			availableMB := hostTotalMB - hostUsedMB - reserveMB
 
 			if deltaMB > availableMB {
-				log.Printf("qemu: virtio-mem %s: need %dMB but only %dMB available (committed=%dMB, host=%dMB, reserve=%dMB)",
-					sandboxID, deltaMB, availableMB, committedMB, hostTotalMB, reserveMB)
-				return fmt.Errorf("insufficient_capacity: need %dMB additional but only %dMB available on this worker (committed=%dMB/%dMB)",
-					deltaMB, availableMB, committedMB, hostTotalMB)
+				log.Printf("qemu: virtio-mem %s: need %dMB but only %dMB available (used=%dMB, host=%dMB, reserve=%dMB)",
+					sandboxID, deltaMB, availableMB, hostUsedMB, hostTotalMB, reserveMB)
+				return fmt.Errorf("insufficient_capacity: need %dMB additional but only %dMB available on this worker (used=%dMB/%dMB)",
+					deltaMB, availableMB, hostUsedMB, hostTotalMB)
 			}
 		}
 
@@ -2220,6 +2393,21 @@ func (m *Manager) HostUsedMemoryMB() int {
 	return m.hostUsedMemoryMB()
 }
 
+// virtioMemBlockSizeMB is the QEMU virtio-mem device block size. All plug
+// requests must be a multiple of this — QMP qom-set rejects non-aligned
+// values. Set in -device virtio-mem-pci,block-size=128M; keep them in sync.
+const virtioMemBlockSizeMB = 128
+
+// alignVirtioMemBlock rounds an additional-memory request up to the virtio-mem
+// device's block size so the QMP qom-set call is accepted. Negative or zero
+// inputs return zero.
+func alignVirtioMemBlock(mb int) int {
+	if mb <= 0 {
+		return 0
+	}
+	return ((mb + virtioMemBlockSizeMB - 1) / virtioMemBlockSizeMB) * virtioMemBlockSizeMB
+}
+
 // VMActualMemoryMB returns the QEMU process RSS for a sandbox — true physical
 // memory the host kernel has backed with RAM. Includes QEMU overhead plus
 // faulted-in guest pages. Scaler passes this value to PrepareMigrationIncoming
@@ -2303,9 +2491,30 @@ func (m *Manager) ContainerName(id string) string {
 }
 
 // Hibernate snapshots a VM and uploads to S3.
-func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (*sandbox.HibernateResult, error) {
+func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (res *sandbox.HibernateResult, retErr error) {
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
+		// Pre-lookup failure — observe with an "unknown" template label so the
+		// histogram still records the failure surface without inventing a
+		// template we didn't find.
+		metrics.HibernateDuration.WithLabelValues(m.cfg.Region, "unknown", "failure").Observe(0)
+		return nil, err
+	}
+
+	t0 := time.Now()
+	defer func() {
+		status := "success"
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.HibernateDuration.WithLabelValues(m.cfg.Region, vm.Template, status).Observe(time.Since(t0).Seconds())
+	}()
+
+	// Refuse hibernate if rootfs is critically full. dpkg/apt mid-rename + an
+	// unsynced page cache + a savevm produces qcow2 EXT4 metadata corruption
+	// that won't cold-mount on the next wake. Cheap pre-flight check; the
+	// customer should free space (or kill+respawn from a checkpoint) instead.
+	if err := m.checkRootfsPressure(ctx, vm); err != nil {
 		return nil, err
 	}
 
@@ -2328,7 +2537,7 @@ func (m *Manager) Hibernate(ctx context.Context, sandboxID string, checkpointSto
 
 // Wake restores a VM from a snapshot.
 // Guards against double-wake: if the sandbox is already running, returns it.
-func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (*types.Sandbox, error) {
+func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey string, checkpointStore *storage.CheckpointStore, timeout int) (sb *types.Sandbox, retErr error) {
 	// Prevent double wake — if sandbox is already running, return it
 	m.mu.RLock()
 	if existing, ok := m.vms[sandboxID]; ok {
@@ -2337,6 +2546,23 @@ func (m *Manager) Wake(ctx context.Context, sandboxID string, checkpointKey stri
 		return vmToSandbox(existing), nil
 	}
 	m.mu.RUnlock()
+
+	// Wake = resume hibernated sandbox from S3 — by definition the checkpoint
+	// archive lives in object storage. ForkFromCheckpoint in grpc_server.go
+	// observes the warm_cache path separately.
+	t0 := time.Now()
+	defer func() {
+		status := "success"
+		template := "unknown"
+		if sb != nil {
+			template = sb.Template
+		}
+		if retErr != nil {
+			status = "failure"
+		}
+		metrics.WakeDuration.WithLabelValues(m.cfg.Region, template, "s3", status).Observe(time.Since(t0).Seconds())
+	}()
+
 	return m.doWake(ctx, sandboxID, checkpointKey, checkpointStore, timeout)
 }
 
@@ -2385,8 +2611,32 @@ func (m *Manager) CheckpointCachePath(checkpointID, filename string) string {
 // than being silently logged — the control plane gets the reason and
 // persists it via SetCheckpointFailed (migration 039 added error_msg).
 func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (rootfsKey, workspaceKey string, sizeBytes int64, err error) {
+	tStart := time.Now()
+	// failureReason is updated at each error site below so the defer can attribute
+	// failures by cause. Stays "other" for any unclassified path (which is a
+	// signal to add an explicit classification when seen).
+	failureReason := "other"
+	template := "unknown"
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "failure"
+			metrics.CheckpointFailuresTotal.WithLabelValues(m.cfg.Region, template, failureReason).Inc()
+		}
+		metrics.CheckpointDuration.WithLabelValues(m.cfg.Region, template, status).Observe(time.Since(tStart).Seconds())
+	}()
+
 	vm, err := m.getVM(sandboxID)
 	if err != nil {
+		failureReason = "vm_not_found"
+		return "", "", 0, err
+	}
+	template = vm.Template
+
+	// Refuse if rootfs is critically full — same corruption risk as hibernate
+	// (dpkg/apt mid-rename + savevm = qcow2 EXT4 metadata broken on next mount).
+	if err := m.checkRootfsPressure(ctx, vm); err != nil {
+		failureReason = "disk_pressure"
 		return "", "", 0, err
 	}
 
@@ -2394,6 +2644,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// Without this, rapid-fire checkpoints queue up and the agent gets into a bad state
 	// from overlapping SIGUSR1/reconnect cycles.
 	if !vm.opMu.TryLock() {
+		failureReason = "op_in_progress"
 		return "", "", 0, fmt.Errorf("another operation is in progress on sandbox %s — try again shortly", sandboxID)
 	}
 	defer vm.opMu.Unlock()
@@ -2401,14 +2652,23 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	t0 := time.Now()
 
 	if vm.qmp == nil {
+		failureReason = "qmp_unavailable"
 		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	// Sync filesystem, quiesce virtio-serial, close host conn, and WAIT for
 	// the guest to process EOF before savevm. Critical for clean snapshot
 	// state — see quiesceAndCloseAgent for the protocol details.
+	//
+	// If quiesce fails (agent unresponsive), refuse the checkpoint: a savevm
+	// against an un-synced guest captures inconsistent qcow2 metadata that
+	// becomes unbootable on next cold-mount. See ErrAgentUnresponsive.
 	if vm.agent != nil {
-		quiesceAndCloseAgent(ctx, vm.agent)
+		if qErr := quiesceAndCloseAgent(ctx, vm.agent); qErr != nil {
+			log.Printf("qemu: CreateCheckpoint %s/%s: refusing savevm — %v", sandboxID, checkpointID, qErr)
+			failureReason = "agent_unresponsive"
+			return "", "", 0, fmt.Errorf("checkpoint %s: %w", sandboxID, qErr)
+		}
 		vm.agent = nil
 	}
 
@@ -2427,22 +2687,40 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	// (close agent + let SIGUSR1 reset the virtio-serial listener before
 	// savevm) is preserved above.
 	if vm.qmp == nil {
+		failureReason = "qmp_unavailable"
 		return "", "", 0, fmt.Errorf("QMP connection not available for %s", sandboxID)
 	}
 
 	cacheDir := m.checkpointCacheDir(checkpointID)
 	stagingDir := cacheDir + ".staging"
 	if mkErr := os.MkdirAll(filepath.Join(stagingDir, "snapshot"), 0755); mkErr != nil {
+		failureReason = "staging_setup"
 		return "", "", 0, fmt.Errorf("mkdir staging: %w", mkErr)
 	}
 
 	// savevm pauses the VM, writes memory+device+disk-delta into every qcow2
 	// drive as an internal snapshot, then resumes. The qcow2 files now carry
 	// the full VM state; no external memory file is needed.
+	//
+	// Explicit Stop() before savevm halts vCPUs to close the small race where
+	// in-flight virtio-blk writes can land in the qcow2 between the agent's
+	// `sync` (above) and the start of savevm. We Cont() unconditionally after
+	// savevm completes (success or failure) — the sandbox is supposed to keep
+	// running post-checkpoint, so we must not leave it in stopped state.
 	snapshotName := "cp-" + checkpointID
-	if err := vm.qmp.SaveVM(snapshotName); err != nil {
+	if stopErr := vm.qmp.Stop(); stopErr != nil {
 		os.RemoveAll(stagingDir)
-		return "", "", 0, fmt.Errorf("savevm: %w", err)
+		failureReason = "qmp_stop"
+		return "", "", 0, fmt.Errorf("qmp stop before savevm: %w", stopErr)
+	}
+	saveErr := vm.qmp.SaveVM(snapshotName)
+	if contErr := vm.qmp.Cont(); contErr != nil {
+		log.Printf("qemu: CreateCheckpoint %s/%s: failed to resume VM after savevm: %v", sandboxID, checkpointID, contErr)
+	}
+	if saveErr != nil {
+		os.RemoveAll(stagingDir)
+		failureReason = "qmp_savevm"
+		return "", "", 0, fmt.Errorf("savevm: %w", saveErr)
 	}
 	log.Printf("qemu: CreateCheckpoint %s/%s: savevm complete (%dms)", sandboxID, checkpointID, time.Since(t0).Milliseconds())
 
@@ -2454,10 +2732,12 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 	srcWorkspace := filepath.Join(vm.sandboxDir, "workspace.qcow2")
 	if err := copyFileReflink(srcRootfs, filepath.Join(stagingDir, "rootfs.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qcow2_copy"
 		return "", "", 0, fmt.Errorf("copy rootfs: %w", err)
 	}
 	if err := copyFileReflink(srcWorkspace, filepath.Join(stagingDir, "workspace.qcow2")); err != nil {
 		os.RemoveAll(stagingDir)
+		failureReason = "qcow2_copy"
 		return "", "", 0, fmt.Errorf("copy workspace: %w", err)
 	}
 	// Record the savevm snapshot name so ForkFromCheckpoint / RestoreFromCheckpoint
@@ -2567,6 +2847,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 			log.Printf("qemu: checkpoint %s: archive failed: %v", checkpointID, archErr)
 			// Surface as the function's error so the API can persist it via
 			// SetCheckpointFailed instead of silently logging.
+			failureReason = "archive"
 			return rootfsKey, workspaceKey, 0, fmt.Errorf("create checkpoint archive: %w", archErr)
 		}
 		// 15-min upload budget. Pre-fix this was 5 min, which combined with
@@ -2589,6 +2870,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sandboxID, checkpointID 
 		os.Remove(archivePath)
 		if uerr != nil {
 			log.Printf("qemu: checkpoint %s: S3 upload failed: %v", checkpointID, uerr)
+			failureReason = "s3_upload"
 			return rootfsKey, workspaceKey, sizeBytes, fmt.Errorf("upload checkpoint to S3: %w", uerr)
 		}
 		log.Printf("qemu: checkpoint %s: S3 upload complete (%dms, %.1f MB, files=%v)",
@@ -2815,8 +3097,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	// memory immediately on resume. Without this, restored processes that were using
 	// >baseMemMB would OOM before the post-resume re-scale completes.
 	if desiredMemMB > bootMemMB {
-		additionalMB := desiredMemMB - bootMemMB
-		additionalMB = ((additionalMB + 127) / 128) * 128 // align to 128MB block size
+		additionalMB := alignVirtioMemBlock(desiredMemMB - bootMemMB)
 		if err := qmpClient.SetVirtioMemSize(additionalMB); err != nil {
 			log.Printf("qemu: RestoreFromCheckpoint %s: pre-resume scale to %dMB failed: %v (continuing with base %dMB)",
 				sandboxID, desiredMemMB, err, bootMemMB)
@@ -2872,7 +3153,7 @@ func (m *Manager) RestoreFromCheckpoint(ctx context.Context, sandboxID, checkpoi
 	vm.CpuCount = bootCpus
 	vm.baseMemoryMB = bootMemMB
 	if desiredMemMB > bootMemMB {
-		additionalMB := ((desiredMemMB - bootMemMB + 127) / 128) * 128
+		additionalMB := alignVirtioMemBlock(desiredMemMB - bootMemMB)
 		vm.MemoryMB = bootMemMB + additionalMB
 		vm.virtioMemRequestedMB = additionalMB
 	} else {

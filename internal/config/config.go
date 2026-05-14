@@ -37,6 +37,18 @@ type Config struct {
 	WorkerID string // Unique worker ID (e.g., "w-iad-1")
 	HTTPAddr string // Public HTTP address for direct SDK access
 
+	// Platform observability identity (used by internal/obslog for log
+	// envelope so all logs in Axiom can be sliced by cell, host, and service
+	// ID). CellID is "<region>-<pool>"; default to "<region>-default" when
+	// unset. HostIP is auto-detected from the first non-loopback IPv4 at
+	// startup if OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
+	//
+	// These use the OPENCOMPUTER_* prefix (vs the rest of the file's
+	// OPENSANDBOX_*) intentionally — they're new fields scoped to the
+	// product-named observability envelope.
+	CellID string
+	HostIP string
+
 	// WorkOS
 	WorkOSAPIKey       string
 	WorkOSClientID     string
@@ -93,7 +105,8 @@ type Config struct {
 
 	// AWS EC2 compute pool (server mode only — for auto-scaling worker machines)
 	EC2AMI             string // Custom AMI for worker instances
-	EC2InstanceType    string // e.g. "c7gd.metal", "r6gd.metal", "r7gd.metal"
+	EC2InstanceType    string // single fallback type; used only when EC2InstanceTypes is empty
+	EC2InstanceTypes   []string // ranked list of instance types tried in order on quota/capacity errors
 	EC2SubnetID        string // VPC subnet for worker instances
 	EC2SecurityGroupID string // Security group (allow 8080, 9090, 9091)
 	EC2KeyName             string // SSH key pair name (for debugging)
@@ -104,7 +117,8 @@ type Config struct {
 	// Azure compute pool (server mode — for auto-scaling worker VMs)
 	AzureSubscriptionID string // Azure subscription ID
 	AzureResourceGroup  string // Resource group for worker VMs
-	AzureVMSize         string // e.g. "Standard_D16s_v5"
+	AzureVMSize         string // single fallback size; used only when AzureVMSizes is empty
+	AzureVMSizes        []string // ranked list of VM sizes tried in order on quota/capacity errors
 	AzureImageID        string // Custom image ID or URN
 	AzureSubnetID       string // Full resource ID of the VNet subnet
 	AzureSSHPublicKey   string // SSH public key for worker VMs
@@ -223,6 +237,9 @@ func Load() (*Config, error) {
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
 
+		CellID: os.Getenv("OPENCOMPUTER_CELL_ID"),
+		HostIP: os.Getenv("OPENCOMPUTER_HOST_IP"),
+
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
 		WorkOSClientID:     os.Getenv("WORKOS_CLIENT_ID"),
 		WorkOSRedirectURI:  envOrDefault("WORKOS_REDIRECT_URI", "http://localhost:8080/auth/callback"),
@@ -261,6 +278,7 @@ func Load() (*Config, error) {
 
 		EC2AMI:             os.Getenv("OPENSANDBOX_EC2_AMI"),
 		EC2InstanceType:    envOrDefault("OPENSANDBOX_EC2_INSTANCE_TYPE", "c7gd.metal"),
+		EC2InstanceTypes:   splitCSV(os.Getenv("OPENSANDBOX_EC2_INSTANCE_TYPES")),
 		EC2SubnetID:        os.Getenv("OPENSANDBOX_EC2_SUBNET_ID"),
 		EC2SecurityGroupID: os.Getenv("OPENSANDBOX_EC2_SECURITY_GROUP_ID"),
 		EC2KeyName:         os.Getenv("OPENSANDBOX_EC2_KEY_NAME"),
@@ -271,6 +289,7 @@ func Load() (*Config, error) {
 		AzureSubscriptionID: os.Getenv("OPENSANDBOX_AZURE_SUBSCRIPTION_ID"),
 		AzureResourceGroup:  os.Getenv("OPENSANDBOX_AZURE_RESOURCE_GROUP"),
 		AzureVMSize:         envOrDefault("OPENSANDBOX_AZURE_VM_SIZE", "Standard_D16s_v5"),
+		AzureVMSizes:        splitCSV(os.Getenv("OPENSANDBOX_AZURE_VM_SIZES")),
 		AzureImageID:        os.Getenv("OPENSANDBOX_AZURE_IMAGE_ID"),
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
@@ -333,6 +352,13 @@ func Load() (*Config, error) {
 		cfg.S3Region = cfg.Region
 	}
 
+	// Default cell ID to "<region>-default" so logs always have a cell tag.
+	// Fleet can split a region into multiple cells later by setting the env
+	// var explicitly at provisioning time.
+	if cfg.CellID == "" {
+		cfg.CellID = cfg.Region + "-default"
+	}
+
 	if portStr := os.Getenv("OPENSANDBOX_PORT"); portStr != "" {
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
@@ -349,6 +375,27 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitCSV parses a comma-separated value into a non-empty trimmed slice.
+// Empty input or all-whitespace entries return nil so callers can use len() == 0
+// to detect "not configured." Leaves the order intact since rank matters
+// for the autoscaler's machine-size fallback list.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func envOrDefaultInt(key string, fallback int) int {

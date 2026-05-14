@@ -19,12 +19,44 @@ import (
 )
 
 // allowedSources is the closed set of source values a client may filter
-// on. Anything else gets a 400 — never fed into the APL string.
+// on. Anything else gets a 400 — never fed into the query.
 var allowedSources = map[string]struct{}{
 	"var_log":     {},
 	"exec_stdout": {},
 	"exec_stderr": {},
 	"agent":       {},
+}
+
+// WARNING: Axiom's /v1/datasets/<dataset>/query endpoint silently
+// ignores body it doesn't recognize — including AND-wrapped filter
+// trees. Empirically, `{"filter":{"op":"and","filters":[{...}]}}`
+// returns the unfiltered dataset (full leak); only a FLAT predicate
+// `{"filter":{"op":"==","field":"sandbox_id","value":"..."}}` actually
+// narrows. So toFilter() returns a single flat predicate on sandbox_id;
+// secondary filters (text search, source list) are applied client-side
+// in applyClientFilters after the query returns.
+//
+// The Filters slice is kept on the type for potential future
+// composition (e.g. if Axiom adds support, or if we move to /v1/datasets/_apl)
+// but is unset in the current shape.
+type queryFilter struct {
+	Op      string        `json:"op"`
+	Field   string        `json:"field,omitempty"`
+	Value   any           `json:"value,omitempty"`
+	Filters []queryFilter `json:"filters,omitempty"`
+}
+
+type queryOrderField struct {
+	Field string `json:"field"`
+	Desc  bool   `json:"desc,omitempty"`
+}
+
+type queryRequest struct {
+	StartTime string            `json:"startTime"`
+	EndTime   string            `json:"endTime"`
+	Filter    queryFilter       `json:"filter"`
+	Limit     int               `json:"limit,omitempty"`
+	Order     []queryOrderField `json:"order,omitempty"`
 }
 
 // getSandboxLogs streams sandbox session logs as Server-Sent Events.
@@ -95,6 +127,11 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
+	// Non-running sandboxes (stopped / error / hibernated): no new events
+	// will arrive post-stop, so tail mode is wasted polling. Cap the window
+	// at stoppedAt+grace too — the shipper finishes flushing within a few
+	// seconds of process exit; 30s covers ingest latency comfortably.
+	q = applySessionState(q, session.Status, session.StoppedAt)
 
 	// SSE headers + immediate flush so the browser knows the stream is open.
 	c.Response().Header().Set("Content-Type", "text/event-stream")
@@ -106,12 +143,13 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 
 	// Initial historical batch.
 	histStart, histEnd := q.timeWindow(false)
-	rows, err := s.queryAxiom(ctx, q.toAPL(s.axiomDataset, false), histStart, histEnd)
+	rows, err := s.queryAxiom(ctx, q.toRequest(histStart, histEnd, false))
 	if err != nil {
 		log.Printf("api: sandbox %s logs: initial query failed: %v", sandboxID, err)
 		writeSSEComment(c.Response(), "initial query failed")
 		return nil
 	}
+	rows = applyClientFilters(rows, q)
 	for _, ev := range rows {
 		writeSSEEvent(c.Response(), ev)
 	}
@@ -119,6 +157,26 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 
 	if !q.tail {
 		return nil
+	}
+
+	// If the sandbox is not running, no new events will arrive — skip
+	// the Axiom poll loop entirely. But keep the SSE connection open
+	// with keepalive comments so the browser EventSource doesn't
+	// interpret a server-side close as a disconnect and auto-reconnect
+	// (which would re-fetch the historical batch and visibly duplicate
+	// events: see the 3× duplication report after #243).
+	if session.Status != "running" {
+		keepalive := time.NewTicker(15 * time.Second)
+		defer keepalive.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-keepalive.C:
+				writeSSEComment(c.Response(), "keepalive")
+				c.Response().Flush()
+			}
+		}
 	}
 
 	// Live tail. Cursor starts at the last historical event's _time.
@@ -155,7 +213,7 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 			tailQ.since = cursor
 			tailQ.until = time.Time{} // open-ended
 			tailStart, tailEnd := tailQ.timeWindow(true)
-			newRows, err := s.queryAxiom(ctx, tailQ.toAPL(s.axiomDataset, true), tailStart, tailEnd)
+			newRows, err := s.queryAxiom(ctx, tailQ.toRequest(tailStart, tailEnd, true))
 			if err != nil {
 				// Don't kill the stream on a single failed poll — log
 				// and try again next tick. Persistent failures will
@@ -163,6 +221,7 @@ func (s *Server) getSandboxLogs(c echo.Context) error {
 				log.Printf("api: sandbox %s logs: tail poll failed: %v", sandboxID, err)
 				continue
 			}
+			newRows = applyClientFilters(newRows, tailQ)
 			for _, ev := range newRows {
 				if !ev.Time.After(cursor) {
 					continue
@@ -190,6 +249,33 @@ type logQuery struct {
 	sources   []string // already-validated against allowedSources
 	limit     int
 	tail      bool
+}
+
+// applySessionState narrows a parsed query based on the sandbox's
+// lifecycle. For stopped/error/hibernated sandboxes:
+//   - until is capped at stoppedAt + 30s grace (the in-VM shipper
+//     finishes flushing within a few seconds of process exit; 30s
+//     covers ingest latency comfortably)
+//
+// q.tail is preserved — it reflects the client's explicit intent
+// (URL ?tail=false / CLI --no-tail). The handler reads session.Status
+// separately to decide whether to actually poll Axiom; for non-running
+// sandboxes it holds the SSE connection open with keepalives instead
+// of closing, so the browser EventSource doesn't auto-reconnect and
+// re-fetch the historical batch (which visibly duplicated events).
+//
+// Pure function (no DB dep) so the lifecycle behaviour is unit-testable.
+func applySessionState(q logQuery, status string, stoppedAt *time.Time) logQuery {
+	if status == "running" {
+		return q
+	}
+	if stoppedAt != nil {
+		bound := stoppedAt.Add(30 * time.Second)
+		if q.until.IsZero() || q.until.After(bound) {
+			q.until = bound
+		}
+	}
+	return q
 }
 
 func parseLogQuery(sandboxID string, sandboxStarted time.Time, qs url.Values) (logQuery, error) {
@@ -236,15 +322,13 @@ func parseLogQuery(sandboxID string, sandboxStarted time.Time, qs url.Values) (l
 	}
 
 	if v := qs.Get("q"); v != "" {
-		// Disallow newlines + control chars; double-escape quotes.
-		// APL string literals are double-quoted; embedded `"` is
-		// escaped as `\"`. The set we strip here is the surface that
-		// could break out of a string literal; everything else passes
-		// through unchanged so search behaviour matches user intent.
+		// Defense in depth: reject control chars; Axiom's `contains`
+		// operator takes the value as a JSON string so quote escaping
+		// isn't needed.
 		if strings.ContainsAny(v, "\r\n\x00") {
 			return q, fmt.Errorf("q must not contain control characters")
 		}
-		q.text = strings.ReplaceAll(v, `"`, `\"`)
+		q.text = v
 	}
 
 	if v := qs.Get("source"); v != "" {
@@ -278,38 +362,63 @@ func (q logQuery) timeWindow(tail bool) (time.Time, time.Time) {
 	return q.since, end
 }
 
-// toAPL renders the query into a KQL/APL string. The sandbox_id filter
-// is the FIRST predicate after the dataset and is unconditionally
-// applied — there is no path that omits it. Every interpolated string
-// is either: a server-derived constant (sandboxID, dataset name), a
-// validated value from allowedSources, or pre-escaped (text search).
+// toFilter returns a FLAT `sandbox_id == q.sandboxID` predicate. Do not
+// wrap it in {op:"and", filters:[...]} — Axiom's per-dataset /query
+// endpoint silently drops AND-wrapped filters and returns the full
+// dataset (cross-tenant leak). The regression test in
+// sandbox_logs_test.go pins the flat shape.
 //
-// `tail` selects an open-ended (no until) variant.
-func (q logQuery) toAPL(dataset string, tail bool) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "['%s']\n", dataset)
-	fmt.Fprintf(&b, "  | where sandbox_id == \"%s\"\n", q.sandboxID)
-	if !q.since.IsZero() {
-		fmt.Fprintf(&b, "  | where _time >= datetime(\"%s\")\n", q.since.UTC().Format(time.RFC3339Nano))
+// Secondary predicates (text search via `q`, source list via `source`)
+// are applied client-side in applyClientFilters after the query
+// returns — Axiom doesn't compose them in the per-dataset filter shape.
+func (q logQuery) toFilter() queryFilter {
+	return queryFilter{Op: "==", Field: "sandbox_id", Value: q.sandboxID}
+}
+
+// applyClientFilters narrows a row set by predicates Axiom did not apply
+// server-side (text contains, source list). The sandbox_id predicate is
+// always applied by Axiom via toFilter; this function is purely UX —
+// it must NOT be relied on for tenant isolation.
+func applyClientFilters(rows []logEvent, q logQuery) []logEvent {
+	if q.text == "" && len(q.sources) == 0 {
+		return rows
 	}
-	if !tail && !q.until.IsZero() {
-		fmt.Fprintf(&b, "  | where _time <= datetime(\"%s\")\n", q.until.UTC().Format(time.RFC3339Nano))
-	}
-	if q.text != "" {
-		fmt.Fprintf(&b, "  | where line contains \"%s\"\n", q.text)
-	}
+	var sourceSet map[string]struct{}
 	if len(q.sources) > 0 {
-		quoted := make([]string, len(q.sources))
-		for i, s := range q.sources {
-			quoted[i] = fmt.Sprintf("\"%s\"", s)
+		sourceSet = make(map[string]struct{}, len(q.sources))
+		for _, s := range q.sources {
+			sourceSet[s] = struct{}{}
 		}
-		fmt.Fprintf(&b, "  | where source in (%s)\n", strings.Join(quoted, ", "))
 	}
-	fmt.Fprintf(&b, "  | sort by _time asc\n")
+	out := rows[:0]
+	for _, ev := range rows {
+		if q.text != "" && !strings.Contains(ev.Line, q.text) {
+			continue
+		}
+		if sourceSet != nil {
+			if _, ok := sourceSet[ev.Source]; !ok {
+				continue
+			}
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// toRequest: time range goes in startTime/endTime (server-side bound);
+// only the structural predicate goes in `filter`. Tail variant omits
+// Limit so every poll surfaces every new row since the cursor.
+func (q logQuery) toRequest(startTime, endTime time.Time, tail bool) queryRequest {
+	req := queryRequest{
+		StartTime: startTime.UTC().Format(time.RFC3339Nano),
+		EndTime:   endTime.UTC().Format(time.RFC3339Nano),
+		Filter:    q.toFilter(),
+		Order:     []queryOrderField{{Field: "_time"}},
+	}
 	if !tail {
-		fmt.Fprintf(&b, "  | limit %d\n", q.limit)
+		req.Limit = q.limit
 	}
-	return b.String()
+	return req
 }
 
 // logEvent is the on-the-wire shape we re-emit to SSE clients. Mirrors
@@ -327,27 +436,13 @@ type logEvent struct {
 	ExitCode  *int      `json:"exit_code,omitempty"`
 }
 
-// queryAxiom POSTs an APL query and parses the response.
+// queryAxiom POSTs a filter-style query and parses the response.
 //
-// Axiom's APL endpoint is /v1/datasets/_apl/query (with format=tabular
-// off, default), and the response shape is:
+// Endpoint: /v1/datasets/<dataset>/query. Response shape:
 //
-//	{
-//	  "matches": [{"data": {<event fields>}}, ...]
-//	}
-//
-// We don't need format=tabular; the default object form is what we want.
-func (s *Server) queryAxiom(ctx context.Context, apl string, startTime, endTime time.Time) ([]logEvent, error) {
-	body, _ := json.Marshal(map[string]any{
-		"apl":       apl,
-		"startTime": startTime.UTC().Format(time.RFC3339Nano),
-		"endTime":   endTime.UTC().Format(time.RFC3339Nano),
-	})
-	// Axiom's APL endpoint. /_apl/query takes the APL string verbatim
-	// (the dataset name is encoded inside the APL itself, e.g.
-	// `['oc-sandbox-logs'] | ...`). Tried the per-dataset
-	// /v1/datasets/<dataset>/query path first but that returned 404
-	// for APL-shaped bodies.
+//	{ "matches": [ { "_time": "...", "data": {<event fields>} }, ... ] }
+func (s *Server) queryAxiom(ctx context.Context, qreq queryRequest) ([]logEvent, error) {
+	body, _ := json.Marshal(qreq)
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		fmt.Sprintf("https://api.axiom.co/v1/datasets/%s/query", url.PathEscape(s.axiomDataset)),
 		bytes.NewReader(body))

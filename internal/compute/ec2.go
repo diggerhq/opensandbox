@@ -3,6 +3,7 @@ package compute
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -15,6 +16,39 @@ import (
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 )
+
+// ec2QuotaCodes are the AWS EC2 error codes that indicate a vCPU quota,
+// per-account instance limit, or AZ-level capacity exhaustion. All of these
+// are recoverable by retrying with a different instance type, so the
+// autoscaler treats them as the ErrQuotaExceeded class.
+var ec2QuotaCodes = []string{
+	"VcpuLimitExceeded",
+	"InstanceLimitExceeded",
+	"InsufficientInstanceCapacity",
+	"MaxSpotInstanceCountExceeded",
+	"Unsupported", // returned when a region/AZ doesn't offer the requested type
+}
+
+func isEC2QuotaErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, code := range ec2QuotaCodes {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func wrapEC2CreateErr(err error, format string, args ...any) error {
+	wrapped := fmt.Errorf(format, args...)
+	if isEC2QuotaErr(err) {
+		return errors.Join(ErrQuotaExceeded, wrapped)
+	}
+	return wrapped
+}
 
 const (
 	tagRole         = "opensandbox:role"
@@ -129,7 +163,7 @@ func (p *EC2Pool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machine
 
 	result, err := p.client.RunInstances(ctx, input)
 	if err != nil {
-		return nil, fmt.Errorf("ec2: RunInstances failed: %w", err)
+		return nil, wrapEC2CreateErr(err, "ec2: RunInstances failed: %w", err)
 	}
 
 	if len(result.Instances) == 0 {

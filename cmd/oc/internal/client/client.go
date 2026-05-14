@@ -170,6 +170,17 @@ func (c *Client) Post(ctx context.Context, path string, body, result interface{}
 	return nil
 }
 
+// GetStream performs a GET request and returns the raw response so the
+// caller can stream chunks (e.g. SSE log feeds). Caller closes resp.Body.
+func (c *Client) GetStream(ctx context.Context, path string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	return c.do(req)
+}
+
 // PostStream performs a POST request and returns the raw response so the
 // caller can stream chunks (e.g. SSE / chat-completions). Caller is
 // responsible for closing resp.Body.

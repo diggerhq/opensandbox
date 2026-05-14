@@ -21,6 +21,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
@@ -83,7 +84,15 @@ type GRPCServer struct {
 	// (kill-switch). Set via SetAxiomConfig at startup.
 	axiomIngestToken string
 	axiomDataset     string
+
+	// region is the worker's region label, used to tag operation metrics.
+	// Set via SetRegion at startup. Empty = "unknown".
+	region string
 }
+
+// SetRegion stamps the worker's region onto operation metrics emitted from
+// this gRPC server (e.g. WakeDuration for warm-fork vs s3 paths).
+func (s *GRPCServer) SetRegion(region string) { s.region = region }
 
 // SetAxiomConfig wires Axiom log-shipping credentials. The worker
 // passes them down to each sandbox's agent on create via the
@@ -215,8 +224,17 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 	// Warm fork: if checkpoint_id is set, fork from the local checkpoint cache.
 	// ForkFromCheckpoint uses the local cache directly — no S3 needed.
 	if req.CheckpointId != "" {
+		// WakeDuration covers "create from checkpoint" end-to-end. source label
+		// distinguishes a local-cache hit (fast, ~hundreds of ms) from a path
+		// that had to pull the archive from S3 (slow, seconds to minutes).
+		tWake := time.Now()
+		observeWake := func(source, status string) {
+			metrics.WakeDuration.WithLabelValues(s.region, cfg.Template, source, status).Observe(time.Since(tWake).Seconds())
+		}
+
 		sb, err := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 		if err == nil {
+			observeWake("warm_cache", "success")
 			if s.router != nil {
 				// timeout == 0 means "persistent" (no auto-hibernate).
 				timeout := cfg.Timeout
@@ -239,7 +257,9 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		notInCache := strings.Contains(err.Error(), "not found in cache")
 		if !notInCache {
 			// Some other error (rebase failure, agent reconnect, etc.).
-			// Don't try to mask it — return the real reason.
+			// Don't try to mask it — return the real reason. Attribute as
+			// warm_cache failure since we never got to the S3 path.
+			observeWake("warm_cache", "failure")
 			return nil, fmt.Errorf("fork from checkpoint %s: %w", req.CheckpointId, err)
 		}
 		if req.TemplateRootfsKey == "" || s.checkpointStore == nil {
@@ -251,16 +271,20 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 			// symptom Oliviero hit on a checkpoint whose DB row had
 			// empty rootfs_s3_key. Fail loud instead so the customer (and
 			// us) sees an actionable error rather than a corrupt sandbox.
+			observeWake("s3", "failure")
 			return nil, fmt.Errorf("fork from checkpoint %s: not in local cache and no S3 key to recover from (DB row may be missing rootfs_s3_key)", req.CheckpointId)
 		}
 		log.Printf("grpc: warm fork %s: not in local cache, downloading from S3", req.CheckpointId)
 		if dlErr := s.downloadFullCheckpoint(ctx, req.CheckpointId, req.TemplateRootfsKey); dlErr != nil {
+			observeWake("s3", "failure")
 			return nil, fmt.Errorf("fork from checkpoint %s: cache miss + S3 download failed: %w", req.CheckpointId, dlErr)
 		}
 		sb, retryErr := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 		if retryErr != nil {
+			observeWake("s3", "failure")
 			return nil, fmt.Errorf("fork from checkpoint %s: retry after S3 download failed: %w", req.CheckpointId, retryErr)
 		}
+		observeWake("s3", "success")
 		if s.router != nil {
 			timeout := cfg.Timeout
 			if timeout < 0 {

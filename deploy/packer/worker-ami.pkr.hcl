@@ -358,6 +358,36 @@ build {
     ]
   }
 
+  # 4.5. Install Vector + the KV-token-populator for platform-logs shipping.
+  #
+  # Vector is enabled but NOT started (Packer captures the image before
+  # systemd has run). At first boot:
+  #   1. cloud-init writes /etc/opensandbox/worker.env
+  #   2. populate-vector-env.service fires (Before=vector.service), reads
+  #      SECRETS_VAULT_NAME from worker.env, fetches AXIOM_PLATFORM_TOKEN
+  #      from KV via the VM's managed identity, writes /etc/opensandbox/vector.env
+  #   3. vector.service starts, reads both env files, ships to oc-platform-logs
+  #
+  # PACKER_BUILD=1 tells install.sh to skip `systemctl start` — systemd in a
+  # baking image is offline.
+  #
+  # CI is expected to pre-tar deploy/vector/ at /tmp/packer-vector-ctx.tar.gz
+  # (see .github/workflows/build-worker-ami.yml).
+  provisioner "file" {
+    source      = "/tmp/packer-vector-ctx.tar.gz"
+    destination = "/tmp/vector-ctx.tar.gz"
+  }
+  provisioner "shell" {
+    execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
+    environment_vars = ["PACKER_BUILD=1"]
+    inline = [
+      "mkdir -p /tmp/vector-ctx",
+      "tar xzf /tmp/vector-ctx.tar.gz -C /tmp/vector-ctx",
+      "cd /tmp/vector-ctx/vector && PACKER_BUILD=1 bash install.sh worker",
+      "rm -rf /tmp/vector-ctx /tmp/vector-ctx.tar.gz",
+    ]
+  }
+
   # 4b. Archive base image to blob storage keyed by goldenVersion so that old
   #     checkpoints referencing this base can be rebased even after workers roll.
   provisioner "shell" {

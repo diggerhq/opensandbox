@@ -44,6 +44,12 @@ var secretMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
+	// Machine-size fallback lists (PR #209). Comma-separated ranked
+	// instance types the autoscaler tries in order on quota / capacity
+	// errors. Empty value = use the single VMSize / InstanceType
+	// configured on the pool (pre-fallback behavior).
+	"server-azure-vm-sizes":         "OPENSANDBOX_AZURE_VM_SIZES",
+	"server-ec2-instance-types":     "OPENSANDBOX_EC2_INSTANCE_TYPES",
 	// Legacy Axiom mappings — kept for backwards compat with existing prod
 	// KVs that pre-date the `shared-` prefix. New deploys should use
 	// `shared-axiom-*` instead. Safe to leave: in server mode only
@@ -67,6 +73,18 @@ var secretMapping = map[string]string{
 	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
 	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
 	"shared-axiom-dataset":      "AXIOM_DATASET",
+	// Platform-logs (this PR): Vector reads these from
+	// /etc/opensandbox/vector.env, populated by populate-vector-env.service
+	// via its own IMDS+KV REST call (not by this Go-side loader, because
+	// Vector starts as its own systemd unit before the Go binary). The
+	// entries here exist for two reasons:
+	//   1. Discoverability — secretMapping is the single source of truth
+	//      for "what shared-* secrets does this deployment need in KV".
+	//   2. Side-effect: the Go binary ALSO loads them into its own env at
+	//      startup; future Go code that wants to surface platform-stream
+	//      config (e.g. an admin endpoint) gets them for free.
+	"shared-axiom-platform-ingest-token": "AXIOM_PLATFORM_TOKEN",
+	"shared-axiom-platform-dataset":      "AXIOM_PLATFORM_DATASET",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,8 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/metrics"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -41,6 +44,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Structured logging (JSON to stdout, host envelope baked in). Installs
+	// itself as slog.Default AND redirects stdlib log.Printf through slog so
+	// existing log call sites emit JSON automatically. Vector reads stdout
+	// from the Docker logging driver and ships to Axiom.
+	cpHostname, _ := os.Hostname()
+	obslog.Init(obslog.HostFields{
+		Service:   obslog.ServiceControlPlane,
+		ServiceID: cpHostname, // hostname distinguishes HA replicas
+		CellID:    cfg.CellID,
+		Region:    cfg.Region,
+		Hostname:  cpHostname,
+		HostIP:    cfg.HostIP,
+		Version:   ServerVersion,
+	}, slog.LevelInfo)
 
 	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
 	flushSentry := observability.Init(cfg, "control-plane", ServerVersion)
@@ -325,17 +343,31 @@ func main() {
 		}
 
 		if pool != nil {
+			// Pick the per-provider ranked size list. Empty → scaler defers to
+			// the pool's single configured default (cfg.AzureVMSize / cfg.EC2InstanceType).
+			var machineSizes []string
+			switch {
+			case len(cfg.AzureVMSizes) > 0 && cfg.AzureSubscriptionID != "":
+				machineSizes = cfg.AzureVMSizes
+			case len(cfg.EC2InstanceTypes) > 0 && (cfg.EC2AMI != "" || cfg.EC2SSMParameterName != ""):
+				machineSizes = cfg.EC2InstanceTypes
+			}
+			if len(machineSizes) > 0 {
+				log.Printf("opensandbox: scaler size fallback ranked: %v", machineSizes)
+			}
+
 			scalerState := controlplane.NewRedisScalerState(redisRegistry.RedisClient())
 			scaler := controlplane.NewScaler(controlplane.ScalerConfig{
-				Pool:        pool,
-				Registry:    redisRegistry,
-				Store:       opts.Store,
-				StateStore:  scalerState,
-				WorkerImage: cfg.EC2WorkerImage,
-				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
-				MinWorkers:  cfg.MinWorkersPerRegion,
-				MaxWorkers:  cfg.MaxWorkersPerRegion,
-				IdleReserve: cfg.IdleReserveWorkers,
+				Pool:         pool,
+				Registry:     redisRegistry,
+				Store:        opts.Store,
+				StateStore:   scalerState,
+				WorkerImage:  cfg.EC2WorkerImage,
+				Cooldown:     time.Duration(cfg.ScaleCooldownSec) * time.Second,
+				MinWorkers:   cfg.MinWorkersPerRegion,
+				MaxWorkers:   cfg.MaxWorkersPerRegion,
+				IdleReserve:  cfg.IdleReserveWorkers,
+				MachineSizes: machineSizes,
 			})
 			defer scaler.Stop()
 
@@ -538,6 +570,13 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("opensandbox: starting server on %s (mode=%s)", addr, cfg.Mode)
+
+	// Prometheus /metrics endpoint on a separate port. Different from the
+	// worker's :9091 so a dev-host (worker+server on one VM) doesn't collide.
+	// Vector scrapes this and ships to Axiom alongside platform logs.
+	metricsSrv := metrics.StartMetricsServer(":9092")
+	defer metricsSrv.Close()
+	log.Println("opensandbox: metrics server started on :9092")
 
 	go func() {
 		if err := server.Start(addr); err != nil {

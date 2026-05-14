@@ -16,6 +16,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
@@ -40,11 +41,13 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 		registry:  registry,
 	}
 
-	// Global middleware
+	// Global middleware. RequestID() comes first so the X-Request-Id header
+	// is present when obslog.EchoMiddleware tags the request context — that
+	// way every log line emitted inside the handler carries the same id.
 	e.Use(middleware.Recover())
-	e.Use(middleware.Logger())
-	e.Use(middleware.CORS())
 	e.Use(middleware.RequestID())
+	e.Use(obslog.EchoMiddleware())
+	e.Use(middleware.CORS())
 
 	// Health check
 	e.GET("/health", func(c echo.Context) error {

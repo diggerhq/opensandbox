@@ -1,0 +1,108 @@
+# Vector config for the control-plane host (Azure prod: systemd binary,
+# not Docker). Reads opensandbox-server.service from journald, scrapes the
+# control plane's Prometheus /metrics on :9092, enriches both streams with
+# the host envelope, and ships to oc-platform-logs.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (populated by
+#              populate-vector-env.service from Key Vault at boot)
+
+data_dir: /var/lib/vector
+
+sources:
+  control_plane_journald:
+    type: journald
+    include_units:
+      - opensandbox-server.service
+    # Default current_boot_only=true is fine — Vector tracks its own cursor
+    # in data_dir, so restarts resume cleanly without replaying the journal.
+
+  # Scrape the control plane's own /metrics on :9092. Different port from the
+  # worker's :9091 so a dev host running both binaries doesn't collide. The
+  # control-plane binary serves Prometheus via metrics.StartMetricsServer
+  # (cmd/server/main.go).
+  control_plane_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - http://127.0.0.1:9092/metrics
+    scrape_interval_secs: 30
+
+transforms:
+  control_plane_parse:
+    type: remap
+    inputs:
+      - control_plane_journald
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # Drop stringified duplicate; non-JSON lines (panics, systemd boot)
+        # keep .message as the readable content.
+        del(.message)
+      }
+      if !exists(.service) { .service = "control-plane" }
+      if !exists(.service_id) { .service_id, _ = get_hostname() }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+
+  # Convert metric events to log shape (metric_to_log is a transform type;
+  # VRL has no `to_log` function in Vector 0.55+).
+  control_plane_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - control_plane_metrics
+
+  # Envelope: same fields as logs so cross-event-type joins work in Axiom
+  # (event_type="metric" filter, then group by region/cell_id/...).
+  # metric_name carries the Prom name; namespaced to dodge a clash with any
+  # log payload that happens to contain a literal `name` field.
+  control_plane_metrics_envelope:
+    type: remap
+    inputs:
+      - control_plane_metrics_to_log
+    source: |
+      .event_type = "metric"
+      if exists(.name) {
+        .metric_name = .name
+        del(.name)
+      }
+      .service = "control-plane"
+      .service_id, _ = get_hostname()
+      .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}"
+      .region = "${OPENSANDBOX_REGION:-unknown}"
+      .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}"
+      .hostname, _ = get_hostname()
+
+sinks:
+  # Logs sink: ships journald (parsed + enveloped) to the platform-logs dataset.
+  axiom_platform:
+    type: axiom
+    inputs:
+      - control_plane_parse
+    dataset: "${AXIOM_PLATFORM_DATASET}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true
+
+  # Metrics sink: separate dataset + token. See worker.yaml for the rationale
+  # (histogram-bucket volume, independent retention/budget, independent
+  # rollout). Soft-fails on missing creds — buffers to disk and doesn't take
+  # the logs sink down.
+  axiom_metrics:
+    type: axiom
+    inputs:
+      - control_plane_metrics_envelope
+    dataset: "${AXIOM_PLATFORM_METRICS_DATASET}"
+    token: "${AXIOM_PLATFORM_METRICS_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

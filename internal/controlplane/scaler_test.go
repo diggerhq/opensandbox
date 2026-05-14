@@ -2,8 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +133,15 @@ type mockPool struct {
 	machines  map[string]string // machineID -> region
 	created   int32
 	destroyed int32
+
+	// Test hooks for createMachineWithFallback. createErrs is consumed left to
+	// right: each CreateMachine call pops one entry; if non-nil it's returned
+	// as the error, otherwise the call falls through to the success path.
+	// Once empty the pool always succeeds (preserves prior test behaviour).
+	// attemptedSizes captures opts.Size on every call so tests can assert the
+	// fallback list was walked in order.
+	createErrs     []error
+	attemptedSizes []string
 }
 
 func newMockPool() *mockPool {
@@ -138,8 +149,17 @@ func newMockPool() *mockPool {
 }
 
 func (p *mockPool) CreateMachine(_ context.Context, opts compute.MachineOpts) (*compute.Machine, error) {
-	id := fmt.Sprintf("osb-worker-%d", atomic.AddInt32(&p.created, 1))
 	p.mu.Lock()
+	p.attemptedSizes = append(p.attemptedSizes, opts.Size)
+	if len(p.createErrs) > 0 {
+		err := p.createErrs[0]
+		p.createErrs = p.createErrs[1:]
+		if err != nil {
+			p.mu.Unlock()
+			return nil, err
+		}
+	}
+	id := fmt.Sprintf("osb-worker-%d", atomic.AddInt32(&p.created, 1))
 	p.machines[id] = opts.Region
 	p.mu.Unlock()
 	return &compute.Machine{ID: id, Addr: "10.0.0.1", Region: opts.Region}, nil
@@ -1427,6 +1447,140 @@ func TestPendingLaunchRegistered(t *testing.T) {
 
 	if len(s.state.GetPendingLaunches("us-east-1")) != 0 {
 		t.Error("expected registered pending launch to be cleared")
+	}
+}
+
+// ============================================================
+// Test: Machine-size fallback on quota / capacity errors
+// ============================================================
+
+func TestCreateMachineWithFallback_SkipsQuotaErrors(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	// First two sizes hit quota, third size succeeds.
+	pool.createErrs = []error{
+		errors.Join(compute.ErrQuotaExceeded, errors.New("Standard_D16ads_v7: QuotaExceeded")),
+		errors.Join(compute.ErrQuotaExceeded, errors.New("Standard_D16ds_v6: ZonalAllocationFailed")),
+		nil, // Standard_D16s_v5 — succeeds
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"},
+	})
+
+	machine, used, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatalf("expected success after fallback, got error: %v", err)
+	}
+	if machine == nil {
+		t.Fatal("expected machine to be returned")
+	}
+	if used != "Standard_D16s_v5" {
+		t.Errorf("expected last size to win, got %q", used)
+	}
+
+	wantSizes := []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"}
+	if !reflect.DeepEqual(pool.attemptedSizes, wantSizes) {
+		t.Errorf("expected sizes attempted in order %v, got %v", wantSizes, pool.attemptedSizes)
+	}
+}
+
+func TestCreateMachineWithFallback_NonQuotaShortCircuits(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	// First size fails with a non-quota error — must not iterate further.
+	pool.createErrs = []error{
+		errors.New("network timeout"),
+		nil,
+		nil,
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"},
+	})
+
+	_, _, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err == nil {
+		t.Fatal("expected error from non-quota failure")
+	}
+	if errors.Is(err, compute.ErrQuotaExceeded) {
+		t.Errorf("non-quota error must not be tagged ErrQuotaExceeded: %v", err)
+	}
+	if len(pool.attemptedSizes) != 1 {
+		t.Errorf("expected exactly one attempt on non-quota error, got %d (%v)",
+			len(pool.attemptedSizes), pool.attemptedSizes)
+	}
+}
+
+func TestCreateMachineWithFallback_AllSizesQuota(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	pool.createErrs = []error{
+		errors.Join(compute.ErrQuotaExceeded, errors.New("a: QuotaExceeded")),
+		errors.Join(compute.ErrQuotaExceeded, errors.New("b: SkuNotAvailable")),
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"a", "b"},
+	})
+
+	_, _, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err == nil {
+		t.Fatal("expected error when all sizes fail")
+	}
+	if !errors.Is(err, compute.ErrQuotaExceeded) {
+		t.Errorf("expected wrapped ErrQuotaExceeded after exhausting all sizes, got %v", err)
+	}
+	if len(pool.attemptedSizes) != 2 {
+		t.Errorf("expected both sizes attempted, got %d", len(pool.attemptedSizes))
+	}
+}
+
+func TestCreateMachineWithFallback_EmptyListUsesPoolDefault(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	s := NewScaler(ScalerConfig{
+		Pool:       pool,
+		Registry:   reg,
+		Cooldown:   time.Second,
+		Interval:   100 * time.Millisecond,
+		MinWorkers: 1,
+		MaxWorkers: 20,
+		// MachineSizes intentionally empty — should call CreateMachine once
+		// with empty Size, deferring to the pool's configured default.
+	})
+
+	machine, used, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if machine == nil {
+		t.Fatal("expected machine")
+	}
+	if used != "" {
+		t.Errorf("expected empty usedSize when MachineSizes is unset, got %q", used)
+	}
+	if len(pool.attemptedSizes) != 1 || pool.attemptedSizes[0] != "" {
+		t.Errorf("expected exactly one attempt with empty Size, got %v", pool.attemptedSizes)
 	}
 }
 
