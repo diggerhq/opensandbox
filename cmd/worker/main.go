@@ -504,10 +504,12 @@ func main() {
 	// memory (sum of MemoryMB across running VMs), CPU pressure (PSI 'some'
 	// avg10/avg60/avg300, or loadavg/nproc fallback).
 	var allocator worker.MemoryAllocator
+	var sbCounter worker.SandboxCounter
 	if qemuMgr != nil {
 		allocator = qemuMgr
+		sbCounter = qemuMgr
 	}
-	worker.StartResourceMetricsTick(ctx, allocator, cfg.Region, cfg.WorkerID, cfg.DataDir, 30*time.Second)
+	worker.StartResourceMetricsTick(ctx, allocator, sbCounter, cfg.Region, cfg.WorkerID, cfg.DataDir, 30*time.Second)
 
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)

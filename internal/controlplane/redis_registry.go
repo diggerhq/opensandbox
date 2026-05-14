@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -270,6 +271,24 @@ func (r *RedisWorkerRegistry) reconcileAndPrune() {
 				delete(r.clients, id)
 			}
 		}
+	}
+
+	// Publish the opensandbox_workers_total gauge, keyed by (region, status).
+	// Reset first so a region that drained to zero stops reporting its last
+	// non-zero value forever; only the (region, status) combos still observed
+	// in r.workers will emit a time series on this tick.
+	metrics.WorkersTotal.Reset()
+	type key struct{ region, status string }
+	counts := make(map[key]int)
+	for _, w := range r.workers {
+		status := "active"
+		if w.Draining {
+			status = "draining"
+		}
+		counts[key{w.Region, status}]++
+	}
+	for k, n := range counts {
+		metrics.WorkersTotal.WithLabelValues(k.region, k.status).Set(float64(n))
 	}
 }
 
