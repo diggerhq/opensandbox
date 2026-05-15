@@ -10,26 +10,26 @@
 #
 # Ordering note: on Azure workers, cloud-init's final stage writes
 # /etc/opensandbox/worker.env from a base64 payload baked by the control
-# plane (internal/compute/azure.go). Without `After=cloud-final.service`
-# the populator races cloud-init, reads an empty environ, exits 0 on
-# the "OPENSANDBOX_AZURE_KEY_VAULT_NAME not set" branch, and never
-# retries (Restart=on-failure doesn't fire on exit 0). Vector then can't
-# start because vector.env was never written.
+# plane (internal/compute/azure.go). The populator races cloud-init and
+# may run before worker.env exists.
 #
-# Only After= cloud-final.service, NOT Wants=. Pulling cloud-final into
-# our dependency graph with Wants creates an ordering cycle —
-# vector.service Wants populate-vector-env.service Wants
-# cloud-final.service (transitively) Before multi-user.target Wants
-# vector.service. systemd resolves the cycle by silently deleting
-# vector.service/start, so Vector never boots on prod workers (PR #249
-# introduced this; observed on osb-worker-49693f11 after merge: load=10,
-# vector inactive, journal: "Job vector.service/start deleted to break
-# ordering cycle"). After= alone preserves the race fix without forcing
-# cloud-final into the graph.
+# #249 tried to solve this with `After=cloud-final.service` + `Wants=`.
+# That broke prod: on Azure, both `cloud-final.service` and
+# `cloud-init.target` declare `After=multi-user.target` — so ANY ordering
+# dependency on a cloud-init unit from a unit WantedBy=multi-user.target
+# creates a systemd cycle. systemd resolves it by silently deleting
+# vector.service/start, and Vector never boots. Observed on a prod
+# worker after #249 merged: load=10, vector inactive, journal contained
+# "Job vector.service/start deleted to break ordering cycle".
+#
+# The fix lives in populate-vector-env.sh: when neither worker.env nor
+# server.env exists, the script exits 1, Restart=on-failure here retries
+# (10s × 5 = 50s budget) until cloud-init writes the file. No new
+# systemd dependencies needed → no cycle.
 
 [Unit]
 Description=Populate /etc/opensandbox/vector.env from Key Vault
-After=network-online.target cloud-final.service
+After=network-online.target
 Wants=network-online.target
 Before=vector.service
 DefaultDependencies=no

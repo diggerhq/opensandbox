@@ -49,6 +49,22 @@ CELL_ID_SECRET=shared-cell-id
 log() { logger -t populate-vector-env "$*"; echo "$*"; }
 
 if [ -z "$VAULT_NAME" ]; then
+    # Distinguish "cloud-init hasn't written the env file yet" (transient,
+    # retry) from "this host genuinely has no KV configured" (permanent,
+    # accept). On prod Azure workers, cloud-init writes worker.env from a
+    # base64 payload baked by the control plane (internal/compute/azure.go)
+    # in its final stage — we may race ahead of it. Exit 1 so
+    # Restart=on-failure (10s × 5 = 50s budget) gives cloud-init time to
+    # land the file. After that budget, treat KV as truly absent and exit 0.
+    #
+    # We can't use After=cloud-final.service in the unit because cloud-init
+    # on Azure declares cloud-final After=multi-user.target — any ordering
+    # dep on it from a unit WantedBy=multi-user.target creates a systemd
+    # cycle and Vector never boots (#249 hit this, see PR-todo to revert).
+    if [ ! -f /etc/opensandbox/worker.env ] && [ ! -f /etc/opensandbox/server.env ]; then
+        log "no role env file at /etc/opensandbox/{worker,server}.env yet — cloud-init may still be running; exiting 1 to trigger systemd retry"
+        exit 1
+    fi
     log "OPENSANDBOX_AZURE_KEY_VAULT_NAME not set — skipping (Vector will start without a token)"
     exit 0
 fi
