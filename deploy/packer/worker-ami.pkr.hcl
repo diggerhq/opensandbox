@@ -468,6 +468,11 @@ build {
   #      separate Tigris client code in the AMI bake. Skips cleanly (exit 0)
   #      when any required var is unset, so this step is safe to leave in
   #      the pipeline once we drop the Azure upload entirely (Phase 5+).
+  #
+  #      Cutover note (2026-05-15): after the prod CP server.env was rotated
+  #      to Tigris-primary + Azure-fallback + migration mode, this AMI rebuild
+  #      forces the scaler's rolling-replace so workers pick up the new
+  #      worker.env via cloud-init.
   provisioner "shell" {
     execute_command = "chmod +x {{ .Path }}; {{ .Vars }} sudo -E bash '{{ .Path }}'"
     environment_vars = [
