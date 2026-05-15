@@ -14,13 +14,23 @@
 # the populator races cloud-init, reads an empty environ, exits 0 on
 # the "OPENSANDBOX_AZURE_KEY_VAULT_NAME not set" branch, and never
 # retries (Restart=on-failure doesn't fire on exit 0). Vector then can't
-# start because vector.env was never written. Ordering after cloud-final
-# guarantees worker.env exists by the time we read it.
+# start because vector.env was never written.
+#
+# Only After= cloud-final.service, NOT Wants=. Pulling cloud-final into
+# our dependency graph with Wants creates an ordering cycle —
+# vector.service Wants populate-vector-env.service Wants
+# cloud-final.service (transitively) Before multi-user.target Wants
+# vector.service. systemd resolves the cycle by silently deleting
+# vector.service/start, so Vector never boots on prod workers (PR #249
+# introduced this; observed on osb-worker-49693f11 after merge: load=10,
+# vector inactive, journal: "Job vector.service/start deleted to break
+# ordering cycle"). After= alone preserves the race fix without forcing
+# cloud-final into the graph.
 
 [Unit]
 Description=Populate /etc/opensandbox/vector.env from Key Vault
 After=network-online.target cloud-final.service
-Wants=network-online.target cloud-final.service
+Wants=network-online.target
 Before=vector.service
 DefaultDependencies=no
 # Retry budget for the Restart= below. StartLimit* belongs in [Unit] per
