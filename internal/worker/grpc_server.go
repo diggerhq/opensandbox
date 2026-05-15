@@ -70,8 +70,8 @@ type LogshipConfigurator interface {
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
-	migrator           LiveMigrator      // optional, set if manager supports live migration
-	goldenRebuilder    GoldenRebuilder   // optional, set if manager supports golden rebuild
+	migrator           LiveMigrator    // optional, set if manager supports live migration
+	goldenRebuilder    GoldenRebuilder // optional, set if manager supports golden rebuild
 	router             *sandbox.SandboxRouter
 	ptyManager         *sandbox.PTYManager
 	execSessionManager *sandbox.ExecSessionManager
@@ -360,10 +360,7 @@ func (s *GRPCServer) recordInitialScaleEvent(ctx context.Context, sandboxID stri
 	if s.store == nil {
 		return
 	}
-	memMB := cfg.MemoryMB
-	if memMB <= 0 {
-		memMB = 1024
-	}
+	memMB := scaleEventMemoryMB(cfg.MemoryMB)
 	cpuPct := (memMB * 100) / 1024
 	if cpuPct < 100 {
 		cpuPct = 100
@@ -729,7 +726,7 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	// Resume billing scale event after wake. Disk size is preserved across wake —
 	// pass 0 so RecordScaleEvent inherits disk_mb from the prior event.
 	if s.store != nil {
-		memMB := 1024 // TODO: get actual memory from sandbox state
+		memMB := scaleEventMemoryMB(sb.MemoryMB)
 		cpuPct := 100
 		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
 		if orgID != "" {
@@ -743,6 +740,13 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
+}
+
+func scaleEventMemoryMB(memoryMB int) int {
+	if memoryMB > 0 {
+		return memoryMB
+	}
+	return 1024
 }
 
 func (s *GRPCServer) RebootSandbox(ctx context.Context, req *pb.RebootSandboxRequest) (*pb.RebootSandboxResponse, error) {
