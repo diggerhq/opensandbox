@@ -107,9 +107,14 @@ func (b *KeyVaultBackend) LoadAllToEnv(ctx context.Context) (loaded, skipped int
 			if !mapped {
 				continue
 			}
+			// Bypass the mode filter for genuinely shared keys:
+			//   - "pg-" — historic, postgres bootstrap shared between server/worker
+			//   - "shared-" — formal "this secret goes to both modes" prefix
+			//     (e.g. shared-axiom-ingest-token, shared-cell-id)
 			if b.ModePrefixFilter != "" &&
 				!strings.HasPrefix(name, b.ModePrefixFilter+"-") &&
-				!strings.HasPrefix(name, "pg-") {
+				!strings.HasPrefix(name, "pg-") &&
+				!strings.HasPrefix(name, "shared-") {
 				continue
 			}
 			if os.Getenv(envVar) != "" {

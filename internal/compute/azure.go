@@ -19,6 +19,51 @@ import (
 	"github.com/opensandbox/opensandbox/internal/secrets"
 )
 
+// azureQuotaCodes are the error-message fragments the Azure ARM API uses for
+// quota and SKU-availability rejections. Detected via substring match against
+// the wrapped error string because the SDK surfaces these through several
+// layers (BeginCreateOrUpdate immediate failure, PollUntilDone async failure,
+// nested ResponseError) and pinning to a single concrete type misses cases.
+// All of these are recoverable by retrying with a different VM size, so the
+// autoscaler treats them as the ErrQuotaExceeded class.
+var azureQuotaCodes = []string{
+	"QuotaExceeded",
+	"OperationNotAllowed",
+	"SkuNotAvailable",
+	"AllocationFailed",
+	"ZonalAllocationFailed",
+	"OverconstrainedAllocationRequest",
+	"exceeding approved quota",
+	"exceeding approved Total Regional Cores quota",
+	"exceeding approved Standard",
+}
+
+// isAzureQuotaErr reports whether err matches one of the documented quota /
+// capacity rejection codes from Azure ARM.
+func isAzureQuotaErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, code := range azureQuotaCodes {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapAzureCreateErr tags createMachine errors with ErrQuotaExceeded when the
+// underlying ARM failure was a quota/capacity rejection, so the scaler can
+// fall through to the next VM size in its ranked list.
+func wrapAzureCreateErr(err error, format string, args ...any) error {
+	wrapped := fmt.Errorf(format, args...)
+	if isAzureQuotaErr(err) {
+		return errors.Join(ErrQuotaExceeded, wrapped)
+	}
+	return wrapped
+}
+
 const (
 	azureTagRole     = "opensandbox-role"
 	azureTagDraining = "opensandbox-draining"
@@ -26,16 +71,27 @@ const (
 
 // AzurePoolConfig configures the Azure compute pool.
 type AzurePoolConfig struct {
-	SubscriptionID string
-	ResourceGroup  string
-	Region         string // e.g. "westus2"
-	VMSize         string // e.g. "Standard_D16s_v5"
-	ImageID        string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
-	SubnetID       string // full resource ID of the subnet
-	AdminUsername  string // SSH username (default: "azureuser")
-	SSHPublicKey   string // SSH public key content
-	DataDiskSizeGB int    // data disk size (default: 256)
-	KeyVaultName   string // Azure Key Vault name for dynamic image ID refresh
+	SubscriptionID  string
+	ResourceGroup   string
+	Region          string // e.g. "westus2"
+	VMSize          string // e.g. "Standard_D16s_v5"
+	ImageID         string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
+	SubnetID        string // full resource ID of the subnet
+	AdminUsername   string // SSH username (default: "azureuser")
+	SSHPublicKey    string // SSH public key content
+	DataDiskSizeGB  int    // data disk size (default: 256)
+	WorkerEnvBase64 string // base64-encoded worker.env content (injected via cloud-init)
+	KeyVaultName    string // Azure Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	// WorkerIdentityID is the full resource ID of a UserAssigned managed
+	// identity to attach to every worker VM. Bootstrap once per region
+	// (see deploy/azure/bootstrap-worker-identity.sh): create the identity,
+	// grant "Key Vault Secrets Officer" on the regional KV, then set this
+	// to the identity's resource ID. Required for live migration of
+	// secrets-using sandboxes — workers fetch the shared MITM CA from KV
+	// using this identity. Empty string = no identity attached (workers
+	// can't fetch shared CA; live migration of secrets sandboxes will TLS-
+	// fail across worker boundaries — see secretsproxy.LoadOrCreateSharedCA).
+	WorkerIdentityID string
 }
 
 // AzurePool implements compute.Pool using Azure VMs.
@@ -161,14 +217,28 @@ func (p *AzurePool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machi
 	imageID := p.cfg.ImageID
 	p.mu.RUnlock()
 
-	// Create VM
-	log.Printf("azure: creating VM %s (size=%s, image=%s)", vmName, vmSize, imageID)
+	// Create VM. Identity is attached when WorkerIdentityID is configured —
+	// the worker uses this identity to fetch the shared secrets-proxy CA
+	// from Key Vault. Without it, freshly-launched workers generate per-
+	// worker CAs and live migration of secrets-using sandboxes fails TLS.
+	var identity *armcompute.VirtualMachineIdentity
+	if p.cfg.WorkerIdentityID != "" {
+		identity = &armcompute.VirtualMachineIdentity{
+			Type: to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
+			UserAssignedIdentities: map[string]*armcompute.UserAssignedIdentitiesValue{
+				p.cfg.WorkerIdentityID: {},
+			},
+		}
+	}
+
+	log.Printf("azure: creating VM %s (size=%s, image=%s, identity=%v)", vmName, vmSize, imageID, p.cfg.WorkerIdentityID != "")
 	vmPoller, err := p.vmClient.BeginCreateOrUpdate(ctx, p.cfg.ResourceGroup, vmName, armcompute.VirtualMachine{
 		Location: to.Ptr(p.cfg.Region),
 		Tags: map[string]*string{
 			"Name":       to.Ptr(vmName),
 			azureTagRole: to.Ptr("worker"),
 		},
+		Identity: identity,
 		Properties: &armcompute.VirtualMachineProperties{
 			HardwareProfile: &armcompute.HardwareProfile{
 				VMSize: to.Ptr(armcompute.VirtualMachineSizeTypes(vmSize)),
@@ -205,12 +275,12 @@ func (p *AzurePool) CreateMachine(ctx context.Context, opts MachineOpts) (*Machi
 	if err != nil {
 		log.Printf("azure: VM %s BeginCreateOrUpdate error detail: %+v", vmName, err)
 		go p.cleanupNIC(nicName, "create failed")
-		return nil, fmt.Errorf("azure: create VM %s failed: %w", vmName, err)
+		return nil, wrapAzureCreateErr(err, "azure: create VM %s failed: %w", vmName, err)
 	}
 	vmResp, err := vmPoller.PollUntilDone(ctx, nil)
 	if err != nil {
 		go p.cleanupNIC(nicName, "poll failed")
-		return nil, fmt.Errorf("azure: VM %s poll failed: %w", vmName, err)
+		return nil, wrapAzureCreateErr(err, "azure: VM %s poll failed: %w", vmName, err)
 	}
 	log.Printf("azure: VM %s created successfully", vmName)
 

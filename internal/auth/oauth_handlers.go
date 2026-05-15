@@ -10,7 +10,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/workos/workos-go/v4/pkg/usermanagement"
+
+	"github.com/opensandbox/opensandbox/internal/metrics"
 )
+
+// authType label values for opensandbox_auth_attempts_total. The type
+// column groups by entry point (WorkOS callback today; add more on demand).
+// Result is the binary outcome — success when the session cookie is set,
+// failure for any earlier error return. Sub-reasons live in logs, not in
+// metric labels, to keep label cardinality bounded.
+const authTypeWorkOS = "workos"
 
 // OAuthHandlers provides HTTP handlers for WorkOS OAuth flow.
 type OAuthHandlers struct {
@@ -64,6 +73,7 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 	state := c.QueryParam("state")
 
 	if code == "" {
+		metrics.AuthAttemptsTotal.WithLabelValues(authTypeWorkOS, "failure").Inc()
 		return c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "missing authorization code",
 		})
@@ -75,6 +85,7 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 	if err == nil {
 		// Cookie exists — verify it matches (normal login flow)
 		if stateCookie.Value != state {
+			metrics.AuthAttemptsTotal.WithLabelValues(authTypeWorkOS, "failure").Inc()
 			return c.JSON(http.StatusBadRequest, map[string]string{
 				"error": "invalid state parameter",
 			})
@@ -98,6 +109,7 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 		Code:     code,
 	})
 	if err != nil {
+		metrics.AuthAttemptsTotal.WithLabelValues(authTypeWorkOS, "failure").Inc()
 		log.Printf("workos: callback authentication failed: %v", err)
 		return c.JSON(http.StatusUnauthorized, map[string]string{
 			"error": "authentication failed",
@@ -118,6 +130,7 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 	orgName := authResult.User.Email
 	localUser, err := h.workos.ProvisionOrgAndUser(ctx, authResult.User.Email, name, orgName, authResult.User.ID, authResult.OrganizationID)
 	if err != nil {
+		metrics.AuthAttemptsTotal.WithLabelValues(authTypeWorkOS, "failure").Inc()
 		log.Printf("workos: provisioning failed: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to provision user",
@@ -141,6 +154,8 @@ func (h *OAuthHandlers) HandleCallback(c echo.Context) error {
 		Secure:   isSecureRequest(c),
 		SameSite: http.SameSiteLaxMode,
 	})
+
+	metrics.AuthAttemptsTotal.WithLabelValues(authTypeWorkOS, "success").Inc()
 
 	// Redirect to dashboard after login
 	return c.Redirect(http.StatusFound, "/")

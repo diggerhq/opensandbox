@@ -21,12 +21,19 @@ type S3Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	UsePathStyle    bool // true for R2/Tigris/MinIO; false for AWS S3.
+
+	// Bucket, if set, overrides any bucket argument passed at runtime. Use
+	// this to give each backend its own bucket name — useful when primary
+	// and fallback live in different namespaces (e.g. Tigris bucket
+	// "opencomputer-prod" + Azure container "checkpoints").
+	Bucket string
 }
 
 // s3Store is an S3-compatible backend.
 type s3Store struct {
-	name string
-	s3   *s3.Client
+	name   string
+	bucket string // override; empty means use caller's runtime bucket
+	s3     *s3.Client
 }
 
 // NewS3 constructs an S3-compatible Store. Returns nil, nil if Endpoint
@@ -55,41 +62,87 @@ func NewS3(cfg S3Config) (Store, error) {
 		}
 		o.UsePathStyle = cfg.UsePathStyle
 	})
-	return &s3Store{name: cfg.Name, s3: client}, nil
+	return &s3Store{name: cfg.Name, bucket: cfg.Bucket, s3: client}, nil
 }
 
 func (s *s3Store) Name() string { return s.name }
 
+// resolveBucket returns the override if configured, else the caller's bucket.
+func (s *s3Store) resolveBucket(bucket string) string {
+	if s.bucket != "" {
+		return s.bucket
+	}
+	return bucket
+}
+
 func (s *s3Store) Get(ctx context.Context, bucket, key string) (io.ReadCloser, error) {
+	b := s.resolveBucket(bucket)
 	out, err := s.s3.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: &bucket,
+		Bucket: &b,
 		Key:    &key,
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return nil, fmt.Errorf("%s://%s/%s: %w", s.name, bucket, key, ErrNotFound)
+			return nil, fmt.Errorf("%s://%s/%s: %w", s.name, b, key, ErrNotFound)
 		}
-		return nil, fmt.Errorf("%s GetObject %s/%s: %w", s.name, bucket, key, err)
+		return nil, fmt.Errorf("%s GetObject %s/%s: %w", s.name, b, key, err)
+	}
+	return out.Body, nil
+}
+
+func (s *s3Store) GetRange(ctx context.Context, bucket, key string, offset, length int64) (io.ReadCloser, error) {
+	b := s.resolveBucket(bucket)
+	rangeStr := fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+	out, err := s.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &b,
+		Key:    &key,
+		Range:  &rangeStr,
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return nil, fmt.Errorf("%s://%s/%s: %w", s.name, b, key, ErrNotFound)
+		}
+		return nil, fmt.Errorf("%s GetObject(range=%s) %s/%s: %w", s.name, rangeStr, b, key, err)
 	}
 	return out.Body, nil
 }
 
 func (s *s3Store) Put(ctx context.Context, bucket, key string, body io.Reader, contentLength int64) error {
+	b := s.resolveBucket(bucket)
 	_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        &bucket,
+		Bucket:        &b,
 		Key:           &key,
 		Body:          body,
 		ContentLength: &contentLength,
 	})
 	if err != nil {
-		return fmt.Errorf("%s PutObject %s/%s: %w", s.name, bucket, key, err)
+		return fmt.Errorf("%s PutObject %s/%s: %w", s.name, b, key, err)
 	}
 	return nil
 }
 
+func (s *s3Store) Head(ctx context.Context, bucket, key string) (int64, error) {
+	b := s.resolveBucket(bucket)
+	out, err := s.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: &b,
+		Key:    &key,
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return 0, fmt.Errorf("%s://%s/%s: %w", s.name, b, key, ErrNotFound)
+		}
+		return 0, fmt.Errorf("%s HeadObject %s/%s: %w", s.name, b, key, err)
+	}
+	if out.ContentLength == nil {
+		return 0, nil
+	}
+	return *out.ContentLength, nil
+}
+
 func (s *s3Store) Exists(ctx context.Context, bucket, key string) (bool, error) {
+	b := s.resolveBucket(bucket)
 	_, err := s.s3.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: &bucket,
+		Bucket: &b,
 		Key:    &key,
 	})
 	if err == nil {
@@ -98,7 +151,19 @@ func (s *s3Store) Exists(ctx context.Context, bucket, key string) (bool, error) 
 	if isNotFound(err) {
 		return false, nil
 	}
-	return false, fmt.Errorf("%s HeadObject %s/%s: %w", s.name, bucket, key, err)
+	return false, fmt.Errorf("%s HeadObject %s/%s: %w", s.name, b, key, err)
+}
+
+func (s *s3Store) Delete(ctx context.Context, bucket, key string) error {
+	b := s.resolveBucket(bucket)
+	_, err := s.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: &b,
+		Key:    &key,
+	})
+	if err != nil {
+		return fmt.Errorf("%s DeleteObject %s/%s: %w", s.name, b, key, err)
+	}
+	return nil
 }
 
 // isNotFound matches the various ways the v2 SDK signals 404. The typed

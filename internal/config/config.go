@@ -37,6 +37,19 @@ type Config struct {
 	WorkerID string // Unique worker ID (e.g., "w-iad-1")
 	HTTPAddr string // Public HTTP address for direct SDK access
 
+	// Platform observability host identity (used by internal/obslog for log
+	// envelope so all Axiom records carry host + service ID). HostIP is
+	// auto-detected from the first non-loopback IPv4 at startup if
+	// OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
+	//
+	// CellID — the cell this process belongs to — is declared further down
+	// as part of the cf-cutover block. Same field, dual purpose: obslog
+	// reads it for log envelope, routing/event_forwarder reads it for cell
+	// identity. Falls back to "<region>-default" at the bottom of Load() so
+	// legacy paths still log a sensible label when OPENSANDBOX_CELL_ID is
+	// unset.
+	HostIP string
+
 	// WorkOS
 	WorkOSAPIKey       string
 	WorkOSClientID     string
@@ -61,6 +74,26 @@ type Config struct {
 	S3SecretAccessKey string
 	S3ForcePathStyle  bool // true for R2/MinIO
 
+	// Fallback backend for the checkpoint store. When set, primary reads that
+	// fail (or, in migration mode, return NotFound) cascade here. Writes go
+	// only to primary. Intended for the Tigris-cutover soak window — flip
+	// BlobMigrationMode off and unset once the soak finishes.
+	S3FallbackEndpoint        string
+	S3FallbackRegion          string
+	S3FallbackAccessKeyID     string
+	S3FallbackSecretAccessKey string
+	S3FallbackForcePathStyle  bool
+	// S3FallbackBucket lets the fallback backend use a different bucket /
+	// Azure container name than the primary. Example: primary points at
+	// Tigris bucket "opencomputer-prod"; fallback points at Azure container
+	// "checkpoints". When empty, the fallback reuses S3Bucket.
+	S3FallbackBucket string
+
+	// BlobMigrationMode flips FallbackStore semantics so primary NotFound
+	// cascades to fallbacks (lazy-migration behavior). Applies to both the
+	// checkpoint-store fallback and the global blob fallback.
+	BlobMigrationMode bool
+
 	// Sandbox resource defaults (overridable per-sandbox via API)
 	DefaultSandboxMemoryMB int // default RAM per sandbox (MB), default 1024
 	DefaultSandboxCPUs     int // default vCPUs per sandbox, default 1
@@ -73,7 +106,8 @@ type Config struct {
 
 	// AWS EC2 compute pool (server mode only — for auto-scaling worker machines)
 	EC2AMI             string // Custom AMI for worker instances
-	EC2InstanceType    string // e.g. "c7gd.metal", "r6gd.metal", "r7gd.metal"
+	EC2InstanceType    string // single fallback type; used only when EC2InstanceTypes is empty
+	EC2InstanceTypes   []string // ranked list of instance types tried in order on quota/capacity errors
 	EC2SubnetID        string // VPC subnet for worker instances
 	EC2SecurityGroupID string // Security group (allow 8080, 9090, 9091)
 	EC2KeyName             string // SSH key pair name (for debugging)
@@ -84,11 +118,21 @@ type Config struct {
 	// Azure compute pool (server mode — for auto-scaling worker VMs)
 	AzureSubscriptionID string // Azure subscription ID
 	AzureResourceGroup  string // Resource group for worker VMs
-	AzureVMSize         string // e.g. "Standard_D16s_v5"
+	AzureVMSize         string // single fallback size; used only when AzureVMSizes is empty
+	AzureVMSizes        []string // ranked list of VM sizes tried in order on quota/capacity errors
 	AzureImageID        string // Custom image ID or URN
 	AzureSubnetID       string // Full resource ID of the VNet subnet
 	AzureSSHPublicKey   string // SSH public key for worker VMs
 	AzureKeyVaultName   string // Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
+	// AzureWorkerIdentityID is the full resource ID of a UserAssigned managed
+	// identity to attach to every worker VM. The identity must already have
+	// "Key Vault Secrets Officer" on the regional KV so workers can fetch
+	// the shared secrets-proxy CA. Created once per region as a bootstrap
+	// step (see deploy/azure/bootstrap-worker-identity.sh). Without this,
+	// workers can't reach KV for the shared CA and live migration of
+	// secret-store-using sandboxes will fail TLS substitution after the
+	// migration completes (per-worker CAs don't match each other).
+	AzureWorkerIdentityID string
 
 	// Cloudflare (custom hostname for org sandbox domains)
 	CFAPIToken string // Cloudflare API token with Custom Hostnames permission
@@ -106,8 +150,21 @@ type Config struct {
 	StripeSuccessURL    string
 	StripeCancelURL     string
 
+	// Per-agent paywalled-feature prices (set in Stripe dashboard, referenced
+	// by ID here). Empty = feature ungated on this deployment (dev mode).
+	StripeTelegramAgentPriceID string
+
 	// Segment analytics — if set, GB-minute usage events are shipped per org.
 	SegmentWriteKey string
+
+	// Axiom — log shipping for sandbox session logs.
+	// AxiomIngestToken empty = log shipping disabled (kill-switch).
+	// Worker uses AxiomIngestToken + AxiomDataset to deliver via the
+	// ConfigureLogship RPC at sandbox boot. Server uses
+	// AxiomQueryToken + AxiomDataset to serve the read API.
+	AxiomIngestToken string
+	AxiomQueryToken  string
+	AxiomDataset     string
 
 	// AWS Secrets Manager — if set, secrets are fetched at startup using IAM credentials.
 	// The secret should be a JSON object with keys matching env var names (e.g. OPENSANDBOX_JWT_SECRET).
@@ -168,8 +225,8 @@ type Config struct {
 
 	// Global blob store — abstract S3-compatible backend for canonical golden
 	// rootfs blobs, template blobs, and the events archive. Currently Tigris
-	// in dev (Region Earth replication), but works with any S3-compatible
-	// endpoint (R2, S3, GCS interop, Azure Blob via S3 compat). Switching
+	// (Region Earth global replication) but works with any S3-compatible
+	// endpoint (R2, AWS S3, GCS interop, Azure Blob via S3 compat). Switching
 	// providers is a config change; see internal/blobstore.
 	//
 	// Empty Endpoint disables — workers fall back to whatever's baked into
@@ -179,7 +236,7 @@ type Config struct {
 	GlobalBlobRegion          string // "auto" for Tigris/R2; real region for AWS S3
 	GlobalBlobAccessKeyID     string
 	GlobalBlobSecretAccessKey string
-	GlobalBlobUsePathStyle    bool   // true for R2/Tigris/MinIO; false for AWS S3
+	GlobalBlobUsePathStyle    bool // true for R2/Tigris/MinIO; false for AWS S3
 	GlobalBlobGoldensBucket   string
 	GlobalBlobTemplatesBucket string
 	GlobalBlobEventsBucket    string
@@ -222,6 +279,8 @@ func Load() (*Config, error) {
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
 
+		HostIP: os.Getenv("OPENCOMPUTER_HOST_IP"),
+
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
 		WorkOSClientID:     os.Getenv("WORKOS_CLIENT_ID"),
 		WorkOSRedirectURI:  envOrDefault("WORKOS_REDIRECT_URI", "http://localhost:8080/auth/callback"),
@@ -241,6 +300,15 @@ func Load() (*Config, error) {
 		S3SecretAccessKey: os.Getenv("OPENSANDBOX_S3_SECRET_ACCESS_KEY"),
 		S3ForcePathStyle:  os.Getenv("OPENSANDBOX_S3_FORCE_PATH_STYLE") == "true",
 
+		S3FallbackEndpoint:        os.Getenv("OPENSANDBOX_S3_FALLBACK_ENDPOINT"),
+		S3FallbackRegion:          os.Getenv("OPENSANDBOX_S3_FALLBACK_REGION"),
+		S3FallbackAccessKeyID:     os.Getenv("OPENSANDBOX_S3_FALLBACK_ACCESS_KEY_ID"),
+		S3FallbackSecretAccessKey: os.Getenv("OPENSANDBOX_S3_FALLBACK_SECRET_ACCESS_KEY"),
+		S3FallbackForcePathStyle:  os.Getenv("OPENSANDBOX_S3_FALLBACK_FORCE_PATH_STYLE") == "true",
+		S3FallbackBucket:          os.Getenv("OPENSANDBOX_S3_FALLBACK_BUCKET"),
+
+		BlobMigrationMode: os.Getenv("OPENSANDBOX_BLOB_MIGRATION_MODE") == "true",
+
 		DefaultSandboxMemoryMB: envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB", 256),
 		DefaultSandboxCPUs:     envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_CPUS", 1),
 		DefaultSandboxDiskMB:   envOrDefaultInt("OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB", 0),
@@ -251,6 +319,7 @@ func Load() (*Config, error) {
 
 		EC2AMI:             os.Getenv("OPENSANDBOX_EC2_AMI"),
 		EC2InstanceType:    envOrDefault("OPENSANDBOX_EC2_INSTANCE_TYPE", "c7gd.metal"),
+		EC2InstanceTypes:   splitCSV(os.Getenv("OPENSANDBOX_EC2_INSTANCE_TYPES")),
 		EC2SubnetID:        os.Getenv("OPENSANDBOX_EC2_SUBNET_ID"),
 		EC2SecurityGroupID: os.Getenv("OPENSANDBOX_EC2_SECURITY_GROUP_ID"),
 		EC2KeyName:         os.Getenv("OPENSANDBOX_EC2_KEY_NAME"),
@@ -261,10 +330,12 @@ func Load() (*Config, error) {
 		AzureSubscriptionID: os.Getenv("OPENSANDBOX_AZURE_SUBSCRIPTION_ID"),
 		AzureResourceGroup:  os.Getenv("OPENSANDBOX_AZURE_RESOURCE_GROUP"),
 		AzureVMSize:         envOrDefault("OPENSANDBOX_AZURE_VM_SIZE", "Standard_D16s_v5"),
+		AzureVMSizes:        splitCSV(os.Getenv("OPENSANDBOX_AZURE_VM_SIZES")),
 		AzureImageID:        os.Getenv("OPENSANDBOX_AZURE_IMAGE_ID"),
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
 		AzureKeyVaultName:   os.Getenv("OPENSANDBOX_AZURE_KEY_VAULT_NAME"),
+		AzureWorkerIdentityID: os.Getenv("OPENSANDBOX_AZURE_WORKER_IDENTITY_ID"),
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
 		CFZoneID:   os.Getenv("OPENSANDBOX_CF_ZONE_ID"),
@@ -274,12 +345,17 @@ func Load() (*Config, error) {
 		MaxWorkersPerRegion: envOrDefaultInt("OPENSANDBOX_MAX_WORKERS", 10),
 		IdleReserveWorkers:  envOrDefaultInt("OPENSANDBOX_IDLE_RESERVE", 1),
 
-		StripeSecretKey:     os.Getenv("STRIPE_SECRET_KEY"),
-		StripeWebhookSecret: os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeSecretKey:            os.Getenv("STRIPE_SECRET_KEY"),
+		StripeWebhookSecret:        os.Getenv("STRIPE_WEBHOOK_SECRET"),
+		StripeTelegramAgentPriceID: os.Getenv("STRIPE_TELEGRAM_AGENT_PRICE_ID"),
 		StripeSuccessURL:    envOrDefault("STRIPE_SUCCESS_URL", "http://localhost:3000/billing?success=true"),
 		StripeCancelURL:     envOrDefault("STRIPE_CANCEL_URL", "http://localhost:3000/billing?cancelled=true"),
 
 		SegmentWriteKey: os.Getenv("SEGMENT_WRITE_KEY"),
+
+		AxiomIngestToken: os.Getenv("AXIOM_INGEST_TOKEN"),
+		AxiomQueryToken:  os.Getenv("AXIOM_QUERY_TOKEN"),
+		AxiomDataset:     envOrDefault("AXIOM_DATASET", "oc-sandbox-logs"),
 
 		SecretsARN: os.Getenv("OPENSANDBOX_SECRETS_ARN"),
 
@@ -327,6 +403,13 @@ func Load() (*Config, error) {
 		cfg.S3Region = cfg.Region
 	}
 
+	// Default cell ID to "<region>-default" so logs always have a cell tag.
+	// Fleet can split a region into multiple cells later by setting the env
+	// var explicitly at provisioning time.
+	if cfg.CellID == "" {
+		cfg.CellID = cfg.Region + "-default"
+	}
+
 	if portStr := os.Getenv("OPENSANDBOX_PORT"); portStr != "" {
 		port, err := strconv.Atoi(portStr)
 		if err != nil {
@@ -343,6 +426,27 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitCSV parses a comma-separated value into a non-empty trimmed slice.
+// Empty input or all-whitespace entries return nil so callers can use len() == 0
+// to detect "not configured." Leaves the order intact since rank matters
+// for the autoscaler's machine-size fallback list.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func envOrDefaultInt(key string, fallback int) int {

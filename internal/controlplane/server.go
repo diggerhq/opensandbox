@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"google.golang.org/grpc"
@@ -15,6 +16,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
 
@@ -39,11 +41,13 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 		registry:  registry,
 	}
 
-	// Global middleware
+	// Global middleware. RequestID() comes first so the X-Request-Id header
+	// is present when obslog.EchoMiddleware tags the request context — that
+	// way every log line emitted inside the handler carries the same id.
 	e.Use(middleware.Recover())
-	e.Use(middleware.Logger())
-	e.Use(middleware.CORS())
 	e.Use(middleware.RequestID())
+	e.Use(obslog.EchoMiddleware())
+	e.Use(middleware.CORS())
 
 	// Health check
 	e.GET("/health", func(c echo.Context) error {
@@ -52,7 +56,7 @@ func NewServer(store *db.Store, jwtIssuer *auth.JWTIssuer, registry *WorkerRegis
 
 	// Auth middleware
 	api := e.Group("")
-	api.Use(auth.PGAPIKeyMiddleware(store, apiKey))
+	api.Use(auth.PGAPIKeyMiddleware(store, apiKey, jwtIssuer))
 
 	// Sandbox lifecycle (control plane only handles create/destroy/discover)
 	api.POST("/sandboxes", s.createSandbox)
@@ -99,11 +103,19 @@ func (s *Server) createSandbox(c echo.Context) error {
 		MemoryMB   int               `json:"memoryMB"`
 		CpuCount   int               `json:"cpuCount"`
 		Metadata   map[string]string `json:"metadata"`
-		NetworkEnabled bool          `json:"networkEnabled"`
+		NetworkEnabled *bool         `json:"networkEnabled"`
 		SecretStore    string        `json:"secretStore"` // secret store name — resolves secrets + egress config
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request: " + err.Error()})
+	}
+
+	// Default networkEnabled to true when caller omits the field. The worker
+	// currently sets up networking unconditionally, so a missing field that
+	// marshaled to false caused the UI to mislabel sandboxes as "Disabled".
+	if req.NetworkEnabled == nil {
+		t := true
+		req.NetworkEnabled = &t
 	}
 
 	orgID, ok := auth.GetOrgID(c)
@@ -124,11 +136,13 @@ func (s *Server) createSandbox(c echo.Context) error {
 	// Resolve secret store: decrypt secrets + inherit egress allowlist
 	var egressAllowlist []string
 	var secretAllowedHosts map[string]string // env var name → comma-separated hosts (for proto)
+	var secretStoreID *uuid.UUID             // populated below; passed to CreateSandboxSession so the row's secret_store_id column is set for the refresh fanout
 	if req.SecretStore != "" {
 		store, err := s.store.GetSecretStoreByName(c.Request().Context(), orgID, req.SecretStore)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "secret store not found: " + req.SecretStore})
 		}
+		secretStoreID = &store.ID
 
 		egressAllowlist = store.EgressAllowlist
 
@@ -194,7 +208,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		Envs:               req.Envs,
 		MemoryMb:           int32(req.MemoryMB),
 		CpuCount:           int32(req.CpuCount),
-		NetworkEnabled:     req.NetworkEnabled,
+		NetworkEnabled:     *req.NetworkEnabled,
 		EgressAllowlist:    egressAllowlist,
 		SecretAllowedHosts: secretAllowedHosts,
 	})
@@ -209,7 +223,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 	}
 	cfgJSON, _ := json.Marshal(req)
 	metadataJSON, _ := json.Marshal(req.Metadata)
-	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON)
+	_, _ = s.store.CreateSandboxSession(ctx, grpcResp.SandboxId, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, secretStoreID)
 
 	// Persist golden version from worker heartbeat so the scaler can read it
 	// from PG instead of relying on in-memory state via gRPC.

@@ -2,8 +2,10 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -131,6 +133,15 @@ type mockPool struct {
 	machines  map[string]string // machineID -> region
 	created   int32
 	destroyed int32
+
+	// Test hooks for createMachineWithFallback. createErrs is consumed left to
+	// right: each CreateMachine call pops one entry; if non-nil it's returned
+	// as the error, otherwise the call falls through to the success path.
+	// Once empty the pool always succeeds (preserves prior test behaviour).
+	// attemptedSizes captures opts.Size on every call so tests can assert the
+	// fallback list was walked in order.
+	createErrs     []error
+	attemptedSizes []string
 }
 
 func newMockPool() *mockPool {
@@ -138,8 +149,17 @@ func newMockPool() *mockPool {
 }
 
 func (p *mockPool) CreateMachine(_ context.Context, opts compute.MachineOpts) (*compute.Machine, error) {
-	id := fmt.Sprintf("osb-worker-%d", atomic.AddInt32(&p.created, 1))
 	p.mu.Lock()
+	p.attemptedSizes = append(p.attemptedSizes, opts.Size)
+	if len(p.createErrs) > 0 {
+		err := p.createErrs[0]
+		p.createErrs = p.createErrs[1:]
+		if err != nil {
+			p.mu.Unlock()
+			return nil, err
+		}
+	}
+	id := fmt.Sprintf("osb-worker-%d", atomic.AddInt32(&p.created, 1))
 	p.machines[id] = opts.Region
 	p.mu.Unlock()
 	return &compute.Machine{ID: id, Addr: "10.0.0.1", Region: opts.Region}, nil
@@ -887,6 +907,155 @@ func TestDrainCompletesWhenEmpty(t *testing.T) {
 }
 
 // ============================================================
+// Test: Rolling-replace quota-aware dance
+// ============================================================
+
+// TestRollingReplaceDance_StartsWithScaleUpWhenAllStale validates that when
+// every worker is stale and no current-version worker exists, the first
+// rollingReplace tick scales up a replacement (doesn't drain blindly with
+// nowhere to go).
+func TestRollingReplaceDance_StartsWithScaleUpWhenAllStale(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	// 3 stale workers, all running the old version, none current.
+	for i := 1; i <= 3; i++ {
+		reg.addWorker(&WorkerInfo{
+			ID: fmt.Sprintf("w%d", i), MachineID: fmt.Sprintf("osb-worker-w%d", i),
+			Region: "us-east-1", Capacity: 50, Current: 5,
+			WorkerVersion: "v-old",
+		})
+	}
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(150 * time.Millisecond)
+	if atomic.LoadInt32(&pool.created) == 0 {
+		t.Error("expected scaler to launch a replacement when no current-version worker exists")
+	}
+	if atomic.LoadInt32(&pool.destroyed) != 0 {
+		t.Errorf("expected NO destroys until a current-version worker is up; got %d",
+			atomic.LoadInt32(&pool.destroyed))
+	}
+}
+
+// TestRollingReplaceDance_LightestStaleFirst validates that when multiple
+// stale workers exist, the lightest one is picked for drain.
+func TestRollingReplaceDance_LightestStaleFirst(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	// Heavy stale (30 sandboxes) + Light stale (5 sandboxes) + one current.
+	reg.addWorker(&WorkerInfo{
+		ID: "wHeavy", MachineID: "osb-worker-wHeavy", Region: "us-east-1",
+		Capacity: 50, Current: 30, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wLight", MachineID: "osb-worker-wLight", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wNew", MachineID: "osb-worker-wNew", Region: "us-east-1",
+		Capacity: 50, Current: 0, WorkerVersion: "v-new",
+	})
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	// Light should be picked, draining state should be set on it (not heavy).
+	time.Sleep(50 * time.Millisecond)
+	if !s.state.IsDraining("osb-worker-wLight") {
+		t.Error("expected lightest stale (wLight) to be picked for drain")
+	}
+	if s.state.IsDraining("osb-worker-wHeavy") {
+		t.Error("expected heavy stale (wHeavy) to be left alone for now")
+	}
+}
+
+// TestRollingReplaceDance_LockSerializes validates that two concurrent ticks
+// can't both fire rollingReplace — only the first acquires the lock.
+func TestRollingReplaceDance_LockSerializes(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	reg.addWorker(&WorkerInfo{
+		ID: "w1", MachineID: "osb-worker-w1", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "w2", MachineID: "osb-worker-w2", Region: "us-east-1",
+		Capacity: 50, Current: 5, WorkerVersion: "v-old",
+	})
+	reg.addWorker(&WorkerInfo{
+		ID: "wNew", MachineID: "osb-worker-wNew", Region: "us-east-1",
+		Capacity: 50, Current: 0, WorkerVersion: "v-new",
+	})
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-new"
+
+	// First call grabs the lock and dispatches the goroutine.
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	// Second call — should be a no-op because the lock is held.
+	// To detect: count how many SetDraining calls actually pinned a worker.
+	// Both w1 and w2 are stale; if the lock didn't hold, the second call would
+	// pick the OTHER stale and pin it as draining too.
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(50 * time.Millisecond)
+	pinned := 0
+	for _, id := range []string{"osb-worker-w1", "osb-worker-w2"} {
+		if s.state.IsDraining(id) {
+			pinned++
+		}
+	}
+	if pinned > 1 {
+		t.Errorf("expected lock to serialize: only one stale worker should be draining; got %d", pinned)
+	}
+	if pinned == 0 {
+		t.Error("expected at least one stale worker to be draining after first rollingReplace call")
+	}
+}
+
+// TestRollingReplaceDance_NoOpOnAllCurrent validates that when every worker
+// already matches targetWorkerVersion, rollingReplace does nothing.
+func TestRollingReplaceDance_NoOpOnAllCurrent(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	for i := 1; i <= 3; i++ {
+		reg.addWorker(&WorkerInfo{
+			ID: fmt.Sprintf("w%d", i), MachineID: fmt.Sprintf("osb-worker-w%d", i),
+			Region: "us-east-1", Capacity: 50, Current: 5,
+			WorkerVersion: "v-current",
+		})
+	}
+
+	s := newTestScaler(reg, pool)
+	s.targetWorkerVersion = "v-current"
+
+	ctx := context.Background()
+	s.rollingReplace(ctx, "us-east-1", reg.GetWorkersByRegion("us-east-1"))
+
+	time.Sleep(50 * time.Millisecond)
+	if atomic.LoadInt32(&pool.created) != 0 {
+		t.Error("expected no machine creation when all workers are current")
+	}
+	if atomic.LoadInt32(&pool.destroyed) != 0 {
+		t.Error("expected no destroys when all workers are current")
+	}
+}
+
+// ============================================================
 // Test: Golden version in migration target selection
 // ============================================================
 
@@ -1278,6 +1447,140 @@ func TestPendingLaunchRegistered(t *testing.T) {
 
 	if len(s.state.GetPendingLaunches("us-east-1")) != 0 {
 		t.Error("expected registered pending launch to be cleared")
+	}
+}
+
+// ============================================================
+// Test: Machine-size fallback on quota / capacity errors
+// ============================================================
+
+func TestCreateMachineWithFallback_SkipsQuotaErrors(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	// First two sizes hit quota, third size succeeds.
+	pool.createErrs = []error{
+		errors.Join(compute.ErrQuotaExceeded, errors.New("Standard_D16ads_v7: QuotaExceeded")),
+		errors.Join(compute.ErrQuotaExceeded, errors.New("Standard_D16ds_v6: ZonalAllocationFailed")),
+		nil, // Standard_D16s_v5 — succeeds
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"},
+	})
+
+	machine, used, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatalf("expected success after fallback, got error: %v", err)
+	}
+	if machine == nil {
+		t.Fatal("expected machine to be returned")
+	}
+	if used != "Standard_D16s_v5" {
+		t.Errorf("expected last size to win, got %q", used)
+	}
+
+	wantSizes := []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"}
+	if !reflect.DeepEqual(pool.attemptedSizes, wantSizes) {
+		t.Errorf("expected sizes attempted in order %v, got %v", wantSizes, pool.attemptedSizes)
+	}
+}
+
+func TestCreateMachineWithFallback_NonQuotaShortCircuits(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	// First size fails with a non-quota error — must not iterate further.
+	pool.createErrs = []error{
+		errors.New("network timeout"),
+		nil,
+		nil,
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"},
+	})
+
+	_, _, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err == nil {
+		t.Fatal("expected error from non-quota failure")
+	}
+	if errors.Is(err, compute.ErrQuotaExceeded) {
+		t.Errorf("non-quota error must not be tagged ErrQuotaExceeded: %v", err)
+	}
+	if len(pool.attemptedSizes) != 1 {
+		t.Errorf("expected exactly one attempt on non-quota error, got %d (%v)",
+			len(pool.attemptedSizes), pool.attemptedSizes)
+	}
+}
+
+func TestCreateMachineWithFallback_AllSizesQuota(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+	pool.createErrs = []error{
+		errors.Join(compute.ErrQuotaExceeded, errors.New("a: QuotaExceeded")),
+		errors.Join(compute.ErrQuotaExceeded, errors.New("b: SkuNotAvailable")),
+	}
+
+	s := NewScaler(ScalerConfig{
+		Pool:         pool,
+		Registry:     reg,
+		Cooldown:     time.Second,
+		Interval:     100 * time.Millisecond,
+		MinWorkers:   1,
+		MaxWorkers:   20,
+		MachineSizes: []string{"a", "b"},
+	})
+
+	_, _, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err == nil {
+		t.Fatal("expected error when all sizes fail")
+	}
+	if !errors.Is(err, compute.ErrQuotaExceeded) {
+		t.Errorf("expected wrapped ErrQuotaExceeded after exhausting all sizes, got %v", err)
+	}
+	if len(pool.attemptedSizes) != 2 {
+		t.Errorf("expected both sizes attempted, got %d", len(pool.attemptedSizes))
+	}
+}
+
+func TestCreateMachineWithFallback_EmptyListUsesPoolDefault(t *testing.T) {
+	reg := newMockRegistry()
+	pool := newMockPool()
+
+	s := NewScaler(ScalerConfig{
+		Pool:       pool,
+		Registry:   reg,
+		Cooldown:   time.Second,
+		Interval:   100 * time.Millisecond,
+		MinWorkers: 1,
+		MaxWorkers: 20,
+		// MachineSizes intentionally empty — should call CreateMachine once
+		// with empty Size, deferring to the pool's configured default.
+	})
+
+	machine, used, err := s.createMachineWithFallback(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if machine == nil {
+		t.Fatal("expected machine")
+	}
+	if used != "" {
+		t.Errorf("expected empty usedSize when MachineSizes is unset, got %q", used)
+	}
+	if len(pool.attemptedSizes) != 1 || pool.attemptedSizes[0] != "" {
+		t.Errorf("expected exactly one attempt with empty Size, got %v", pool.attemptedSizes)
 	}
 }
 

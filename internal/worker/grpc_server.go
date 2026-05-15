@@ -21,6 +21,7 @@ import (
 
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	"github.com/opensandbox/opensandbox/internal/sparse"
@@ -33,8 +34,8 @@ import (
 // LiveMigrator is implemented by VM managers that support live migration (e.g. QEMU).
 type LiveMigrator interface {
 	PrepareIncomingMigration(ctx context.Context, sandboxID, rootfsPath, workspacePath string, cpus, memMB, guestPort int, template string) (incomingAddr string, hostPort int, err error)
-	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string) (incomingAddr string, hostPort int, err error)
-	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, err error)
+	PrepareIncomingMigrationWithS3(ctx context.Context, sandboxID, rootfsS3Key, workspaceS3Key string, cpus, memMB, guestPort int, template string, checkpointStore *storage.CheckpointStore, overlayMode bool, sourceGoldenVersion string, secrets sandbox.MigrationSecrets) (incomingAddr string, hostPort int, err error)
+	PreCopyDrives(ctx context.Context, sandboxID string, checkpointStore *storage.CheckpointStore) (rootfsKey, workspaceKey, goldenVersion string, baseCPU, baseMem, actualMem int, secrets sandbox.MigrationSecrets, err error)
 	CompleteIncomingMigration(ctx context.Context, sandboxID string) error
 	LiveMigrate(ctx context.Context, sandboxID, incomingAddr string) error
 }
@@ -57,6 +58,15 @@ type GoldenRebuilder interface {
 	GoldenVersion() string
 }
 
+// LogshipConfigurator is implemented by VM managers that can deliver
+// log-shipping configuration to the in-VM agent over the existing
+// worker→agent gRPC channel. Managers without an agent channel just
+// don't implement this — the worker silently skips configuration for
+// those sandboxes.
+type LogshipConfigurator interface {
+	ConfigureLogship(ctx context.Context, sandboxID, ingestToken, dataset, orgID string) error
+}
+
 type GRPCServer struct {
 	pb.UnimplementedSandboxWorkerServer
 	manager            sandbox.Manager
@@ -69,6 +79,28 @@ type GRPCServer struct {
 	checkpointStore    *storage.CheckpointStore
 	store              *db.Store // nil if no DB configured
 	server             *grpc.Server
+
+	// Axiom log-shipping config. Empty token = log shipping disabled
+	// (kill-switch). Set via SetAxiomConfig at startup.
+	axiomIngestToken string
+	axiomDataset     string
+
+	// region is the worker's region label, used to tag operation metrics.
+	// Set via SetRegion at startup. Empty = "unknown".
+	region string
+}
+
+// SetRegion stamps the worker's region onto operation metrics emitted from
+// this gRPC server (e.g. WakeDuration for warm-fork vs s3 paths).
+func (s *GRPCServer) SetRegion(region string) { s.region = region }
+
+// SetAxiomConfig wires Axiom log-shipping credentials. The worker
+// passes them down to each sandbox's agent on create via the
+// LogshipConfigurator interface (implemented by the QEMU manager).
+// Empty token disables shipping for every sandbox this worker boots.
+func (s *GRPCServer) SetAxiomConfig(ingestToken, dataset string) {
+	s.axiomIngestToken = ingestToken
+	s.axiomDataset = dataset
 }
 
 // NewGRPCServer creates a new gRPC server wrapping the sandbox manager.
@@ -127,6 +159,32 @@ func (s *GRPCServer) Stop() {
 	s.server.GracefulStop()
 }
 
+// configureLogshipForSandbox delivers Axiom log-shipping configuration
+// to the in-VM agent. Best-effort: a failure here does not fail the
+// sandbox-create — log shipping just stays dormant for this sandbox.
+// No-op if the worker has no Axiom token set or the manager doesn't
+// implement LogshipConfigurator.
+func (s *GRPCServer) configureLogshipForSandbox(ctx context.Context, sandboxID string) {
+	if s.axiomIngestToken == "" {
+		log.Printf("grpc: ConfigureLogship skipped for %s: no axiom ingest token set on worker", sandboxID)
+		return
+	}
+	cfger, ok := s.manager.(LogshipConfigurator)
+	if !ok {
+		log.Printf("grpc: ConfigureLogship skipped for %s: manager %T does not implement LogshipConfigurator", sandboxID, s.manager)
+		return
+	}
+	var orgID string
+	if s.store != nil {
+		orgID, _ = s.store.GetSandboxOrgID(ctx, sandboxID)
+	}
+	if err := cfger.ConfigureLogship(ctx, sandboxID, s.axiomIngestToken, s.axiomDataset, orgID); err != nil {
+		log.Printf("grpc: ConfigureLogship for %s failed: %v (logs disabled for this sandbox)", sandboxID, err)
+		return
+	}
+	log.Printf("grpc: ConfigureLogship sent for %s (org=%s, dataset=%s)", sandboxID, orgID, s.axiomDataset)
+}
+
 // parseSecretAllowedHosts converts the proto map (env var → comma-separated hosts)
 // to the internal map (env var → host slice). Returns nil if input is empty.
 func parseSecretAllowedHosts(m map[string]string) map[string][]string {
@@ -152,7 +210,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		Envs:               req.Envs,
 		MemoryMB:           int(req.MemoryMb),
 		CpuCount:           int(req.CpuCount),
-		NetworkEnabled:     req.NetworkEnabled,
+		NetworkEnabled:     &req.NetworkEnabled,
 		ImageRef:           req.ImageRef,
 		Port:               int(req.Port),
 		SandboxID:          req.SandboxId,    // use server-assigned ID if provided
@@ -166,8 +224,17 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 	// Warm fork: if checkpoint_id is set, fork from the local checkpoint cache.
 	// ForkFromCheckpoint uses the local cache directly — no S3 needed.
 	if req.CheckpointId != "" {
+		// WakeDuration covers "create from checkpoint" end-to-end. source label
+		// distinguishes a local-cache hit (fast, ~hundreds of ms) from a path
+		// that had to pull the archive from S3 (slow, seconds to minutes).
+		tWake := time.Now()
+		observeWake := func(source, status string) {
+			metrics.WakeDuration.WithLabelValues(s.region, cfg.Template, source, status).Observe(time.Since(tWake).Seconds())
+		}
+
 		sb, err := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
 		if err == nil {
+			observeWake("warm_cache", "success")
 			if s.router != nil {
 				// timeout == 0 means "persistent" (no auto-hibernate).
 				timeout := cfg.Timeout
@@ -176,39 +243,61 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
+			s.recordInitialScaleEvent(ctx, sb.ID, cfg)
+			s.configureLogshipForSandbox(ctx, sb.ID)
 			return &pb.CreateSandboxResponse{
 				SandboxId: sb.ID,
 				Status:    string(sb.Status),
 			}, nil
 		}
-		// If not in local cache, download the full checkpoint from S3 and retry.
-		// The archive includes drives + memory dump — everything needed for restore.
-		if strings.Contains(err.Error(), "not found in cache") && req.TemplateRootfsKey != "" && s.checkpointStore != nil {
-			log.Printf("grpc: warm fork %s: not in local cache, downloading from S3", req.CheckpointId)
-			if dlErr := s.downloadFullCheckpoint(ctx, req.CheckpointId, req.TemplateRootfsKey); dlErr != nil {
-				log.Printf("grpc: warm fork %s: S3 download failed: %v, falling back to template create", req.CheckpointId, dlErr)
-			} else {
-				sb, err = s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
-				if err == nil {
-					if s.router != nil {
-						// timeout == 0 means "persistent" (no auto-hibernate).
-						timeout := cfg.Timeout
-						if timeout < 0 {
-							timeout = 0
-						}
-						s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
-					}
-					return &pb.CreateSandboxResponse{
-						SandboxId: sb.ID,
-						Status:    string(sb.Status),
-					}, nil
-				}
-				log.Printf("grpc: warm fork %s: retry after S3 download failed: %v, falling back to template create", req.CheckpointId, err)
-			}
-		} else if !strings.Contains(err.Error(), "not found in cache") {
+		// Cache miss path: try to recover by downloading the checkpoint from
+		// S3, then retry the fork. The archive at TemplateRootfsKey holds
+		// drives + memory dump + metadata — everything ForkFromCheckpoint
+		// needs.
+		notInCache := strings.Contains(err.Error(), "not found in cache")
+		if !notInCache {
+			// Some other error (rebase failure, agent reconnect, etc.).
+			// Don't try to mask it — return the real reason. Attribute as
+			// warm_cache failure since we never got to the S3 path.
+			observeWake("warm_cache", "failure")
 			return nil, fmt.Errorf("fork from checkpoint %s: %w", req.CheckpointId, err)
 		}
-		log.Printf("grpc: warm fork %s: resolve drives failed: %v, continuing with ForkFromCheckpoint", req.CheckpointId, err)
+		if req.TemplateRootfsKey == "" || s.checkpointStore == nil {
+			// We can't recover this fork — the controlplane gave us a
+			// checkpoint id but no S3 key, and we don't have it cached
+			// locally. Pre-fix this fell through to plain Create() at the
+			// bottom of this function, silently producing an empty sandbox
+			// from the base golden — exactly the "only lost+found"
+			// symptom Oliviero hit on a checkpoint whose DB row had
+			// empty rootfs_s3_key. Fail loud instead so the customer (and
+			// us) sees an actionable error rather than a corrupt sandbox.
+			observeWake("s3", "failure")
+			return nil, fmt.Errorf("fork from checkpoint %s: not in local cache and no S3 key to recover from (DB row may be missing rootfs_s3_key)", req.CheckpointId)
+		}
+		log.Printf("grpc: warm fork %s: not in local cache, downloading from S3", req.CheckpointId)
+		if dlErr := s.downloadFullCheckpoint(ctx, req.CheckpointId, req.TemplateRootfsKey); dlErr != nil {
+			observeWake("s3", "failure")
+			return nil, fmt.Errorf("fork from checkpoint %s: cache miss + S3 download failed: %w", req.CheckpointId, dlErr)
+		}
+		sb, retryErr := s.manager.ForkFromCheckpoint(ctx, req.CheckpointId, cfg)
+		if retryErr != nil {
+			observeWake("s3", "failure")
+			return nil, fmt.Errorf("fork from checkpoint %s: retry after S3 download failed: %w", req.CheckpointId, retryErr)
+		}
+		observeWake("s3", "success")
+		if s.router != nil {
+			timeout := cfg.Timeout
+			if timeout < 0 {
+				timeout = 0
+			}
+			s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
+		}
+		s.recordInitialScaleEvent(ctx, sb.ID, cfg)
+		s.configureLogshipForSandbox(ctx, sb.ID)
+		return &pb.CreateSandboxResponse{
+			SandboxId: sb.ID,
+			Status:    string(sb.Status),
+		}, nil
 	}
 
 	// Handle sandbox snapshot template: resolve S3 keys to local paths.
@@ -247,32 +336,49 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		}
 	}
 
-	// Record initial scale event for billing
-	if s.store != nil {
-		memMB := cfg.MemoryMB
-		if memMB <= 0 {
-			memMB = 1024 // default
-		}
-		cpuPct := (memMB * 100) / 1024
-		if cpuPct < 100 {
-			cpuPct = 100
-		}
-		diskMB := cfg.DiskMB
-		if diskMB <= 0 {
-			diskMB = 20480
-		}
-		orgID, _ := s.store.GetSandboxOrgID(ctx, sb.ID)
-		if orgID != "" {
-			if err := s.store.RecordScaleEvent(ctx, sb.ID, orgID, memMB, cpuPct, diskMB); err != nil {
-				log.Printf("grpc: failed to record initial scale event for %s: %v", sb.ID, err)
-			}
-		}
-	}
+	s.recordInitialScaleEvent(ctx, sb.ID, cfg)
+
+	s.configureLogshipForSandbox(ctx, sb.ID)
 
 	return &pb.CreateSandboxResponse{
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
+}
+
+// recordInitialScaleEvent writes a sandbox_scale_events row marking the start
+// of billable usage for a freshly-created sandbox. Called from every successful
+// CreateSandbox return path — fork from checkpoint (local + S3-fallback) and
+// from-scratch — so billing accounting works for forks too. Without this on
+// the fork paths, sandbox_scale_events stays empty for the org, the
+// usage-reporter excludes it from ListFreeOrgIDsWithOpenUsage / ListBillableOrgIDs,
+// and no credits/usage are deducted or reported to Stripe.
+//
+// Best-effort: never returns an error. Defaults mirror the worker's own
+// fallbacks for unset CPU/memory/disk so downstream pricing math is consistent.
+func (s *GRPCServer) recordInitialScaleEvent(ctx context.Context, sandboxID string, cfg types.SandboxConfig) {
+	if s.store == nil {
+		return
+	}
+	memMB := cfg.MemoryMB
+	if memMB <= 0 {
+		memMB = 1024
+	}
+	cpuPct := (memMB * 100) / 1024
+	if cpuPct < 100 {
+		cpuPct = 100
+	}
+	diskMB := cfg.DiskMB
+	if diskMB <= 0 {
+		diskMB = 20480
+	}
+	orgID, _ := s.store.GetSandboxOrgID(ctx, sandboxID)
+	if orgID == "" {
+		return
+	}
+	if err := s.store.RecordScaleEvent(ctx, sandboxID, orgID, memMB, cpuPct, diskMB); err != nil {
+		log.Printf("grpc: failed to record initial scale event for %s: %v", sandboxID, err)
+	}
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxRequest) (*pb.DestroySandboxResponse, error) {
@@ -639,6 +745,23 @@ func (s *GRPCServer) WakeSandbox(ctx context.Context, req *pb.WakeSandboxRequest
 	}, nil
 }
 
+func (s *GRPCServer) RebootSandbox(ctx context.Context, req *pb.RebootSandboxRequest) (*pb.RebootSandboxResponse, error) {
+	if err := s.manager.RebootSandbox(ctx, req.SandboxId); err != nil {
+		return nil, fmt.Errorf("reboot sandbox: %w", err)
+	}
+	return &pb.RebootSandboxResponse{}, nil
+}
+
+func (s *GRPCServer) PowerCycleSandbox(ctx context.Context, req *pb.PowerCycleSandboxRequest) (*pb.PowerCycleSandboxResponse, error) {
+	port, err := s.manager.PowerCycleSandbox(ctx, req.SandboxId)
+	if err != nil {
+		return nil, fmt.Errorf("power-cycle sandbox: %w", err)
+	}
+	return &pb.PowerCycleSandboxResponse{
+		HostPort: int32(port),
+	}, nil
+}
+
 func (s *GRPCServer) BuildTemplate(ctx context.Context, req *pb.BuildTemplateRequest) (*pb.BuildTemplateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "deprecated")
 }
@@ -657,30 +780,25 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 		return nil, fmt.Errorf("invalid checkpoint ID: %w", err)
 	}
 
-	// The onReady callback fires after the async mem file move + S3 upload completes.
-	// If prepare_golden is set, it also creates a golden snapshot from the cache.
+	// The onReady callback fires after the S3 upload completes inside
+	// CreateCheckpoint. We only use it to trigger golden-snapshot prep here;
+	// the DB row is marked ready by the API using the actual keys + size from
+	// the gRPC response (see api/sandbox.go SetCheckpointReady call).
+	//
+	// Why not also mark ready here: the previous version of this callback
+	// called SetCheckpointReady(cpID, "", "", 0) — empty strings — and lost a
+	// race against the API's proper write under timeout. When the gRPC ctx
+	// timed out (large checkpoints, ~5 min budget), the API marked the row
+	// failed; minutes later the worker's upload finished, this onReady fired,
+	// and SetCheckpointReady flipped the row back to status='ready' with
+	// empty keys. Forks then saw a "ready" checkpoint with no S3 key and
+	// silently fell through to a fresh Create — empty /home/sandbox, only
+	// lost+found. Removing the worker-side write makes the API the single
+	// source of truth for the DB row's ready state.
 	prepareGolden := req.PrepareGolden
 	mgr := s.manager
 	var onReady func()
-	if s.store != nil {
-		cpID, _ := uuid.Parse(checkpointID)
-		onReady = func() {
-			if err := s.store.SetCheckpointReady(context.Background(), cpID, "", "", 0); err != nil {
-				log.Printf("grpc: CreateCheckpoint: failed to mark checkpoint %s ready: %v", checkpointID, err)
-			} else {
-				log.Printf("grpc: CreateCheckpoint: checkpoint %s is now ready", checkpointID)
-			}
-			// Create golden snapshot after mem file is in place
-			if prepareGolden {
-				type goldenPreparer interface {
-					RegisterTemplateGoldenFromCache(checkpointID string)
-				}
-				if gp, ok := mgr.(goldenPreparer); ok {
-					gp.RegisterTemplateGoldenFromCache(checkpointID)
-				}
-			}
-		}
-	} else if prepareGolden {
+	if prepareGolden {
 		onReady = func() {
 			type goldenPreparer interface {
 				RegisterTemplateGoldenFromCache(checkpointID string)
@@ -696,7 +814,7 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 	// it's marked "ready" — forks poll for "ready" before downloading.
 	// The gRPC call returns immediately with the S3 keys — the CP's fork path
 	// polls for checkpoint readiness and blocks until onReady fires.
-	rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, onReady)
+	rootfsKey, workspaceKey, sizeBytes, err := s.manager.CreateCheckpoint(ctx, req.SandboxId, checkpointID, s.checkpointStore, onReady)
 	if err != nil {
 		return nil, fmt.Errorf("create checkpoint failed: %w", err)
 	}
@@ -704,6 +822,7 @@ func (s *GRPCServer) CreateCheckpoint(ctx context.Context, req *pb.CreateCheckpo
 	return &pb.CreateCheckpointResponse{
 		RootfsS3Key:    rootfsKey,
 		WorkspaceS3Key: workspaceKey,
+		SizeBytes:      sizeBytes,
 	}, nil
 }
 
@@ -958,6 +1077,17 @@ func (s *GRPCServer) SetSandboxLimits(ctx context.Context, req *pb.SetSandboxLim
 	return &pb.SetSandboxLimitsResponse{}, nil
 }
 
+func (s *GRPCServer) UpdateSandboxSecret(ctx context.Context, req *pb.UpdateSandboxSecretRequest) (*pb.UpdateSandboxSecretResponse, error) {
+	if req.SandboxId == "" || req.SecretName == "" {
+		return nil, fmt.Errorf("sandbox_id and secret_name required")
+	}
+	updated, err := s.manager.UpdateSandboxSecret(ctx, req.SandboxId, req.SecretName, req.Value)
+	if err != nil {
+		return nil, fmt.Errorf("update secret: %w", err)
+	}
+	return &pb.UpdateSandboxSecretResponse{Updated: updated}, nil
+}
+
 // SetMigrator sets the live migration handler (call after NewGRPCServer if the manager supports it).
 func (s *GRPCServer) SetMigrator(m LiveMigrator) {
 	s.migrator = m
@@ -972,18 +1102,32 @@ func (s *GRPCServer) PreCopyDrives(ctx context.Context, req *pb.PreCopyDrivesReq
 	if s.migrator == nil {
 		return nil, fmt.Errorf("live migration not supported on this worker")
 	}
-	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
+	rootfsKey, workspaceKey, goldenVersion, baseCPU, baseMem, actualMem, secrets, err := s.migrator.PreCopyDrives(ctx, req.SandboxId, s.checkpointStore)
 	if err != nil {
 		return nil, fmt.Errorf("pre-copy drives: %w", err)
 	}
-	return &pb.PreCopyDrivesResponse{
+	resp := &pb.PreCopyDrivesResponse{
 		RootfsKey:      rootfsKey,
 		WorkspaceKey:   workspaceKey,
 		GoldenVersion:  goldenVersion,
 		BaseMemoryMb:   int32(baseMem),
 		BaseCpuCount:   int32(baseCPU),
 		ActualMemoryMb: int32(actualMem),
-	}, nil
+	}
+	// Marshal the secrets-proxy session into the proto. Skipped silently
+	// when the sandbox has no secret store registered (empty maps).
+	if len(secrets.SealedTokens) > 0 {
+		resp.SealedTokens = secrets.SealedTokens
+		resp.EgressAllowlist = secrets.EgressAllowlist
+		resp.SealedNames = secrets.SealedNames
+		if len(secrets.TokenHosts) > 0 {
+			resp.TokenHosts = make(map[string]*pb.HostList, len(secrets.TokenHosts))
+			for tok, hosts := range secrets.TokenHosts {
+				resp.TokenHosts[tok] = &pb.HostList{Hosts: hosts}
+			}
+		}
+	}
+	return resp, nil
 }
 
 func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.PrepareMigrationIncomingRequest) (*pb.PrepareMigrationIncomingResponse, error) {
@@ -1011,6 +1155,24 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 		}
 	}
 
+	// Unmarshal the secrets-proxy session from the request, if any. The
+	// orchestrator will have copied this from PreCopyDrives. Empty when
+	// the sandbox has no secret store.
+	var secrets sandbox.MigrationSecrets
+	if len(req.SealedTokens) > 0 {
+		secrets.SealedTokens = req.SealedTokens
+		secrets.EgressAllowlist = req.EgressAllowlist
+		secrets.SealedNames = req.SealedNames
+		if len(req.TokenHosts) > 0 {
+			secrets.TokenHosts = make(map[string][]string, len(req.TokenHosts))
+			for tok, hl := range req.TokenHosts {
+				if hl != nil {
+					secrets.TokenHosts[tok] = hl.Hosts
+				}
+			}
+		}
+	}
+
 	var (
 		addr     string
 		hostPort int
@@ -1019,7 +1181,7 @@ func (s *GRPCServer) PrepareMigrationIncoming(ctx context.Context, req *pb.Prepa
 	if req.RootfsS3Key != "" && req.WorkspaceS3Key != "" {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigrationWithS3(ctx,
 			req.SandboxId, req.RootfsS3Key, req.WorkspaceS3Key,
-			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion)
+			int(req.CpuCount), int(req.MemoryMb), int(req.GuestPort), req.Template, s.checkpointStore, req.OverlayMode, req.SourceGoldenVersion, secrets)
 	} else {
 		addr, hostPort, err = s.migrator.PrepareIncomingMigration(ctx,
 			req.SandboxId, req.RootfsPath, req.WorkspacePath,

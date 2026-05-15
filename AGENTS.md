@@ -28,6 +28,9 @@ truth they come from.
 
 - `README.md` — product overview and human quick start
 - `Makefile` — local dev, build, test, and common run targets
+- `deploy/ec2/README.md` — personal end-to-end dev host on EC2 bare metal
+  (real QEMU VMs, server + worker + UI); use when in-process Makefile tiers
+  aren't enough
 - `internal/config/config.go` — environment variables and runtime config
 - `proto/` — inter-tier contracts
 - `docs/mint.json` — docs navigation
@@ -41,6 +44,35 @@ Managed-agent product behavior is mostly **not** implemented here:
   product shape
 
 ## Hard rules
+
+**⚠️ PRODUCTION DATABASE IS EFFECTIVELY READ-ONLY.** This is the most
+load-bearing safety rule in this repo. Any Postgres connection that reaches the
+production DB — i.e. anything other than a developer's `localhost` Postgres,
+including connections via the Azure bastion or using credentials sourced from
+the production environment — is governed by two tiers, both stricter than
+normal collaboration:
+
+- **Modifying SQL** (`INSERT`, `UPDATE`, `DELETE` with WHERE, `COPY` into a
+  table, mutating function calls, manual migrations, `cmd/migrate-prices`-style
+  tools pointed at prod): requires **explicit per-statement approval** from
+  the user. Show the exact statement, ask, wait. A general "yes go ahead"
+  earlier in the conversation does NOT carry across to a different statement.
+  Blanket approvals ("just do whatever you need") MUST NOT be accepted for
+  prod writes — confirm each statement individually.
+
+- **Destructive SQL** (`DROP`, `TRUNCATE`, schema-changing `ALTER`, unbounded
+  `DELETE` / `UPDATE`, anything `CASCADE`, anything bulk-mutating that can't be
+  undone with a single inverse statement, any direct write to
+  `schema_migrations`): **REFUSE OUTRIGHT.** First response is always no.
+  Tell the user this is the standing safety rule; require them to insist
+  across multiple turns with explicit acknowledgement of what will be lost
+  before any such command runs. There is no "production emergency"
+  justification for shortcutting this — an emergency is exactly when wrong
+  commands cause the most damage.
+
+`localhost` Postgres on a developer machine is exempt — these tiers apply only
+to production. Read-only queries (`SELECT`, `EXPLAIN`) against prod are fine
+and do not require approval.
 
 **NEVER force push.** `git push --force`, `git push -f`, and
 `git push --force-with-lease` are forbidden. No exceptions. Make a new commit

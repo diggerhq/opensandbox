@@ -1,15 +1,18 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/opensandbox/opensandbox/internal/auth"
+	"github.com/opensandbox/opensandbox/internal/db"
 )
 
 // billingSetup initiates the upgrade flow: creates Stripe customer + Checkout session.
@@ -246,7 +249,8 @@ func (s *Server) stripeWebhook(c echo.Context) error {
 		if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "bad event data"})
 		}
-		if sess.Metadata["type"] == "setup" {
+		switch sess.Metadata["type"] {
+		case "setup":
 			orgIDStr := sess.Metadata["org_id"]
 			orgID, err := uuid.Parse(orgIDStr)
 			if err != nil {
@@ -277,7 +281,18 @@ func (s *Server) stripeWebhook(c echo.Context) error {
 			}
 
 			log.Printf("billing: org %s upgraded to pro (subscription=%s, $30 credit applied)", orgID, subID)
+
+		case "agent_feature_subscription":
+			// Customer paid for a per-agent feature via Checkout. The
+			// Stripe-side subscription is already created (Checkout
+			// mode=subscription); we just persist the local row so
+			// the entitlement check finds it. Subscription metadata
+			// carries (org_id, agent_id, feature).
+			s.recordAgentFeatureCheckoutCompletion(ctx, sess.Metadata, event.Data.Raw)
 		}
+
+	case "customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted":
+		s.handleAgentFeatureSubscriptionEvent(ctx, string(event.Type), event.Data.Raw)
 
 	case "invoice.paid":
 		log.Printf("billing: invoice paid: %s", string(event.Data.Raw)[:100])
@@ -287,4 +302,138 @@ func (s *Server) stripeWebhook(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// recordAgentFeatureCheckoutCompletion persists a freshly-created
+// per-agent feature subscription that was set up via Checkout. The
+// Subscription object is already on Stripe; we just need to insert
+// the local row. Metadata is propagated from the Checkout Session
+// into the Subscription, so the subsequent customer.subscription.*
+// events will also trigger handleAgentFeatureSubscriptionEvent which
+// fills in current_period_end / status / etc.
+func (s *Server) recordAgentFeatureCheckoutCompletion(ctx context.Context, metadata map[string]string, raw []byte) {
+	orgID, err := uuid.Parse(metadata["org_id"])
+	if err != nil {
+		log.Printf("billing: agent_feature_subscription checkout missing org_id: %v", err)
+		return
+	}
+	agentID := metadata["agent_id"]
+	feature := metadata["feature"]
+	if agentID == "" || feature == "" {
+		log.Printf("billing: agent_feature_subscription checkout missing agent_id/feature in metadata")
+		return
+	}
+
+	// Pull the subscription_id out of the checkout session payload —
+	// Stripe attaches it after Checkout creates the subscription.
+	var sess struct {
+		Subscription string `json:"subscription"`
+		Customer     string `json:"customer"`
+	}
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		log.Printf("billing: agent_feature_subscription checkout: unmarshal: %v", err)
+		return
+	}
+	if sess.Subscription == "" {
+		log.Printf("billing: agent_feature_subscription checkout has no subscription id")
+		return
+	}
+
+	// Idempotent: skip if we already recorded it.
+	existing, err := s.store.GetAgentSubscriptionByStripeID(ctx, sess.Subscription)
+	if err == nil && existing != nil {
+		return
+	}
+
+	priceID := ""
+	if s.stripeClient != nil {
+		switch feature {
+		case "telegram":
+			priceID = s.stripeClient.TelegramAgentPriceID
+		}
+	}
+
+	if _, err := s.store.CreateAgentSubscription(ctx, db.AgentSubscription{
+		OrgID:                orgID,
+		AgentID:              agentID,
+		Feature:              feature,
+		StripeCustomerID:     sess.Customer,
+		StripeSubscriptionID: sess.Subscription,
+		StripePriceID:        priceID,
+		Status:               "incomplete", // will be updated by subscription.updated event
+	}); err != nil {
+		log.Printf("billing: persist agent_subscription from checkout failed: %v", err)
+	} else {
+		log.Printf("billing: agent_feature_subscription recorded: agent=%s feature=%s sub=%s", agentID, feature, sess.Subscription)
+	}
+}
+
+// handleAgentFeatureSubscriptionEvent reconciles status on every
+// customer.subscription.* event. We filter to subscriptions that we
+// have a local row for — anything else is the org-level pro-plan
+// subscription which is handled elsewhere.
+//
+// `customer.subscription.deleted` fires when Stripe finally removes
+// the subscription (after period end if cancel_at_period_end was
+// scheduled, or immediately for a hard cancel). At that point we
+// flip the local row to canceled and disconnect any active Telegram
+// webhook so the user actually loses access.
+func (s *Server) handleAgentFeatureSubscriptionEvent(ctx context.Context, eventType string, raw []byte) {
+	var sub struct {
+		ID                string            `json:"id"`
+		Status            string            `json:"status"`
+		CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
+		CanceledAt        *int64            `json:"canceled_at"`
+		Metadata          map[string]string `json:"metadata"`
+		Items             struct {
+			Data []struct {
+				CurrentPeriodEnd int64 `json:"current_period_end"`
+			} `json:"data"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &sub); err != nil {
+		log.Printf("billing: subscription event unmarshal: %v", err)
+		return
+	}
+
+	row, err := s.store.GetAgentSubscriptionByStripeID(ctx, sub.ID)
+	if err != nil {
+		log.Printf("billing: lookup agent_subscription %s failed: %v", sub.ID, err)
+		return
+	}
+	if row == nil {
+		// Not a per-agent subscription — ignore.
+		return
+	}
+
+	var currentPeriodEnd *time.Time
+	if len(sub.Items.Data) > 0 && sub.Items.Data[0].CurrentPeriodEnd > 0 {
+		t := time.Unix(sub.Items.Data[0].CurrentPeriodEnd, 0).UTC()
+		currentPeriodEnd = &t
+	}
+	var canceledAt *time.Time
+	if sub.CanceledAt != nil && *sub.CanceledAt > 0 {
+		t := time.Unix(*sub.CanceledAt, 0).UTC()
+		canceledAt = &t
+	}
+
+	if err := s.store.UpdateAgentSubscriptionFromStripe(
+		ctx, sub.ID, sub.Status, currentPeriodEnd, sub.CancelAtPeriodEnd, canceledAt,
+	); err != nil {
+		log.Printf("billing: update agent_subscription %s failed: %v", sub.ID, err)
+		return
+	}
+
+	// On terminal statuses, the entitlement check will start denying
+	// new connect attempts immediately. We deliberately don't auto-
+	// disconnect a currently-connected Telegram channel from here —
+	// that side-effect needs an authenticated call into sessions-api,
+	// and the cleanest way to do it is from the user-facing flow
+	// (e.g. show "subscription expired" in the UI and let them click
+	// Disconnect, or have sessions-api re-check entitlement on each
+	// inbound webhook). Phase-1 leaves this as a "soft" gate.
+	if eventType == "customer.subscription.deleted" {
+		log.Printf("billing: agent_subscription terminated: agent=%s feature=%s sub=%s status=%s",
+			row.AgentID, row.Feature, sub.ID, sub.Status)
+	}
 }

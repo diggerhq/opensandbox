@@ -399,7 +399,8 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		}
 		_ = resp
 	} else if s.manager != nil {
-		cfg.NetworkEnabled = true
+		t := true
+		cfg.NetworkEnabled = &t
 		sb, err := s.manager.Create(ctx, cfg)
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to create build sandbox: %w", err)
@@ -441,7 +442,9 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		if workerID == "" {
 			workerID = "w-local-1"
 		}
-		_, _ = s.store.CreateSandboxSession(ctx, buildSandboxID, orgID, nil, cfg.Template, region, workerID, cfgJSON, []byte("{}"))
+		// Image-builder sandboxes never bind to a customer secret store —
+		// secret_store_id stays NULL. They run a Dockerfile build, not user code.
+		_, _ = s.store.CreateSandboxSession(ctx, buildSandboxID, orgID, nil, cfg.Template, region, workerID, cfgJSON, []byte("{}"), nil)
 		if s.workerRegistry != nil {
 			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {
 				_ = s.store.SetSandboxGoldenVersion(ctx, buildSandboxID, w.GoldenVersion)
@@ -499,36 +502,41 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		}
 	}
 
-	// Create checkpoint on worker
+	// Create checkpoint on worker. 20-min budget matches the regular
+	// checkpoint create path (api/sandbox.go) — image builder checkpoints
+	// can be just as large, and the previous 2-min ceiling silently failed
+	// big builds the same way the regular path failed Oliviero's 7-9 GB
+	// sandbox.
 	if grpcClient != nil {
-		cpCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+		cpCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 		defer cancel()
 
 		resp, err := grpcClient.CreateCheckpoint(cpCtx, &pb.CreateCheckpointRequest{
-			SandboxId:      buildSandboxID,
-			CheckpointId:   checkpointID.String(),
-			PrepareGolden:  true, // prepare golden snapshot for instant template creates
+			SandboxId:     buildSandboxID,
+			CheckpointId:  checkpointID.String(),
+			PrepareGolden: true, // prepare golden snapshot for instant template creates
 		})
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to checkpoint build sandbox: %w", err)
 		}
 
-		// Update checkpoint with S3 keys
+		// Persist S3 keys + actual archive size on the row. Pre-fix the size
+		// field was hardcoded to 0 even though the gRPC response carries it.
 		if s.store != nil {
-			_ = s.store.SetCheckpointReady(ctx, checkpointID, resp.RootfsS3Key, resp.WorkspaceS3Key, 0)
+			_ = s.store.SetCheckpointReady(ctx, checkpointID, resp.RootfsS3Key, resp.WorkspaceS3Key, resp.SizeBytes)
 		}
 	} else if s.manager != nil {
 		// Combined mode: call CreateCheckpoint via reflection-free approach.
 		// The concrete firecracker.Manager implements CreateCheckpoint directly.
 		type checkpointer interface {
-			CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (string, string, error)
+			CreateCheckpoint(ctx context.Context, sandboxID, checkpointID string, checkpointStore *storage.CheckpointStore, onReady func()) (string, string, int64, error)
 		}
 		cpMgr, ok := s.manager.(checkpointer)
 		if !ok {
 			return uuid.Nil, fmt.Errorf("manager does not support checkpoints")
 		}
 
-		rootfsKey, workspaceKey, err := cpMgr.CreateCheckpoint(ctx, buildSandboxID, checkpointID.String(), s.checkpointStore, func() {})
+		rootfsKey, workspaceKey, sizeBytes, err := cpMgr.CreateCheckpoint(ctx, buildSandboxID, checkpointID.String(), s.checkpointStore, func() {})
 		if err != nil {
 			return uuid.Nil, fmt.Errorf("failed to checkpoint build sandbox: %w", err)
 		}
@@ -542,7 +550,7 @@ func (s *Server) buildImage(ctx context.Context, orgID uuid.UUID, manifest *Imag
 		}
 
 		if s.store != nil {
-			_ = s.store.SetCheckpointReady(ctx, checkpointID, rootfsKey, workspaceKey, 0)
+			_ = s.store.SetCheckpointReady(ctx, checkpointID, rootfsKey, workspaceKey, sizeBytes)
 		}
 
 		// Prepare golden snapshot for combined mode

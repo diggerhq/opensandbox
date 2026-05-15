@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,11 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/blobstore"
 	"github.com/opensandbox/opensandbox/internal/storage"
 )
 
 // ---------------------------------------------------------------------------
-// Mock blob client — in-memory store for testing without real S3/Azure
+// Mock Store — in-memory blobstore.Store for testing without real S3/Azure.
 // ---------------------------------------------------------------------------
 
 type mockBlobClient struct {
@@ -30,7 +30,9 @@ func newMockBlobClient() *mockBlobClient {
 	return &mockBlobClient{objects: make(map[string][]byte)}
 }
 
-func (m *mockBlobClient) Upload(_ context.Context, bucket, key string, body io.ReadSeeker, _ int64) error {
+func (m *mockBlobClient) Name() string { return "mock" }
+
+func (m *mockBlobClient) Put(_ context.Context, bucket, key string, body io.Reader, _ int64) error {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return err
@@ -41,22 +43,22 @@ func (m *mockBlobClient) Upload(_ context.Context, bucket, key string, body io.R
 	return nil
 }
 
-func (m *mockBlobClient) Download(_ context.Context, bucket, key string) (io.ReadCloser, error) {
+func (m *mockBlobClient) Get(_ context.Context, bucket, key string) (io.ReadCloser, error) {
 	m.mu.Lock()
 	data, ok := m.objects[bucket+"/"+key]
 	m.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("not found: %s/%s", bucket, key)
+		return nil, blobstore.ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
-func (m *mockBlobClient) DownloadRange(_ context.Context, bucket, key string, offset, length int64) (io.ReadCloser, error) {
+func (m *mockBlobClient) GetRange(_ context.Context, bucket, key string, offset, length int64) (io.ReadCloser, error) {
 	m.mu.Lock()
 	data, ok := m.objects[bucket+"/"+key]
 	m.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("not found: %s/%s", bucket, key)
+		return nil, blobstore.ErrNotFound
 	}
 	end := offset + length
 	if end > int64(len(data)) {
@@ -71,9 +73,16 @@ func (m *mockBlobClient) Head(_ context.Context, bucket, key string) (int64, err
 	data, ok := m.objects[bucket+"/"+key]
 	m.mu.Unlock()
 	if !ok {
-		return 0, fmt.Errorf("not found: %s/%s", bucket, key)
+		return 0, blobstore.ErrNotFound
 	}
 	return int64(len(data)), nil
+}
+
+func (m *mockBlobClient) Exists(_ context.Context, bucket, key string) (bool, error) {
+	m.mu.Lock()
+	_, ok := m.objects[bucket+"/"+key]
+	m.mu.Unlock()
+	return ok, nil
 }
 
 func (m *mockBlobClient) Delete(_ context.Context, bucket, key string) error {
@@ -82,8 +91,6 @@ func (m *mockBlobClient) Delete(_ context.Context, bucket, key string) error {
 	m.mu.Unlock()
 	return nil
 }
-
-func (m *mockBlobClient) BackendName() string { return "mock" }
 
 func (m *mockBlobClient) put(bucket, key string, data []byte) {
 	m.mu.Lock()
@@ -111,7 +118,7 @@ func testManager(t *testing.T, goldenVersion string) (mgr *Manager, store *stora
 	}
 
 	mock = newMockBlobClient()
-	store = storage.NewCheckpointStoreFromClient(mock, "checkpoints")
+	store = storage.NewCheckpointStoreFromStore(mock, "checkpoints")
 
 	mgr = &Manager{
 		cfg: Config{

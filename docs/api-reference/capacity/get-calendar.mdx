@@ -3,11 +3,6 @@ title: 'Get Calendar'
 api: 'GET /api/capacity/calendar'
 ---
 
-<Info>
-  **Coming soon.** Reserved capacity is not yet available. See the
-  [Reserved Capacity overview](/reserved-capacity/overview).
-</Info>
-
 Return a planning snapshot of 15-minute UTC intervals in the requested window.
 One row per interval with current `reservedGb`, `reservableGb`, and the
 per-org `reservationLimitGb`. See
@@ -24,11 +19,9 @@ per-org `reservationLimitGb`. See
 <ResponseExample>
 ```json 200
 {
-  "generatedAt": "2026-04-28T18:00:00Z",
-  "staleAt":     "2026-04-28T18:00:10Z",
-  "intervalDuration": "PT15M",
-  "timezone": "UTC",
-  "earliestReservableStart": "2026-04-28T18:30:00Z",
+  "from":      "2026-04-29T02:00:00Z",
+  "to":        "2026-04-29T04:00:00Z",
+  "resource":  "memory_gb",
   "intervals": [
     {
       "startsAt": "2026-04-29T02:00:00Z",

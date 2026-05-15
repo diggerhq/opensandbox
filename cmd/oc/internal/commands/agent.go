@@ -234,4 +234,6 @@ func init() {
 	agentCmd.AddCommand(agentUninstallCmd)
 	agentCmd.AddCommand(agentPackagesCmd)
 	agentCmd.AddCommand(agentEventsCmd)
+	agentCmd.AddCommand(agentSendCmd)
+	agentCmd.AddCommand(agentChatCmd)
 }

@@ -2,8 +2,54 @@ package config
 
 import (
 	"os"
+	"reflect"
 	"testing"
 )
+
+func TestSplitCSV(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty", "", nil},
+		{"whitespace only", "   ,  ,", nil},
+		{"single", "Standard_D16ads_v7", []string{"Standard_D16ads_v7"}},
+		{"multiple", "Standard_D16ads_v7,Standard_D16ds_v6,Standard_D16s_v5",
+			[]string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"}},
+		{"trim whitespace", "  Standard_D16ads_v7 , Standard_D16ds_v6  ",
+			[]string{"Standard_D16ads_v7", "Standard_D16ds_v6"}},
+		{"drop empty entries", "a,,b,,,c", []string{"a", "b", "c"}},
+		{"order preserved", "c7gd.metal,r7gd.metal,r6gd.metal",
+			[]string{"c7gd.metal", "r7gd.metal", "r6gd.metal"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitCSV(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("splitCSV(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadParsesMachineSizeLists(t *testing.T) {
+	t.Setenv("OPENSANDBOX_AZURE_VM_SIZES", "Standard_D16ads_v7, Standard_D16ds_v6 ,Standard_D16s_v5")
+	t.Setenv("OPENSANDBOX_EC2_INSTANCE_TYPES", "c7gd.metal,r7gd.metal")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	wantAzure := []string{"Standard_D16ads_v7", "Standard_D16ds_v6", "Standard_D16s_v5"}
+	if !reflect.DeepEqual(cfg.AzureVMSizes, wantAzure) {
+		t.Errorf("AzureVMSizes = %v, want %v", cfg.AzureVMSizes, wantAzure)
+	}
+	wantEC2 := []string{"c7gd.metal", "r7gd.metal"}
+	if !reflect.DeepEqual(cfg.EC2InstanceTypes, wantEC2) {
+		t.Errorf("EC2InstanceTypes = %v, want %v", cfg.EC2InstanceTypes, wantEC2)
+	}
+}
 
 func TestLoadDefaults(t *testing.T) {
 	// Clear env to test defaults

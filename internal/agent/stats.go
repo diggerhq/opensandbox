@@ -37,7 +37,14 @@ func (s *Server) Shutdown(ctx context.Context, req *pb.ShutdownRequest) (*pb.Shu
 func (s *Server) Stats(ctx context.Context, req *pb.StatsRequest) (*pb.StatsResponse, error) {
 	resp := &pb.StatsResponse{}
 
-	// Memory from /proc/meminfo
+	// Memory from /proc/meminfo. Note we use MemAvailable, not MemFree —
+	// MemAvailable is the kernel's own working-set estimate that subtracts
+	// reclaimable page cache + slab. So MemTotal-MemAvailable already
+	// excludes file-cache pressure (e.g. a `dd` workload won't make this
+	// climb to 100% even though page cache fills RAM). The autoscaler reads
+	// this value via mem_pct; treating it as a working-set proxy is correct.
+	// It is also an upper bound on resident anon memory, so the worker's
+	// scale-down OOM floor uses MemUsage * 1.05 as a safe lower bound.
 	memTotal, memAvail := readMemInfo()
 	resp.MemLimit = memTotal
 	resp.MemUsage = memTotal - memAvail
@@ -51,7 +58,32 @@ func (s *Server) Stats(ctx context.Context, req *pb.StatsRequest) (*pb.StatsResp
 	// Network from /proc/net/dev
 	resp.NetInput, resp.NetOutput = readNetStats()
 
+	// Disk usage via statvfs(). The worker uses these to refuse hibernate /
+	// checkpoint when rootfs is critically full, before the qcow2 ends up
+	// captured in an inconsistent state. Errors silently zero the fields —
+	// the worker treats 0/0 as "unknown" and falls back to no pressure gate.
+	resp.RootfsUsedBytes, resp.RootfsTotalBytes = diskUsage("/")
+	resp.WorkspaceUsedBytes, resp.WorkspaceTotalBytes = diskUsage("/home/sandbox")
+
 	return resp, nil
+}
+
+// diskUsage returns (used, total) in bytes for the filesystem containing path.
+// On any error, returns (0, 0) — caller treats that as "unknown".
+func diskUsage(path string) (used, total uint64) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0
+	}
+	bsize := uint64(st.Bsize)
+	total = st.Blocks * bsize
+	avail := st.Bavail * bsize
+	if avail > total {
+		// Should never happen on ext4, but guard against underflow if it does.
+		return 0, total
+	}
+	used = total - avail
+	return used, total
 }
 
 // readMemInfo parses /proc/meminfo for MemTotal and MemAvailable.

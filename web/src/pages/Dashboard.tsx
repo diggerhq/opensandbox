@@ -177,6 +177,8 @@ function GettingStarted() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <DeployAgentBanner />
+
       <StepCard
         index={1}
         title="Install the OpenComputer skill"
@@ -459,4 +461,90 @@ function formatDuration(session: Session): string {
   if (secs < 60) return `${secs}s`
   if (secs < 3600) return `${Math.round(secs / 60)}m`
   return `${Math.round(secs / 3600 * 10) / 10}h`
+}
+
+// Deploy-managed-agent banner shown above the getting-started checklist on
+// fresh signups. The Agents page has the same lobster mark in its empty
+// state; keeping the two consistent makes the OpenClaw / managed-agent
+// product visible from minute one without asking the user to navigate.
+function DeployAgentBanner() {
+  const navigate = useNavigate()
+  return (
+    <div
+      onClick={() => navigate('/agents')}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigate('/agents') }
+      }}
+      role="button"
+      tabIndex={0}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 18,
+        padding: '20px 24px',
+        border: '1px solid rgba(255,77,77,0.30)',
+        borderRadius: 14,
+        background:
+          'radial-gradient(ellipse at left, rgba(255,77,77,0.14), transparent 62%), rgba(255,77,77,0.04)',
+        cursor: 'pointer',
+        transition: 'background 0.12s ease, border-color 0.12s ease',
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,77,77,0.55)' }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.borderColor = 'rgba(255,77,77,0.30)' }}
+    >
+      <DashClawLogo />
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'var(--font-display)', marginBottom: 4 }}>
+          Deploy an OpenClaw managed agent
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+          Spin up a managed agent runtime with built-in chat, Telegram, and gbrain memory.
+          We host the gateway and the model routing — you bring the prompt.
+        </div>
+      </div>
+      <div
+        style={{
+          padding: '9px 18px',
+          fontSize: 13, fontWeight: 600,
+          background: 'var(--accent-indigo)', color: '#fff',
+          borderRadius: 'var(--radius-sm)',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Deploy →
+      </div>
+    </div>
+  )
+}
+
+// OpenClaw lobster mark — pulled directly from openclaw.ai/favicon.svg so the
+// dashboard banner uses the same brand asset as the marketing site. Inline so
+// it ships with the bundle (no extra HTTP fetch); gradient ID is scoped per
+// page (`dash-…`) to avoid collisions when multiple copies render at once.
+function DashClawLogo() {
+  return (
+    <svg
+      width="56"
+      height="56"
+      viewBox="0 0 120 120"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      style={{ filter: 'drop-shadow(0 0 16px rgba(255,77,77,0.45))', flexShrink: 0 }}
+    >
+      <defs>
+        <linearGradient id="dash-lobster-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#ff4d4d" />
+          <stop offset="100%" stopColor="#991b1b" />
+        </linearGradient>
+      </defs>
+      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#dash-lobster-gradient)" />
+      <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#dash-lobster-gradient)" />
+      <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#dash-lobster-gradient)" />
+      <path d="M45 15 Q35 5 30 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      <path d="M75 15 Q85 5 90 8" stroke="#ff4d4d" strokeWidth="3" strokeLinecap="round" />
+      <circle cx="45" cy="35" r="6" fill="#050810" />
+      <circle cx="75" cy="35" r="6" fill="#050810" />
+      <circle cx="46" cy="34" r="2.5" fill="#00e5cc" />
+      <circle cx="76" cy="34" r="2.5" fill="#00e5cc" />
+    </svg>
+  )
 }

@@ -252,7 +252,7 @@ func (p *SandboxProxy) doHTTP(c echo.Context, sandboxID, addr string, hostPort i
 			DialContext: (&net.Dialer{
 				Timeout: 2 * time.Second,
 			}).DialContext,
-			ResponseHeaderTimeout: 10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
 		}
 
 		var proxyErr error

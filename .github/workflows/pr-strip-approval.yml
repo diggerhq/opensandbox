@@ -1,0 +1,23 @@
+name: Strip CI Approval On Push
+
+# Removes the osb-ci-approve label whenever a PR receives new commits, forcing
+# a maintainer to re-review the new SHA before integration tests can run again.
+# Pairs with pr-integration.yml, which only fires on the `labeled` event.
+on:
+  pull_request:
+    types: [synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  strip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove osb-ci-approve label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit ${{ github.event.pull_request.number }} \
+            --remove-label osb-ci-approve \
+            -R ${{ github.repository }} 2>/dev/null || true

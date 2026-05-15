@@ -31,6 +31,10 @@ on:
       - 'deploy/azure/setup-azure-host.sh'
       - 'deploy/ec2/build-rootfs-docker.sh'
       - 'deploy/packer/**'
+      # Vector configs + install.sh + KV populator are all baked into the
+      # AMI by the Packer provisioner (deploy/packer/worker-ami.pkr.hcl §4.5).
+      # A change here needs to roll through a new AMI to reach prod workers.
+      - 'deploy/vector/**'
       - 'scripts/claude-agent-wrapper/**'
       - 'go.mod'
       - 'go.sum'
@@ -94,6 +98,14 @@ jobs:
             deploy/ec2/build-rootfs-docker.sh \
             scripts/claude-agent-wrapper/
 
+      - name: Package Vector configs
+        # Bundled separately so Packer's file provisioner has a known
+        # tarball path (it can't reliably upload an arbitrary directory).
+        # install.sh on the builder extracts and installs Vector + the
+        # KV-token populator into the AMI.
+        run: |
+          tar czf /tmp/packer-vector-ctx.tar.gz -C deploy vector
+
       - name: Azure Login
         uses: azure/login@v2
         with:
@@ -139,6 +151,10 @@ jobs:
             -var "base_archive_account=${{ secrets.AZURE_STORAGE_ACCOUNT }}" \
             -var "base_archive_key=${{ secrets.AZURE_STORAGE_KEY }}" \
             -var "prev_golden_version=${{ steps.prev-golden.outputs.prev }}" \
+            -var "tigris_endpoint=${{ secrets.TIGRIS_ENDPOINT }}" \
+            -var "tigris_access_key_id=${{ secrets.TIGRIS_ACCESS_KEY_ID }}" \
+            -var "tigris_secret_access_key=${{ secrets.TIGRIS_SECRET_ACCESS_KEY }}" \
+            -var "tigris_goldens_bucket=${{ secrets.TIGRIS_GOLDENS_BUCKET }}" \
             deploy/packer/worker-ami.pkr.hcl | tee /tmp/packer-output.txt
 
           # Use the gallery image ID (NVMe-compatible for v7 VMs)

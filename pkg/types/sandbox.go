@@ -48,7 +48,9 @@ type SandboxConfig struct {
 	DiskMB     int               `json:"diskMB,omitempty"`    // workspace disk in MB (default 20480)
 	Envs       map[string]string `json:"envs,omitempty"`
 	Port       int               `json:"port,omitempty"`       // container port to expose via subdomain (default 80)
-	NetworkEnabled bool          `json:"networkEnabled,omitempty"`
+	// NetworkEnabled is a pointer so we can distinguish "unset" from
+	// "explicitly false". Unset defaults to true (see IsNetworkEnabled).
+	NetworkEnabled *bool         `json:"networkEnabled,omitempty"`
 	ImageRef       string        `json:"imageRef,omitempty"`       // resolved ECR URI for custom templates
 	// Sandbox snapshot template: S3 keys for rootfs and workspace drives.
 	// When set, the sandbox boots from these drives instead of the standard base image.
@@ -105,6 +107,26 @@ var AllowedResourceTiers = []ResourceTier{
 	{MemoryMB: 16384, VCPUs: 4},
 	{MemoryMB: 32768, VCPUs: 8},
 	{MemoryMB: 65536, VCPUs: 16},
+}
+
+// IsNetworkEnabled returns the effective NetworkEnabled value, defaulting to
+// true when unset. Direct deref is unsafe because older persisted configs and
+// clients that omit the field produce nil.
+func (c SandboxConfig) IsNetworkEnabled() bool {
+	if c.NetworkEnabled == nil {
+		return true
+	}
+	return *c.NetworkEnabled
+}
+
+// EnsureNetworkEnabledDefault sets NetworkEnabled to true when unset, so the
+// value persisted into the DB is explicit and survives round-trips (e.g. fork
+// from checkpoint).
+func (c *SandboxConfig) EnsureNetworkEnabledDefault() {
+	if c.NetworkEnabled == nil {
+		t := true
+		c.NetworkEnabled = &t
+	}
 }
 
 // ValidateMemoryMB checks that memoryMB matches an allowed tier and returns the corresponding vCPU count.

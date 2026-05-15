@@ -398,7 +398,7 @@ var (
 	_ func(context.Context, string, string) ([]types.EntryInfo, error)                                                     = (*Manager)(nil).ListDir
 	_ func(context.Context, string, *storage.CheckpointStore) (*sandbox.HibernateResult, error)                            = (*Manager)(nil).Hibernate
 	_ func(context.Context, string, string, *storage.CheckpointStore, int) (*types.Sandbox, error)                         = (*Manager)(nil).Wake
-	_ func(context.Context, string, string, *storage.CheckpointStore, func()) (string, string, error)                      = (*Manager)(nil).CreateCheckpoint
+	_ func(context.Context, string, string, *storage.CheckpointStore, func()) (string, string, int64, error)               = (*Manager)(nil).CreateCheckpoint
 	_ func(context.Context, string, string) error                                                                          = (*Manager)(nil).RestoreFromCheckpoint
 	_ func(context.Context, string, types.SandboxConfig) (*types.Sandbox, error)                                           = (*Manager)(nil).ForkFromCheckpoint
 )

@@ -1,0 +1,142 @@
+# Vector config for worker hosts (Azure VMs and EC2).
+#
+# Two pipelines, two Axiom datasets:
+#   • logs:    journald → parse → axiom_platform sink → AXIOM_PLATFORM_DATASET
+#   • metrics: /metrics scrape → envelope → axiom_metrics sink → AXIOM_PLATFORM_METRICS_DATASET
+#
+# Separate datasets because histogram-bucket volume dwarfs log volume at scale
+# and the two streams want different retention/cost policies.
+#
+# Install path: /etc/vector/vector.yaml
+# Env file:    /etc/opensandbox/vector.env (provides AXIOM_PLATFORM_TOKEN +
+#              AXIOM_PLATFORM_METRICS_TOKEN, populated by
+#              populate-vector-env.service from Key Vault at boot)
+#
+# Field shape after this pipeline:
+#   service        "worker"
+#   service_id     worker_id (e.g. w-oc-eastus2-1)
+#   cell_id        <region>-<pool>
+#   region         e.g. eastus2
+#   hostname       VM hostname
+#   host_ip        primary IPv4
+#   event_type     "metric" for scraped Prom samples, absent on logs
+#   metric_name    Prom metric name when event_type=="metric"
+#   tags           Prom label map when event_type=="metric"
+#   request_id     set per request by control plane, forwarded to worker
+#   sandbox_id     set per request when in scope
+#   msg, level, ts present from slog
+
+data_dir: /var/lib/vector
+
+sources:
+  worker_journald:
+    type: journald
+    include_units:
+      - opensandbox-worker.service
+    # Default current_boot_only=true. (Explicit `false` is rejected on
+    # systemd 250-257 — Vector limitation.) Vector tracks its own cursor in
+    # data_dir, so restarts pick up where they left off rather than replaying.
+
+  # Scrape the worker's own /metrics on :9091. The worker binary serves
+  # Prometheus via metrics.StartMetricsServer (cmd/worker/main.go). 30s
+  # matches the worker's internal resource-stats tick so we don't capture
+  # interpolated transient values.
+  worker_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - http://127.0.0.1:9091/metrics
+    scrape_interval_secs: 30
+
+transforms:
+  worker_parse:
+    type: remap
+    inputs:
+      - worker_journald
+    # VRL: parse_json fails for non-JSON lines (e.g. systemd boot messages,
+    # panic stack traces from Go's runtime). For those we keep the original
+    # message and just stamp the host envelope so they're still queryable.
+    source: |
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge(., object!(parsed))
+        # See dev-host.yaml — drop stringified duplicate; non-JSON lines
+        # keep .message as the readable content.
+        del(.message)
+      }
+      if !exists(.service) { .service = "worker" }
+      if !exists(.service_id) { .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}" }
+      if !exists(.cell_id) { .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}" }
+      if !exists(.region) { .region = "${OPENSANDBOX_REGION:-unknown}" }
+      if !exists(.host_ip) { .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}" }
+      if !exists(.hostname) { .hostname, _ = get_hostname() }
+
+  # Convert Prom metric events to log-shaped events so the Axiom sink can
+  # ingest them. metric_to_log is a dedicated transform type — VRL has no
+  # `to_log` function (Vector 0.55+).
+  worker_metrics_to_log:
+    type: metric_to_log
+    inputs:
+      - worker_metrics
+
+  # Envelope: same fields as logs (service/service_id/cell_id/region/host_ip/
+  # hostname) so dashboards can join across event_type and cross-filter by
+  # infra dimension. event_type="metric" is the discriminator vs logs — we
+  # deliberately don't reuse `kind`, which metric_to_log writes as
+  # "incremental"/"absolute".
+  #
+  # metric_name carries the Prom name (namespaced to dodge clashes with log
+  # payloads that might contain a literal `name` field). Label values stay
+  # under `.tags` (region, worker_id, template, status, ...).
+  worker_metrics_envelope:
+    type: remap
+    inputs:
+      - worker_metrics_to_log
+    source: |
+      .event_type = "metric"
+      if exists(.name) {
+        .metric_name = .name
+        del(.name)
+      }
+      .service = "worker"
+      .service_id = "${OPENSANDBOX_WORKER_ID:-unknown}"
+      .cell_id = "${OPENCOMPUTER_CELL_ID:-unknown}"
+      .region = "${OPENSANDBOX_REGION:-unknown}"
+      .host_ip = "${OPENCOMPUTER_HOST_IP:-unknown}"
+      .hostname, _ = get_hostname()
+
+sinks:
+  # Logs sink: ships journald (parsed + enveloped) to the platform-logs dataset.
+  # Unchanged from pre-metrics behavior.
+  axiom_platform:
+    type: axiom
+    inputs:
+      - worker_parse
+    dataset: "${AXIOM_PLATFORM_DATASET}"
+    token: "${AXIOM_PLATFORM_TOKEN}"
+    # Disk buffer so a network blip or Axiom outage doesn't lose worker logs.
+    # 256 MiB is enough for a few hours at typical worker rates; drop_newest
+    # keeps the most-recent context if the buffer fills (better than blocking).
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true
+
+  # Metrics sink: separate Axiom dataset (typically `oc-platform-metrics`)
+  # with its own ingest token. Volume is histogram-bucket-multiplied and
+  # belongs on a different retention/budget than logs. If the secrets aren't
+  # provisioned yet the populator writes empty values; this sink fails its
+  # healthcheck and buffers to disk independently — the logs sink keeps working.
+  axiom_metrics:
+    type: axiom
+    inputs:
+      - worker_metrics_envelope
+    dataset: "${AXIOM_PLATFORM_METRICS_DATASET}"
+    token: "${AXIOM_PLATFORM_METRICS_TOKEN}"
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: drop_newest
+    healthcheck:
+      enabled: true

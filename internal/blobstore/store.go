@@ -34,13 +34,27 @@ type Store interface {
 	// Returns ErrNotFound if the object isn't present.
 	Get(ctx context.Context, bucket, key string) (io.ReadCloser, error)
 
+	// GetRange streams a byte range of the object. Used for parallel
+	// chunked downloads of large objects (e.g. checkpoint archives).
+	// Returns ErrNotFound if the object isn't present.
+	GetRange(ctx context.Context, bucket, key string, offset, length int64) (io.ReadCloser, error)
+
 	// Put writes body of length contentLength bytes to bucket/key.
 	// Streams from the reader — no in-memory buffering of the full body.
 	Put(ctx context.Context, bucket, key string, body io.Reader, contentLength int64) error
 
+	// Head returns the content length of the object. Distinct from Exists
+	// in that callers needing size (e.g. for range planning) avoid a second
+	// round trip. Returns ErrNotFound if the object isn't present.
+	Head(ctx context.Context, bucket, key string) (int64, error)
+
 	// Exists returns true if the object is present at bucket/key.
 	// Returns (false, nil) on NotFound; (false, err) on other errors.
 	Exists(ctx context.Context, bucket, key string) (bool, error)
+
+	// Delete removes the object at bucket/key. Returns nil if the object
+	// didn't exist (idempotent).
+	Delete(ctx context.Context, bucket, key string) error
 
 	// Name returns a short identifier for logging ("tigris", "r2",
 	// "azure-blob"). Never empty.

@@ -6,11 +6,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 
+	"github.com/opensandbox/opensandbox/internal/logship"
 	"github.com/opensandbox/opensandbox/internal/agent"
 )
 
@@ -33,6 +36,20 @@ func main() {
 	}
 
 	srv := agent.NewServer(Version)
+
+	// Sandbox session log shipping. The shipper boots dormant — events
+	// queue in its bounded ring but don't POST anywhere until the
+	// worker delivers ConfigureLogship after VM boot. The /var/log
+	// tailer starts immediately so we don't miss the boot window.
+	// If the worker never calls ConfigureLogship (kill-switch), the
+	// ring keeps dropping oldest indefinitely; cost is negligible.
+	shipperCtx, shipperCancel := context.WithCancel(context.Background())
+	defer shipperCancel()
+	shipper := logship.New()
+	go shipper.Run(shipperCtx)
+	go logship.NewVarLogTailer(shipper, "/var/log").Run(shipperCtx)
+	srv.Shipper = shipper
+
 	// Only set ListenPort for vsock-based backends (Firecracker).
 	// For virtio-serial (QEMU), PTY I/O flows over gRPC PTYAttach instead.
 	if vsl, isVirtioSerial := lis.(*virtioSerialListener); isVirtioSerial {
@@ -50,6 +67,24 @@ func main() {
 	// resource temporarily unavailable" even though they have nothing
 	// running. Drain on each SIGCHLD; signals coalesce so we loop.
 	startReaper()
+
+	// Best-effort: start supervisord if installed and configured. Run as a
+	// daemon (default mode, not -n) so it returns immediately and we don't
+	// block agent startup. Supervisord becomes a regular child of PID 1; its
+	// own children (configured programs) are reparented to it, not to us, so
+	// our SIGCHLD reaper doesn't conflict with supervisord's own wait4 calls.
+	// Without this, "supervisord baked into rootfs" only works while the user
+	// manually starts it — programs don't auto-start at boot the way they do
+	// on a systemd-managed VM.
+	if _, err := os.Stat("/usr/bin/supervisord"); err == nil {
+		if _, err := os.Stat("/etc/supervisor/supervisord.conf"); err == nil {
+			if err := exec.Command("/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf").Start(); err != nil {
+				log.Printf("agent: supervisord start failed: %v (continuing)", err)
+			} else {
+				log.Printf("agent: supervisord started (config=/etc/supervisor/supervisord.conf)")
+			}
+		}
+	}
 
 	// Signal handling:
 	// SIGTERM/SIGINT: clean shutdown (exit)

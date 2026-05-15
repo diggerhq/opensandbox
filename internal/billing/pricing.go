@@ -59,6 +59,41 @@ const (
 	DiskOverageMetadataKey         = "sandbox_disk_overage"
 )
 
+// --- Phase-3 unified pipeline meters ---
+//
+// New orgs (`billing_mode='unified'`, default per migration 031) are
+// billed via two flat meters with `unit = GB-seconds`:
+//
+//   - Reserved: customer-facing name "pre-booked." Only orgs that
+//     reserve capacity pay this.
+//   - Overage: customer-facing name "instant." Flat per-GB rate
+//     regardless of sandbox tier.
+//
+// **Dollar rates are deliberately not in code.** Stripe Prices are
+// configured in the Stripe Dashboard (or via Stripe API by the
+// pricing team) and linked to the meters below. The sender ships
+// meter events with `value = GB-seconds`; Stripe computes invoice
+// dollars from Price × value at billing time. This decouples
+// pricing changes from code deploys.
+//
+// **Existing orgs (`billing_mode='legacy'`) are completely unaffected
+// by these meters.** They continue to bill via `TierPricePerSecond`
+// and the legacy `sandbox_compute_<tier>` meters through
+// `UsageReporter`. The dollar amounts in `TierPricePerSecond` stay
+// in code because free-tier credit deduction
+// (`CalculateUsageCostCents`) computes cents locally without a
+// Stripe round-trip — a real reason for those constants. Phase 3
+// just doesn't add new ones.
+const (
+	// Pre-booked: single meter, no tier breakdown.
+	ReservedMeterKey = "sandbox_reserved"
+	ReservedPriceKey = "sandbox_reserved_v1"
+
+	// Instant (overage): single meter, flat across all sandbox sizes.
+	OverageMeterKey = "sandbox_overage"
+	OveragePriceKey = "sandbox_overage_v1"
+)
+
 // DiskOverageGBSeconds returns the chargeable GB-seconds for one usage summary
 // row (zero if the sandbox stayed within the free allowance).
 func DiskOverageGBSeconds(s db.OrgUsageSummary) float64 {

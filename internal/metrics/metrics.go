@@ -10,6 +10,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// lifecycleBuckets covers from sub-second warm forks to slow checkpoint uploads.
+var lifecycleBuckets = []float64{0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0}
+
 // Worker metrics
 var (
 	SandboxesActive = prometheus.NewGaugeVec(
@@ -24,9 +27,47 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "opensandbox_sandbox_create_duration_seconds",
 			Help:    "Time to create a sandbox",
-			Buckets: []float64{0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0},
+			Buckets: lifecycleBuckets,
 		},
-		[]string{"region", "template"},
+		[]string{"region", "template", "status"},
+	)
+
+	CheckpointDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "opensandbox_checkpoint_duration_seconds",
+			Help:    "Time to create a sandbox checkpoint (savevm + archive + upload)",
+			Buckets: lifecycleBuckets,
+		},
+		[]string{"region", "template", "status"},
+	)
+
+	// Exists alongside CheckpointDuration{status="failure"} so failures can be
+	// attributed by *cause* without log parsing.
+	CheckpointFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "opensandbox_checkpoint_failures_total",
+			Help: "Checkpoint failures by classified reason",
+		},
+		[]string{"region", "template", "reason"},
+	)
+
+	HibernateDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "opensandbox_hibernate_duration_seconds",
+			Help:    "Time to hibernate a sandbox (quiesce + savevm + upload)",
+			Buckets: lifecycleBuckets,
+		},
+		[]string{"region", "template", "status"},
+	)
+
+	// source=warm_cache: local snapshot reused. source=s3: downloaded archive.
+	WakeDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "opensandbox_wake_duration_seconds",
+			Help:    "Time to create a sandbox from a checkpoint",
+			Buckets: lifecycleBuckets,
+		},
+		[]string{"region", "template", "source", "status"},
 	)
 
 	ExecDuration = prometheus.NewHistogramVec(
@@ -54,6 +95,44 @@ var (
 		[]string{"region", "worker_id"},
 	)
 
+	// Worker resource gauges. Populated by a periodic tick in cmd/worker/main.go.
+	WorkerDiskUsedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_disk_used_bytes", Help: "Disk bytes used on the worker's data mount"},
+		[]string{"region", "worker_id", "mount"},
+	)
+	WorkerDiskAvailableBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_disk_available_bytes", Help: "Disk bytes available on the worker's data mount"},
+		[]string{"region", "worker_id", "mount"},
+	)
+	WorkerDiskTotalBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_disk_total_bytes", Help: "Total disk bytes on the worker's data mount"},
+		[]string{"region", "worker_id", "mount"},
+	)
+
+	WorkerMemoryTotalBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_memory_total_bytes", Help: "Total physical memory (MemTotal)"},
+		[]string{"region", "worker_id"},
+	)
+	WorkerMemoryAvailableBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_memory_available_bytes", Help: "Memory available to userspace (MemAvailable)"},
+		[]string{"region", "worker_id"},
+	)
+	// Sum of MemoryMB committed to running sandboxes. Measures oversubscription
+	// independent of actual guest workload.
+	WorkerMemoryAllocatedBytes = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_memory_allocated_bytes", Help: "Sum of memory allocated to running sandboxes"},
+		[]string{"region", "worker_id"},
+	)
+
+	// CPU pressure percent. window: avg10/avg60/avg300.
+	// source=psi: PSI "some" stall pct from /proc/pressure/cpu (preferred).
+	// source=loadavg: loadavg/nproc*100 fallback (older kernels / macOS dev hosts);
+	// different semantics — interpret with care.
+	WorkerCPUPressure = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "opensandbox_worker_cpu_pressure", Help: "CPU pressure percent (PSI 'some' or loadavg/nproc*100 fallback)"},
+		[]string{"region", "worker_id", "window", "source"},
+	)
+
 	DirectConnectionsActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "opensandbox_direct_connections_active",
@@ -79,6 +158,23 @@ var (
 			Help: "Total HTTP requests",
 		},
 		[]string{"method", "path", "status"},
+	)
+
+	HTTPRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "opensandbox_http_request_duration_seconds",
+			Help:    "HTTP request handler latency",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	HTTPRequestsInFlight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "opensandbox_http_requests_in_flight",
+			Help: "Currently in-flight HTTP requests",
+		},
+		[]string{"method"},
 	)
 
 	SandboxCreatesTotal = prometheus.NewCounterVec(
@@ -115,16 +211,28 @@ var (
 )
 
 func init() {
-	// Register all metrics
 	prometheus.MustRegister(
 		SandboxesActive,
 		SandboxCreateDuration,
+		CheckpointDuration,
+		CheckpointFailuresTotal,
+		HibernateDuration,
+		WakeDuration,
 		ExecDuration,
 		PTYSessionsActive,
 		WorkerUtilization,
+		WorkerDiskUsedBytes,
+		WorkerDiskAvailableBytes,
+		WorkerDiskTotalBytes,
+		WorkerMemoryTotalBytes,
+		WorkerMemoryAvailableBytes,
+		WorkerMemoryAllocatedBytes,
+		WorkerCPUPressure,
 		DirectConnectionsActive,
 		SQLiteSyncLag,
 		HTTPRequestsTotal,
+		HTTPRequestDuration,
+		HTTPRequestsInFlight,
 		SandboxCreatesTotal,
 		AuthAttemptsTotal,
 		WorkersTotal,
@@ -138,9 +246,16 @@ func Handler() http.Handler {
 }
 
 // EchoMiddleware returns Echo middleware that instruments HTTP requests.
+//
+// path label uses c.Path() (the route template, e.g. /api/sandboxes/:id) rather
+// than c.Request().URL.Path so high-cardinality IDs don't explode the metric.
 func EchoMiddleware() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			method := c.Request().Method
+			HTTPRequestsInFlight.WithLabelValues(method).Inc()
+			defer HTTPRequestsInFlight.WithLabelValues(method).Dec()
+
 			start := time.Now()
 			err := next(c)
 			duration := time.Since(start)
@@ -152,13 +267,11 @@ func EchoMiddleware() echo.MiddlewareFunc {
 				}
 			}
 
-			HTTPRequestsTotal.WithLabelValues(
-				c.Request().Method,
-				c.Path(),
-				strconv.Itoa(status),
-			).Inc()
+			statusStr := strconv.Itoa(status)
+			path := c.Path()
+			HTTPRequestsTotal.WithLabelValues(method, path, statusStr).Inc()
+			HTTPRequestDuration.WithLabelValues(method, path, statusStr).Observe(duration.Seconds())
 
-			_ = duration // Could add request duration histogram here
 			return err
 		}
 	}

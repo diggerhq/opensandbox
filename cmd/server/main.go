@@ -2,13 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
-	"strings"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
-
 	"time"
 
 	"github.com/opensandbox/opensandbox/internal/api"
@@ -20,6 +22,8 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/metrics"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -46,6 +50,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+
+	// Structured logging (JSON to stdout, host envelope baked in). Installs
+	// itself as slog.Default AND redirects stdlib log.Printf through slog so
+	// existing log call sites emit JSON automatically. Vector reads stdout
+	// from the Docker logging driver and ships to Axiom.
+	cpHostname, _ := os.Hostname()
+	obslog.Init(obslog.HostFields{
+		Service:   obslog.ServiceControlPlane,
+		ServiceID: cpHostname, // hostname distinguishes HA replicas
+		CellID:    cfg.CellID,
+		Region:    cfg.Region,
+		Hostname:  cpHostname,
+		HostIP:    cfg.HostIP,
+		Version:   ServerVersion,
+	}, slog.LevelInfo)
 
 	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
 	flushSentry := observability.Init(cfg, "control-plane", ServerVersion)
@@ -215,6 +234,13 @@ func main() {
 		}
 	}
 
+	// Hoisted at function scope so the per-sandbox autoscaler (created
+	// later, after the API server) can consult IsLeader() each tick — keeps
+	// a single elector authoritative across both the cluster scaler and the
+	// per-sandbox autoscaler in HA setups. nil when there's no compute pool
+	// (combined / dev mode) — autoscaler then runs unconditionally.
+	var leaderElector *controlplane.LeaderElector
+
 	// Initialize compute pool + autoscaler (server mode)
 	if cfg.Mode == "server" && redisRegistry != nil {
 		// Build the WorkerSpec: cloud-neutral config that the CP supplies to
@@ -274,15 +300,107 @@ func main() {
 
 		switch provider {
 		case "azure":
+			// Build worker env template — new VMs get this via cloud-init.
+			// GRPC_ADVERTISE, HTTP_ADDR, and WORKER_ID are patched by cloud-init
+			// with the VM's actual private IP and hostname.
+			// Workers need to reach Postgres/Redis on the control plane's private IP,
+			// not localhost. Replace localhost with the control plane's IP.
+			cpIP := os.Getenv("OPENSANDBOX_CONTROLPLANE_IP")
+			workerDBURL := cfg.DatabaseURL
+			workerRedisURL := cfg.RedisURL
+			if cpIP != "" {
+				workerDBURL = strings.ReplaceAll(workerDBURL, "localhost", cpIP)
+				workerDBURL = strings.ReplaceAll(workerDBURL, "127.0.0.1", cpIP)
+				workerRedisURL = strings.ReplaceAll(workerRedisURL, "localhost", cpIP)
+				workerRedisURL = strings.ReplaceAll(workerRedisURL, "127.0.0.1", cpIP)
+			}
+
+			// Warn loud if we're about to bake an empty AXIOM_INGEST_TOKEN
+			// into a worker. Reachable when the server's cfg was empty at
+			// startup but the secret has since been added to KV and no
+			// restart has happened yet — every worker minted from here will
+			// silently skip log shipping.
+			if cfg.AxiomIngestToken == "" {
+				log.Printf("opensandbox: WARNING: spawning Azure-pool worker with empty AXIOM_INGEST_TOKEN — this worker will not ship sandbox session logs (restart this control plane after the secret is in KV)")
+			}
+
+			workerEnv := fmt.Sprintf(
+				"OPENSANDBOX_MODE=worker\n"+
+					"OPENSANDBOX_VM_BACKEND=qemu\n"+
+					"OPENSANDBOX_QEMU_BIN=qemu-system-x86_64\n"+
+					"OPENSANDBOX_DATA_DIR=/data/sandboxes\n"+
+					"OPENSANDBOX_KERNEL_PATH=/opt/opensandbox/vmlinux\n"+
+					"OPENSANDBOX_IMAGES_DIR=/data/firecracker/images\n"+
+					"OPENSANDBOX_GRPC_ADVERTISE=PLACEHOLDER:9090\n"+
+					"OPENSANDBOX_HTTP_ADDR=http://PLACEHOLDER:8081\n"+
+					"OPENSANDBOX_JWT_SECRET=%s\n"+
+					"OPENSANDBOX_WORKER_ID=PLACEHOLDER\n"+
+					"OPENSANDBOX_REGION=%s\n"+
+					"OPENSANDBOX_MAX_CAPACITY=%d\n"+
+					"OPENSANDBOX_PORT=8081\n"+
+					"OPENSANDBOX_DEFAULT_SANDBOX_MEMORY_MB=%d\n"+
+					"OPENSANDBOX_DEFAULT_SANDBOX_CPUS=%d\n"+
+					"OPENSANDBOX_DATABASE_URL=%s\n"+
+					"OPENSANDBOX_REDIS_URL=%s\n"+
+					"OPENSANDBOX_S3_BUCKET=%s\n"+
+					"OPENSANDBOX_S3_REGION=%s\n"+
+					"OPENSANDBOX_S3_ENDPOINT=%s\n"+
+					"OPENSANDBOX_S3_ACCESS_KEY_ID=%s\n"+
+					"OPENSANDBOX_S3_SECRET_ACCESS_KEY=%s\n"+
+					"OPENSANDBOX_S3_FORCE_PATH_STYLE=%v\n"+
+					"OPENSANDBOX_S3_FALLBACK_ENDPOINT=%s\n"+
+					"OPENSANDBOX_S3_FALLBACK_REGION=%s\n"+
+					"OPENSANDBOX_S3_FALLBACK_ACCESS_KEY_ID=%s\n"+
+					"OPENSANDBOX_S3_FALLBACK_SECRET_ACCESS_KEY=%s\n"+
+					"OPENSANDBOX_S3_FALLBACK_FORCE_PATH_STYLE=%v\n"+
+					"OPENSANDBOX_S3_FALLBACK_BUCKET=%s\n"+
+					"OPENSANDBOX_BLOB_MIGRATION_MODE=%v\n"+
+					"OPENSANDBOX_SANDBOX_DOMAIN=%s\n"+
+					"OPENSANDBOX_DEFAULT_SANDBOX_DISK_MB=%d\n"+
+					"OPENSANDBOX_AZURE_KEY_VAULT_NAME=%s\n"+
+					"SEGMENT_WRITE_KEY=%s\n"+
+					"AXIOM_INGEST_TOKEN=%s\n"+
+					"AXIOM_DATASET=%s\n",
+				cfg.JWTSecret,
+				cfg.Region,
+				cfg.MaxCapacity,
+				cfg.DefaultSandboxMemoryMB,
+				cfg.DefaultSandboxCPUs,
+				workerDBURL,
+				workerRedisURL,
+				cfg.S3Bucket,
+				cfg.S3Region,
+				cfg.S3Endpoint,
+				cfg.S3AccessKeyID,
+				cfg.S3SecretAccessKey,
+				cfg.S3ForcePathStyle,
+				cfg.S3FallbackEndpoint,
+				cfg.S3FallbackRegion,
+				cfg.S3FallbackAccessKeyID,
+				cfg.S3FallbackSecretAccessKey,
+				cfg.S3FallbackForcePathStyle,
+				cfg.S3FallbackBucket,
+				cfg.BlobMigrationMode,
+				cfg.SandboxDomain,
+				cfg.DefaultSandboxDiskMB,
+				cfg.AzureKeyVaultName,
+				cfg.SegmentWriteKey,
+				cfg.AxiomIngestToken,
+				cfg.AxiomDataset,
+			)
+			workerEnvB64 := base64.StdEncoding.EncodeToString([]byte(workerEnv))
+
 			azPool, err := compute.NewAzurePool(compute.AzurePoolConfig{
-				SubscriptionID: cfg.AzureSubscriptionID,
-				ResourceGroup:  cfg.AzureResourceGroup,
-				Region:         cfg.Region,
-				VMSize:         cfg.AzureVMSize,
-				ImageID:        cfg.AzureImageID,
-				SubnetID:       cfg.AzureSubnetID,
-				SSHPublicKey:   cfg.AzureSSHPublicKey,
-				KeyVaultName:   cfg.AzureKeyVaultName,
+				SubscriptionID:   cfg.AzureSubscriptionID,
+				ResourceGroup:    cfg.AzureResourceGroup,
+				Region:           cfg.Region,
+				VMSize:           cfg.AzureVMSize,
+				ImageID:          cfg.AzureImageID,
+				SubnetID:         cfg.AzureSubnetID,
+				SSHPublicKey:     cfg.AzureSSHPublicKey,
+				KeyVaultName:     cfg.AzureKeyVaultName,
+				WorkerIdentityID: cfg.AzureWorkerIdentityID,
+				WorkerEnvBase64:  workerEnvB64,
 			})
 			if err != nil {
 				log.Fatalf("opensandbox: failed to create Azure pool: %v", err)
@@ -333,33 +451,50 @@ func main() {
 		}
 
 		if pool != nil {
+			// Pick the per-provider ranked size list. Empty → scaler defers to
+			// the pool's single configured default (cfg.AzureVMSize / cfg.EC2InstanceType).
+			var machineSizes []string
+			switch {
+			case len(cfg.AzureVMSizes) > 0 && cfg.AzureSubscriptionID != "":
+				machineSizes = cfg.AzureVMSizes
+			case len(cfg.EC2InstanceTypes) > 0 && (cfg.EC2AMI != "" || cfg.EC2SSMParameterName != ""):
+				machineSizes = cfg.EC2InstanceTypes
+			}
+			if len(machineSizes) > 0 {
+				log.Printf("opensandbox: scaler size fallback ranked: %v", machineSizes)
+			}
+
 			scalerState := controlplane.NewRedisScalerState(redisRegistry.RedisClient())
 			scaler := controlplane.NewScaler(controlplane.ScalerConfig{
-				Pool:        pool,
-				Registry:    redisRegistry,
-				Store:       opts.Store,
-				StateStore:  scalerState,
-				WorkerImage: cfg.EC2WorkerImage,
-				Cooldown:    time.Duration(cfg.ScaleCooldownSec) * time.Second,
-				MinWorkers:  cfg.MinWorkersPerRegion,
-				MaxWorkers:  cfg.MaxWorkersPerRegion,
-				IdleReserve: cfg.IdleReserveWorkers,
+				Pool:         pool,
+				Registry:     redisRegistry,
+				Store:        opts.Store,
+				StateStore:   scalerState,
+				WorkerImage:  cfg.EC2WorkerImage,
+				Cooldown:     time.Duration(cfg.ScaleCooldownSec) * time.Second,
+				MinWorkers:   cfg.MinWorkersPerRegion,
+				MaxWorkers:   cfg.MaxWorkersPerRegion,
+				IdleReserve:  cfg.IdleReserveWorkers,
+				MachineSizes: machineSizes,
 			})
 			defer scaler.Stop()
 
-			// Leader election: only the leader runs the scaler
-			elector := controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
-			elector.OnBecomeLeader(func() {
+			// Leader election: only the leader runs the scaler. The
+			// per-sandbox autoscaler (created later) consults this same
+			// elector via IsLeader() to skip ticks when not leader, so we
+			// don't double-fire scale decisions across CPs in HA setups.
+			leaderElector = controlplane.NewLeaderElector(redisRegistry.RedisClient(), cfg.WorkerID)
+			leaderElector.OnBecomeLeader(func() {
 				scaler.Start()
 				log.Printf("opensandbox: became leader, autoscaler started (%s)", poolName)
 			})
-			elector.OnLoseLeadership(func() {
+			leaderElector.OnLoseLeadership(func() {
 				scaler.Stop()
 				log.Println("opensandbox: lost leadership, autoscaler stopped")
 			})
-			elector.Start()
-			defer elector.Stop()
-			log.Printf("opensandbox: leader election started (instance=%s)", elector.InstanceID())
+			leaderElector.Start()
+			defer leaderElector.Stop()
+			log.Printf("opensandbox: leader election started (instance=%s)", leaderElector.InstanceID())
 		}
 	}
 
@@ -415,6 +550,7 @@ func main() {
 	var stripeClient *billing.StripeClient
 	if cfg.StripeSecretKey != "" {
 		stripeClient = billing.NewStripeClient(cfg.StripeSecretKey, cfg.StripeWebhookSecret, cfg.StripeSuccessURL, cfg.StripeCancelURL)
+		stripeClient.TelegramAgentPriceID = cfg.StripeTelegramAgentPriceID
 		if err := stripeClient.EnsureProducts(); err != nil {
 			log.Printf("opensandbox: Stripe product setup failed: %v (billing may not work)", err)
 		} else {
@@ -425,6 +561,50 @@ func main() {
 
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
+
+	// Wire Axiom read-only token for the sandbox session logs API.
+	// Token never leaves this process; the UI proxies its queries through
+	// /api/sandboxes/:id/logs. Empty token disables the endpoint (503).
+	server.SetAxiomQueryConfig(cfg.AxiomQueryToken, cfg.AxiomDataset)
+	if cfg.AxiomQueryToken != "" {
+		log.Printf("opensandbox: sandbox session logs read API enabled (dataset=%s)", cfg.AxiomDataset)
+	}
+
+	// Worker-bake side: report whether sandboxes spawned by this control
+	// plane will ship logs. The token's value here is whatever cfg.Load
+	// pulled from os.Getenv at startup; it stays frozen until the next
+	// process restart. If a deployment puts the secret in KV but never
+	// restarts this process, every Azure-pool worker baked from here on
+	// will land with an empty AXIOM_INGEST_TOKEN and silently skip
+	// shipping. Logging once at startup turns the silent case into a
+	// paged-on-able journalctl line.
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox: workers spawned by this server will ship sandbox session logs to Axiom (dataset=%s)", cfg.AxiomDataset)
+	} else {
+		log.Printf("opensandbox: WARNING: AXIOM_INGEST_TOKEN empty — workers spawned by this server will NOT ship sandbox session logs (set the secret in your secret store and restart this process)")
+	}
+
+	// Per-sandbox autoscaler. Tier-aligned (1/4/8/16 GB), opt-in per
+	// sandbox via PUT /api/sandboxes/:id/autoscale.
+	//
+	// Leader-gated when an elector exists. With HA (multiple CPs) we don't
+	// want two instances both reading stats and double-firing scale events.
+	// SetSandboxLimits is technically idempotent for memory targets, but
+	// the cooldown CAS races and the cooldown timestamp gets clobbered if
+	// both CPs UPDATE — see ClaimAutoscaleEvent. Gating on the leader is
+	// cheaper than relying on the CAS alone. When there's no elector
+	// (single-CP / no cloud pool), isLeader is nil and the loop runs
+	// unconditionally.
+	if opts.Store != nil && redisRegistry != nil {
+		var isLeader func() bool
+		if leaderElector != nil {
+			isLeader = leaderElector.IsLeader
+		}
+		autoscaler := controlplane.NewAutoscaler(opts.Store, redisRegistry, api.NewAutoscalerSetter(server), isLeader)
+		autoscaler.Start(ctx)
+		defer autoscaler.Stop()
+		log.Println("opensandbox: per-sandbox autoscaler started (interval=30s, leader-gated)")
+	}
 
 	// Start usage reporter — reports Pro org usage to Stripe and deducts
 	// free-tier trial credits (force-hibernates on empty) every 5 min.
@@ -439,6 +619,42 @@ func main() {
 		reporter.Start()
 		defer reporter.Stop()
 		log.Println("opensandbox: usage reporter started (interval=5m)")
+	}
+
+	// Phase-2 capacity allocator. Writes outbox rows for unified-mode
+	// pro orgs after each settled bucket. Allocator skips legacy and
+	// free orgs (see ListAllocatorCandidates); rollback is by
+	// reverting the deploy.
+	if opts.Store != nil {
+		allocOpts := billing.CapacityReconcilerOpts{
+			Interval: getDurationEnv("CAPACITY_ALLOCATOR_INTERVAL", 5*time.Minute),
+			Settle:   getDurationEnv("CAPACITY_ALLOCATOR_SETTLE", 30*time.Minute),
+			Lookback: getDurationEnv("CAPACITY_ALLOCATOR_LOOKBACK", 24*time.Hour),
+			Limit:    getIntEnv("CAPACITY_ALLOCATOR_BATCH_LIMIT", 500),
+		}
+		allocator := billing.NewCapacityReconciler(opts.Store, allocOpts)
+		allocator.Start()
+		defer allocator.Stop()
+		log.Printf("opensandbox: capacity allocator started (interval=%s, settle=%s, lookback=%s)",
+			allocOpts.Interval, allocOpts.Settle, allocOpts.Lookback)
+	}
+
+	// Phase-3 billable-events sender. Ships pending outbox rows to
+	// Stripe via meter events for orgs in `billing_mode='unified'`
+	// with a Stripe customer ID. New orgs default to unified per
+	// migration 031; existing orgs are pinned to legacy and stay
+	// untouched on UsageReporter. Idempotency is per-row via
+	// `billable_events.id` as Stripe meter event Identifier.
+	if opts.Store != nil && stripeClient != nil {
+		senderOpts := billing.BillableEventsSenderOpts{
+			Interval: getDurationEnv("BILLABLE_EVENTS_SENDER_INTERVAL", 5*time.Minute),
+			Batch:    getIntEnv("BILLABLE_EVENTS_SENDER_BATCH", 200),
+		}
+		sender := billing.NewBillableEventsSender(opts.Store, stripeClient, senderOpts)
+		sender.Start()
+		defer sender.Stop()
+		log.Printf("opensandbox: billable events sender started (interval=%s, batch=%d)",
+			senderOpts.Interval, senderOpts.Batch)
 	}
 
 	// Start NATS sync consumer if both PG and NATS are configured
@@ -462,6 +678,13 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	log.Printf("opensandbox: starting server on %s (mode=%s)", addr, cfg.Mode)
+
+	// Prometheus /metrics endpoint on a separate port. Different from the
+	// worker's :9091 so a dev-host (worker+server on one VM) doesn't collide.
+	// Vector scrapes this and ships to Axiom alongside platform logs.
+	metricsSrv := metrics.StartMetricsServer(":9092")
+	defer metricsSrv.Close()
+	log.Println("opensandbox: metrics server started on :9092")
 
 	go func() {
 		if err := server.Start(addr); err != nil {
@@ -489,4 +712,27 @@ func main() {
 		server.Close()
 	}
 	log.Println("opensandbox: server stopped")
+}
+
+// getDurationEnv reads a Go duration string (e.g. "5m", "30m", "24h")
+// from env or returns the default. Used for the capacity allocator
+// knobs which are off the hot path of config.Load().
+func getDurationEnv(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		log.Printf("opensandbox: invalid duration in %s=%q, using default %s", key, v, def)
+	}
+	return def
+}
+
+func getIntEnv(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		log.Printf("opensandbox: invalid int in %s=%q, using default %d", key, v, def)
+	}
+	return def
 }

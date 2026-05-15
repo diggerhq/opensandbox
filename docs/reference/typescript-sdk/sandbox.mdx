@@ -286,6 +286,44 @@ Generate a signed upload URL. [HTTP API →](/api-reference/files/generate-uploa
 
 ---
 
+### `sandbox.getAllowedHosts()`
+
+Return the egress allowlist + per-secret allowed hosts the sandbox's secrets proxy enforces. Useful for debugging "why is my outbound HTTP call being blocked" without having to cross-reference the [secret store](/sandboxes/secrets) config separately.
+
+Sandboxes created without a `secretStore` option return an empty allowlist with `secretStore` undefined — the sandbox has no per-store egress restriction.
+
+**Returns:** `Promise<AllowedHostsInfo>`
+
+```typescript
+const info = await sandbox.getAllowedHosts();
+console.log(info.egressAllowlist);          // ['api.openai.com', 'api.anthropic.com']
+console.log(info.perSecretAllowedHosts);    // { 'OPENAI_API_KEY': ['api.openai.com'] }
+```
+
+The returned `AllowedHostsInfo`:
+
+<ParamField body="sandboxID" type="string">
+  Sandbox ID
+</ParamField>
+
+<ParamField body="secretStore" type="string">
+  Name of the primary secret store the sandbox is bound to (the "winning" store on the row, whose secrets shadow the base store on env-name collisions). Empty when the sandbox was created without a `secretStore` option.
+</ParamField>
+
+<ParamField body="baseSecretStore" type="string">
+  Name of the inherited parent store, present only when a fork layered an additional `secretStore` on top of an inherited one. Empty for sandboxes created from scratch and for forks without an override.
+</ParamField>
+
+<ParamField body="egressAllowlist" type="string[]">
+  Hosts the sandbox can reach via the secrets proxy. For layered forks this is the **union** of every layered store's allowlist (base first, primary's additions appended, deduped) — matches what the runtime proxy actually enforces.
+</ParamField>
+
+<ParamField body="perSecretAllowedHosts" type="Record<string, string[]>">
+  Optional per-secret restrictions. When the sandbox uses a listed secret in a request, only the listed hosts are reachable for that request. For layered forks, the primary store's secrets shadow the base on name collisions (matches runtime env-collision behavior).
+</ParamField>
+
+---
+
 ## Properties
 
 <ParamField body="sandboxId" type="string">

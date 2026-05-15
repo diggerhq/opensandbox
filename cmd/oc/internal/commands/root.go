@@ -71,6 +71,7 @@ func init() {
 	rootCmd.AddCommand(secretCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(agentCmd)
+	rootCmd.AddCommand(logsCmd)
 
 	// Top-level shortcuts
 	rootCmd.AddCommand(createShortcut)

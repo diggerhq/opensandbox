@@ -1,0 +1,506 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/labstack/echo/v4"
+
+	"github.com/opensandbox/opensandbox/internal/auth"
+)
+
+// allowedSources is the closed set of source values a client may filter
+// on. Anything else gets a 400 — never fed into the query.
+var allowedSources = map[string]struct{}{
+	"var_log":     {},
+	"exec_stdout": {},
+	"exec_stderr": {},
+	"agent":       {},
+}
+
+// WARNING: Axiom's /v1/datasets/<dataset>/query endpoint silently
+// ignores body it doesn't recognize — including AND-wrapped filter
+// trees. Empirically, `{"filter":{"op":"and","filters":[{...}]}}`
+// returns the unfiltered dataset (full leak); only a FLAT predicate
+// `{"filter":{"op":"==","field":"sandbox_id","value":"..."}}` actually
+// narrows. So toFilter() returns a single flat predicate on sandbox_id;
+// secondary filters (text search, source list) are applied client-side
+// in applyClientFilters after the query returns.
+//
+// The Filters slice is kept on the type for potential future
+// composition (e.g. if Axiom adds support, or if we move to /v1/datasets/_apl)
+// but is unset in the current shape.
+type queryFilter struct {
+	Op      string        `json:"op"`
+	Field   string        `json:"field,omitempty"`
+	Value   any           `json:"value,omitempty"`
+	Filters []queryFilter `json:"filters,omitempty"`
+}
+
+type queryOrderField struct {
+	Field string `json:"field"`
+	Desc  bool   `json:"desc,omitempty"`
+}
+
+type queryRequest struct {
+	StartTime string            `json:"startTime"`
+	EndTime   string            `json:"endTime"`
+	Filter    queryFilter       `json:"filter"`
+	Limit     int               `json:"limit,omitempty"`
+	Order     []queryOrderField `json:"order,omitempty"`
+}
+
+// getSandboxLogs streams sandbox session logs as Server-Sent Events.
+//
+// Flow:
+//
+//  1. Auth check via existing dashboard middleware (caller has an org).
+//  2. Sandbox-ownership check via GetSandboxSessionInOrg — refuses if
+//     the caller's org doesn't own this sandbox.
+//  3. Initial historical batch: APL with sandbox_id == :id + the
+//     caller's filters, sort asc, limit. Emit one SSE event per row.
+//  4. If tail=true (default), poll Axiom every 1s with a moving
+//     `_time > last_seen` cursor; emit deltas. Send `: keepalive\n\n`
+//     every 15s if nothing new arrived to keep proxies happy.
+//  5. Stream ends when the client disconnects or the request context
+//     is otherwise cancelled.
+//
+// The query token is held server-side and never reaches the browser —
+// this whole endpoint exists to keep that invariant clean.
+//
+// Query params:
+//
+//	tail      true|false (default true)
+//	since     RFC3339 (default sandbox.StartedAt)
+//	until     RFC3339 (default now; ignored when tail=true)
+//	q         free-text search (escaped, "where line contains")
+//	source    comma-separated subset of allowedSources
+//	limit     int, default 1000, max 10000 (historical batch only)
+func (s *Server) getSandboxLogs(c echo.Context) error {
+	if s.axiomQueryToken == "" || s.axiomDataset == "" {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "sandbox session logs are not configured on this deployment",
+		})
+	}
+
+	orgUUID, hasOrg := auth.GetOrgID(c)
+	if !hasOrg {
+		return c.JSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+	}
+
+	// Both routes mount this handler:
+	//   /api/sandboxes/:id/logs                       (SDK/X-API-Key)
+	//   /api/dashboard/sessions/:sandboxId/logs       (browser/cookie)
+	// Try both names — Echo will only set whichever is in the URL pattern.
+	sandboxID := c.Param("sandboxId")
+	if sandboxID == "" {
+		sandboxID = c.Param("id")
+	}
+	if sandboxID == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "missing sandbox id"})
+	}
+
+	// Authorization: the caller's org must own this sandbox. Returns
+	// 404 (not 403) on mismatch to avoid leaking sandbox existence
+	// across orgs — same contract as the rest of /api/sandboxes/:id/*.
+	ctx := c.Request().Context()
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{
+			"error": "sandbox session logs require a database",
+		})
+	}
+	session, err := s.store.GetSandboxSessionInOrg(ctx, orgUUID, sandboxID)
+	if err != nil || session == nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+
+	q, err := parseLogQuery(sandboxID, session.StartedAt, c.QueryParams())
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+	// Non-running sandboxes (stopped / error / hibernated): no new events
+	// will arrive post-stop, so tail mode is wasted polling. Cap the window
+	// at stoppedAt+grace too — the shipper finishes flushing within a few
+	// seconds of process exit; 30s covers ingest latency comfortably.
+	q = applySessionState(q, session.Status, session.StoppedAt)
+
+	// SSE headers + immediate flush so the browser knows the stream is open.
+	c.Response().Header().Set("Content-Type", "text/event-stream")
+	c.Response().Header().Set("Cache-Control", "no-cache")
+	c.Response().Header().Set("Connection", "keep-alive")
+	c.Response().Header().Set("X-Accel-Buffering", "no") // disable nginx buffering
+	c.Response().WriteHeader(http.StatusOK)
+	c.Response().Flush()
+
+	// Initial historical batch.
+	histStart, histEnd := q.timeWindow(false)
+	rows, err := s.queryAxiom(ctx, q.toRequest(histStart, histEnd, false))
+	if err != nil {
+		log.Printf("api: sandbox %s logs: initial query failed: %v", sandboxID, err)
+		writeSSEComment(c.Response(), "initial query failed")
+		return nil
+	}
+	rows = applyClientFilters(rows, q)
+	for _, ev := range rows {
+		writeSSEEvent(c.Response(), ev)
+	}
+	c.Response().Flush()
+
+	if !q.tail {
+		return nil
+	}
+
+	// If the sandbox is not running, no new events will arrive — skip
+	// the Axiom poll loop entirely. But keep the SSE connection open
+	// with keepalive comments so the browser EventSource doesn't
+	// interpret a server-side close as a disconnect and auto-reconnect
+	// (which would re-fetch the historical batch and visibly duplicate
+	// events: see the 3× duplication report after #243).
+	if session.Status != "running" {
+		keepalive := time.NewTicker(15 * time.Second)
+		defer keepalive.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-keepalive.C:
+				writeSSEComment(c.Response(), "keepalive")
+				c.Response().Flush()
+			}
+		}
+	}
+
+	// Live tail. Cursor starts at the last historical event's _time.
+	// Tail polls strictly require `ev.Time.After(cursor)`, so events
+	// at exactly the cursor are skipped — no double-emit of historical
+	// rows.
+	//
+	// Tradeoff: events ingested after the historical query window
+	// closed but with _time falling before the historical batch's
+	// last event (out-of-order ingest, e.g. network jitter on the
+	// shipper) are missed. Earlier we tried subtracting a 1s overlap
+	// to catch those, but Axiom returns events with stable _time so
+	// the overlap re-fetched events already emitted in the
+	// historical batch — visible duplicates in the UI. Until we add
+	// a server-side seen-set, no overlap.
+	var cursor time.Time
+	if len(rows) > 0 {
+		cursor = rows[len(rows)-1].Time
+	} else {
+		cursor = q.since
+	}
+
+	tick := time.NewTicker(1 * time.Second)
+	defer tick.Stop()
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+			tailQ := q
+			tailQ.since = cursor
+			tailQ.until = time.Time{} // open-ended
+			tailStart, tailEnd := tailQ.timeWindow(true)
+			newRows, err := s.queryAxiom(ctx, tailQ.toRequest(tailStart, tailEnd, true))
+			if err != nil {
+				// Don't kill the stream on a single failed poll — log
+				// and try again next tick. Persistent failures will
+				// show as a stalled stream which the UI can detect.
+				log.Printf("api: sandbox %s logs: tail poll failed: %v", sandboxID, err)
+				continue
+			}
+			newRows = applyClientFilters(newRows, tailQ)
+			for _, ev := range newRows {
+				if !ev.Time.After(cursor) {
+					continue
+				}
+				writeSSEEvent(c.Response(), ev)
+				cursor = ev.Time
+			}
+			if len(newRows) > 0 {
+				c.Response().Flush()
+			}
+		case <-keepalive.C:
+			writeSSEComment(c.Response(), "keepalive")
+			c.Response().Flush()
+		}
+	}
+}
+
+// logQuery is the validated form of incoming query params, ready to
+// render into APL.
+type logQuery struct {
+	sandboxID string
+	since     time.Time
+	until     time.Time
+	text      string   // already-escaped
+	sources   []string // already-validated against allowedSources
+	limit     int
+	tail      bool
+}
+
+// applySessionState narrows a parsed query based on the sandbox's
+// lifecycle. For stopped/error/hibernated sandboxes:
+//   - until is capped at stoppedAt + 30s grace (the in-VM shipper
+//     finishes flushing within a few seconds of process exit; 30s
+//     covers ingest latency comfortably)
+//
+// q.tail is preserved — it reflects the client's explicit intent
+// (URL ?tail=false / CLI --no-tail). The handler reads session.Status
+// separately to decide whether to actually poll Axiom; for non-running
+// sandboxes it holds the SSE connection open with keepalives instead
+// of closing, so the browser EventSource doesn't auto-reconnect and
+// re-fetch the historical batch (which visibly duplicated events).
+//
+// Pure function (no DB dep) so the lifecycle behaviour is unit-testable.
+func applySessionState(q logQuery, status string, stoppedAt *time.Time) logQuery {
+	if status == "running" {
+		return q
+	}
+	if stoppedAt != nil {
+		bound := stoppedAt.Add(30 * time.Second)
+		if q.until.IsZero() || q.until.After(bound) {
+			q.until = bound
+		}
+	}
+	return q
+}
+
+func parseLogQuery(sandboxID string, sandboxStarted time.Time, qs url.Values) (logQuery, error) {
+	q := logQuery{
+		sandboxID: sandboxID,
+		since:     sandboxStarted,
+		limit:     1000,
+		tail:      true,
+	}
+
+	if v := qs.Get("tail"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return q, fmt.Errorf("tail must be true or false")
+		}
+		q.tail = b
+	}
+
+	if v := qs.Get("since"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return q, fmt.Errorf("since must be RFC3339")
+		}
+		q.since = t
+	}
+
+	if v := qs.Get("until"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return q, fmt.Errorf("until must be RFC3339")
+		}
+		q.until = t
+	}
+
+	if v := qs.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return q, fmt.Errorf("limit must be a positive integer")
+		}
+		if n > 10000 {
+			n = 10000
+		}
+		q.limit = n
+	}
+
+	if v := qs.Get("q"); v != "" {
+		// Defense in depth: reject control chars; Axiom's `contains`
+		// operator takes the value as a JSON string so quote escaping
+		// isn't needed.
+		if strings.ContainsAny(v, "\r\n\x00") {
+			return q, fmt.Errorf("q must not contain control characters")
+		}
+		q.text = v
+	}
+
+	if v := qs.Get("source"); v != "" {
+		for _, src := range strings.Split(v, ",") {
+			src = strings.TrimSpace(src)
+			if src == "" {
+				continue
+			}
+			if _, ok := allowedSources[src]; !ok {
+				return q, fmt.Errorf("source %q not allowed", src)
+			}
+			q.sources = append(q.sources, src)
+		}
+	}
+
+	return q, nil
+}
+
+// timeWindow returns (startTime, endTime) suitable for Axiom's APL
+// API body fields. Axiom requires them; we send them separately and
+// also embed `_time >=` filters in the APL so the query plan is
+// equivalent regardless of which the engine prefers.
+//
+// Historical: since..until (until defaults to now if unset).
+// Tail: since..now (no upper bound logically; Axiom needs a value).
+func (q logQuery) timeWindow(tail bool) (time.Time, time.Time) {
+	end := q.until
+	if tail || end.IsZero() {
+		end = time.Now().UTC().Add(1 * time.Minute) // small skew tolerance
+	}
+	return q.since, end
+}
+
+// toFilter returns a FLAT `sandbox_id == q.sandboxID` predicate. Do not
+// wrap it in {op:"and", filters:[...]} — Axiom's per-dataset /query
+// endpoint silently drops AND-wrapped filters and returns the full
+// dataset (cross-tenant leak). The regression test in
+// sandbox_logs_test.go pins the flat shape.
+//
+// Secondary predicates (text search via `q`, source list via `source`)
+// are applied client-side in applyClientFilters after the query
+// returns — Axiom doesn't compose them in the per-dataset filter shape.
+func (q logQuery) toFilter() queryFilter {
+	return queryFilter{Op: "==", Field: "sandbox_id", Value: q.sandboxID}
+}
+
+// applyClientFilters narrows a row set by predicates Axiom did not apply
+// server-side (text contains, source list). The sandbox_id predicate is
+// always applied by Axiom via toFilter; this function is purely UX —
+// it must NOT be relied on for tenant isolation.
+func applyClientFilters(rows []logEvent, q logQuery) []logEvent {
+	if q.text == "" && len(q.sources) == 0 {
+		return rows
+	}
+	var sourceSet map[string]struct{}
+	if len(q.sources) > 0 {
+		sourceSet = make(map[string]struct{}, len(q.sources))
+		for _, s := range q.sources {
+			sourceSet[s] = struct{}{}
+		}
+	}
+	out := rows[:0]
+	for _, ev := range rows {
+		if q.text != "" && !strings.Contains(ev.Line, q.text) {
+			continue
+		}
+		if sourceSet != nil {
+			if _, ok := sourceSet[ev.Source]; !ok {
+				continue
+			}
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// toRequest: time range goes in startTime/endTime (server-side bound);
+// only the structural predicate goes in `filter`. Tail variant omits
+// Limit so every poll surfaces every new row since the cursor.
+func (q logQuery) toRequest(startTime, endTime time.Time, tail bool) queryRequest {
+	req := queryRequest{
+		StartTime: startTime.UTC().Format(time.RFC3339Nano),
+		EndTime:   endTime.UTC().Format(time.RFC3339Nano),
+		Filter:    q.toFilter(),
+		Order:     []queryOrderField{{Field: "_time"}},
+	}
+	if !tail {
+		req.Limit = q.limit
+	}
+	return req
+}
+
+// logEvent is the on-the-wire shape we re-emit to SSE clients. Mirrors
+// the agent-side schema but only includes fields the UI needs to
+// render a row. Unknown extra fields from Axiom are tolerated.
+type logEvent struct {
+	Time      time.Time `json:"_time"`
+	Source    string    `json:"source"`
+	Line      string    `json:"line"`
+	SandboxID string    `json:"sandbox_id,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	ExecID    string    `json:"exec_id,omitempty"`
+	Command   string    `json:"command,omitempty"`
+	Argv      []string  `json:"argv,omitempty"`
+	ExitCode  *int      `json:"exit_code,omitempty"`
+}
+
+// queryAxiom POSTs a filter-style query and parses the response.
+//
+// Endpoint: /v1/datasets/<dataset>/query. Response shape:
+//
+//	{ "matches": [ { "_time": "...", "data": {<event fields>} }, ... ] }
+func (s *Server) queryAxiom(ctx context.Context, qreq queryRequest) ([]logEvent, error) {
+	body, _ := json.Marshal(qreq)
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("https://api.axiom.co/v1/datasets/%s/query", url.PathEscape(s.axiomDataset)),
+		bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.axiomQueryToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := &http.Client{Timeout: 15 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("axiom %d: %s", resp.StatusCode, string(raw))
+	}
+
+	// Axiom's per-dataset /query response surfaces `_time` at the match
+	// level, NOT inside `data`. Parse both and use the match-level time
+	// when present (the data-level time is often the zero value because
+	// Axiom strips _time from the indexed event body on ingest).
+	var parsed struct {
+		Matches []struct {
+			Time time.Time       `json:"_time"`
+			Data json.RawMessage `json:"data"`
+		} `json:"matches"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, fmt.Errorf("decode axiom response: %w", err)
+	}
+
+	out := make([]logEvent, 0, len(parsed.Matches))
+	for _, m := range parsed.Matches {
+		var ev logEvent
+		if err := json.Unmarshal(m.Data, &ev); err != nil {
+			continue // skip malformed, don't fail the whole batch
+		}
+		if !m.Time.IsZero() {
+			ev.Time = m.Time
+		}
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
+// writeSSEEvent writes one event in SSE wire format. Errors here mean
+// the client disconnected; the caller's ctx will see Done shortly.
+func writeSSEEvent(w io.Writer, ev logEvent) {
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", data)
+}
+
+func writeSSEComment(w io.Writer, comment string) {
+	fmt.Fprintf(w, ": %s\n\n", comment)
+}

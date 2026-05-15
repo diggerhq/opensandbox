@@ -82,6 +82,7 @@ func (s *Server) internalCreateSandbox(c echo.Context) error {
 
 	// Reuse the normal remote-create path — picks a worker, dispatches via
 	// gRPC, persists the session, writes the {sandboxID, token, status, ...}
-	// response body.
-	return s.createSandboxRemote(c, c.Request().Context(), cfg, orgID, true)
+	// response body. secretStoreID is nil here — cap-token callers don't
+	// reference an org-uploaded secret store (that's a /api/sandboxes feature).
+	return s.createSandboxRemote(c, c.Request().Context(), cfg, orgID, true, nil)
 }

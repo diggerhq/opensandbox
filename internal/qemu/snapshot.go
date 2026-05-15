@@ -36,6 +36,10 @@ type SnapshotMeta struct {
 	GoldenVersion    string              `json:"goldenVersion,omitempty"`
 	SnapshotedAt     time.Time           `json:"snapshotedAt,omitempty"`
 	SealedTokens     map[string]string   `json:"sealedTokens,omitempty"`
+	// SealedNames is the env-var-name → sealed-token index. Persisted alongside
+	// SealedTokens so secret-store refresh-by-name (UpdateSecretValue) keeps
+	// working after a wake or migration handoff.
+	SealedNames      map[string]string   `json:"sealedNames,omitempty"`
 	EgressAllowlist  []string            `json:"egressAllowlist,omitempty"`
 	TokenHosts       map[string][]string `json:"tokenHosts,omitempty"`
 }
@@ -62,13 +66,20 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		return nil, fmt.Errorf("mkdir snapshot dir: %w", err)
 	}
 
-	// Step 1: Sync filesystems and quiesce agent.
+	// Step 1: Sync filesystems, quiesce agent, close host conn, and WAIT for
+	// the guest to process EOF before savevm. See quiesceAndCloseAgent.
 	// Don't unmount /workspace — open FDs prevent clean unmount and cause ext4 corruption.
-	// PrepareHibernate syncs dirty pages and resets the virtio-serial listener
-	// synchronously, so no post-close sleep is needed.
+	//
+	// If quiesce fails (agent unresponsive), DO NOT proceed to savevm: the
+	// captured qcow2 would carry un-synced page cache + pending EXT4 journal
+	// entries and become unbootable on the next cold-mount (inode #2 checksum
+	// failure → kernel panic loop). Bubble the error up so the API caller
+	// gets a clear refusal instead of a silently-corrupted sandbox.
 	if vm.agent != nil {
-		prepareAgentForHibernate(ctx, vm.agent)
-		vm.agent.Close()
+		if err := quiesceAndCloseAgent(ctx, vm.agent); err != nil {
+			log.Printf("qemu: hibernate %s: refusing savevm — %v", vm.ID, err)
+			return nil, fmt.Errorf("hibernate %s: %w", vm.ID, err)
+		}
 		vm.agent = nil
 	}
 	log.Printf("qemu: hibernate %s: guest sync + unmount done (%dms)", vm.ID, time.Since(t0).Milliseconds())
@@ -76,12 +87,23 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Step 2: savevm — saves memory + device state INTO the qcow2 files.
 	// Same mechanism as CreateCheckpoint. On wake, loadvm restores everything
 	// including running processes, open files, and memory contents.
+	//
+	// Explicit Stop() before savevm: although savevm internally pauses and
+	// resumes the VM, the explicit pause closes the small race where in-flight
+	// virtio-blk writes from the guest can still land in the qcow2 between
+	// the agent's `sync` and the start of savevm. Halting vCPUs first makes
+	// the captured state strictly post-sync. doHibernate proceeds straight
+	// to Quit on success, so leaving the VM in stopped state is fine; only
+	// the failure path resumes (so we don't leak a wedged paused VM).
 	if vm.qmp == nil {
 		return nil, fmt.Errorf("no QMP client for VM %s", vm.ID)
 	}
 	snapshotName := "hibernate"
+	if stopErr := vm.qmp.Stop(); stopErr != nil {
+		return nil, fmt.Errorf("qmp stop before savevm: %w", stopErr)
+	}
 	if err := vm.qmp.SaveVM(snapshotName); err != nil {
-		// Try to resume VM so it's not left in a broken paused state
+		// Resume so we don't leave the VM wedged paused on the error path.
 		if contErr := vm.qmp.Cont(); contErr != nil {
 			log.Printf("qemu: hibernate %s: failed to resume after savevm failure: %v", vm.ID, contErr)
 		}
@@ -132,6 +154,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	// Persist secrets proxy state so wake can re-register the session.
 	if m.secretsProxy != nil && vm.network != nil {
 		meta.SealedTokens = m.secretsProxy.GetSessionTokens(vm.network.GuestIP)
+		meta.SealedNames = m.secretsProxy.GetSessionNames(vm.network.GuestIP)
 		meta.EgressAllowlist = m.secretsProxy.GetSessionAllowlist(vm.network.GuestIP)
 		meta.TokenHosts = m.secretsProxy.GetSessionTokenHosts(vm.network.GuestIP)
 	}
@@ -161,7 +184,16 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		os.Remove(vm.qmpSockPath)
 	}
 
-	checkpointKey := fmt.Sprintf("checkpoints/%s/%d.tar.zst", vm.ID, time.Now().Unix())
+	// Per-hibernation unique paths. Pre-fix used a single sandbox-scoped
+	// `archive-staging/` and `checkpoint.tar.zst`, so back-to-back
+	// hibernate→wake→hibernate cycles raced: the second hibernate's
+	// copyFileReflink overwrote the first goroutine's staging files mid-tar,
+	// and both goroutines wrote the same checkpoint.tar.zst path. End state:
+	// neither blob landed in S3, the DB still showed both rows as hibernated,
+	// and cross-worker wake failed with "blob: object not found". Including
+	// UnixNano in the staging dir name is enough to make the paths unique.
+	epochSec := time.Now().Unix()
+	checkpointKey := fmt.Sprintf("checkpoints/%s/%d.tar.zst", vm.ID, epochSec)
 	localElapsed := time.Since(t0)
 	log.Printf("qemu: hibernate %s: local snapshot complete (%dms), starting async S3 upload",
 		vm.ID, localElapsed.Milliseconds())
@@ -176,7 +208,7 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 	workspaceFile := filepath.Base(detectDrivePath(sandboxDir, "workspace"))
 	rootfsFile := filepath.Base(detectDrivePath(sandboxDir, "rootfs"))
 
-	archiveDir := filepath.Join(sandboxDir, "archive-staging")
+	archiveDir := filepath.Join(sandboxDir, fmt.Sprintf("archive-staging-%d", time.Now().UnixNano()))
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return nil, fmt.Errorf("mkdir archive-staging: %w", err)
 	}
@@ -205,19 +237,31 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 		log.Printf("qemu: hibernate %s: rootfs rebase failed (archive may not be portable): %v (%s)",
 			sandboxID, err, strings.TrimSpace(string(out)))
 	}
-	log.Printf("qemu: hibernate %s: archive staging ready", sandboxID)
+	log.Printf("qemu: hibernate %s: archive staging ready (dir=%s)", sandboxID, filepath.Base(archiveDir))
 
 	// Signal channel so destroyVM can wait for archive completion before deleting files.
 	archiveDone := make(chan struct{})
 	vm.archiveDone = archiveDone
 
+	uploadCb := m.onHibernationUpload
 	m.uploadWg.Add(1)
 	go func() {
 		defer m.uploadWg.Done()
 		defer close(archiveDone)
 		defer os.RemoveAll(archiveDir) // clean up staging copies when done
+
+		var sizeBytes int64
+		var goroutineErr error
+		defer func() {
+			if uploadCb != nil {
+				uploadCb(sandboxID, checkpointKey, sizeBytes, goroutineErr)
+			}
+		}()
+
 		t1 := time.Now()
-		archivePath := filepath.Join(sandboxDir, "checkpoint.tar.zst")
+		// Tar lives inside the per-hibernation staging dir so concurrent
+		// hibernations of the same sandbox don't write to the same path.
+		archivePath := filepath.Join(archiveDir, "checkpoint.tar.zst")
 
 		// Archive from the staging copies — originals are free for wake/QEMU.
 		if err := createArchive(archivePath, archiveDir, []string{
@@ -225,29 +269,30 @@ func (m *Manager) doHibernate(ctx context.Context, vm *VMInstance, checkpointSto
 			rootfsFile,
 			workspaceFile,
 		}); err != nil {
+			goroutineErr = fmt.Errorf("archive: %w", err)
 			log.Printf("qemu: async archive failed for %s: %v", sandboxID, err)
 			return
 		}
 		archiveInfo, err := os.Stat(archivePath)
 		if err != nil {
+			goroutineErr = fmt.Errorf("stat archive: %w", err)
 			log.Printf("qemu: async archive stat failed for %s: %v", sandboxID, err)
 			return
 		}
+		sizeBytes = archiveInfo.Size()
 		log.Printf("qemu: hibernate %s: archive created (%dms, %.1f MB)",
-			sandboxID, time.Since(t1).Milliseconds(), float64(archiveInfo.Size())/(1024*1024))
+			sandboxID, time.Since(t1).Milliseconds(), float64(sizeBytes)/(1024*1024))
 
 		t2 := time.Now()
 		uploadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		if _, err := checkpointStore.Upload(uploadCtx, checkpointKey, archivePath); err != nil {
+			goroutineErr = fmt.Errorf("upload: %w", err)
 			log.Printf("qemu: async S3 upload failed for %s: %v", sandboxID, err)
-			os.Remove(archivePath) // clean up — local qcow2 files are the source of truth for same-worker wake
-			return
+			return // archiveDir cleanup via defer takes the tar with it
 		}
 		log.Printf("qemu: hibernate %s: S3 upload complete (%dms, key=%s)",
 			sandboxID, time.Since(t2).Milliseconds(), checkpointKey)
-
-		os.Remove(archivePath) // only delete after successful upload
 	}()
 
 	return &sandbox.HibernateResult{
@@ -275,25 +320,11 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	snapshotDir := filepath.Join(sandboxDir, "snapshot")
 	metaPath := filepath.Join(snapshotDir, "snapshot-meta.json")
 
-	// Wait for any in-flight hibernate archive to finish before proceeding.
-	// Same-worker wake: archive reads from staging copies (safe), but we need
-	// archive-staging/ cleaned up before starting QEMU to avoid disk waste.
-	// Cross-worker wake: S3 upload must complete before download can succeed.
-	archiveStagingDir := filepath.Join(sandboxDir, "archive-staging")
-	if fileExists(archiveStagingDir) {
-		log.Printf("qemu: wake %s: waiting for in-flight archive to complete", sandboxID)
-		for i := 0; i < 60; i++ { // up to 30 seconds
-			if !fileExists(archiveStagingDir) {
-				break
-			}
-			time.Sleep(500 * time.Millisecond)
-		}
-		if fileExists(archiveStagingDir) {
-			// Don't force-remove — the archive goroutine's defer will clean up.
-			// Removing while tar is mid-read corrupts the S3 archive.
-			log.Printf("qemu: wake %s: archive staging still present after 30s, proceeding (goroutine will clean up)", sandboxID)
-		}
-	}
+	// Per-hibernation archive staging dirs are named `archive-staging-<nano>` and
+	// each goroutine cleans up its own dir via defer. Wake doesn't need the
+	// archive (same-worker uses local qcow2; cross-worker downloads from S3),
+	// so there is nothing to wait for here. Pre-fix this loop watched a single
+	// fixed `archive-staging/` path — irrelevant under the new scheme.
 
 	// Step 1: Ensure qcow2 files are local
 	t0 := time.Now()
@@ -360,10 +391,31 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return nil, fmt.Errorf("workspace not found at %s", workspacePath)
 	}
 
-	// Step 3: Set up network
-	netCfg, err := m.subnets.Allocate()
-	if err != nil {
-		return nil, fmt.Errorf("allocate subnet: %w", err)
+	// Step 3: Set up network. Prefer the original TAP/subnet so the gateway
+	// IP remains stable across hibernate→wake cycles. The VM's HTTPS_PROXY
+	// env var was baked at create time pointing at the original gateway IP
+	// (e.g. 172.16.0.1). If wake reallocates a fresh subnet, the env still
+	// points at the stale gateway and every outbound HTTPS through the
+	// secrets proxy times out — silent breakage of the entire proxy path
+	// for any sandbox with a secret store.
+	//
+	// Fall back to a fresh allocation if the original block was claimed by a
+	// different sandbox while this one was hibernated. The fallback path
+	// will leave HTTPS_PROXY stale, so log a clear warning — operators who
+	// see this in journal know why post-wake outbound HTTPS is broken.
+	var netCfg *NetworkConfig
+	if meta.Network != nil && meta.Network.TAPName != "" {
+		netCfg, err = m.subnets.AllocateSpecific(meta.Network.TAPName)
+		if err != nil {
+			log.Printf("qemu: wake %s: original TAP %q unavailable (%v) — falling back to fresh subnet; HTTPS_PROXY env will be stale, outbound HTTPS through proxy will fail until sandbox is recreated",
+				sandboxID, meta.Network.TAPName, err)
+		}
+	}
+	if netCfg == nil {
+		netCfg, err = m.subnets.Allocate()
+		if err != nil {
+			return nil, fmt.Errorf("allocate subnet: %w", err)
+		}
 	}
 	if err := CreateTAP(netCfg); err != nil {
 		m.subnets.Release(netCfg.TAPName)
@@ -452,6 +504,26 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		return m.coldBootLocal(ctx, sandboxID, timeout)
 	}
 
+	// Re-plug virtio-mem to match the pre-hibernate total BEFORE Cont. The VM
+	// is paused, so the kernel sees the full memory map immediately on resume
+	// — without this, restored processes that were using more than baseMem
+	// OOM before any post-resume scale could land. Mirrors the
+	// RestoreFromCheckpoint path (manager.go:2536). Also keeps host-side
+	// accounting honest: vm.MemoryMB stays equal to what's actually plugged,
+	// not the ceiling, so TotalCommittedMemoryMB reflects reality.
+	pluggedMB := 0
+	if meta.MemoryMB > baseMem {
+		additionalMB := alignVirtioMemBlock(meta.MemoryMB - baseMem)
+		if err := qmpClient.SetVirtioMemSize(additionalMB); err != nil {
+			log.Printf("qemu: wake %s: pre-resume virtio-mem plug to %dMB failed: %v (continuing with base %dMB)",
+				sandboxID, additionalMB, err, baseMem)
+		} else {
+			pluggedMB = additionalMB
+			log.Printf("qemu: wake %s: pre-resume virtio-mem plug %dMB (base=%d, total=%d)",
+				sandboxID, additionalMB, baseMem, baseMem+additionalMB)
+		}
+	}
+
 	if err := qmpClient.Cont(); err != nil {
 		qmpClient.Close()
 		cmd.Process.Kill()
@@ -488,11 +560,23 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		log.Printf("qemu: wake %s: clock sync failed: %v", sandboxID, err)
 	}
 
-	// Re-register secrets proxy session from persisted tokens.
-	if m.secretsProxy != nil && len(meta.SealedTokens) > 0 {
-		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts)
-		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens)", sandboxID, len(meta.SealedTokens))
+	// Re-register secrets proxy session from persisted tokens. An allowlist
+	// alone is enough — without a session the proxy 407s every request.
+	if m.secretsProxy != nil && (len(meta.SealedTokens) > 0 || len(meta.EgressAllowlist) > 0) {
+		m.secretsProxy.ReregisterSession(sandboxID, netCfg.GuestIP, meta.SealedTokens, meta.EgressAllowlist, meta.TokenHosts, meta.SealedNames)
+		log.Printf("qemu: wake %s: re-registered secrets proxy session (%d tokens, %d allowlist, %d names)", sandboxID, len(meta.SealedTokens), len(meta.EgressAllowlist), len(meta.SealedNames))
 	}
+	// Refresh the proxy CA in the guest's trust store. Wake may land on a
+	// different worker than the one that hibernated the sandbox, in which
+	// case the cert in the guest's trust store no longer matches what this
+	// worker's proxy presents. Idempotent on same-worker wake.
+	m.reinstallProxyCA(context.Background(), sandboxID, agentClient)
+
+	// Re-apply the apt-cache bind-mount. Idempotent: no-op if already in place
+	// (e.g., same-worker wake where the loadvm-restored mount table preserved
+	// the bind). On cross-worker wake or sandboxes that pre-date this fix,
+	// this is the first chance to set it up.
+	m.setupAptCacheBindMount(context.Background(), sandboxID, agentClient)
 
 	log.Printf("qemu: wake %s: golden restore complete (port=%d, tap=%s)",
 		sandboxID, hostPort, netCfg.TAPName)
@@ -504,16 +588,17 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 	}
 
 	vm := &VMInstance{
-		ID:            sandboxID,
-		Template:      meta.Template,
-		Status:        types.SandboxStatusRunning,
-		StartedAt:     now,
-		EndAt:         now.Add(ttl),
-		CpuCount:      meta.CpuCount,
-		MemoryMB:      meta.MemoryMB,
-		baseMemoryMB:  baseMem,
-		HostPort:      hostPort,
-		GuestPort:     netCfg.GuestPort,
+		ID:                   sandboxID,
+		Template:             meta.Template,
+		Status:               types.SandboxStatusRunning,
+		StartedAt:            now,
+		EndAt:                now.Add(ttl),
+		CpuCount:             meta.CpuCount,
+		MemoryMB:             baseMem + pluggedMB, // actually-plugged total, not the ceiling — keeps committed accounting honest
+		baseMemoryMB:         baseMem,
+		virtioMemRequestedMB: pluggedMB,
+		HostPort:             hostPort,
+		GuestPort:             netCfg.GuestPort,
 		pid:           cmd.Process.Pid,
 		cmd:           cmd,
 		network:       netCfg,
@@ -525,6 +610,14 @@ func (m *Manager) doWake(ctx context.Context, sandboxID, checkpointKey string, c
 		guestCID:      guestCID,
 		bootArgs:      bootArgs,
 		goldenVersion: m.goldenVersion, // set on wake — VM runs on the current worker's base
+	}
+	// Recompute virtio-mem amount from the meta. Without this the field
+	// stays at zero on wake, which would (a) make grow deltas under-charge
+	// the host capacity check and (b) make the shrink-OOM-floor in
+	// SetResourceLimits silently no-op since `additional == requested == 0`
+	// is treated as "no change" and skips the check entirely.
+	if meta.MemoryMB > baseMem {
+		vm.virtioMemRequestedMB = meta.MemoryMB - baseMem
 	}
 	vm.agent = agentClient
 
@@ -796,15 +889,33 @@ func copyFileReflink(src, dst string) error {
 }
 
 // syncGuestClock sets the guest clock to the current host time via agent exec.
+//
+// Wraps the underlying RPC with a 10s deadline (caller-side timeout, NOT just
+// the agent-side TimeoutSeconds) and one Redial-on-transport-error retry. Prior
+// version used the caller's context.Background() which had no deadline at all,
+// so a wedged virtio-serial channel would block until gRPC keepalive (~7 min)
+// gave up. That stall is what produced the multi-minute "from-checkpoint"
+// requests in load tests.
 func syncGuestClock(ctx context.Context, agent *AgentClient) error {
 	now := time.Now().Unix()
-	cmd := fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)
-	resp, err := agent.Exec(ctx, &pb.ExecRequest{
+	req := &pb.ExecRequest{
 		Command:        "/bin/sh",
-		Args:           []string{"-c", cmd},
+		Args:           []string{"-c", fmt.Sprintf("date -s @%d > /dev/null 2>&1", now)},
 		TimeoutSeconds: 5,
 		RunAsRoot:      true,
-	})
+	}
+	rpcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	resp, err := agent.Exec(rpcCtx, req)
+	if err != nil && IsTransportError(err) {
+		log.Printf("qemu: syncGuestClock: transport error %v, redialing and retrying once", err)
+		if rdErr := agent.Redial(); rdErr != nil {
+			return fmt.Errorf("clock sync redial: %w (orig: %v)", rdErr, err)
+		}
+		rpcCtx2, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel2()
+		resp, err = agent.Exec(rpcCtx2, req)
+	}
 	if err != nil {
 		return fmt.Errorf("exec clock sync: %w", err)
 	}

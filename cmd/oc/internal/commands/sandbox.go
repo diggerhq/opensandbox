@@ -186,6 +186,50 @@ var sandboxWakeCmd = &cobra.Command{
 	},
 }
 
+var sandboxRebootCmd = &cobra.Command{
+	Use:   "reboot <sandbox-id>",
+	Short: "Soft restart of a running sandbox (guest-only kernel reboot, disks preserved)",
+	Long: `Soft restart of a running sandbox via in-guest reset.
+
+The QEMU process, network mapping, and persistent disks all stay; only
+the guest CPU is reset and the kernel reboots from scratch. Recovers
+from in-guest wedges: zombie pile-ups, OOM-killed agents, runaway
+processes, broken-but-isolated systemd state.
+
+For the rare case where the QEMU process itself is wedged, use
+'oc sandbox power-cycle' instead.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c := client.FromContext(cmd.Context())
+		if err := c.Post(cmd.Context(), "/sandboxes/"+args[0]+"/reboot", nil, nil); err != nil {
+			return err
+		}
+		fmt.Printf("Sandbox %s rebooted.\n", args[0])
+		return nil
+	},
+}
+
+var sandboxPowerCycleCmd = &cobra.Command{
+	Use:   "power-cycle <sandbox-id>",
+	Short: "Hard restart of a sandbox (kill QEMU + cold-boot, drives preserved)",
+	Long: `Hard restart of a sandbox.
+
+The QEMU process is killed and a fresh one is started with the same
+on-disk drives (rootfs.qcow2 + workspace.qcow2). The sandbox keeps its
+ID, project, secrets, env, and persistent workspace data; gets a new
+external host port and TAP. Use when the QEMU process itself is wedged
+or 'oc sandbox reboot' didn't recover.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c := client.FromContext(cmd.Context())
+		if err := c.Post(cmd.Context(), "/sandboxes/"+args[0]+"/power-cycle", nil, nil); err != nil {
+			return err
+		}
+		fmt.Printf("Sandbox %s power-cycled.\n", args[0])
+		return nil
+	},
+}
+
 var sandboxSetTimeoutCmd = &cobra.Command{
 	Use:   "set-timeout <sandbox-id> <seconds>",
 	Short: "Update sandbox timeout",
@@ -241,6 +285,8 @@ func init() {
 	sandboxCmd.AddCommand(sandboxKillCmd)
 	sandboxCmd.AddCommand(sandboxHibernateCmd)
 	sandboxCmd.AddCommand(sandboxWakeCmd)
+	sandboxCmd.AddCommand(sandboxRebootCmd)
+	sandboxCmd.AddCommand(sandboxPowerCycleCmd)
 	sandboxCmd.AddCommand(sandboxSetTimeoutCmd)
 }
 

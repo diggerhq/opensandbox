@@ -1,0 +1,45 @@
+# Pulls AXIOM_PLATFORM_TOKEN + AXIOM_PLATFORM_DATASET from Key Vault via
+# the VM's managed identity and writes /etc/opensandbox/vector.env before
+# vector.service starts.
+#
+# Reads OPENSANDBOX_AZURE_KEY_VAULT_NAME (and OPENCOMPUTER_CELL_ID /
+# OPENSANDBOX_REGION for tagging) from whichever role-env file exists —
+# worker.env on workers, server.env on the control plane. EnvironmentFile
+# lines with a leading `-` are silently skipped if the file is absent, so
+# this unit works on both roles.
+#
+# Ordering note: on Azure workers, cloud-init's final stage writes
+# /etc/opensandbox/worker.env from a base64 payload baked by the control
+# plane (internal/compute/azure.go). Without `After=cloud-final.service`
+# the populator races cloud-init, reads an empty environ, exits 0 on
+# the "OPENSANDBOX_AZURE_KEY_VAULT_NAME not set" branch, and never
+# retries (Restart=on-failure doesn't fire on exit 0). Vector then can't
+# start because vector.env was never written. Ordering after cloud-final
+# guarantees worker.env exists by the time we read it.
+
+[Unit]
+Description=Populate /etc/opensandbox/vector.env from Key Vault
+After=network-online.target cloud-final.service
+Wants=network-online.target cloud-final.service
+Before=vector.service
+DefaultDependencies=no
+# Retry budget for the Restart= below. StartLimit* belongs in [Unit] per
+# systemd 229+; in [Service] systemd-255 logs an "Unknown key" warning
+# and ignores them (then Restart=on-failure can crash-loop without a cap).
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/opensandbox/worker.env
+EnvironmentFile=-/etc/opensandbox/server.env
+ExecStart=/usr/local/bin/populate-vector-env.sh
+RemainAfterExit=yes
+# Retry a few times if KV is briefly unreachable at boot. The script
+# itself exits 0 on graceful failure paths (no IMDS, no secret, etc.) so
+# this only fires on truly unexpected errors.
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

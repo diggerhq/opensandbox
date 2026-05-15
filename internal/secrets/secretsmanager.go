@@ -120,7 +120,8 @@ func (b *SecretsManagerBackend) LoadAllToEnv(ctx context.Context) (loaded, skipp
 		}
 		if b.ModePrefixFilter != "" &&
 			!strings.HasPrefix(k, b.ModePrefixFilter+"-") &&
-			!strings.HasPrefix(k, "pg-") {
+			!strings.HasPrefix(k, "pg-") &&
+			!strings.HasPrefix(k, "shared-") {
 			continue
 		}
 		if os.Getenv(envVar) != "" {

@@ -26,6 +26,9 @@ func (s *Server) createSandbox(c echo.Context) error {
 			"error": "invalid request body: " + err.Error(),
 		})
 	}
+	// Default networkEnabled=true when caller omits it, so the value persisted
+	// to sandbox_sessions.config_json is explicit and forks inherit it correctly.
+	cfg.EnsureNetworkEnabledDefault()
 
 	// Validate CPU/memory against allowed tiers.
 	// Allowed tiers (memoryMB → vCPU): 1024→1, 4096→1, 8192→2, 16384→4, 32768→8, 65536→16.
@@ -136,7 +139,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		// on the fork. User envs override checkpoint's stored envs.
 		// Secret store: if checkpoint has none, user can attach one at fork time.
 		// If checkpoint already has one, user cannot override it.
-		result, status, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore)
+		result, status, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore, cfg.Metadata)
 		if cpErr != nil {
 			return c.JSON(status, map[string]string{"error": cpErr.Error()})
 		}
@@ -146,8 +149,11 @@ func (s *Server) createSandbox(c echo.Context) error {
 	// Fresh-create path: resolve the secret store (if any) into cfg.SecretEnvs.
 	// This is intentionally below the snapshot/image branch so the snapshot
 	// path never resolves a user-supplied store — forks inherit only.
+	var secretStoreID *uuid.UUID
 	if cfg.SecretStore != "" && hasOrg {
-		if err := s.resolveSecretStoreInto(ctx, orgID, &cfg); err != nil {
+		var err error
+		secretStoreID, err = s.resolveSecretStoreInto(ctx, orgID, &cfg)
+		if err != nil {
 			log.Printf("api: %v", err)
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 		}
@@ -155,7 +161,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 
 	// Server mode with worker registry: dispatch to remote worker via gRPC
 	if s.workerRegistry != nil {
-		return s.createSandboxRemote(c, ctx, cfg, orgID, hasOrg)
+		return s.createSandboxRemote(c, ctx, cfg, orgID, hasOrg, secretStoreID)
 	}
 
 	// Combined/worker mode: create locally
@@ -216,7 +222,7 @@ func (s *Server) createSandbox(c echo.Context) error {
 		if template == "" {
 			template = "default"
 		}
-		_, _ = s.store.CreateSandboxSession(ctx, sb.ID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
+		_, _ = s.store.CreateSandboxSession(ctx, sb.ID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON, secretStoreID)
 	}
 
 	return c.JSON(http.StatusCreated, sb)
@@ -292,7 +298,7 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 
 	c.SetParamNames("checkpointId")
 	c.SetParamValues(checkpointID.String())
-	result, _, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore)
+	result, _, cpErr := s.createFromCheckpointCore(c, cfg.Envs, cfg.SecretStore, cfg.Metadata)
 	if cpErr != nil {
 		emit("error", map[string]string{"error": cpErr.Error()})
 		return nil
@@ -312,23 +318,28 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 // happens, so the same logic runs on both fresh creates and on
 // fork-from-checkpoint inheritance. If the user updates a secret between
 // snapshot and fork, the fork sees the new value.
-func (s *Server) resolveSecretStoreInto(ctx context.Context, orgID [16]byte, cfg *types.SandboxConfig) error {
+// resolveSecretStoreInto looks up the named secret store, decrypts entries
+// into cfg, and returns the store's UUID (or nil if no store was bound).
+// The UUID is plumbed back to CreateSandboxSession so sandbox_sessions.
+// secret_store_id gets populated — required for the secret-refresh fanout
+// (ListRunningSandboxesByStore filters on this column).
+func (s *Server) resolveSecretStoreInto(ctx context.Context, orgID [16]byte, cfg *types.SandboxConfig) (*uuid.UUID, error) {
 	if cfg.SecretStore == "" || s.store == nil {
-		return nil
+		return nil, nil
 	}
 	store, err := s.store.GetSecretStoreByName(ctx, orgID, cfg.SecretStore)
 	if err != nil {
-		return fmt.Errorf("secret store not found: %s", cfg.SecretStore)
+		return nil, fmt.Errorf("secret store not found: %s", cfg.SecretStore)
 	}
 
 	cfg.EgressAllowlist = store.EgressAllowlist
 
 	secrets, err := s.store.DecryptSecretEntries(ctx, store.ID)
 	if err != nil {
-		return fmt.Errorf("failed to decrypt secrets for store %s: %w", cfg.SecretStore, err)
+		return nil, fmt.Errorf("failed to decrypt secrets for store %s: %w", cfg.SecretStore, err)
 	}
 	if len(secrets) == 0 {
-		return nil
+		return &store.ID, nil
 	}
 	if cfg.SecretEnvs == nil {
 		cfg.SecretEnvs = make(map[string]string, len(secrets))
@@ -342,7 +353,7 @@ func (s *Server) resolveSecretStoreInto(ctx context.Context, orgID [16]byte, cfg
 			cfg.SecretAllowedHosts[secret.Name] = secret.AllowedHosts
 		}
 	}
-	return nil
+	return &store.ID, nil
 }
 
 // cfgForPersistence returns a copy of cfg suitable for marshaling into PG
@@ -393,7 +404,10 @@ func flattenSecretAllowedHosts(m map[string][]string) map[string]string {
 }
 
 // createSandboxRemote dispatches sandbox creation to a remote worker via gRPC.
-func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg types.SandboxConfig, orgID [16]byte, hasOrg bool) error {
+// secretStoreID is the resolved store UUID (or nil) from resolveSecretStoreInto;
+// passed straight to CreateSandboxSessionWithStatus so the row's secret_store_id
+// column is populated and the secret-refresh fanout can find this sandbox.
+func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg types.SandboxConfig, orgID [16]byte, hasOrg bool, secretStoreID *uuid.UUID) error {
 	// Select region (explicit header, or default to server's region)
 	region := c.Request().Header.Get("Fly-Region")
 	if region == "" {
@@ -448,8 +462,13 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 
 	// Dispatch via persistent gRPC connection.
 	// Worker uses local cache for checkpoint forks (300ms) and downloads from S3
-	// only on cold starts (~30s). 60s is enough for both paths.
-	grpcTimeout := 60 * time.Second
+	// only on cold starts. The pre-fix 60s budget was tight for cold forks of
+	// multi-GB checkpoints — under any blob-side contention or rebase work,
+	// the call could time out before the worker finished. Bumped to a generous
+	// flat 5min so cold forks of large checkpoints land cleanly. The happy
+	// path is unchanged: this RPC returns as soon as the VM is up, so warm
+	// forks still complete in well under a second.
+	grpcTimeout := 5 * time.Minute
 	grpcCtx, cancel := context.WithTimeout(ctx, grpcTimeout)
 	defer cancel()
 
@@ -471,7 +490,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		}
 		cfgJSON, _ := json.Marshal(cfgForPersistence(cfg))
 		metadataJSON, _ := json.Marshal(cfg.Metadata)
-		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, "pending")
+		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, worker.ID, cfgJSON, metadataJSON, "pending", secretStoreID)
 		if worker.GoldenVersion != "" {
 			_ = s.store.SetSandboxGoldenVersion(ctx, sandboxID, worker.GoldenVersion)
 		}
@@ -485,7 +504,7 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		Template:             cfg.Template,
 		Timeout:              int32(cfg.Timeout),
 		Envs:                 cfg.Envs,
-		NetworkEnabled:       cfg.NetworkEnabled,
+		NetworkEnabled:       cfg.IsNetworkEnabled(),
 		Port:                 int32(cfg.Port),
 		TemplateRootfsKey:    templateRootfsKey,
 		TemplateWorkspaceKey: templateWorkspaceKey,
@@ -958,12 +977,20 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 		WorkspaceS3Key:      preCopyResp.WorkspaceKey,
 		OverlayMode:         true,
 		SourceGoldenVersion: preCopyResp.GoldenVersion,
+		// Carry the secrets-proxy session from source → target. Without
+		// this the destination has no substitution map and outbound HTTPS
+		// from the migrated VM would leak `osb_sealed_xxx` env vars
+		// verbatim to upstream services. Empty when no secret store.
+		SealedTokens:    preCopyResp.SealedTokens,
+		EgressAllowlist: preCopyResp.EgressAllowlist,
+		TokenHosts:      preCopyResp.TokenHosts,
+		SealedNames:     preCopyResp.SealedNames,
 	})
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "prepare target: " + err.Error()})
 	}
 
-	log.Printf("migrate %s: target prepared at %s (host port %d)", id, prepResp.IncomingAddr, prepResp.HostPort)
+	log.Printf("migrate %s: target prepared at %s (host port %d, secrets=%d)", id, prepResp.IncomingAddr, prepResp.HostPort, len(preCopyResp.SealedTokens))
 
 	// Step 3: Live migrate from source to target
 	migrateCtx, migrateCancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -1117,10 +1144,39 @@ func (s *Server) scaleSandbox(c echo.Context) error {
 		}
 	}
 
+	// Scaling lock: refuse if the user has explicitly pinned this sandbox's
+	// resources. Same code that the autoscale endpoint and the autoscaler
+	// loop use, so SDK consumers can branch on a single error code.
+	if s.store != nil {
+		if locked, err := s.store.GetScalingLock(c.Request().Context(), id); err == nil && locked {
+			return c.JSON(http.StatusForbidden, map[string]any{
+				"error": "scaling is locked on this sandbox — unlock via PUT /scaling-lock to allow size changes",
+				"code":  "scaling_locked",
+			})
+		}
+	}
+
 	cpuPercent := vcpus * 100
 	maxMemoryBytes := int64(req.MemoryMB) * 1024 * 1024
 	cpuMaxUsec := int64(cpuPercent) * 1000
 	cpuPeriodUsec := int64(100000)
+
+	// Manual scale disables autoscale. Rationale: a user explicitly setting a
+	// size has signalled they want predictability — letting the autoscaler
+	// override would surprise them. They can re-enable via PUT /autoscale.
+	// Best-effort — failure to disable is logged but doesn't fail the scale.
+	// We capture whether it WAS enabled so the response can flag the side-
+	// effect to SDK callers (otherwise autoscale silently flips off).
+	var autoscaleWasEnabled bool
+	if s.store != nil {
+		if enabled, _, _, err := s.store.GetSandboxAutoscale(c.Request().Context(), id); err == nil {
+			autoscaleWasEnabled = enabled
+		}
+		if err := s.store.SetSandboxAutoscale(c.Request().Context(), id, false, 0, 0); err != nil {
+			log.Printf("scale: failed to disable autoscale on %s after manual scale: %v", id, err)
+		}
+	}
+	c.Set("autoscaleWasEnabled", autoscaleWasEnabled)
 
 	if s.workerRegistry != nil {
 		return s.setLimitsRemote(c, id, 0, maxMemoryBytes, cpuMaxUsec, cpuPeriodUsec)
@@ -1264,6 +1320,18 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 
 		log.Printf("scale-migrate %s: migrated to %s and scaled to %dMB", sandboxID, workerID, requestedMemMB)
 	} else if err != nil {
+		// OOM-floor refusal: returned by the worker when the requested limit
+		// is below the guest's current working set. This is a "user can fix
+		// it" condition (free memory in the guest, then retry) — surface it
+		// as 409 Conflict with a structured code so SDK consumers can branch
+		// on it without string-matching the wrapped gRPC error.
+		if strings.Contains(err.Error(), "oom_floor:") {
+			return c.JSON(http.StatusConflict, map[string]any{
+				"error":   "memory limit below guest working set — would OOM-kill processes",
+				"code":    "oom_floor",
+				"details": err.Error(),
+			})
+		}
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "set limits failed: " + err.Error(),
 		})
@@ -1277,14 +1345,21 @@ func (s *Server) setLimitsRemote(c echo.Context, sandboxID string, maxPids int32
 		s.emitEvent("scale", sandboxID, workerID, fmt.Sprintf("scaled to %dMB (migrated=%v)", requestedMemMB, migrated))
 	}
 
-	return c.JSON(http.StatusOK, map[string]interface{}{
+	resp := map[string]any{
 		"sandboxID":  sandboxID,
 		"workerID":   workerID,
 		"memoryMB":   requestedMemMB,
 		"cpuPercent": int(cpuMaxUsec / 1000),
 		"migrated":   migrated,
 		"ok":         true,
-	})
+	}
+	// Surface the autoscale-was-disabled side-effect when the request came
+	// from /scale (scaleSandbox stashes this on the echo context). Quiet
+	// when called from /limits (no autoscale toggle there).
+	if v := c.Get("autoscaleWasEnabled"); v != nil {
+		resp["autoscaleDisabled"] = v.(bool)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // findScaleMigrationTargets finds workers with enough memory headroom for a scaled-up sandbox.
@@ -1387,6 +1462,11 @@ func (s *Server) migrateForScale(ctx context.Context, sandboxID string, session 
 		OverlayMode:         true,
 		SourceGoldenVersion: preCopyResp.GoldenVersion,
 		TargetMemoryMb:      int32(memoryMB),
+		// Carry secrets-proxy session from source to target (see PreCopyDrives).
+		SealedTokens:    preCopyResp.SealedTokens,
+		EgressAllowlist: preCopyResp.EgressAllowlist,
+		TokenHosts:      preCopyResp.TokenHosts,
+		SealedNames:     preCopyResp.SealedNames,
 	})
 	if err != nil {
 		log.Printf("scale-migrate %s: prepare target failed: %v", sandboxID, err)
@@ -1663,13 +1743,52 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "sandbox is not hibernated"})
 	}
 
-	// Pick ANY worker in the same region
+	// Prefer the source worker (where hibernation actually happened) so wake
+	// can use the local qcow2 files instead of downloading from S3. Two reasons:
+	//
+	//   1. Same-worker wake is dramatically faster (~300ms vs. 30+s for a 1GB
+	//      download+extract).
+	//   2. Avoids a wake-vs-upload race: hibernate's S3 upload is async and
+	//      takes tens of seconds for a 4GB sandbox. A wake routed to a
+	//      different worker that runs before the upload finishes fails with
+	//      "blob: object not found" because it tries HEAD before the goroutine
+	//      finished writing. uploaded_at is the canonical signal — if it's
+	//      NULL, the source worker is the only safe target.
+	//
+	// Fall back to least-loaded only when source is gone, draining, or under
+	// resource pressure. If upload isn't complete yet, prefer source even at
+	// the cost of some imbalance — the alternative is a 500 to the user.
 	region := hibernation.Region
-	worker, grpcClient, err := s.workerRegistry.GetLeastLoadedWorker(region)
-	if err != nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]string{
-			"error": "no workers available in region " + region,
-		})
+	var worker *controlplane.WorkerEntry
+	var grpcClient pb.SandboxWorkerClient
+	uploadComplete := hibernation.UploadedAt != nil
+	if session.WorkerID != "" {
+		if src := s.workerRegistry.GetWorker(session.WorkerID); src != nil &&
+			!src.Draining && src.CPUPct < 90 && src.MemPct < 90 && src.DiskPct < 90 {
+			if cli, cerr := s.workerRegistry.GetWorkerClient(session.WorkerID); cerr == nil {
+				worker = src
+				grpcClient = cli
+				log.Printf("wake %s: routing to source worker %s (upload_complete=%v)",
+					sandboxID, session.WorkerID, uploadComplete)
+			}
+		}
+	}
+	if worker == nil {
+		// Source unavailable. Cross-worker wake will need to download from S3,
+		// so refuse if upload hasn't completed — better a clear error than a
+		// confusing "blob: object not found" once the worker actually tries.
+		if !uploadComplete {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "source worker unavailable and hibernation upload not yet complete; retry shortly",
+			})
+		}
+		var lerr error
+		worker, grpcClient, lerr = s.workerRegistry.GetLeastLoadedWorker(region)
+		if lerr != nil {
+			return c.JSON(http.StatusServiceUnavailable, map[string]string{
+				"error": "no workers available in region " + region,
+			})
+		}
 	}
 
 	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 60*time.Second)
@@ -1725,6 +1844,103 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	}
 
 	return c.JSON(http.StatusOK, resp)
+}
+
+// rebootSandbox triggers a soft, in-place guest restart on a running
+// sandbox. The QEMU process, network mapping, and persistent disks all
+// stay; only the guest CPU is reset and the kernel reboots. Recovers from
+// in-guest wedges (zombie pile-up, OOM-killed agent, runaway processes).
+//
+// POST /api/sandboxes/:id/reboot
+func (s *Server) rebootSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	if s.workerRegistry != nil {
+		return s.rebootSandboxRemote(c, id)
+	}
+
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if err := s.manager.RebootSandbox(c.Request().Context(), id); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) rebootSandboxRemote(c echo.Context, sandboxID string) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+	}
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 90*time.Second)
+	defer cancel()
+	if _, err := client.RebootSandbox(grpcCtx, &pb.RebootSandboxRequest{SandboxId: sandboxID}); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "reboot failed: " + err.Error()})
+	}
+	s.emitEvent("reboot", sandboxID, session.WorkerID, "rebooted")
+	return c.NoContent(http.StatusNoContent)
+}
+
+// powerCycleSandbox tears down the QEMU process and cold-boots a fresh VM
+// with the existing on-disk drives. Use when the VMM itself is wedged or
+// a soft reboot didn't recover. Sandbox keeps its ID, project, secrets,
+// and persistent data; gets a new TAP and host port.
+//
+// POST /api/sandboxes/:id/power-cycle
+func (s *Server) powerCycleSandbox(c echo.Context) error {
+	id := c.Param("id")
+
+	if s.workerRegistry != nil {
+		return s.powerCycleSandboxRemote(c, id)
+	}
+
+	if s.manager == nil {
+		return c.JSON(http.StatusServiceUnavailable, errSandboxNotAvailable)
+	}
+
+	if _, err := s.manager.PowerCycleSandbox(c.Request().Context(), id); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *Server) powerCycleSandboxRemote(c echo.Context, sandboxID string) error {
+	if s.store == nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "database not configured"})
+	}
+	session, err := s.store.GetSandboxSession(c.Request().Context(), sandboxID)
+	if err != nil {
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "sandbox not found"})
+	}
+	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
+	if err != nil {
+		return c.JSON(http.StatusServiceUnavailable, map[string]string{"error": "worker unreachable: " + err.Error()})
+	}
+	grpcCtx, cancel := context.WithTimeout(c.Request().Context(), 120*time.Second)
+	defer cancel()
+	if _, err := client.PowerCycleSandbox(grpcCtx, &pb.PowerCycleSandboxRequest{SandboxId: sandboxID}); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "power-cycle failed: " + err.Error()})
+	}
+
+	// Worker re-allocated the TAP/host port. The CP→worker mapping is
+	// unchanged so the sandbox API proxy doesn't need refreshing, but the
+	// proxy's per-sandbox cache might hold a stale workerURL/JWT — drop it
+	// so the next request re-resolves cleanly.
+	if s.sandboxAPIProxy != nil {
+		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
+	}
+
+	s.emitEvent("power-cycle", sandboxID, session.WorkerID, "power-cycled")
+	return c.NoContent(http.StatusNoContent)
 }
 
 // --- Checkpoint handlers ---
@@ -1813,7 +2029,13 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 		}
 
 		go func() {
-			grpcCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			// 20-min budget for the full create+archive+upload chain. Pre-fix
+			// this was 5 min — too tight for >3 GB compressed archives under
+			// any blob-side contention. Customer hit this on a 7–9 GB sandbox
+			// (status processing for ~280 s → failed, no detail). The worker
+			// internal upload is bounded at 15 min; the extra 5 min here gives
+			// headroom for archive build + worker-side tar + transit.
+			grpcCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 			defer cancel()
 
 			grpcResp, err := grpcClient.CreateCheckpoint(grpcCtx, &pb.CreateCheckpointRequest{
@@ -1828,20 +2050,23 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 
 			if err != nil {
 				log.Printf("api: async checkpoint %s failed: %v", checkpointID, err)
+				// SetCheckpointFailed now persists the reason via the
+				// error_msg/failed_at columns added in migration 039.
+				// Pre-fix the reason was silently discarded.
 				_ = s.store.SetCheckpointFailed(context.Background(), checkpointID, err.Error())
 				return
 			}
-			// Mark ready immediately — S3 upload continues async inside CreateCheckpoint
-			// but the checkpoint is locally usable now.
-			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, grpcResp.RootfsS3Key, grpcResp.WorkspaceS3Key, 0)
-			log.Printf("api: checkpoint %s ready", checkpointID)
+			// Persist the actual archive size from the worker's response.
+			// Pre-fix this was hardcoded to 0, leaving size_bytes meaningless.
+			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, grpcResp.RootfsS3Key, grpcResp.WorkspaceS3Key, grpcResp.SizeBytes)
+			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, grpcResp.SizeBytes)
 		}()
 	} else if s.manager != nil {
 		go func() {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			bgCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 			defer cancel()
 
-			rootfsKey, workspaceKey, err := s.manager.CreateCheckpoint(bgCtx, sandboxID, checkpointID.String(), s.checkpointStore, func() {})
+			rootfsKey, workspaceKey, sizeBytes, err := s.manager.CreateCheckpoint(bgCtx, sandboxID, checkpointID.String(), s.checkpointStore, func() {})
 
 			// Signal sandbox usable
 			pending.err = err
@@ -1852,8 +2077,8 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 				_ = s.store.SetCheckpointFailed(context.Background(), checkpointID, err.Error())
 				return
 			}
-			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, rootfsKey, workspaceKey, 0)
-			log.Printf("api: checkpoint %s ready", checkpointID)
+			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, rootfsKey, workspaceKey, sizeBytes)
+			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, sizeBytes)
 		}()
 	} else {
 		s.pendingCreates.Delete(sandboxID)
@@ -1993,15 +2218,19 @@ func (s *Server) restoreCheckpoint(c echo.Context) error {
 
 // createFromCheckpoint creates a new sandbox from an existing checkpoint (fork).
 func (s *Server) createFromCheckpoint(c echo.Context) error {
-	// Direct route (POST /sandboxes/from-checkpoint/:checkpointId): only the
-	// envs override is currently supported on the fork path; everything else
-	// is inherited from the checkpoint's stored config.
+	// Direct route (POST /sandboxes/from-checkpoint/:checkpointId): the
+	// envs / secretStore / metadata fields are supported on the fork path;
+	// everything else is inherited from the checkpoint's stored config.
+	// Metadata is merged onto the checkpoint's persisted metadata
+	// (caller wins) so callers can stamp identifiers like agent_id without
+	// losing whatever the snapshot author originally set.
 	var body struct {
 		Envs        map[string]string `json:"envs"`
 		SecretStore string            `json:"secretStore"`
+		Metadata    map[string]string `json:"metadata"`
 	}
 	_ = c.Bind(&body)
-	result, httpStatus, err := s.createFromCheckpointCore(c, body.Envs, body.SecretStore)
+	result, httpStatus, err := s.createFromCheckpointCore(c, body.Envs, body.SecretStore, body.Metadata)
 	if err != nil {
 		return c.JSON(httpStatus, map[string]string{"error": err.Error()})
 	}
@@ -2022,7 +2251,12 @@ func (s *Server) createFromCheckpoint(c echo.Context) error {
 //
 // userEnvs (may be nil) overrides the envs from the checkpoint's stored config.
 // User keys win over keys re-resolved from the secret store.
-func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]string, userSecretStore string) (map[string]interface{}, int, error) {
+//
+// userMetadata (may be nil) is merged into the checkpoint's persisted
+// metadata before the sandbox session row is recorded — so callers can
+// stamp request-time identifiers (e.g. agent_id) without losing whatever
+// the snapshot author baked in.
+func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]string, userSecretStore string, userMetadata map[string]string) (map[string]interface{}, int, error) {
 	checkpointIDStr := c.Param("checkpointId")
 	ctx := c.Request().Context()
 
@@ -2033,6 +2267,22 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	orgID, ok := auth.GetOrgID(c)
 	if !ok {
 		return nil, http.StatusUnauthorized, fmt.Errorf("org context required")
+	}
+
+	// Enforce per-org concurrency limit on the fork path, mirroring the gate
+	// in the direct-create path at the top of CreateSandbox (around line 50).
+	// Without this, callers using POST /api/sandboxes/from-checkpoint/<id>
+	// (i.e. `oc checkpoint spawn` and equivalent SDK calls) can fork unbounded
+	// sandboxes past their plan's max_concurrent_sandboxes — every other
+	// per-plan gate (free-tier credits, machine size, disk size) is also
+	// missing on this path, but concurrency is the load-bearing one because
+	// it directly drives runaway billing.
+	//
+	// Fail-open on DB errors to match the existing direct-create behavior.
+	if org, gerr := s.store.GetOrg(ctx, orgID); gerr == nil {
+		if count, cerr := s.store.CountActiveSandboxes(ctx, orgID); cerr == nil && count >= org.MaxConcurrentSandboxes {
+			return nil, http.StatusTooManyRequests, fmt.Errorf("concurrent sandbox limit reached")
+		}
 	}
 
 	checkpointID, err := uuid.Parse(checkpointIDStr)
@@ -2089,6 +2339,10 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	// Parse the original sandbox config to reuse settings
 	var originalCfg types.SandboxConfig
 	_ = json.Unmarshal(cp.SandboxConfig, &originalCfg)
+	// Older checkpoints predate the networkEnabled default-to-true normalization
+	// and persisted no value (or false from the old non-pointer bool). Forks
+	// should still come up with networking on.
+	originalCfg.EnsureNetworkEnabledDefault()
 
 	// Secret store resolution — supports layering:
 	// Resolve stores in order: BaseSecretStore → SecretStore → user's store.
@@ -2115,12 +2369,22 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 			uniqueStores = append(uniqueStores, name)
 		}
 	}
+	// secretStoreID tracks the resolved store of the LAST (winning) layer in
+	// uniqueStores — that's the one we want recorded on the sandbox row, since
+	// later layers shadow earlier ones for env collisions. Plumbed back to
+	// CreateSandboxSessionWithStatus below so secret_store_id is populated for
+	// the refresh fanout.
+	var secretStoreID *uuid.UUID
 	if len(uniqueStores) > 0 {
 		var allEgress []string
 		for _, storeName := range uniqueStores {
 			originalCfg.SecretStore = storeName
-			if err := s.resolveSecretStoreInto(ctx, orgID, &originalCfg); err != nil {
+			storeID, err := s.resolveSecretStoreInto(ctx, orgID, &originalCfg)
+			if err != nil {
 				return nil, http.StatusBadRequest, err
+			}
+			if storeID != nil {
+				secretStoreID = storeID
 			}
 			allEgress = append(allEgress, originalCfg.EgressAllowlist...)
 		}
@@ -2214,6 +2478,30 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 		}
 	}
 
+	// Pre-write the sandbox_sessions row with status='pending' so the worker
+	// can resolve org_id during CreateSandbox — the worker's
+	// recordInitialScaleEvent looks up sandbox→org via this row. Without the
+	// pre-write, fork-path scale events are silently skipped and both free-tier
+	// credit deduction and pro-tier Stripe metering miss the usage. Mirrors
+	// the from-scratch path's CreateSandboxSessionWithStatus(..., "pending")
+	// call. Status flips to 'running' on success / 'failed' on error below.
+	template := originalCfg.Template
+	if template == "" {
+		template = "default"
+	}
+	mergedMeta := map[string]string{}
+	for k, v := range originalCfg.Metadata {
+		mergedMeta[k] = v
+	}
+	for k, v := range userMetadata {
+		mergedMeta[k] = v
+	}
+	if s.store != nil {
+		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
+		metadataJSON, _ := json.Marshal(mergedMeta)
+		_, _ = s.store.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON, "pending", secretStoreID)
+	}
+
 	// Boot VM synchronously so the worker's in-memory sandbox map is populated
 	// before we respond or record the session. Previously this ran in a goroutine
 	// with the session row written first as status=running, which allowed
@@ -2231,7 +2519,7 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 			Envs:                 originalCfg.Envs,
 			MemoryMb:             int32(originalCfg.MemoryMB),
 			CpuCount:             int32(originalCfg.CpuCount),
-			NetworkEnabled:       originalCfg.NetworkEnabled,
+			NetworkEnabled:       originalCfg.IsNetworkEnabled(),
 			Port:                 int32(originalCfg.Port),
 			TemplateRootfsKey:    *cp.RootfsS3Key,
 			TemplateWorkspaceKey: *cp.WorkspaceS3Key,
@@ -2268,21 +2556,18 @@ func (s *Server) createFromCheckpointCore(c echo.Context, userEnvs map[string]st
 	}
 
 	if createErr != nil {
+		if s.store != nil {
+			errMsg := createErr.Error()
+			_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "failed", &errMsg)
+		}
 		s.pendingCreates.Delete(sandboxID)
 		log.Printf("api: fork %s failed: %v", sandboxID, createErr)
 		return nil, http.StatusInternalServerError, fmt.Errorf("fork from checkpoint: %w", createErr)
 	}
 
-	// Record session only after the worker has the VM registered so the session
-	// row never points at a worker that does not yet own the VM.
+	// Flip the pre-written session row to 'running' and stamp lineage fields.
 	if s.store != nil {
-		template := originalCfg.Template
-		if template == "" {
-			template = "default"
-		}
-		cfgJSON, _ := json.Marshal(cfgForPersistence(originalCfg))
-		metadataJSON, _ := json.Marshal(originalCfg.Metadata)
-		_, _ = s.store.CreateSandboxSession(ctx, sandboxID, orgID, auth.GetUserID(c), template, region, workerID, cfgJSON, metadataJSON)
+		_ = s.store.UpdateSandboxSessionStatus(ctx, sandboxID, "running", nil)
 		// Set golden version from worker heartbeat
 		if s.workerRegistry != nil {
 			if w := s.workerRegistry.GetWorker(workerID); w != nil && w.GoldenVersion != "" {

@@ -134,21 +134,24 @@ func CreateTAP(cfg *NetworkConfig) error {
 		return fmt.Errorf("bring up %s: %w", cfg.TAPName, err)
 	}
 
-	// Apply network rate limiting: 50 Mbps bandwidth + packet rate police.
-	// Prevents DDoS, network abuse, and protects host bandwidth.
-	// tc: token bucket filter on egress (VM → host → internet)
+	// Apply network rate limiting: 500 Mbps bandwidth cap per VM.
+	// Prevents noisy-neighbor abuse without throttling normal sandbox use.
+	// Pre-fix the cap was 50 Mbps which was tight enough to noticeably slow
+	// npm install, docker pull, model downloads, and large uploads — all
+	// real-world sandbox workloads. 500 Mbps gives sandboxes a credible
+	// link speed while still bounding aggregate worker NIC pressure.
 	applyRateLimit(cfg.TAPName)
 
 	return nil
 }
 
 // applyRateLimit sets tc rate limiting on a TAP device.
-// 50 Mbps bandwidth cap + 10000 pps packet rate to prevent abuse.
+// Token bucket filter: 500 Mbps sustained, 10 MB burst, 50 ms latency.
+// Burst is sized so a typical TLS handshake + first request fits in one shot
+// rather than being shaped from packet 1.
 func applyRateLimit(tapName string) {
-	// Egress from VM (ingress to TAP from host perspective)
-	// Use tc on the TAP device to limit what the VM can send out
 	_ = run("tc", "qdisc", "add", "dev", tapName, "root", "tbf",
-		"rate", "50mbit", "burst", "1mb", "latency", "50ms")
+		"rate", "500mbit", "burst", "10mb", "latency", "50ms")
 }
 
 // DeleteTAP removes a TAP device and its tc qdisc.

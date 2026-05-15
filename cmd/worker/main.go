@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/db"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
+	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	qm "github.com/opensandbox/opensandbox/internal/qemu"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -93,6 +95,21 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
+	// Structured logging (JSON to stdout/journald, host envelope baked in).
+	// Installs itself as slog.Default AND redirects stdlib log.Printf through
+	// slog so existing log call sites emit JSON automatically. Vector on the
+	// host reads journald and ships to Axiom.
+	workerHostname, _ := os.Hostname()
+	obslog.Init(obslog.HostFields{
+		Service:   obslog.ServiceWorker,
+		ServiceID: cfg.WorkerID,
+		CellID:    cfg.CellID,
+		Region:    cfg.Region,
+		Hostname:  workerHostname,
+		HostIP:    cfg.HostIP,
+		Version:   WorkerVersion,
+	}, slog.LevelInfo)
+
 	// Sentry error reporting — no-op if OPENSANDBOX_SENTRY_DSN is unset.
 	flushSentry := observability.Init(cfg, "worker", WorkerVersion)
 	defer flushSentry()
@@ -118,7 +135,32 @@ func main() {
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
-	secretsCA, err := secretsproxy.LoadOrCreateCA(filepath.Join(cfg.DataDir, "proxy-ca"))
+	//
+	// CA must be region-scoped (shared across all workers in the same KV)
+	// so live migration of a sandbox doesn't break TLS substitution. The
+	// guest's trust store has the source worker's CA cert baked in; if the
+	// destination presents certs signed by a different CA, every outbound
+	// HTTPS call after migration fails with "authority and subject key
+	// identifier mismatch". With KV-backed shared CA, every worker in the
+	// region presents the same cert and migration is transparent.
+	//
+	// Falls back to per-worker CA when no KV is configured (dev / EC2
+	// without SSM bridging) — single-worker setups still work, but live
+	// migration of secrets-using sandboxes will fail TLS until a shared
+	// store is wired.
+	caDir := filepath.Join(cfg.DataDir, "proxy-ca")
+	var kvStore secretsproxy.KVStore
+	if cfg.AzureKeyVaultName != "" {
+		if kv, kvErr := secretsproxy.NewAzureKVStore(cfg.AzureKeyVaultName); kvErr != nil {
+			log.Printf("opensandbox-worker: shared CA: KV client failed (%v) — falling back to per-worker CA", kvErr)
+		} else {
+			kvStore = kv
+			log.Printf("opensandbox-worker: shared CA: using Azure Key Vault %s", cfg.AzureKeyVaultName)
+		}
+	}
+	caCtx, caCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	secretsCA, err := secretsproxy.LoadOrCreateSharedCA(caCtx, kvStore, "proxy-ca-cert", "proxy-ca-key", caDir)
+	caCancel()
 	if err != nil {
 		log.Printf("opensandbox-worker: secrets proxy CA failed: %v (secrets proxy disabled)", err)
 	}
@@ -128,6 +170,15 @@ func main() {
 		if err != nil {
 			log.Printf("opensandbox-worker: secrets proxy listen failed: %v", err)
 		} else {
+			// Make 169.254.169.253:3128 reachable from every TAP via lo. The
+			// proxy already binds 0.0.0.0:3128 so this is just the host-side
+			// address the kernel should answer. Without this, VMs created
+			// with the new HTTPS_PROXY env (anycast) can't reach the proxy.
+			if anyErr := secretsproxy.EnsureAnycastInterface(); anyErr != nil {
+				log.Printf("opensandbox-worker: WARNING: failed to set up secrets-proxy anycast address (%v) — VMs with anycast HTTPS_PROXY env will lose outbound until this is fixed", anyErr)
+			} else {
+				log.Printf("opensandbox-worker: secrets-proxy anycast address %s assigned to lo", secretsproxy.AnycastIP)
+			}
 			secretsProxy.Start()
 			defer secretsProxy.Stop()
 			log.Println("opensandbox-worker: secrets proxy started on :3128")
@@ -163,8 +214,12 @@ func main() {
 		var globalBlob blobstore.Store
 		if blobPrimary != nil {
 			if blobFallback != nil {
-				globalBlob, _ = blobstore.NewFallback(blobPrimary, blobFallback)
-				log.Printf("opensandbox-worker: global blob store: %s primary, %s fallback", blobPrimary.Name(), blobFallback.Name())
+				if cfg.BlobMigrationMode {
+					globalBlob, _ = blobstore.NewMigrationFallback(blobPrimary, blobFallback)
+				} else {
+					globalBlob, _ = blobstore.NewFallback(blobPrimary, blobFallback)
+				}
+				log.Printf("opensandbox-worker: global blob store: %s primary, %s fallback (migration=%v)", blobPrimary.Name(), blobFallback.Name(), cfg.BlobMigrationMode)
 			} else {
 				globalBlob = blobPrimary
 				log.Printf("opensandbox-worker: global blob store: %s (no fallback)", blobPrimary.Name())
@@ -174,15 +229,16 @@ func main() {
 		}
 
 		qmCfg := qm.Config{
-			DataDir:         cfg.DataDir,
-			KernelPath:      cfg.KernelPath,
-			ImagesDir:       cfg.ImagesDir,
-			QEMUBin:         cfg.QEMUBin,
-			AgentBinaryPath: "/usr/local/bin/osb-agent",
-			AgentVersion:    AgentVersion,
-			DefaultMemoryMB: cfg.DefaultSandboxMemoryMB,
-			DefaultCPUs:     cfg.DefaultSandboxCPUs,
-			DefaultDiskMB:   cfg.DefaultSandboxDiskMB,
+			DataDir:                 cfg.DataDir,
+			KernelPath:              cfg.KernelPath,
+			ImagesDir:               cfg.ImagesDir,
+			QEMUBin:                 cfg.QEMUBin,
+			AgentBinaryPath:         "/usr/local/bin/osb-agent",
+			AgentVersion:            AgentVersion,
+			Region:                  cfg.Region,
+			DefaultMemoryMB:         cfg.DefaultSandboxMemoryMB,
+			DefaultCPUs:             cfg.DefaultSandboxCPUs,
+			DefaultDiskMB:           cfg.DefaultSandboxDiskMB,
 			GlobalBlob:              globalBlob,
 			GlobalBlobGoldensBucket: cfg.GlobalBlobGoldensBucket,
 			GlobalBlobGoldenKey:     "default.ext4",
@@ -200,6 +256,12 @@ func main() {
 		}
 
 		qmMgr.CleanupOrphanedProcesses()
+
+		// Start the periodic orphan reaper. Catches qemu processes that
+		// survived a destroyVM-path failure (state-inconsistency / panic /
+		// hibernate race) so they don't pile up and silently shrink worker
+		// capacity. See internal/qemu/orphan_reaper.go.
+		qmMgr.StartOrphanReaper(ctx)
 
 		// Prepare golden snapshot for fast VM creation
 		if err := qmMgr.PrepareGoldenSnapshot(); err != nil {
@@ -294,22 +356,42 @@ func main() {
 	}
 	jwtIssuer := auth.NewJWTIssuer(cfg.JWTSecret)
 
-	// S3 checkpoint store
+	// Checkpoint store — built on top of a blobstore.Store. The primary
+	// endpoint is OPENSANDBOX_S3_*; an optional secondary OPENSANDBOX_S3_FALLBACK_*
+	// provides HA / lazy-migration fallback. Migration semantics (NotFound
+	// cascades to fallback) are gated on cfg.BlobMigrationMode.
 	var checkpointStore *storage.CheckpointStore
 	if cfg.S3Bucket != "" {
-		var err error
-		checkpointStore, err = storage.NewCheckpointStore(storage.S3Config{
-			Endpoint:        cfg.S3Endpoint,
-			Bucket:          cfg.S3Bucket,
-			Region:          cfg.S3Region,
-			AccessKeyID:     cfg.S3AccessKeyID,
-			SecretAccessKey: cfg.S3SecretAccessKey,
-			ForcePathStyle:  cfg.S3ForcePathStyle,
-		})
+		// Primary: no bucket override (CheckpointStore passes cfg.S3Bucket per call).
+		cpPrimary, err := buildCheckpointBackend("primary", cfg.S3Endpoint, cfg.S3Region, cfg.S3AccessKeyID, cfg.S3SecretAccessKey, "", cfg.S3ForcePathStyle)
 		if err != nil {
-			log.Fatalf("failed to initialize checkpoint store: %v", err)
+			log.Fatalf("failed to build checkpoint store primary: %v", err)
 		}
-		log.Printf("opensandbox-worker: S3 checkpoint store configured (bucket=%s, region=%s)", cfg.S3Bucket, cfg.S3Region)
+		if cpPrimary == nil {
+			log.Fatalf("OPENSANDBOX_S3_BUCKET set but primary backend has no credentials")
+		}
+		// Fallback: if S3FallbackBucket is set, the fallback uses its own
+		// bucket name (e.g. Azure container "checkpoints") regardless of
+		// what bucket the primary uses (e.g. Tigris bucket "opencomputer-prod").
+		cpFallback, err := buildCheckpointBackend("fallback", cfg.S3FallbackEndpoint, cfg.S3FallbackRegion, cfg.S3FallbackAccessKeyID, cfg.S3FallbackSecretAccessKey, cfg.S3FallbackBucket, cfg.S3FallbackForcePathStyle)
+		if err != nil {
+			log.Fatalf("failed to build checkpoint store fallback: %v", err)
+		}
+
+		var cpStore blobstore.Store = cpPrimary
+		if cpFallback != nil {
+			if cfg.BlobMigrationMode {
+				cpStore, _ = blobstore.NewMigrationFallback(cpPrimary, cpFallback)
+			} else {
+				cpStore, _ = blobstore.NewFallback(cpPrimary, cpFallback)
+			}
+			log.Printf("opensandbox-worker: checkpoint store: %s primary, %s fallback (migration=%v)", cpPrimary.Name(), cpFallback.Name(), cfg.BlobMigrationMode)
+		} else {
+			log.Printf("opensandbox-worker: checkpoint store: %s (no fallback)", cpPrimary.Name())
+		}
+
+		checkpointStore = storage.NewCheckpointStoreFromStore(cpStore, cfg.S3Bucket)
+		log.Printf("opensandbox-worker: checkpoint store configured (bucket=%s, region=%s)", cfg.S3Bucket, cfg.S3Region)
 
 		if cfg.DataDir != "" {
 			cacheDir := filepath.Join(cfg.DataDir, "checkpoints")
@@ -354,6 +436,27 @@ func main() {
 					}
 					// Disk doesn't change on memory scale; pass 0 to inherit disk_mb from the prior event.
 					_ = st.RecordScaleEvent(context.Background(), sandboxID, orgID, memoryMB, cpuPercent, 0)
+				})
+			}
+
+			// Wire hibernation upload completion → DB so silent S3 upload
+			// failures stop hiding behind a "hibernated" row that points at a
+			// blob that was never written. The callback runs from the async
+			// archive goroutine in qemu/snapshot.go after upload finishes.
+			if qemuMgr != nil {
+				st := store // capture for closure
+				qemuMgr.SetHibernationUploadCallback(func(sandboxID, hibernationKey string, sizeBytes int64, uploadErr error) {
+					ctx2, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					if uploadErr != nil {
+						if err := st.MarkHibernationUploadFailed(ctx2, hibernationKey, uploadErr.Error()); err != nil {
+							log.Printf("opensandbox-worker: failed to record hibernation upload error for %s: %v", sandboxID, err)
+						}
+						return
+					}
+					if err := st.MarkHibernationUploaded(ctx2, hibernationKey, sizeBytes); err != nil {
+						log.Printf("opensandbox-worker: failed to mark hibernation uploaded for %s: %v", sandboxID, err)
+					}
 				})
 			}
 		}
@@ -403,8 +506,27 @@ func main() {
 	defer metricsSrv.Close()
 	log.Println("opensandbox-worker: metrics server started on :9091")
 
+	// Periodic resource-stats sampler: disk bytes (used/avail/total on the
+	// data mount), memory bytes (total/avail from /proc/meminfo), allocated
+	// memory (sum of MemoryMB across running VMs), CPU pressure (PSI 'some'
+	// avg10/avg60/avg300, or loadavg/nproc fallback).
+	var allocator worker.MemoryAllocator
+	var sbCounter worker.SandboxCounter
+	if qemuMgr != nil {
+		allocator = qemuMgr
+		sbCounter = qemuMgr
+	}
+	worker.StartResourceMetricsTick(ctx, allocator, sbCounter, cfg.Region, cfg.WorkerID, cfg.DataDir, 30*time.Second)
+
 	// gRPC server (nil builder — template building via podman not needed for QEMU)
 	grpcServer := worker.NewGRPCServer(mgr, ptyMgr, execMgr, sandboxDBMgr, checkpointStore, sbRouter, nil, store)
+	// Wire up Axiom log-shipping. Empty token disables shipping (kill-switch).
+	grpcServer.SetAxiomConfig(cfg.AxiomIngestToken, cfg.AxiomDataset)
+	// Tag wake-source metrics with the worker's region.
+	grpcServer.SetRegion(cfg.Region)
+	if cfg.AxiomIngestToken != "" {
+		log.Printf("opensandbox-worker: sandbox session log shipping enabled (dataset=%s)", cfg.AxiomDataset)
+	}
 	// Wire up live migration if using QEMU manager
 	if migrator, ok := mgr.(worker.LiveMigrator); ok {
 		grpcServer.SetMigrator(migrator)
@@ -472,6 +594,27 @@ func main() {
 			if qemuMgr != nil {
 				hb.SetMemoryInfoFunc(func() (int, int) {
 					return qemuMgr.HostMemoryMB(), qemuMgr.TotalCommittedMemoryMB()
+				})
+				// Per-sandbox stats for the CP autoscaler. The stats collector
+				// runs on a 10s tick (matching heartbeat cadence) and the
+				// heartbeat reads the cached snapshot non-blockingly.
+				qemuMgr.StartStatsCollector(ctx, 10*time.Second)
+				hb.SetSandboxStatsFunc(func() map[string]worker.SandboxStatsWire {
+					raw := qemuMgr.GetAllSandboxStats()
+					out := make(map[string]worker.SandboxStatsWire, len(raw))
+					for id, s := range raw {
+						memPct := 0.0
+						if s.MemLimit > 0 {
+							memPct = float64(s.MemUsage) / float64(s.MemLimit) * 100
+						}
+						out[id] = worker.SandboxStatsWire{
+							MemUsage: s.MemUsage,
+							MemLimit: s.MemLimit,
+							MemPct:   memPct,
+							CPUPct:   s.CPUPercent,
+						}
+					}
+					return out
 				})
 			}
 			// On reconnect after outage, reconcile sandbox state with DB
@@ -614,6 +757,39 @@ func getDBURL(cfg *config.Config) string {
 		return cfg.DatabaseURL
 	}
 	return os.Getenv("DATABASE_URL")
+}
+
+// buildCheckpointBackend constructs a blobstore.Store for the checkpoint
+// path, picking Azure or S3-compat based on endpoint shape. Returns (nil, nil)
+// if no credentials are configured for this slot (caller treats nil as
+// "fallback disabled"). The auto-detect preserves the historical behavior of
+// storage.NewCheckpointStore.
+//
+// bucketOverride, if non-empty, tells the backend to use that bucket name
+// regardless of what bucket the caller passes at runtime. Empty means the
+// backend honors the caller's bucket (which the CheckpointStore sets to
+// cfg.S3Bucket).
+func buildCheckpointBackend(label, endpoint, region, accessKeyID, secretAccessKey, bucketOverride string, forcePathStyle bool) (blobstore.Store, error) {
+	if endpoint == "" && accessKeyID == "" && secretAccessKey == "" {
+		return nil, nil
+	}
+	if strings.Contains(endpoint, ".blob.core.windows.net") {
+		return blobstore.NewAzure(blobstore.AzureConfig{
+			Name:        "azure-blob-" + label,
+			AccountName: accessKeyID,
+			AccountKey:  secretAccessKey,
+			Bucket:      bucketOverride,
+		})
+	}
+	return blobstore.NewS3(blobstore.S3Config{
+		Name:            "s3-" + label,
+		Endpoint:        endpoint,
+		Region:          region,
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		UsePathStyle:    forcePathStyle || strings.Contains(endpoint, ".blob.core.windows.net"),
+		Bucket:          bucketOverride,
+	})
 }
 
 // createExecSessionQEMU creates an exec session using a QEMU agent client.

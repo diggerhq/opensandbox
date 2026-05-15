@@ -1,6 +1,6 @@
 """OpenComputer Python SDK - cloud sandbox platform."""
 
-from opencomputer.sandbox import Sandbox
+from opencomputer.sandbox import Sandbox, ScalingLockedError, PlanLimitError
 from opencomputer.agent import Agent, AgentEvent, AgentSession, AgentSessionInfo
 from opencomputer.filesystem import Filesystem
 from opencomputer.exec import Exec, ProcessResult, ExecSession, ExecSessionInfo
@@ -25,6 +25,8 @@ from opencomputer.usage import (
 
 __all__ = [
     "Sandbox",
+    "ScalingLockedError",
+    "PlanLimitError",
     "Agent",
     "AgentEvent",
     "AgentSession",
@@ -55,4 +57,4 @@ __all__ = [
     "TagKeyInfo",
 ]
 
-__version__ = "0.5.2"
+__version__ = "0.5.4"

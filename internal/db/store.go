@@ -123,6 +123,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{30, "migrations/027_capacity_reservation_intervals.up.sql"},
 		{31, "migrations/028_capacity_idempotency_keys.up.sql"},
 		{32, "migrations/029_orgs_max_memory_gb.up.sql"},
+		{33, "migrations/030_billable_events.up.sql"},
+		{34, "migrations/031_orgs_billing_mode.up.sql"},
+		{35, "migrations/035_sandbox_autoscale.up.sql"},
+		{36, "migrations/036_sandbox_scaling_lock.up.sql"},
+		{37, "migrations/037_agent_subscriptions.up.sql"},
+		{38, "migrations/038_hibernation_upload_status.up.sql"},
+		{39, "migrations/039_checkpoint_failure_detail.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -193,6 +200,13 @@ type Org struct {
 	StripeSubscriptionID *string    `json:"stripeSubscriptionId,omitempty"`
 	LastUsageReportedAt  time.Time  `json:"lastUsageReportedAt"`
 	PriceLocked          bool       `json:"priceLocked"`
+
+	// Per-org billing pipeline selector. 'legacy' = UsageReporter ships
+	// to Stripe; 'unified' = the phase-3 sender ships from
+	// billable_events. Both paths produce the same dollar amounts via
+	// today's tiered rates — the column controls *how* events are
+	// emitted, not what the customer pays.
+	BillingMode string `json:"billingMode"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
@@ -201,7 +215,7 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
 	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked,
-	free_credits_remaining_cents`
+	free_credits_remaining_cents, billing_mode`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -214,7 +228,7 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.WorkOSOrgID, &org.IsPersonal, &org.OwnerUserID, &org.CreditBalanceCents,
 		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
 		&org.PriceLocked,
-		&org.FreeCreditsRemainingCents,
+		&org.FreeCreditsRemainingCents, &org.BillingMode,
 	)
 	return org, err
 }
@@ -504,17 +518,25 @@ type SandboxSession struct {
 	GoldenVersion        *string         `json:"goldenVersion,omitempty"`
 }
 
-func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage) (*SandboxSession, error) {
-	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running")
+func (s *Store) CreateSandboxSession(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, secretStoreID *uuid.UUID) (*SandboxSession, error) {
+	return s.CreateSandboxSessionWithStatus(ctx, sandboxID, orgID, userID, template, region, workerID, config, metadata, "running", secretStoreID)
 }
 
-func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string) (*SandboxSession, error) {
+// CreateSandboxSessionWithStatus inserts a new sandbox_sessions row.
+//
+// secretStoreID is the resolved secret_stores.id when the sandbox is bound to
+// a store (nil otherwise). The column is required for the secret-refresh
+// fan-out: ListRunningSandboxesByStore filters on it. Pre-fix the column was
+// silently NULL because the INSERT omitted it, which made the fanout a no-op
+// and meant a customer's PUT to /secret-stores/:id/entries/:name didn't
+// propagate to running sandboxes — they kept the value from create-time.
+func (s *Store) CreateSandboxSessionWithStatus(ctx context.Context, sandboxID string, orgID uuid.UUID, userID *uuid.UUID, template, region, workerID string, config, metadata json.RawMessage, status string, secretStoreID *uuid.UUID) (*SandboxSession, error) {
 	session := &SandboxSession{}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO sandbox_sessions (sandbox_id, org_id, user_id, template, region, worker_id, config, metadata, status, secret_store_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version`,
-		sandboxID, orgID, userID, template, region, workerID, config, metadata, status,
+		sandboxID, orgID, userID, template, region, workerID, config, metadata, status, secretStoreID,
 	).Scan(&session.ID, &session.SandboxID, &session.OrgID, &session.UserID, &session.Template,
 		&session.Region, &session.WorkerID, &session.Status, &session.Config, &session.Metadata, &session.StartedAt,
 		&session.BasedOnCheckpointID, &session.LastPatchSequence, &session.PatchError, &session.GoldenVersion)
@@ -1019,6 +1041,8 @@ type SandboxHibernation struct {
 	HibernatedAt   time.Time       `json:"hibernatedAt"`
 	RestoredAt     *time.Time      `json:"restoredAt,omitempty"`
 	ExpiredAt      *time.Time      `json:"expiredAt,omitempty"`
+	UploadedAt     *time.Time      `json:"uploadedAt,omitempty"`
+	UploadError    *string         `json:"uploadError,omitempty"`
 }
 
 // CreateHibernation inserts a new hibernation record, marking any prior active
@@ -1067,11 +1091,11 @@ func (s *Store) CreateHibernation(ctx context.Context, sandboxID string, orgID u
 func (s *Store) GetActiveHibernation(ctx context.Context, sandboxID string) (*SandboxHibernation, error) {
 	cp := &SandboxHibernation{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at
+		`SELECT id, sandbox_id, org_id, hibernation_key, size_bytes, region, template, sandbox_config, hibernated_at, restored_at, expired_at, uploaded_at, upload_error
 		 FROM sandbox_hibernations
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`, sandboxID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.HibernationKey, &cp.SizeBytes,
-		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt, &cp.RestoredAt, &cp.ExpiredAt)
+		&cp.Region, &cp.Template, &cp.SandboxConfig, &cp.HibernatedAt, &cp.RestoredAt, &cp.ExpiredAt, &cp.UploadedAt, &cp.UploadError)
 	if err != nil {
 		return nil, fmt.Errorf("active hibernation not found: %w", err)
 	}
@@ -1084,6 +1108,31 @@ func (s *Store) MarkHibernationRestored(ctx context.Context, sandboxID string) e
 		`UPDATE sandbox_hibernations SET restored_at = now()
 		 WHERE sandbox_id = $1 AND restored_at IS NULL AND expired_at IS NULL`,
 		sandboxID)
+	return err
+}
+
+// MarkHibernationUploaded records that the async S3 archive upload completed
+// for a specific hibernation_key. Matches by key (not sandbox_id) because a
+// sandbox can have multiple hibernation rows in flight when hibernate→wake→
+// hibernate cycles run faster than the upload goroutine.
+func (s *Store) MarkHibernationUploaded(ctx context.Context, hibernationKey string, sizeBytes int64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_hibernations
+		   SET uploaded_at = now(), size_bytes = $2, upload_error = NULL
+		 WHERE hibernation_key = $1`,
+		hibernationKey, sizeBytes)
+	return err
+}
+
+// MarkHibernationUploadFailed records the failure reason for an upload that
+// did not land in S3. Without this, async upload failures were silent and the
+// row stayed in a misleading "hibernated, blob present" state.
+func (s *Store) MarkHibernationUploadFailed(ctx context.Context, hibernationKey, errMsg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_hibernations
+		   SET upload_error = $2
+		 WHERE hibernation_key = $1`,
+		hibernationKey, errMsg)
 	return err
 }
 
@@ -1188,17 +1237,23 @@ func (s *Store) UpsertWorkspaceBackup(ctx context.Context, sandboxID string, org
 
 // Checkpoint represents a named checkpoint for a sandbox.
 type Checkpoint struct {
-	ID              uuid.UUID       `json:"id"`
-	SandboxID       string          `json:"sandboxId"`
-	OrgID           uuid.UUID       `json:"orgId"`
-	Name            string          `json:"name"`
-	RootfsS3Key     *string         `json:"rootfsS3Key,omitempty"`
-	WorkspaceS3Key  *string         `json:"workspaceS3Key,omitempty"`
-	SandboxConfig   json.RawMessage `json:"sandboxConfig"`
-	Status          string          `json:"status"`
-	SizeBytes       int64           `json:"sizeBytes"`
-	IsPublic        bool            `json:"isPublic"`
-	CreatedAt       time.Time       `json:"createdAt"`
+	ID             uuid.UUID       `json:"id"`
+	SandboxID      string          `json:"sandboxId"`
+	OrgID          uuid.UUID       `json:"orgId"`
+	Name           string          `json:"name"`
+	RootfsS3Key    *string         `json:"rootfsS3Key,omitempty"`
+	WorkspaceS3Key *string         `json:"workspaceS3Key,omitempty"`
+	SandboxConfig  json.RawMessage `json:"sandboxConfig"`
+	Status         string          `json:"status"`
+	SizeBytes      int64           `json:"sizeBytes"`
+	IsPublic       bool            `json:"isPublic"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	// ErrorMsg holds the failure reason when Status == "failed". Persisted by
+	// SetCheckpointFailed so customers/operators can see WHY a checkpoint
+	// failed (timeout, archive error, S3 upload error, etc.) instead of just
+	// status="failed" with no detail.
+	ErrorMsg *string    `json:"errorMsg,omitempty"`
+	FailedAt *time.Time `json:"failedAt,omitempty"`
 }
 
 // CreateCheckpoint inserts a new checkpoint record.
@@ -1211,11 +1266,23 @@ func (s *Store) CreateCheckpoint(ctx context.Context, cp *Checkpoint) error {
 	).Scan(&cp.CreatedAt)
 }
 
-// SetCheckpointReady marks a checkpoint as ready after async S3 upload completes.
+// SetCheckpointReady marks a checkpoint as ready after the S3 upload completes.
+// Also clears error_msg/failed_at so a row that previously failed and was then
+// recovered ends up in a consistent state (no leftover failure detail on a
+// "ready" row). Today no code path flips failed→ready — the API's checkpoint
+// goroutine calls either SetCheckpointFailed or SetCheckpointReady but never
+// both — but the defensive clear matches the column semantics (failed_at /
+// error_msg are only meaningful when status='failed').
 func (s *Store) SetCheckpointReady(ctx context.Context, checkpointID uuid.UUID, rootfsKey, workspaceKey string, sizeBytes int64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET status = 'ready', rootfs_s3_key = $2, workspace_s3_key = $3, size_bytes = $4
-		 WHERE id = $1`,
+		`UPDATE sandbox_checkpoints
+		    SET status           = 'ready',
+		        rootfs_s3_key    = $2,
+		        workspace_s3_key = $3,
+		        size_bytes       = $4,
+		        error_msg        = NULL,
+		        failed_at        = NULL
+		  WHERE id = $1`,
 		checkpointID, rootfsKey, workspaceKey, sizeBytes)
 	return err
 }
@@ -1228,11 +1295,18 @@ func (s *Store) UpdateCheckpointS3Keys(ctx context.Context, checkpointID uuid.UU
 	return err
 }
 
-// SetCheckpointFailed marks a checkpoint as failed.
+// SetCheckpointFailed marks a checkpoint as failed and records the reason.
+// Pre-fix the `reason` argument was silently discarded — operators saw
+// status='failed' with no detail. The error_msg / failed_at columns are
+// added in migration 039.
 func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID, reason string) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE sandbox_checkpoints SET status = 'failed' WHERE id = $1`,
-		checkpointID)
+		`UPDATE sandbox_checkpoints
+		    SET status    = 'failed',
+		        error_msg = $2,
+		        failed_at = now()
+		  WHERE id = $1`,
+		checkpointID, reason)
 	return err
 }
 
@@ -1240,10 +1314,11 @@ func (s *Store) SetCheckpointFailed(ctx context.Context, checkpointID uuid.UUID,
 func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE id = $1`, checkpointID,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+		&cp.ErrorMsg, &cp.FailedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1253,7 +1328,7 @@ func (s *Store) GetCheckpoint(ctx context.Context, checkpointID uuid.UUID) (*Che
 // ListCheckpoints returns all checkpoints for a sandbox, newest first.
 func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkpoint, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 ORDER BY created_at DESC`, sandboxID)
 	if err != nil {
 		return nil, err
@@ -1264,7 +1339,8 @@ func (s *Store) ListCheckpoints(ctx context.Context, sandboxID string) ([]Checkp
 	for rows.Next() {
 		var cp Checkpoint
 		if err := rows.Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt); err != nil {
+			&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+			&cp.ErrorMsg, &cp.FailedAt); err != nil {
 			return nil, err
 		}
 		checkpoints = append(checkpoints, cp)
@@ -1291,6 +1367,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.id, c.sandbox_id, c.org_id, c.name, c.rootfs_s3_key, c.workspace_s3_key,
 		        c.sandbox_config, c.status, c.size_bytes, c.is_public, c.created_at,
+		        c.error_msg, c.failed_at,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id AND ss.status IN ('running', 'hibernated')) AS active_forks,
 		        (SELECT COUNT(*) FROM sandbox_sessions ss WHERE ss.based_on_checkpoint_id = c.id) AS total_forks
 		 FROM sandbox_checkpoints c WHERE c.org_id = $1
@@ -1305,6 +1382,7 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 		var cf CheckpointWithForks
 		if err := rows.Scan(&cf.ID, &cf.SandboxID, &cf.OrgID, &cf.Name, &cf.RootfsS3Key, &cf.WorkspaceS3Key,
 			&cf.SandboxConfig, &cf.Status, &cf.SizeBytes, &cf.IsPublic, &cf.CreatedAt,
+			&cf.ErrorMsg, &cf.FailedAt,
 			&cf.ActiveForks, &cf.TotalForks); err != nil {
 			return nil, 0, err
 		}
@@ -1317,10 +1395,11 @@ func (s *Store) ListOrgCheckpoints(ctx context.Context, orgID uuid.UUID, limit, 
 func (s *Store) GetCheckpointByName(ctx context.Context, sandboxID, name string) (*Checkpoint, error) {
 	cp := &Checkpoint{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at
+		`SELECT id, sandbox_id, org_id, name, rootfs_s3_key, workspace_s3_key, sandbox_config, status, size_bytes, is_public, created_at, error_msg, failed_at
 		 FROM sandbox_checkpoints WHERE sandbox_id = $1 AND name = $2`, sandboxID, name,
 	).Scan(&cp.ID, &cp.SandboxID, &cp.OrgID, &cp.Name, &cp.RootfsS3Key, &cp.WorkspaceS3Key,
-		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt)
+		&cp.SandboxConfig, &cp.Status, &cp.SizeBytes, &cp.IsPublic, &cp.CreatedAt,
+		&cp.ErrorMsg, &cp.FailedAt)
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint not found: %w", err)
 	}
@@ -1955,6 +2034,35 @@ func (s *Store) GetSecretStoreByName(ctx context.Context, orgID uuid.UUID, name 
 	return &ss, nil
 }
 
+// GetSandboxStoreRefs returns the secret stores attached to a sandbox:
+//
+//   - primaryID is sandbox_sessions.secret_store_id, the "winning" store on
+//     the row (last layer for env-collision resolution; nil if no store).
+//   - baseStoreName is config->>'baseSecretStore' (parent store from the
+//     fork chain), populated when a fork layered an additional store on top
+//     of an inherited one. Empty string when there's no parent.
+//
+// Both are needed to reconstruct the runtime egress allowlist accurately:
+// the secrets proxy enforces the union of egress hosts from EVERY layered
+// store, while sandbox_sessions.secret_store_id only records the last one.
+// Without including the base store, an /allowed-hosts response on a layered
+// fork would underrepresent what the proxy actually allows.
+//
+// Org-scoped: sandbox IDs aren't globally unique, so a leaked ID from
+// another org won't return that org's data.
+func (s *Store) GetSandboxStoreRefs(ctx context.Context, orgID uuid.UUID, sandboxID string) (primaryID *uuid.UUID, baseStoreName string, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT secret_store_id, COALESCE(config->>'baseSecretStore', '')
+		 FROM sandbox_sessions
+		 WHERE org_id = $1 AND sandbox_id = $2 ORDER BY started_at DESC LIMIT 1`,
+		orgID, sandboxID,
+	).Scan(&primaryID, &baseStoreName)
+	if err != nil {
+		return nil, "", fmt.Errorf("get sandbox store refs: %w", err)
+	}
+	return primaryID, baseStoreName, nil
+}
+
 // ListSecretStores returns all secret stores for an org.
 func (s *Store) ListSecretStores(ctx context.Context, orgID uuid.UUID) ([]SecretStore, error) {
 	rows, err := s.pool.Query(ctx,
@@ -2107,4 +2215,170 @@ func (s *Store) DecryptSecretEntries(ctx context.Context, storeID uuid.UUID) ([]
 		})
 	}
 	return secrets, nil
+}
+
+// --- Agent feature subscriptions (per-agent paywalled features) ---
+
+type AgentSubscription struct {
+	ID                   uuid.UUID  `json:"id"`
+	OrgID                uuid.UUID  `json:"orgId"`
+	AgentID              string     `json:"agentId"`
+	Feature              string     `json:"feature"`
+	StripeCustomerID     string     `json:"stripeCustomerId"`
+	StripeSubscriptionID string     `json:"stripeSubscriptionId"`
+	StripePriceID        string     `json:"stripePriceId"`
+	Status               string     `json:"status"`
+	CurrentPeriodEnd     *time.Time `json:"currentPeriodEnd,omitempty"`
+	CancelAtPeriodEnd    bool       `json:"cancelAtPeriodEnd"`
+	CanceledAt           *time.Time `json:"canceledAt,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// AgentSubscriptionIsActive returns true for statuses where the feature
+// should be enabled. Mirrors the partial-unique-index condition in
+// migration 032; keep them in sync.
+func AgentSubscriptionIsActive(status string) bool {
+	switch status {
+	case "active", "trialing", "past_due", "incomplete":
+		// past_due/incomplete are grace-period states — Stripe still
+		// considers them billable. We let the bot run during grace and
+		// rely on the webhook to flip to canceled when Stripe gives up.
+		return true
+	default:
+		return false
+	}
+}
+
+// GetActiveAgentSubscription returns the single active subscription for
+// (agent_id, feature) if one exists. Used for entitlement checks.
+func (s *Store) GetActiveAgentSubscription(ctx context.Context, agentID, feature string) (*AgentSubscription, error) {
+	var sub AgentSubscription
+	var currentPeriodEnd, canceledAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE agent_id = $1 AND feature = $2
+		   AND status NOT IN ('canceled','incomplete_expired','unpaid')
+		 LIMIT 1`, agentID, feature).Scan(
+		&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+		&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+		&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+		&sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sub.CurrentPeriodEnd = currentPeriodEnd
+	sub.CanceledAt = canceledAt
+	return &sub, nil
+}
+
+// ListAgentSubscriptionsByOrg returns all subscriptions for an org, used
+// by the billing page's per-agent-features section.
+func (s *Store) ListAgentSubscriptionsByOrg(ctx context.Context, orgID uuid.UUID) ([]AgentSubscription, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE org_id = $1
+		 ORDER BY created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subs []AgentSubscription
+	for rows.Next() {
+		var sub AgentSubscription
+		var currentPeriodEnd, canceledAt *time.Time
+		if err := rows.Scan(
+			&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+			&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+			&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+			&sub.CreatedAt, &sub.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		sub.CurrentPeriodEnd = currentPeriodEnd
+		sub.CanceledAt = canceledAt
+		subs = append(subs, sub)
+	}
+	return subs, rows.Err()
+}
+
+// GetAgentSubscriptionByStripeID is the lookup path used by the Stripe
+// webhook handler — it gets a subscription_id from Stripe and needs to
+// find the matching internal row.
+func (s *Store) GetAgentSubscriptionByStripeID(ctx context.Context, stripeSubscriptionID string) (*AgentSubscription, error) {
+	var sub AgentSubscription
+	var currentPeriodEnd, canceledAt *time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		       stripe_price_id, status, current_period_end, cancel_at_period_end,
+		       canceled_at, created_at, updated_at
+		  FROM agent_subscriptions
+		 WHERE stripe_subscription_id = $1
+		 LIMIT 1`, stripeSubscriptionID).Scan(
+		&sub.ID, &sub.OrgID, &sub.AgentID, &sub.Feature, &sub.StripeCustomerID,
+		&sub.StripeSubscriptionID, &sub.StripePriceID, &sub.Status,
+		&currentPeriodEnd, &sub.CancelAtPeriodEnd, &canceledAt,
+		&sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sub.CurrentPeriodEnd = currentPeriodEnd
+	sub.CanceledAt = canceledAt
+	return &sub, nil
+}
+
+// CreateAgentSubscription records a fresh Stripe subscription. Caller
+// is responsible for ensuring the Stripe-side object exists first.
+func (s *Store) CreateAgentSubscription(ctx context.Context, sub AgentSubscription) (*AgentSubscription, error) {
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO agent_subscriptions
+		    (org_id, agent_id, feature, stripe_customer_id, stripe_subscription_id,
+		     stripe_price_id, status, current_period_end, cancel_at_period_end)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		RETURNING id, created_at, updated_at`,
+		sub.OrgID, sub.AgentID, sub.Feature, sub.StripeCustomerID,
+		sub.StripeSubscriptionID, sub.StripePriceID, sub.Status,
+		sub.CurrentPeriodEnd, sub.CancelAtPeriodEnd,
+	)
+	if err := row.Scan(&sub.ID, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &sub, nil
+}
+
+// UpdateAgentSubscriptionFromStripe applies status/period/cancel fields
+// from a Stripe webhook event onto the local row. Identifies by stripe
+// subscription_id.
+func (s *Store) UpdateAgentSubscriptionFromStripe(
+	ctx context.Context,
+	stripeSubscriptionID, status string,
+	currentPeriodEnd *time.Time,
+	cancelAtPeriodEnd bool,
+	canceledAt *time.Time,
+) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE agent_subscriptions
+		   SET status = $2,
+		       current_period_end = $3,
+		       cancel_at_period_end = $4,
+		       canceled_at = $5,
+		       updated_at = now()
+		 WHERE stripe_subscription_id = $1`,
+		stripeSubscriptionID, status, currentPeriodEnd, cancelAtPeriodEnd, canceledAt,
+	)
+	return err
 }

@@ -1,0 +1,121 @@
+---
+title: "oc sandbox scaling"
+description: "Resize sandboxes, configure autoscale, and manage scaling locks from the CLI"
+---
+
+The CLI groups three related actions for sizing a sandbox:
+
+| Command | What it does |
+| --- | --- |
+| [`oc sandbox autoscale`](#oc-sandbox-autoscale-id) | Turn the platform autoscaler on/off and inspect its config |
+| [`oc sandbox scale`](#oc-sandbox-scale-id-memory-mb) | Manually resize once |
+| [`oc sandbox lock`](#oc-sandbox-lock-id) / [`unlock`](#oc-sandbox-unlock-id) / [`lock-status`](#oc-sandbox-lock-status-id) | Freeze or unfreeze the current size |
+
+Memory tiers are fixed: `1024`, `4096`, `8192`, `16384`, `32768`, `65536` MB. CPU follows memory per the platform's tier table (e.g. 8 GB → 4 vCPU); you don't pick CPU separately.
+
+For the underlying concepts and how these three modes interact, see the [Elasticity](/sandboxes/elasticity) guide.
+
+---
+
+## `oc sandbox autoscale <id>`
+
+Configure or inspect per-sandbox autoscale. [HTTP API →](/api-reference/sandboxes/autoscale)
+
+Run with no flags to print the current configuration:
+
+```bash
+oc sandbox autoscale sb-abc123
+# Autoscale enabled for sb-abc123 (1024–16384 MB)
+```
+
+Enable with bounds:
+
+```bash
+oc sandbox autoscale sb-abc123 --on --min 1024 --max 16384
+```
+
+Disable:
+
+```bash
+oc sandbox autoscale sb-abc123 --off
+```
+
+When enabled, the platform watches memory pressure and resizes the sandbox between `--min` and `--max`:
+
+- **Scale up** on a single 1-min sample above 75 % memory utilization. Cooldown 60 s between up-scales.
+- **Scale down** only when the 1-min, 5-min, AND 15-min averages all sit below 25 %. Cooldown 5 min between down-scales.
+
+The asymmetry is deliberate: rapid response when the user notices lag, conservative shrink after sustained idle.
+
+**Flags**
+
+| Flag | Description |
+| --- | --- |
+| `--on` | Enable autoscale (requires `--min` and `--max`). |
+| `--off` | Disable autoscale. Mutually exclusive with `--on`. |
+| `--min N` | Minimum memory tier in MB. Must be an allowed tier. |
+| `--max N` | Maximum memory tier in MB. Must be an allowed tier and ≥ `--min`. |
+
+**Errors**
+
+- `scaling_locked` — the sandbox has a scaling lock active. Run `oc sandbox unlock <id>` first.
+- `402 Payment Required` — `--max` exceeds your plan cap.
+
+---
+
+## `oc sandbox scale <id> <memory-mb>`
+
+Manually resize a sandbox to a specific memory tier. [HTTP API →](/api-reference/sandboxes/scale)
+
+```bash
+oc sandbox scale sb-abc123 8192
+# Scaled sb-abc123 to 8192MB / 400% CPU
+```
+
+A manual scale **disables autoscale** on this sandbox as a side effect — explicit intent overrides the loop. Re-enable with `oc sandbox autoscale --on` if you want size to track load again.
+
+**Errors**
+
+- `scaling_locked` — the sandbox has a scaling lock active. Run `oc sandbox unlock <id>` first.
+- `402 Payment Required` — requested size exceeds your plan cap.
+
+---
+
+## `oc sandbox lock <id>`
+
+Pin a sandbox at its current size. [HTTP API →](/api-reference/sandboxes/scaling-lock)
+
+```bash
+oc sandbox lock sb-abc123
+# Sandbox sb-abc123 locked (scaling disabled)
+```
+
+While locked:
+
+- `oc sandbox scale` is rejected with `scaling_locked`.
+- `oc sandbox autoscale --on` is rejected with `scaling_locked`.
+- The platform autoscaler skips the sandbox entirely.
+
+Locking **also** disables autoscale (single knob — "I don't want this scaling, period"). Unlocking does NOT re-enable autoscale; run `oc sandbox autoscale --on` explicitly if you want it back.
+
+---
+
+## `oc sandbox unlock <id>`
+
+Clear the scaling lock.
+
+```bash
+oc sandbox unlock sb-abc123
+# Sandbox sb-abc123 unlocked
+```
+
+---
+
+## `oc sandbox lock-status <id>`
+
+Print the current scaling-lock state.
+
+```bash
+oc sandbox lock-status sb-abc123
+# Sandbox sb-abc123 is unlocked
+```

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/opensandbox/opensandbox/internal/logship"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
 	pb "github.com/opensandbox/opensandbox/proto/agent"
 )
@@ -27,6 +28,13 @@ type execSession struct {
 	stdinPipe  io.WriteCloser
 	exitCode   *int32
 	exited     chan struct{}
+
+	// Logship tees: shadow each pipe's bytes into a per-session
+	// LineWriter that ships line-by-line to Axiom alongside the
+	// existing scrollback. Both nil if logship isn't wired (Shipper
+	// not set on Server) — LineWriter is nil-safe.
+	stdoutTee *logship.LineWriter
+	stderrTee *logship.LineWriter
 
 	mu              sync.Mutex
 	attachedClients int
@@ -82,6 +90,8 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 	maxScrollback := int(req.ScrollbackMaxBytes)
 	scrollback := sandbox.NewScrollbackBuffer(maxScrollback)
 
+	stdoutTee, stderrTee := s.newExecLineWriters(req.Command, req.Args)
+
 	sess := &execSession{
 		id:         sessionID,
 		cmd:        cmd,
@@ -91,6 +101,8 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 		started:    time.Now(),
 		scrollback: scrollback,
 		stdinPipe:  stdinPipe,
+		stdoutTee:  stdoutTee,
+		stderrTee:  stderrTee,
 		exited:     make(chan struct{}),
 	}
 
@@ -121,6 +133,9 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 			n, err := stdoutPipe.Read(buf)
 			if n > 0 {
 				scrollback.Write(1, buf[:n])
+				if stdoutTee != nil {
+					stdoutTee.Write(buf[:n])
+				}
 			}
 			if err != nil {
 				return
@@ -135,6 +150,9 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 			n, err := stderrPipe.Read(buf)
 			if n > 0 {
 				scrollback.Write(2, buf[:n])
+				if stderrTee != nil {
+					stderrTee.Write(buf[:n])
+				}
 			}
 			if err != nil {
 				return
@@ -151,6 +169,10 @@ func (s *Server) ExecSessionCreate(ctx context.Context, req *pb.ExecSessionCreat
 		sess.mu.Lock()
 		sess.exitCode = &code
 		sess.mu.Unlock()
+		// Flush any trailing partial line and emit the synthesised
+		// EOF event with exit_code so the UI can render the row.
+		// Same shape as one-shot Exec / streaming ExecStream.
+		closeExecLineWriters(stdoutTee, stderrTee, int(code))
 		close(sess.exited)
 
 		// Schedule cleanup after 5 minutes

@@ -34,6 +34,20 @@ type StripeClient struct {
 	// Disk overage meter / price (single dimension: GB-seconds above 20GB).
 	DiskOveragePriceID       string
 	DiskOverageMeterEventName string
+
+	// Phase-3 unified-pipeline meters and prices. Two flat meters
+	// (overage + reserved) used by new orgs (`billing_mode='unified'`).
+	// Legacy per-tier meters above are untouched and continue to serve
+	// existing orgs via UsageReporter.
+	OveragePriceID         string // flat overage Price for `overage_usage` events
+	OverageMeterEventName  string // "sandbox_compute_sandbox_overage"
+	ReservedPriceID        string // flat reserved Price for `reserved_usage` events
+	ReservedMeterEventName string // "sandbox_compute_sandbox_reserved"
+
+	// Per-agent paywalled-feature prices. Configured from env and
+	// referenced by name from the dashboard subscribe handlers. Empty
+	// string means the feature is not gated on this deployment (dev mode).
+	TelegramAgentPriceID string // recurring $20/mo price for the per-agent Telegram feature
 }
 
 // NewStripeClient creates a new Stripe client.
@@ -222,7 +236,62 @@ func (s *StripeClient) EnsureProducts() error {
 		log.Printf("billing: created disk overage price (id=%s)", p.ID)
 	}
 
+	// 5. Phase-3 unified-pipeline meters. Two flat meters (overage +
+	//    reserved) at unit GB-seconds. Code creates the *meters* (their
+	//    event names are stable wire-protocol coupling) but **does not
+	//    create Prices** — those are configured in the Stripe Dashboard
+	//    so pricing changes don't need a code deploy. The Price IDs
+	//    are discovered below if present; if missing, meter events
+	//    still flow but won't appear on invoices until a Price is
+	//    linked to the meter in Stripe.
+	s.OverageMeterEventName = ensureMeter(existingMeters, "sandbox_compute_"+OverageMeterKey, "Sandbox Instant Compute (GB-seconds)")
+	s.ReservedMeterEventName = ensureMeter(existingMeters, "sandbox_compute_"+ReservedMeterKey, "Sandbox Reserved Capacity (GB-seconds)")
+
+	if id, ok := existingPrices[OveragePriceKey]; ok {
+		s.OveragePriceID = id
+		log.Printf("billing: found existing overage price (id=%s)", id)
+	} else {
+		log.Printf("billing: no overage price configured for meter %s — meter events will flow but won't appear on invoices until a Price is created in Stripe", s.OverageMeterEventName)
+	}
+	if id, ok := existingPrices[ReservedPriceKey]; ok {
+		s.ReservedPriceID = id
+		log.Printf("billing: found existing reserved price (id=%s)", id)
+	} else {
+		log.Printf("billing: no reserved price configured for meter %s — meter events will flow but won't appear on invoices until a Price is created in Stripe", s.ReservedMeterEventName)
+	}
+
 	return nil
+}
+
+// ensureMeter is a small helper that returns the event_name after
+// creating or finding the meter. Used only for the phase-3 flat
+// meters; legacy per-tier meters retain their inline creation so the
+// unrelated stripe.go diff stays small.
+func ensureMeter(existing map[string]*stripe.BillingMeter, eventName, displayName string) string {
+	if m, ok := existing[eventName]; ok {
+		log.Printf("billing: found existing meter %s (id=%s)", eventName, m.ID)
+		return eventName
+	}
+	m, err := meter.New(&stripe.BillingMeterParams{
+		DisplayName: stripe.String(displayName),
+		EventName:   stripe.String(eventName),
+		DefaultAggregation: &stripe.BillingMeterDefaultAggregationParams{
+			Formula: stripe.String(string(stripe.BillingMeterDefaultAggregationFormulaSum)),
+		},
+		CustomerMapping: &stripe.BillingMeterCustomerMappingParams{
+			EventPayloadKey: stripe.String("stripe_customer_id"),
+			Type:            stripe.String(string(stripe.BillingMeterCustomerMappingTypeByID)),
+		},
+		ValueSettings: &stripe.BillingMeterValueSettingsParams{
+			EventPayloadKey: stripe.String("value"),
+		},
+	})
+	if err != nil {
+		log.Printf("billing: WARN failed to create meter %s: %v", eventName, err)
+		return eventName // return name anyway; sender will fail loudly if used
+	}
+	log.Printf("billing: created meter %s (id=%s)", eventName, m.ID)
+	return eventName
 }
 
 // CreateCustomer creates a Stripe customer for an org.
@@ -275,7 +344,10 @@ func (s *StripeClient) CreatePortalSession(customerID, returnURL string) (string
 }
 
 // CreateSubscription creates a subscription with metered prices for all tiers.
-// Returns subscription ID and map of memoryMB → subscription item ID.
+// Returns subscription ID and map of memoryMB → subscription item ID
+// (legacy per-second tier items only; phase-3 overage/reserved items
+// are added to the subscription but not returned in the map since
+// `org_subscription_items` only tracks the legacy mapping).
 func (s *StripeClient) CreateSubscription(customerID string) (string, map[int]string, error) {
 	var items []*stripe.SubscriptionItemsParams
 	for _, priceID := range s.PriceIDs {
@@ -286,6 +358,21 @@ func (s *StripeClient) CreateSubscription(customerID string) (string, map[int]st
 	if s.DiskOveragePriceID != "" {
 		items = append(items, &stripe.SubscriptionItemsParams{
 			Price: stripe.String(s.DiskOveragePriceID),
+		})
+	}
+	// Phase-3 unified-pipeline items: flat overage + flat reserved.
+	// New orgs default to `billing_mode='unified'` so meter events
+	// flow to these items. Existing legacy orgs sit at zero usage
+	// on these line items (Stripe omits zero-usage rows from invoices,
+	// so they're invisible to the customer).
+	if s.OveragePriceID != "" {
+		items = append(items, &stripe.SubscriptionItemsParams{
+			Price: stripe.String(s.OveragePriceID),
+		})
+	}
+	if s.ReservedPriceID != "" {
+		items = append(items, &stripe.SubscriptionItemsParams{
+			Price: stripe.String(s.ReservedPriceID),
 		})
 	}
 
@@ -346,6 +433,34 @@ func (s *StripeClient) ReportUsage(customerID string, memoryMB int, seconds int6
 	return nil
 }
 
+// ReportMeterEvent sends a single Stripe meter event with an
+// idempotency identifier. Used by the phase-3 sender to ship outbox
+// rows; the identifier (typically `billable_events.id`) makes
+// at-least-once shipping safe — Stripe dedups repeated submissions
+// of the same identifier within 24h.
+//
+// Returns the resulting BillingMeterEvent.Identifier echo'd by Stripe
+// (which equals the input on successful submission). Caller stores
+// this in `billable_events.stripe_event_id` for traceability.
+func (s *StripeClient) ReportMeterEvent(eventName, customerID string, value float64, identifier string, timestamp int64) (string, error) {
+	resp, err := meterevent.New(&stripe.BillingMeterEventParams{
+		EventName:  stripe.String(eventName),
+		Identifier: stripe.String(identifier),
+		Timestamp:  stripe.Int64(timestamp),
+		Payload: map[string]string{
+			"stripe_customer_id": customerID,
+			// Stripe accepts string-encoded values; use a high-precision
+			// format so fractional GB-seconds (the proportional split
+			// produces them) don't get truncated to integers.
+			"value": fmt.Sprintf("%.6f", value),
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("report meter event %s: %w", eventName, err)
+	}
+	return resp.Identifier, nil
+}
+
 // ReportDiskOverageUsage sends a meter event for disk overage GB-seconds
 // (provisioned disk above 20GB, integrated over time).
 func (s *StripeClient) ReportDiskOverageUsage(customerID string, gbSeconds int64, timestamp int64) error {
@@ -366,6 +481,13 @@ func (s *StripeClient) ReportDiskOverageUsage(customerID string, gbSeconds int64
 	return nil
 }
 
+// SuccessURL returns the configured Stripe Checkout success URL. Public
+// because per-feature subscribe handlers reuse the same redirect targets.
+func (s *StripeClient) SuccessURL() string { return s.successURL }
+
+// CancelURL returns the configured Stripe Checkout cancel URL.
+func (s *StripeClient) CancelURL() string { return s.cancelURL }
+
 // GetCustomerBalance returns the customer's balance in cents (negative = credit).
 func (s *StripeClient) GetCustomerBalance(customerID string) (int64, error) {
 	c, err := customer.Get(customerID, nil)
@@ -373,6 +495,138 @@ func (s *StripeClient) GetCustomerBalance(customerID string) (int64, error) {
 		return 0, err
 	}
 	return c.Balance, nil
+}
+
+// GetCustomerDefaultPaymentMethod returns the saved default payment
+// method ID for a customer, or "" if none is on file. Used by the
+// per-agent subscribe flow: with a card on file we can call subscriptions.New
+// directly; without one we have to bounce through Stripe Checkout.
+func (s *StripeClient) GetCustomerDefaultPaymentMethod(customerID string) (string, error) {
+	c, err := customer.Get(customerID, nil)
+	if err != nil {
+		return "", err
+	}
+	if c.InvoiceSettings != nil && c.InvoiceSettings.DefaultPaymentMethod != nil {
+		return c.InvoiceSettings.DefaultPaymentMethod.ID, nil
+	}
+	return "", nil
+}
+
+// CreateAgentFeatureSubscription creates a per-agent paywalled-feature
+// subscription using a saved payment method. Caller must have verified
+// a default payment method exists (via GetCustomerDefaultPaymentMethod).
+//
+// metadata is stamped onto the Stripe Subscription so the webhook
+// handler can route updates back to the right (org, agent, feature)
+// triple without a DB lookup. Caller passes (org_id, agent_id, feature, type).
+//
+// Returns the Stripe subscription. Status will typically be "active"
+// (paid immediately), or "incomplete" if the saved card was declined —
+// callers should check.
+func (s *StripeClient) CreateAgentFeatureSubscription(
+	customerID, priceID string,
+	metadata map[string]string,
+) (*stripe.Subscription, error) {
+	params := &stripe.SubscriptionParams{
+		Customer: stripe.String(customerID),
+		Items: []*stripe.SubscriptionItemsParams{{
+			Price: stripe.String(priceID),
+		}},
+		// Charge the saved card immediately. Subscription becomes
+		// active on first invoice payment success.
+		PaymentBehavior: stripe.String("error_if_incomplete"),
+	}
+	for k, v := range metadata {
+		params.AddMetadata(k, v)
+	}
+	sub, err := subscription.New(params)
+	if err != nil {
+		return nil, fmt.Errorf("create agent-feature subscription: %w", err)
+	}
+	return sub, nil
+}
+
+// CreateAgentFeatureCheckoutSession redirects the customer to Stripe
+// Checkout to add a payment method AND start the subscription
+// atomically. Used when the customer has no card on file.
+//
+// metadata is propagated to both the Checkout Session and (via
+// SubscriptionData) the resulting Subscription so the webhook can wire
+// it back to the right agent on completion.
+func (s *StripeClient) CreateAgentFeatureCheckoutSession(
+	customerID, priceID string,
+	successURL, cancelURL string,
+	metadata map[string]string,
+) (string, error) {
+	params := &stripe.CheckoutSessionParams{
+		Customer:   stripe.String(customerID),
+		Mode:       stripe.String(string(stripe.CheckoutSessionModeSubscription)),
+		SuccessURL: stripe.String(successURL),
+		CancelURL:  stripe.String(cancelURL),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{{
+			Price:    stripe.String(priceID),
+			Quantity: stripe.Int64(1),
+		}},
+		SubscriptionData: &stripe.CheckoutSessionSubscriptionDataParams{},
+	}
+	for k, v := range metadata {
+		params.AddMetadata(k, v)
+		params.SubscriptionData.AddMetadata(k, v)
+	}
+	sess, err := checkoutsession.New(params)
+	if err != nil {
+		return "", fmt.Errorf("create agent-feature checkout: %w", err)
+	}
+	return sess.URL, nil
+}
+
+// FindAgentFeatureSubscription looks up an active subscription on a
+// customer for a given (agent_id, feature) combo, identified by the
+// metadata stamps we set at create time. Used by the reconciliation
+// path: if our local DB lost a row (webhook never arrived because
+// STRIPE_WEBHOOK_SECRET wasn't set, network blip, etc.), Stripe is
+// the source of truth and we re-import from there.
+func (s *StripeClient) FindAgentFeatureSubscription(customerID, agentID, feature string) (*stripe.Subscription, error) {
+	iter := subscription.List(&stripe.SubscriptionListParams{
+		Customer: stripe.String(customerID),
+		Status:   stripe.String("all"), // include past_due/incomplete; caller decides
+	})
+	for iter.Next() {
+		sub := iter.Subscription()
+		if sub.Metadata == nil {
+			continue
+		}
+		if sub.Metadata["agent_id"] == agentID && sub.Metadata["feature"] == feature {
+			// Return the first (most recent — Stripe lists newest-first).
+			// Caller handles status filtering.
+			return sub, nil
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("list subscriptions: %w", err)
+	}
+	return nil, nil
+}
+
+// CancelAgentFeatureSubscription cancels a Stripe subscription. By
+// default cancels at period end so the customer keeps the feature
+// until the end of what they've paid for. Pass immediate=true to cut
+// service off now (used by the disconnect-on-payment-failure flow).
+func (s *StripeClient) CancelAgentFeatureSubscription(subscriptionID string, immediate bool) (*stripe.Subscription, error) {
+	if immediate {
+		sub, err := subscription.Cancel(subscriptionID, nil)
+		if err != nil {
+			return nil, fmt.Errorf("cancel subscription: %w", err)
+		}
+		return sub, nil
+	}
+	sub, err := subscription.Update(subscriptionID, &stripe.SubscriptionParams{
+		CancelAtPeriodEnd: stripe.Bool(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("schedule subscription cancel: %w", err)
+	}
+	return sub, nil
 }
 
 // ListInvoices returns past invoices for a customer.

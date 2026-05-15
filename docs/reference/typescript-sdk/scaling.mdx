@@ -1,0 +1,179 @@
+---
+title: "Scaling"
+description: "Resize a sandbox manually, autoscale on memory pressure, or freeze its resources."
+---
+
+OpenComputer sandboxes can change size at runtime. There are three knobs:
+
+| What you want | Use |
+| --- | --- |
+| Resize once, predictably | [`scale()`](#sandbox-scale-opts) |
+| Track memory pressure automatically | [`setAutoscale()`](#sandbox-setautoscale-opts) |
+| Freeze the current size | [`setScalingLock()`](#sandbox-setscalinglock-locked) |
+
+Memory tiers are fixed: `1024`, `4096`, `8192`, `16384`, `32768`, `65536` MB. CPU follows memory per the platform's tier table (e.g. 8 GB → 4 vCPU). You don't pick CPU separately.
+
+## How the three interact
+
+- **Manual `scale()`** disables autoscale on the sandbox as a side effect — explicit user intent overrides the loop. Re-enable autoscale with `setAutoscale({ enabled: true, ... })` after if you want.
+- **Setting a scaling lock** disables autoscale at the same time (single-knob: "I don't want this scaling, period"). While locked, both `scale()` and `setAutoscale({ enabled: true })` reject with `ScalingLockedError`. Unlocking does NOT auto-re-enable autoscale.
+- **Plan caps** apply everywhere. Free-tier orgs are capped at 4 GB. Calls above the cap throw `PlanLimitError`.
+
+---
+
+## `sandbox.scale(opts)`
+
+Manually resize the sandbox. [HTTP API →](/api-reference/sandboxes/scale)
+
+<ParamField body="memoryMB" type="number" required>
+  Target memory tier in MB. Must be one of the allowed tiers.
+</ParamField>
+
+**Returns:** `Promise<{ sandboxID: string; memoryMB: number; cpuPercent: number }>`
+
+**Throws:**
+
+- `ScalingLockedError` — sandbox has a scaling lock active.
+- `PlanLimitError` — `memoryMB` exceeds the org's plan cap.
+
+```typescript
+import { Sandbox, ScalingLockedError, PlanLimitError } from "@opencomputer/sdk";
+
+const sandbox = await Sandbox.connect("sb-abc123");
+
+try {
+  const result = await sandbox.scale({ memoryMB: 8192 });
+  console.log(`scaled to ${result.memoryMB}MB / ${result.cpuPercent}% CPU`);
+} catch (err) {
+  if (err instanceof ScalingLockedError) {
+    console.warn("sandbox is locked — unlock to scale");
+  } else if (err instanceof PlanLimitError) {
+    console.warn("upgrade required for larger instances");
+  } else {
+    throw err;
+  }
+}
+```
+
+---
+
+## `sandbox.setAutoscale(opts)`
+
+Enable or disable per-sandbox autoscale.
+
+<ParamField body="enabled" type="boolean" required>
+  Whether autoscale should be active.
+</ParamField>
+
+<ParamField body="minMemoryMB" type="number">
+  Lower bound when `enabled=true`. Must be an allowed tier.
+</ParamField>
+
+<ParamField body="maxMemoryMB" type="number">
+  Upper bound when `enabled=true`. Must be an allowed tier and ≥ `minMemoryMB`.
+</ParamField>
+
+**Returns:** `Promise<{ sandboxID: string; enabled: boolean; minMemoryMB: number; maxMemoryMB: number }>`
+
+**Throws:**
+
+- `ScalingLockedError` — sandbox has a scaling lock active.
+- `PlanLimitError` — `maxMemoryMB` exceeds the org's plan cap.
+
+When `enabled=true`, the platform watches the sandbox's memory pressure and resizes it within the bounds:
+
+- **Scale up** on a single 1-min sample above 75% memory utilization. Cooldown 60s between up-scales.
+- **Scale down** only when 1-min, 5-min, AND 15-min averages all sit below 25%. Cooldown 5 min between down-scales.
+
+The asymmetry matches user perception: rapid response when the user notices lag, conservative shrink after sustained idle. The 15-min window is the dominant constraint on shrink, so a sandbox that briefly idles and resumes won't sawtooth.
+
+```typescript
+await sandbox.setAutoscale({
+  enabled: true,
+  minMemoryMB: 1024,
+  maxMemoryMB: 16384,
+});
+```
+
+To turn off:
+
+```typescript
+await sandbox.setAutoscale({ enabled: false });
+```
+
+---
+
+## `sandbox.getAutoscale()`
+
+Get the current autoscale configuration.
+
+**Returns:** `Promise<{ sandboxID: string; enabled: boolean; minMemoryMB: number; maxMemoryMB: number }>`
+
+```typescript
+const cfg = await sandbox.getAutoscale();
+if (cfg.enabled) {
+  console.log(`autoscale ${cfg.minMemoryMB}–${cfg.maxMemoryMB} MB`);
+}
+```
+
+---
+
+## `sandbox.setScalingLock(locked)`
+
+Lock or unlock the sandbox's resources against any size change.
+
+<ParamField body="locked" type="boolean" required>
+  `true` to freeze, `false` to allow scaling again.
+</ParamField>
+
+**Returns:** `Promise<{ sandboxID: string; locked: boolean }>`
+
+While locked:
+
+- `scale()` rejects with `ScalingLockedError`.
+- `setAutoscale({ enabled: true })` rejects with `ScalingLockedError`.
+- The platform autoscaler skips this sandbox entirely.
+
+Locking ALSO disables autoscale (single knob — "I don't want this scaling"). Unlocking does **not** re-enable autoscale; call `setAutoscale({ enabled: true, ... })` explicitly if you want it back.
+
+```typescript
+// Pin a sandbox at its current size during a critical workload
+await sandbox.setScalingLock(true);
+
+// ...
+
+// Allow scaling again after
+await sandbox.setScalingLock(false);
+```
+
+---
+
+## `sandbox.getScalingLock()`
+
+Get the current scaling-lock state.
+
+**Returns:** `Promise<{ sandboxID: string; locked: boolean }>`
+
+---
+
+## Errors
+
+### `ScalingLockedError`
+
+Thrown when the sandbox has a scaling lock active. Has a `code` property of `"scaling_locked"` for parity with the HTTP API's error code.
+
+```typescript
+import { ScalingLockedError } from "@opencomputer/sdk";
+
+try {
+  await sandbox.scale({ memoryMB: 8192 });
+} catch (err) {
+  if (err instanceof ScalingLockedError) {
+    // unlock first, or surface to user
+  }
+}
+```
+
+### `PlanLimitError`
+
+Thrown when the requested size exceeds the org's plan cap. The HTTP API returns 402 Payment Required for this case.

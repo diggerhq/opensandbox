@@ -10,13 +10,21 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/opensandbox/opensandbox/internal/blobstore"
 	"golang.org/x/sys/unix"
 )
 
-// S3Config holds the configuration for the S3 storage backend.
+// ErrNotFound is re-exported from blobstore so existing callers
+// (errors.Is(err, storage.ErrNotFound)) keep working.
+var ErrNotFound = blobstore.ErrNotFound
+
+// S3Config holds the configuration for the checkpoint store's backend.
+// The "S3" in the name is historical — the same config drives Azure Blob via
+// blobstore.NewAzure when the endpoint resolves there.
 type S3Config struct {
 	Endpoint        string
 	Bucket          string
@@ -26,40 +34,65 @@ type S3Config struct {
 	ForcePathStyle  bool
 }
 
-// CheckpointStore manages checkpoint archives in S3-compatible object storage,
-// with an optional local NVMe cache for fast same-machine wake.
+// CheckpointStore manages checkpoint archives in object storage, with an
+// optional local NVMe cache for fast same-machine wake.
 //
-// S3 is always the source of truth. Local NVMe is a hot cache.
-// On hibernate: CRIU checkpoint + workspace both uploaded to S3, kept locally.
-// On wake: check NVMe first, fall back to S3 download.
+// Object storage is always the source of truth. Local NVMe is a hot cache.
+// On hibernate: CRIU checkpoint + workspace both uploaded, kept locally.
+// On wake: check NVMe first, fall back to object-store download.
 // Eviction: LRU based on real filesystem pressure (keep 20% free for active sandboxes).
 type CheckpointStore struct {
-	blob     BlobClient
+	blob     blobstore.Store
 	bucket   string
 	cacheDir string // local NVMe cache for CRIU checkpoints (empty = disabled)
 	cacheMu  sync.Mutex
 }
 
-// NewCheckpointStoreFromClient creates a CheckpointStore using an existing
-// BlobClient. Useful for testing with a mock backend.
-func NewCheckpointStoreFromClient(blob BlobClient, bucket string) *CheckpointStore {
-	return &CheckpointStore{blob: blob, bucket: bucket}
+// NewCheckpointStoreFromStore creates a CheckpointStore wrapping a
+// pre-constructed blobstore.Store. Use this when the worker has already
+// built a Store (e.g. with FallbackStore wrapping primary+fallback) and
+// wants the same instance shared with the checkpoint code path.
+func NewCheckpointStoreFromStore(store blobstore.Store, bucket string) *CheckpointStore {
+	return &CheckpointStore{blob: store, bucket: bucket}
 }
 
-// NewCheckpointStore creates a new checkpoint store.
-// Automatically selects Azure Blob or AWS S3 based on the endpoint URL.
+// NewCheckpointStore creates a new checkpoint store from an S3Config,
+// auto-detecting Azure Blob or S3-compatible based on the endpoint URL.
+//
+// Prefer NewCheckpointStoreFromStore when the caller already has a configured
+// blobstore.Store (e.g. with fallback wrapping). This constructor exists for
+// simple single-backend setups.
 func NewCheckpointStore(cfg S3Config) (*CheckpointStore, error) {
-	blob, err := NewBlobClient(cfg)
+	store, err := buildStoreFromS3Config(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create blob client: %w", err)
+		return nil, err
 	}
-
-	log.Printf("storage: using %s backend (endpoint=%s, bucket=%s)", blob.BackendName(), cfg.Endpoint, cfg.Bucket)
-
+	log.Printf("storage: using %s backend (endpoint=%s, bucket=%s)", store.Name(), cfg.Endpoint, cfg.Bucket)
 	return &CheckpointStore{
-		blob:   blob,
+		blob:   store,
 		bucket: cfg.Bucket,
 	}, nil
+}
+
+// buildStoreFromS3Config picks Azure or S3-compat based on endpoint shape,
+// preserving the previous auto-detection contract.
+func buildStoreFromS3Config(cfg S3Config) (blobstore.Store, error) {
+	if strings.Contains(cfg.Endpoint, ".blob.core.windows.net") {
+		// Azure: storage account name lives in AccessKeyID, account key in SecretAccessKey.
+		return blobstore.NewAzure(blobstore.AzureConfig{
+			Name:        "azure-blob",
+			AccountName: cfg.AccessKeyID,
+			AccountKey:  cfg.SecretAccessKey,
+		})
+	}
+	return blobstore.NewS3(blobstore.S3Config{
+		Name:            "s3",
+		Endpoint:        cfg.Endpoint,
+		Region:          cfg.Region,
+		AccessKeyID:     cfg.AccessKeyID,
+		SecretAccessKey: cfg.SecretAccessKey,
+		UsePathStyle:    cfg.ForcePathStyle || strings.Contains(cfg.Endpoint, ".blob.core.windows.net"),
+	})
 }
 
 // SetCacheDir enables local NVMe checkpoint caching at the given directory.
@@ -128,7 +161,7 @@ func (s *CheckpointStore) Upload(ctx context.Context, key, localPath string) (in
 		return 0, fmt.Errorf("failed to stat checkpoint file: %w", err)
 	}
 
-	if err := s.blob.Upload(ctx, s.bucket, key, f, stat.Size()); err != nil {
+	if err := s.blob.Put(ctx, s.bucket, key, f, stat.Size()); err != nil {
 		return 0, fmt.Errorf("failed to upload checkpoint: %w", err)
 	}
 
@@ -275,7 +308,7 @@ func (s *CheckpointStore) downloadAndCache(ctx context.Context, key string) (io.
 			}
 			chunkLen := end - start + 1
 
-			body, err := s.blob.DownloadRange(ctx, s.bucket, key, start, chunkLen)
+			body, err := s.blob.GetRange(ctx, s.bucket, key, start, chunkLen)
 			if err != nil {
 				errs[idx] = fmt.Errorf("chunk %d: %w", idx, err)
 				return
@@ -324,9 +357,10 @@ func (s *CheckpointStore) downloadAndCache(ctx context.Context, key string) (io.
 	return f, nil
 }
 
-// downloadFromS3 streams directly from S3 (no caching).
+// downloadFromS3 streams directly from S3 (no caching). Despite the name,
+// works against any blobstore.Store backend.
 func (s *CheckpointStore) downloadFromS3(ctx context.Context, key string) (io.ReadCloser, error) {
-	body, err := s.blob.Download(ctx, s.bucket, key)
+	body, err := s.blob.Get(ctx, s.bucket, key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download checkpoint: %w", err)
 	}

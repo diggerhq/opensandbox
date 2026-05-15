@@ -1,0 +1,82 @@
+name: PR Integration Test
+
+# Runs in the PR's context (not pull_request_target), so fork PRs run WITHOUT
+# secrets — eliminating the standard pull_request_target exfiltration vector.
+# For PRs from branches in this repo (org-member flow), the workflow does have
+# secrets, so we additionally gate behind an explicit `osb-ci-approve` label
+# applied by a maintainer. A companion workflow (pr-strip-approval.yml) auto-
+# removes the label on each push, forcing a fresh per-SHA approval.
+on:
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    # Only the osb-ci-approve label triggers CI; other labels do nothing.
+    if: github.event.label.name == 'osb-ci-approve'
+    runs-on: ubuntu-latest
+    outputs:
+      approved: ${{ steps.check.outputs.approved }}
+    steps:
+      - id: check
+        run: echo "approved=true" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: gate
+    if: needs.gate.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Pre-flight tests (no infra)
+        run: go test -count=1 ./ci/tests/migration/...
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OPENCOMPUTER_CI_SSH_KEY }}" > ~/.ssh/opencomputer-ci
+          chmod 600 ~/.ssh/opencomputer-ci
+          # Public half is derived once from the private key.
+          ssh-keygen -y -f ~/.ssh/opencomputer-ci > ~/.ssh/opencomputer-ci.pub
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Bring up PR stack (2 workers, cross-version baseline)
+        id: up
+        env:
+          BASELINE_FROM_GALLERY: "1"
+        run: |
+          ./ci/pr/up.sh ${{ github.event.pull_request.number }} 2
+
+      - name: API test suite
+        env:
+          OSB_TEST_SERVER_URL: ${{ steps.up.outputs.server_url }}
+          OSB_TEST_API_KEY: ${{ steps.up.outputs.api_key }}
+          OSB_TEST_WORKERS: ${{ steps.up.outputs.workers }}
+        run: go test -count=1 -v ./ci/tests/api/...
+
+      - name: Tear down PR stack
+        if: always()
+        run: |
+          ./ci/pr/down.sh ${{ github.event.pull_request.number }} || true

@@ -125,7 +125,9 @@ SETUP_DISK
     log "Syncing codebase..."
     rsync -az --progress \
         --exclude '.git' --exclude 'bin/' --exclude 'node_modules/' \
-        --exclude '.dev-env-state*' --exclude '*.ext4' --exclude 'vendor/' \
+        --exclude '.dev-env-state*' --exclude '.dev-env-secrets*' \
+        --exclude '.dev-vector-token-*' \
+        --exclude '*.ext4' --exclude 'vendor/' \
         "$REPO_ROOT/" "${AZURE_ADMIN_USER}@${VM_PUBLIC_IP}:~/opensandbox/"
 
     log "Running host setup..."
@@ -190,7 +192,9 @@ cmd_deploy() {
     log "Syncing code..."
     rsync -az --progress \
         --exclude '.git' --exclude 'bin/' --exclude 'node_modules/' \
-        --exclude '.dev-env-state*' --exclude '*.ext4' --exclude 'vendor/' \
+        --exclude '.dev-env-state*' --exclude '.dev-env-secrets*' \
+        --exclude '.dev-vector-token-*' \
+        --exclude '*.ext4' --exclude 'vendor/' \
         "$REPO_ROOT/" "${AZURE_ADMIN_USER}@${VM_PUBLIC_IP}:~/opensandbox/"
 
     # Build binaries on instance

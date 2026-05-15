@@ -29,7 +29,7 @@ func (s *Server) createAuthToken(c echo.Context) error {
 		})
 	}
 
-	in := auth.IdentityTokenInput{OrgID: orgID.String()}
+	in := auth.IdentityTokenInput{OrgID: orgID.String(), Audience: auth.AudSessionsAPI}
 	if userID := auth.GetUserID(c); userID != nil {
 		userStr := userID.String()
 		in.UserID = &userStr

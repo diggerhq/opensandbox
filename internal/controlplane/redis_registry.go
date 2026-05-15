@@ -14,8 +14,40 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/opensandbox/opensandbox/internal/grpctls"
+	"github.com/opensandbox/opensandbox/internal/metrics"
 
 	pb "github.com/opensandbox/opensandbox/proto/worker"
+)
+
+const (
+	// routingCountTTL bounds how long a per-worker placement counter survives
+	// without further increments. Heartbeat reconciles every 10s; 60s gives the
+	// counter enough headroom to bridge several heartbeat windows so a quiet
+	// stretch between placements doesn't drop us back to heartbeat-only data.
+	routingCountTTL = 60 * time.Second
+
+	// routingHardCapPct excludes workers whose actual CPU/mem/disk pressure is
+	// at or above this level. The score below handles the gradient up to this
+	// cap, so 0–85%-loaded workers are ranked smoothly; only at 85% do we stop
+	// considering a worker entirely. Aligned with the scaler's 80% evacuation
+	// threshold — by the time a worker is being evacuated we should have
+	// already stopped sending it traffic.
+	routingHardCapPct = 85.0
+
+	// drainKeyPrefix is the Redis key prefix used to publish per-worker drain
+	// state across all control planes. SetDraining writes this key; every
+	// heartbeat applies it to the in-memory worker entry so any CP's view of
+	// "is this worker draining?" stays consistent regardless of which CP
+	// initiated the drain.
+	drainKeyPrefix = "drain:"
+
+	// drainKeyTTL bounds how long a drain marker survives without renewal.
+	// Longer than any reasonable drain (45min drainTimeout in scaler.go) so
+	// long-running drains don't unexpectedly re-route traffic to the worker,
+	// but short enough that a forgotten "drain forever" doesn't outlive the
+	// worker's lifetime — pending operator clearing, the worker will rejoin
+	// the pool after 24h.
+	drainKeyTTL = 24 * time.Hour
 )
 
 // WorkerEntry represents a worker in the Redis-backed registry.
@@ -35,6 +67,21 @@ type WorkerEntry struct {
 	GoldenVersion     string  `json:"golden_version,omitempty"`
 	WorkerVersion     string  `json:"worker_version,omitempty"`
 	Draining          bool    `json:"draining,omitempty"`
+
+	// Per-sandbox stats published by the worker. Bounded by per-host sandbox
+	// capacity (~50-150 entries) so the heartbeat doesn't grow unboundedly.
+	// Consumed by the autoscaler — see GetSandboxStats accessor below.
+	Sandboxes map[string]SandboxStats `json:"sandboxes,omitempty"`
+}
+
+// SandboxStats is the per-sandbox snapshot ingested from worker heartbeats.
+// Mirrors internal/worker.SandboxStatsWire — kept separate to avoid an
+// import cycle (CP shouldn't depend on the worker package).
+type SandboxStats struct {
+	MemUsage uint64  `json:"mem_usage"`
+	MemLimit uint64  `json:"mem_limit"`
+	MemPct   float64 `json:"mem_pct"`
+	CPUPct   float64 `json:"cpu_pct"`
 }
 
 // RedisWorkerRegistry maintains an in-memory cache of worker state
@@ -48,11 +95,32 @@ type RedisWorkerRegistry struct {
 	clients    map[string]pb.SandboxWorkerClient // cached gRPC clients
 	rrCounter  uint64                        // round-robin counter for tie-breaking
 	stop       chan struct{}
+
+	// Per-sandbox stats indexed by sandboxID for O(1) autoscaler lookup. Updated
+	// from each worker heartbeat. Lock-protected separately from workers so the
+	// autoscaler doesn't contend with the routing path (which holds workersMu).
+	sandboxStatsMu  sync.RWMutex
+	sandboxStats    map[string]SandboxStats // sandboxID → latest snapshot
+	sandboxOnWorker map[string]string       // sandboxID → workerID (for prune-on-disappear)
 }
 
 // RedisClient returns the underlying Redis client (for health checks, shared state, etc.).
 func (r *RedisWorkerRegistry) RedisClient() *redis.Client {
 	return r.rdb
+}
+
+// GetSandboxStats returns the latest cached stats for a sandbox along with
+// its host worker, or ok=false if no recent heartbeat has carried that
+// sandbox. The autoscaler's per-tick fetchMemPct uses this — replaces the
+// previous gRPC fan-out which scaled O(total sandboxes) per tick.
+func (r *RedisWorkerRegistry) GetSandboxStats(sandboxID string) (SandboxStats, string, bool) {
+	r.sandboxStatsMu.RLock()
+	defer r.sandboxStatsMu.RUnlock()
+	stats, ok := r.sandboxStats[sandboxID]
+	if !ok {
+		return SandboxStats{}, "", false
+	}
+	return stats, r.sandboxOnWorker[sandboxID], true
 }
 
 // NewRedisWorkerRegistry connects to Redis and returns a new registry.
@@ -77,11 +145,13 @@ func NewRedisWorkerRegistry(redisURL string) (*RedisWorkerRegistry, error) {
 	}
 
 	return &RedisWorkerRegistry{
-		rdb:     rdb,
-		workers: make(map[string]*WorkerEntry),
-		conns:   make(map[string]*grpc.ClientConn),
-		clients: make(map[string]pb.SandboxWorkerClient),
-		stop:    make(chan struct{}),
+		rdb:             rdb,
+		workers:         make(map[string]*WorkerEntry),
+		conns:           make(map[string]*grpc.ClientConn),
+		clients:         make(map[string]pb.SandboxWorkerClient),
+		sandboxStats:    make(map[string]SandboxStats),
+		sandboxOnWorker: make(map[string]string),
+		stop:            make(chan struct{}),
 	}, nil
 }
 
@@ -202,10 +272,38 @@ func (r *RedisWorkerRegistry) reconcileAndPrune() {
 			}
 		}
 	}
+
+	// Publish the opensandbox_workers_total gauge, keyed by (region, status).
+	// Reset first so a region that drained to zero stops reporting its last
+	// non-zero value forever; only the (region, status) combos still observed
+	// in r.workers will emit a time series on this tick.
+	metrics.WorkersTotal.Reset()
+	type key struct{ region, status string }
+	counts := make(map[key]int)
+	for _, w := range r.workers {
+		status := "active"
+		if w.Draining {
+			status = "draining"
+		}
+		counts[key{w.Region, status}]++
+	}
+	for k, n := range counts {
+		metrics.WorkersTotal.WithLabelValues(k.region, k.status).Set(float64(n))
+	}
 }
 
 // handleHeartbeat updates the in-memory worker map and dials gRPC if this is a new worker.
 func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
+	// Read drain state outside the lock — this is a network call and we don't
+	// want to block other registry ops on Redis latency. The drain key is the
+	// cross-CP source of truth; per-CP SetDraining writes it on the admin
+	// path or scaler-initiated drain, and every CP's heartbeat applies it
+	// here so all CPs converge on the same view.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), time.Second)
+	drainExists, _ := r.rdb.Exists(drainCtx, drainKeyPrefix+entry.ID).Result()
+	drainCancel()
+	drainOverride := drainExists > 0
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -219,6 +317,7 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		existing.DiskPct = entry.DiskPct
 		existing.TotalMemoryMB = entry.TotalMemoryMB
 		existing.CommittedMemoryMB = entry.CommittedMemoryMB
+		existing.Draining = drainOverride
 		if entry.GoldenVersion != "" {
 			existing.GoldenVersion = entry.GoldenVersion
 		}
@@ -236,9 +335,37 @@ func (r *RedisWorkerRegistry) handleHeartbeat(entry WorkerEntry) {
 		}
 	} else {
 		// New worker
+		entry.Draining = drainOverride
 		r.workers[entry.ID] = &entry
-		log.Printf("redis_registry: new worker registered: %s (region=%s, grpc=%s)", entry.ID, entry.Region, entry.GRPCAddr)
+		log.Printf("redis_registry: new worker registered: %s (region=%s, grpc=%s, draining=%v)", entry.ID, entry.Region, entry.GRPCAddr, drainOverride)
 	}
+
+	// Per-sandbox stats indexing. Update fresh entries; prune sandboxes that
+	// the worker reported last time but didn't this time (sandbox destroyed
+	// between heartbeats). Done under a separate mutex so the autoscaler's
+	// stats lookups don't contend with the routing path's worker map updates.
+	r.sandboxStatsMu.Lock()
+	if len(entry.Sandboxes) > 0 {
+		for sbID, stats := range entry.Sandboxes {
+			r.sandboxStats[sbID] = stats
+			r.sandboxOnWorker[sbID] = entry.ID
+		}
+	}
+	// Prune: any sandbox previously associated with this worker that's no
+	// longer in the heartbeat is gone (destroyed/migrated). We don't prune on
+	// `len(entry.Sandboxes) == 0` because that may legitimately mean "0
+	// sandboxes on this worker right now" (after dance drained it) — and we
+	// still want to remove our stale memories.
+	for sbID, wID := range r.sandboxOnWorker {
+		if wID != entry.ID {
+			continue
+		}
+		if _, still := entry.Sandboxes[sbID]; !still {
+			delete(r.sandboxStats, sbID)
+			delete(r.sandboxOnWorker, sbID)
+		}
+	}
+	r.sandboxStatsMu.Unlock()
 
 	// Ensure gRPC connection exists and is healthy.
 	// Re-dial if address changed, connection is failed/idle, or worker is newly registered.
@@ -312,88 +439,135 @@ func (r *RedisWorkerRegistry) dialWorkerLocked(workerID, grpcAddr string) {
 	log.Printf("redis_registry: gRPC connection initiated to worker %s at %s", workerID, grpcAddr)
 }
 
-// GetLeastLoadedWorker returns the worker with the best combination of remaining capacity
-// and resource headroom. Workers under heavy resource pressure (CPU > 90% or mem > 90%)
-// are skipped. If region is non-empty, only workers in that region are considered.
-// If no workers match the region, falls back to all workers.
+// GetLeastLoadedWorker returns the worker with the best combination of slot
+// allocation and actual host-memory headroom. Workers above routingHardCapPct
+// on CPU/mem/disk, with no slot capacity left, or marked draining are skipped.
+// If region is non-empty, only workers in that region are considered; if none
+// match, falls back to all workers.
+//
+// Ranking score (lower is better):
+//
+//	score = Current/Capacity + MemPct/100
+//
+// MemPct is real RSS-based usage, not committed memory: an idle 16GB-max
+// sandbox occupying 200MB of host RAM should not be treated as if it had
+// reserved 16GB. Committed-memory accounting over-reserves for the common
+// idle-but-large case and pushed traffic away from workers that actually had
+// plenty of headroom. CPU and disk are handled by the hard cap, not the
+// score, since they're spikier and a transient burst shouldn't permanently
+// disprefer a worker.
 func (r *RedisWorkerRegistry) GetLeastLoadedWorker(region string) (*WorkerEntry, pb.SandboxWorkerClient, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Simple strategy: pick the worker with fewest sandboxes.
-	// Skip workers under heavy resource pressure.
-	// Skip idle reserves unless all active workers are above 60% committed.
-	// Read Redis routing counters to get real-time sandbox counts across both CPs
 	routingCtx, routingCancel := context.WithTimeout(context.Background(), time.Second)
 	defer routingCancel()
 
-	var eligible []*WorkerEntry
-	for _, w := range r.workers {
-		if region != "" && w.Region != region {
-			continue
-		}
-		if w.Draining {
-			continue
-		}
-		if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
-			continue
-		}
-		// Use Redis routing counter if higher than heartbeat count
-		rCount, err := r.rdb.Get(routingCtx, "routing:count:"+w.ID).Int()
-		if err == nil && rCount > w.Current {
-			w.Current = rCount
-		}
-		eligible = append(eligible, w)
-	}
-
-	// Fallback: try any region
+	eligible := r.collectEligibleLocked(region, false /* anyRegion */)
 	if len(eligible) == 0 && region != "" {
-		for _, w := range r.workers {
-			if w.CPUPct > 90 || w.MemPct > 90 || w.DiskPct > 90 {
-				continue
-			}
-			eligible = append(eligible, w)
-		}
+		eligible = r.collectEligibleLocked(region, true /* anyRegion */)
 	}
-
 	if len(eligible) == 0 {
 		return nil, nil, fmt.Errorf("no workers available")
 	}
 
-	// Find workers tied for fewest sandboxes, round-robin among them
-	minCount := eligible[0].Current
-	for _, w := range eligible[1:] {
-		if w.Current < minCount {
-			minCount = w.Current
-		}
-	}
-	var tied []*WorkerEntry
+	// Apply the cross-CP routing counter so an in-flight placement on the
+	// other CP is reflected before we score. Heartbeats reconcile to truth
+	// within 10s; until then this counter is the only way the other CP's
+	// recent picks show up here.
 	for _, w := range eligible {
-		if w.Current <= minCount+1 { // within 1 of the minimum
-			tied = append(tied, w)
+		rCount, err := r.rdb.Get(routingCtx, "routing:count:"+w.ID).Int()
+		if err == nil && rCount > w.Current {
+			w.Current = rCount
 		}
 	}
 
-	// Use Redis-based round-robin counter so both CPs spread evenly
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	rr, _ := r.rdb.Incr(ctx, "routing:rr").Result()
-	cancel()
-	best := tied[rr%int64(len(tied))]
+	// Score each eligible worker; track the minimum so we can tie-break.
+	type scored struct {
+		w *WorkerEntry
+		s float64
+	}
+	scoredWorkers := make([]scored, 0, len(eligible))
+	minScore := scoreWorker(eligible[0])
+	for _, w := range eligible {
+		s := scoreWorker(w)
+		if s < minScore {
+			minScore = s
+		}
+		scoredWorkers = append(scoredWorkers, scored{w, s})
+	}
+
+	// Strict tie window. With float scores genuine ties are rare except in the
+	// clean-cluster case (all workers at 0 sandboxes, equal MemPct), where RR
+	// across both CPs keeps the spread even. Any real difference in load —
+	// one extra sandbox or a percent more memory — picks a single winner, so
+	// we get the bias toward the lighter worker that the old +1-smoothing
+	// logic was failing to provide.
+	const tieEpsilon = 1e-9
+	var tied []*WorkerEntry
+	for _, sc := range scoredWorkers {
+		if sc.s-minScore < tieEpsilon {
+			tied = append(tied, sc.w)
+		}
+	}
+
+	var best *WorkerEntry
+	if len(tied) == 1 {
+		best = tied[0]
+	} else {
+		// Cross-CP round-robin among genuine ties.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		rr, _ := r.rdb.Incr(ctx, "routing:rr").Result()
+		cancel()
+		best = tied[rr%int64(len(tied))]
+	}
 
 	client, ok := r.clients[best.ID]
 	if !ok {
 		return nil, nil, fmt.Errorf("no gRPC connection to worker %s", best.ID)
 	}
 
-	// Atomically increment sandbox count in Redis so BOTH CPs see it instantly.
-	// The heartbeat will correct to the real count within 10s.
+	// Publish the increment so the other CP sees this placement before its
+	// next heartbeat reconcile. TTL bridges quiet windows between placements.
 	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
 	r.rdb.Incr(ctx2, "routing:count:"+best.ID)
-	r.rdb.Expire(ctx2, "routing:count:"+best.ID, 15*time.Second)
+	r.rdb.Expire(ctx2, "routing:count:"+best.ID, routingCountTTL)
 	cancel2()
-	best.Current++ // also update local for this CP
+	best.Current++
 
 	return best, client, nil
+}
+
+// collectEligibleLocked returns workers passing the routing eligibility gates.
+// If anyRegion is true the region filter is dropped (used for cross-region
+// fallback when a region is starved). Caller must hold r.mu.
+func (r *RedisWorkerRegistry) collectEligibleLocked(region string, anyRegion bool) []*WorkerEntry {
+	var out []*WorkerEntry
+	for _, w := range r.workers {
+		if !anyRegion && region != "" && w.Region != region {
+			continue
+		}
+		if w.Draining {
+			continue
+		}
+		if w.CPUPct >= routingHardCapPct || w.MemPct >= routingHardCapPct || w.DiskPct >= routingHardCapPct {
+			continue
+		}
+		if w.Capacity <= 0 || w.Current >= w.Capacity {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// scoreWorker computes a placement score where lower is better. Combines slot
+// allocation with actual memory pressure. See GetLeastLoadedWorker comment for
+// rationale.
+func scoreWorker(w *WorkerEntry) float64 {
+	slotPressure := float64(w.Current) / float64(w.Capacity)
+	memPressure := w.MemPct / 100.0
+	return slotPressure + memPressure
 }
 
 // GetWorkerClient returns the gRPC client for a specific worker.
@@ -470,8 +644,31 @@ func (r *RedisWorkerRegistry) GetAllWorkers() []*WorkerEntry {
 	return result
 }
 
-// SetDraining marks a worker as draining — it will not receive new sandboxes.
+// SetDraining marks a worker as draining cluster-wide. The drain state is
+// published to Redis under drainKeyPrefix+workerID, where every CP's
+// handleHeartbeat reads it on the next heartbeat (≤10s) and applies it to its
+// in-memory entry. This makes drain state a cross-CP fact rather than a
+// per-CP local override.
+//
+// The local in-memory map is also updated immediately so the calling CP's
+// next placement decision sees the change without waiting for the heartbeat
+// roundtrip. Redis errors are logged but not returned — local state still
+// takes effect, and the worker will undrain naturally via the 24h TTL even if
+// the operator can't reach the API to clear it explicitly.
 func (r *RedisWorkerRegistry) SetDraining(workerID string, draining bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	key := drainKeyPrefix + workerID
+	if draining {
+		if err := r.rdb.Set(ctx, key, "1", drainKeyTTL).Err(); err != nil {
+			log.Printf("redis_registry: SetDraining(%s, true): Redis SET failed: %v (local-only)", workerID, err)
+		}
+	} else {
+		if err := r.rdb.Del(ctx, key).Err(); err != nil {
+			log.Printf("redis_registry: SetDraining(%s, false): Redis DEL failed: %v (local-only)", workerID, err)
+		}
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if w, ok := r.workers[workerID]; ok {

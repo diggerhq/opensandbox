@@ -48,6 +48,19 @@ var kvMapping = map[string]string{
 	"server-stripe-secret-key":      "STRIPE_SECRET_KEY",
 	"server-stripe-webhook-secret":  "STRIPE_WEBHOOK_SECRET",
 	"server-sentry-dsn":             "OPENSANDBOX_SENTRY_DSN",
+	// Machine-size fallback lists (PR #209). Comma-separated ranked
+	// instance types the autoscaler tries in order on quota / capacity
+	// errors. Empty value = use the single VMSize / InstanceType
+	// configured on the pool (pre-fallback behavior).
+	"server-azure-vm-sizes":         "OPENSANDBOX_AZURE_VM_SIZES",
+	"server-ec2-instance-types":     "OPENSANDBOX_EC2_INSTANCE_TYPES",
+	// Legacy Axiom mappings — kept for backwards compat with existing prod
+	// KVs that pre-date the `shared-` prefix. New deploys should use
+	// `shared-axiom-*` instead. Safe to leave: in server mode only
+	// `server-axiom-*` is loaded; in worker mode only `worker-axiom-*`. New
+	// `shared-*` mappings below win for new envs that have only those.
+	"server-axiom-query-token":      "AXIOM_QUERY_TOKEN",
+	"server-axiom-dataset":          "AXIOM_DATASET",
 
 	// Server-side cell config + shared secrets. These mirror the worker-* keys
 	// of the same name — both sides need them, and the prefix filter loads only
@@ -62,12 +75,14 @@ var kvMapping = map[string]string{
 	"server-session-jwt-secret": "OPENSANDBOX_SESSION_JWT_SECRET",
 
 	// Worker secrets
-	"worker-jwt-secret":    "OPENSANDBOX_JWT_SECRET",
-	"worker-database-url":  "OPENSANDBOX_DATABASE_URL",
-	"worker-redis-url":     "OPENSANDBOX_REDIS_URL",
-	"worker-s3-access-key": "OPENSANDBOX_S3_ACCESS_KEY_ID",
-	"worker-s3-secret-key": "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
-	"worker-sentry-dsn":    "OPENSANDBOX_SENTRY_DSN",
+	"worker-jwt-secret":         "OPENSANDBOX_JWT_SECRET",
+	"worker-database-url":       "OPENSANDBOX_DATABASE_URL",
+	"worker-redis-url":          "OPENSANDBOX_REDIS_URL",
+	"worker-s3-access-key":      "OPENSANDBOX_S3_ACCESS_KEY_ID",
+	"worker-s3-secret-key":      "OPENSANDBOX_S3_SECRET_ACCESS_KEY",
+	"worker-sentry-dsn":         "OPENSANDBOX_SENTRY_DSN",
+	"worker-axiom-ingest-token": "AXIOM_INGEST_TOKEN", // legacy; superseded by shared-axiom-ingest-token
+	"worker-axiom-dataset":      "AXIOM_DATASET",      // legacy; superseded by shared-axiom-dataset
 
 	// Worker per-cell config (non-secret but cell-scoped — every worker in the
 	// cell shares these, so KV is the single source of truth)
@@ -108,8 +123,29 @@ var kvMapping = map[string]string{
 	"worker-global-blob-fallback-access-key-id":     "OPENSANDBOX_GLOBAL_BLOB_FALLBACK_ACCESS_KEY_ID",
 	"worker-global-blob-fallback-secret-access-key": "OPENSANDBOX_GLOBAL_BLOB_FALLBACK_SECRET_ACCESS_KEY",
 
-	// Shared
-	"pg-password": "OPENSANDBOX_PG_PASSWORD",
+	// Shared (mode-agnostic — loaded in both server and worker)
+	"pg-password":               "OPENSANDBOX_PG_PASSWORD",
+	"shared-axiom-ingest-token": "AXIOM_INGEST_TOKEN",
+	"shared-axiom-query-token":  "AXIOM_QUERY_TOKEN",
+	"shared-axiom-dataset":      "AXIOM_DATASET",
+	// Platform-logs: Vector reads these from /etc/opensandbox/vector.env,
+	// populated by populate-vector-env.service via its own IMDS+KV REST call
+	// (not by this Go-side loader, because Vector starts as its own systemd
+	// unit before the Go binary). The entries here exist for two reasons:
+	//   1. Discoverability — kvMapping is the single source of truth for
+	//      "what shared-* secrets does this deployment need in KV".
+	//   2. Side-effect: the Go binary ALSO loads them into its own env at
+	//      startup; future Go code that wants to surface platform-stream
+	//      config (e.g. an admin endpoint) gets them for free.
+	"shared-axiom-platform-ingest-token": "AXIOM_PLATFORM_TOKEN",
+	"shared-axiom-platform-dataset":      "AXIOM_PLATFORM_DATASET",
+	// Cell identifier — stamped on every log + metric event so platform
+	// dashboards can filter per cell. Same dual-consumer pattern as the
+	// platform-* secrets above: Vector reads it from /etc/opensandbox/vector.env
+	// (written by populate-vector-env.sh) for its remap substitutions, and
+	// the Go binary reads it from cfg.CellID (which falls back to
+	// "<region>-default" when this isn't in KV — see config.go).
+	"shared-cell-id": "OPENSANDBOX_CELL_ID",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them
