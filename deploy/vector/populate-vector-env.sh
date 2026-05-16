@@ -48,24 +48,46 @@ CELL_ID_SECRET=shared-cell-id
 
 log() { logger -t populate-vector-env "$*"; echo "$*"; }
 
-if [ -z "$VAULT_NAME" ]; then
-    # Distinguish "cloud-init hasn't written the env file yet" (transient,
-    # retry) from "this host genuinely has no KV configured" (permanent,
-    # accept). On prod Azure workers, cloud-init writes worker.env from a
-    # base64 payload baked by the control plane (internal/compute/azure.go)
-    # in its final stage — we may race ahead of it. Exit 1 so
-    # Restart=on-failure (10s × 5 = 50s budget) gives cloud-init time to
-    # land the file. After that budget, treat KV as truly absent and exit 0.
-    #
-    # We can't use After=cloud-final.service in the unit because cloud-init
-    # on Azure declares cloud-final After=multi-user.target — any ordering
-    # dep on it from a unit WantedBy=multi-user.target creates a systemd
-    # cycle and Vector never boots (#249 hit this, see PR-todo to revert).
-    if [ ! -f /etc/opensandbox/worker.env ] && [ ! -f /etc/opensandbox/server.env ]; then
-        log "no role env file at /etc/opensandbox/{worker,server}.env yet — cloud-init may still be running; exiting 1 to trigger systemd retry"
-        exit 1
+# On Azure prod workers, cloud-init writes /etc/opensandbox/worker.env in
+# its final stage from a base64 payload baked by the control plane
+# (internal/compute/azure.go). We can race ahead of it.
+#
+# We don't pull cloud-init into our unit graph (cycle: cloud-final and
+# cloud-init.target both declare After=multi-user.target on this image, so
+# any ordering dep on them from a unit WantedBy=multi-user.target wedges
+# systemd's job graph and vector.service/start gets silently deleted —
+# observed in #249, reverted in #254).
+#
+# Earlier #254 exited 1 here so systemd's Restart=on-failure could retry.
+# That hit a different issue: when vector.service repeatedly tries to
+# start (Restart=always), each attempt re-requests this unit and the
+# StartLimitBurst=5 / IntervalSec=120 budget gets burnt in <2 seconds —
+# all 5 "restarts" land before RestartSec=10s can pace them, populator
+# enters `failed`, vector also `failed`, both stuck until manual
+# intervention. Observed on osb-worker-c0741893: 5 retries between
+# 00:43:08 and 00:43:10, worker.env written at 00:44 — too late.
+#
+# Poll inside the script instead: single systemd invocation, internal
+# wait of up to 90s. No restart-budget interaction.
+DEADLINE=$(($(date +%s) + 90))
+while [ $(date +%s) -lt $DEADLINE ]; do
+    if [ -f /etc/opensandbox/worker.env ] || [ -f /etc/opensandbox/server.env ]; then
+        break
     fi
-    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME not set — skipping (Vector will start without a token)"
+    log "waiting for cloud-init to write /etc/opensandbox/{worker,server}.env..."
+    sleep 5
+done
+
+# Re-source whichever env file exists. systemd's EnvironmentFile= already
+# loaded these at unit start, but they may have appeared during our wait.
+# shellcheck disable=SC1091
+[ -f /etc/opensandbox/worker.env ] && . /etc/opensandbox/worker.env
+# shellcheck disable=SC1091
+[ -f /etc/opensandbox/server.env ] && . /etc/opensandbox/server.env
+VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
+
+if [ -z "$VAULT_NAME" ]; then
+    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME still unset after 90s wait — host genuinely has no KV configured (e.g. dev VM without managed identity); skipping (Vector will start without a token)"
     exit 0
 fi
 
