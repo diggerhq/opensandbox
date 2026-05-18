@@ -68,16 +68,8 @@ log() { logger -t populate-vector-env "$*"; echo "$*"; }
 # 00:43:08 and 00:43:10, worker.env written at 00:44 — too late.
 #
 # Poll inside the script instead: single systemd invocation, internal
-# wait. No restart-budget interaction.
-#
-# 600s (10 min) — #256 used 90s and gave up too early. Observed on
-# osb-worker-0b42c8be: cloud-init wrote worker.env at +4m into boot,
-# our 90s poll already ended at +90s. Vector was started without an
-# env, failed-restart-looped into a `failed` state, and worker.env
-# arriving later didn't help. Azure cloud-init can take 3-5 min on
-# Standard_D-series VMs; 10 min covers the observed long tail with
-# margin. If something exceeds 10 min, the host is broken anyway.
-DEADLINE=$(($(date +%s) + 600))
+# wait of up to 90s. No restart-budget interaction.
+DEADLINE=$(($(date +%s) + 90))
 while [ $(date +%s) -lt $DEADLINE ]; do
     if [ -f /etc/opensandbox/worker.env ] || [ -f /etc/opensandbox/server.env ]; then
         break
@@ -95,7 +87,7 @@ done
 VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
 
 if [ -z "$VAULT_NAME" ]; then
-    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME still unset after 600s wait — host genuinely has no KV configured (e.g. dev VM without managed identity); skipping (Vector will start without a token)"
+    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME still unset after 90s wait — host genuinely has no KV configured (e.g. dev VM without managed identity); skipping (Vector will start without a token)"
     exit 0
 fi
 

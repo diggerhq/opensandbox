@@ -44,14 +44,6 @@ Type=oneshot
 EnvironmentFile=-/etc/opensandbox/worker.env
 EnvironmentFile=-/etc/opensandbox/server.env
 ExecStart=/usr/local/bin/populate-vector-env.sh
-# On prod, vector.service may have started at boot before worker.env
-# arrived and entered failed state via Restart=always/StartLimit hit.
-# Once populator's 600s poll lands the env file and writes vector.env,
-# reset-failed + restart brings vector back. `-` prefix ignores
-# errors (vector may not be installed in some packer-bake paths).
-# `--no-block` avoids deadlock on vector's After=this-service.
-ExecStartPost=-/bin/systemctl --no-block reset-failed vector.service
-ExecStartPost=-/bin/systemctl --no-block restart vector.service
 RemainAfterExit=yes
 # Retry a few times if KV is briefly unreachable at boot. The script
 # itself exits 0 on graceful failure paths (no IMDS, no secret, etc.) so
