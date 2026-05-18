@@ -16,7 +16,7 @@ Memory tiers are fixed: `1024`, `4096`, `8192`, `16384`, `32768`, `65536` MB. CP
 ## How the three interact
 
 - **Manual `scale()`** disables autoscale on the sandbox as a side effect — explicit user intent overrides the loop. Re-enable autoscale with `setAutoscale({ enabled: true, ... })` after if you want.
-- **Setting a scaling lock** disables autoscale at the same time (single-knob: "I don't want this scaling, period"). While locked, both `scale()` and `setAutoscale({ enabled: true })` reject with `ScalingLockedError`. Unlocking does NOT auto-re-enable autoscale.
+- **Setting a scaling lock** disables autoscale at the same time (single knob: "I don't want this scaling, period"). While locked, both `scale()` and `setAutoscale({ enabled: true })` reject with `ScalingLockedError`. Unlocking does NOT auto-re-enable autoscale.
 - **Plan caps** apply everywhere. Free-tier orgs are capped at 4 GB. Calls above the cap throw `PlanLimitError`.
 
 ---
