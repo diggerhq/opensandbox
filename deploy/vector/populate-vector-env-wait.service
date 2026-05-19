@@ -1,0 +1,29 @@
+# Background companion to populate-vector-env.service.
+#
+# On Azure first boot, cloud-final.service writes /etc/opensandbox/worker.env
+# AFTER multi-user.target is reached. populate-vector-env.service can't
+# synchronously wait for it (would deadlock multi-user ↔ cloud-final, see
+# the long comment in populate-vector-env.sh). Instead, populator writes a
+# stub vector.env and starts THIS unit, which polls in the background and
+# repopulates with real creds + restarts vector once worker.env appears.
+#
+# Deliberately NOT WantedBy=multi-user.target: boot must not wait on us.
+# Started imperatively by populate-vector-env.sh via
+#   `systemctl --no-block start populate-vector-env-wait.service`
+# only when role env files are missing at boot.
+
+[Unit]
+Description=Wait for cloud-init to write worker.env, then populate vector.env
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/populate-vector-env-wait.sh
+# Generous timeout — the script has its own deadline (30 min default) and
+# exits 0 either way. systemd's default 90s TimeoutStartSec would kill the
+# poller before cloud-final on a slow VM.
+TimeoutStartSec=infinity
+# One-shot in practice — the script exits 0 once it's done (or given up).
+# Don't restart on success or failure.
+Restart=no

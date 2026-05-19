@@ -50,36 +50,66 @@ log() { logger -t populate-vector-env "$*"; echo "$*"; }
 
 # On Azure prod workers, cloud-init writes /etc/opensandbox/worker.env in
 # its final stage from a base64 payload baked by the control plane
-# (internal/compute/azure.go). We can race ahead of it.
+# (internal/compute/azure.go). cloud-final.service on Ubuntu Azure images
+# is ordered After=multi-user.target, so worker.env doesn't exist until
+# AFTER multi-user is reached.
 #
-# We don't pull cloud-init into our unit graph (cycle: cloud-final and
-# cloud-init.target both declare After=multi-user.target on this image, so
-# any ordering dep on them from a unit WantedBy=multi-user.target wedges
-# systemd's job graph and vector.service/start gets silently deleted —
-# observed in #249, reverted in #254).
+# This puts us in a bind: we can't synchronously wait for worker.env from
+# inside a unit WantedBy=multi-user.target — multi-user won't reach active
+# while we're waiting, so cloud-final never runs, so worker.env never
+# appears, so our wait spins for nothing. (Observed: #257/#46e660f shipped
+# a 600s in-script wait; it deadlocked multi-user.target ↔ cloud-final
+# and every new Azure worker was reaped after exactly 600s by the
+# scaler's pendingWorkerTTL.)
 #
-# Earlier #254 exited 1 here so systemd's Restart=on-failure could retry.
-# That hit a different issue: when vector.service repeatedly tries to
-# start (Restart=always), each attempt re-requests this unit and the
-# StartLimitBurst=5 / IntervalSec=120 budget gets burnt in <2 seconds —
-# all 5 "restarts" land before RestartSec=10s can pace them, populator
-# enters `failed`, vector also `failed`, both stuck until manual
-# intervention. Observed on osb-worker-c0741893: 5 retries between
-# 00:43:08 and 00:43:10, worker.env written at 00:44 — too late.
+# Previous attempts and why they didn't work:
+#   #249  After=cloud-final.service + Wants= → systemd cycle (both
+#         cloud-final and cloud-init.target declare After=multi-user.target
+#         on Azure Ubuntu, so any WantedBy=multi-user.target unit ordering
+#         after them wedges the job graph; vector.service/start gets
+#         silently deleted).
+#   #254  exit 1 + Restart=on-failure → vector's Restart=always re-requests
+#         this unit faster than RestartSec=10s can pace; StartLimitBurst=5
+#         budget burnt in <2s; both units enter failed.
+#   #256  internal 90s poll → multi-user blocked 90s; vector hits restart
+#         budget while populator waits; usually exits before cloud-final
+#         arrives at ~4min anyway.
+#   #257  internal 600s poll → boot deadlock (above).
 #
-# Poll inside the script instead: single systemd invocation, internal
-# wait of up to 90s. No restart-budget interaction.
-DEADLINE=$(($(date +%s) + 90))
-while [ $(date +%s) -lt $DEADLINE ]; do
-    if [ -f /etc/opensandbox/worker.env ] || [ -f /etc/opensandbox/server.env ]; then
-        break
-    fi
-    log "waiting for cloud-init to write /etc/opensandbox/{worker,server}.env..."
-    sleep 5
-done
+# This iteration: when role env is missing, write a stub vector.env so
+# vector.service can pass validation and start, then kick off a separate
+# wait unit (populate-vector-env-wait.service) to poll asynchronously and
+# repopulate + restart vector once cloud-final writes worker.env. The
+# main populator exits 0 in ~1s, multi-user.target reaches active,
+# cloud-final runs, the waiter does its job. No boot blocking, no
+# systemd cycle, no restart-burst.
+
+if [ ! -f /etc/opensandbox/worker.env ] && [ ! -f /etc/opensandbox/server.env ]; then
+    log "neither worker.env nor server.env present (cloud-init not finished yet); writing stub $ENV_FILE and starting wait unit, exiting 0 so boot can proceed"
+    install -d -m 0755 /etc/opensandbox
+    umask 077
+    # Stub with all expected vars defined-but-empty so `vector validate`
+    # passes (Vector's ${VAR} substitution fails on truly-unset vars; an
+    # empty value satisfies the substitution and the axiom sink fails its
+    # healthcheck and buffers to disk until the waiter writes real creds).
+    cat > "${ENV_FILE}.tmp" <<EOF
+AXIOM_PLATFORM_TOKEN=
+AXIOM_PLATFORM_DATASET=
+AXIOM_PLATFORM_METRICS_TOKEN=
+AXIOM_PLATFORM_METRICS_DATASET=
+OPENCOMPUTER_CELL_ID=unknown
+OPENSANDBOX_REGION=unknown
+OPENCOMPUTER_HOST_IP=unknown
+EOF
+    chmod 0600 "${ENV_FILE}.tmp"
+    mv -f "${ENV_FILE}.tmp" "$ENV_FILE"
+    systemctl --no-block start populate-vector-env-wait.service || log "could not start populate-vector-env-wait.service"
+    exit 0
+fi
 
 # Re-source whichever env file exists. systemd's EnvironmentFile= already
-# loaded these at unit start, but they may have appeared during our wait.
+# loaded these at unit start, but the populator may have been invoked
+# manually or by the wait unit after the file appeared.
 # shellcheck disable=SC1091
 [ -f /etc/opensandbox/worker.env ] && . /etc/opensandbox/worker.env
 # shellcheck disable=SC1091
@@ -87,7 +117,7 @@ done
 VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
 
 if [ -z "$VAULT_NAME" ]; then
-    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME still unset after 90s wait — host genuinely has no KV configured (e.g. dev VM without managed identity); skipping (Vector will start without a token)"
+    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME unset — host has no KV configured (e.g. dev VM without managed identity); skipping (Vector will use whatever vector.env is on disk)"
     exit 0
 fi
 

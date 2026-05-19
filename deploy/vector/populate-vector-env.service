@@ -1,6 +1,6 @@
-# Pulls AXIOM_PLATFORM_TOKEN + AXIOM_PLATFORM_DATASET from Key Vault via
-# the VM's managed identity and writes /etc/opensandbox/vector.env before
-# vector.service starts.
+# Pulls AXIOM_PLATFORM_TOKEN + AXIOM_PLATFORM_DATASET (and metrics tokens)
+# from Key Vault via the VM's managed identity and writes
+# /etc/opensandbox/vector.env before vector.service starts.
 #
 # Reads OPENSANDBOX_AZURE_KEY_VAULT_NAME (and OPENCOMPUTER_CELL_ID /
 # OPENSANDBOX_REGION for tagging) from whichever role-env file exists —
@@ -8,24 +8,27 @@
 # lines with a leading `-` are silently skipped if the file is absent, so
 # this unit works on both roles.
 #
-# Ordering note: on Azure workers, cloud-init's final stage writes
+# Azure first-boot race: cloud-init's cloud-final.service writes
 # /etc/opensandbox/worker.env from a base64 payload baked by the control
-# plane (internal/compute/azure.go). The populator races cloud-init and
-# may run before worker.env exists.
+# plane (internal/compute/azure.go). On Ubuntu Azure images, cloud-final
+# is ordered After=multi-user.target — so worker.env doesn't exist when
+# this unit runs (we're WantedBy=multi-user.target).
 #
-# #249 tried to solve this with `After=cloud-final.service` + `Wants=`.
-# That broke prod: on Azure, both `cloud-final.service` and
-# `cloud-init.target` declare `After=multi-user.target` — so ANY ordering
-# dependency on a cloud-init unit from a unit WantedBy=multi-user.target
-# creates a systemd cycle. systemd resolves it by silently deleting
-# vector.service/start, and Vector never boots. Observed on a prod
-# worker after #249 merged: load=10, vector inactive, journal contained
-# "Job vector.service/start deleted to break ordering cycle".
+# Earlier attempts to handle this in-unit all failed:
+#   #249: After=cloud-final.service → systemd cycle (vector silently dropped).
+#   #254: exit 1 + Restart=on-failure → vector's restart-burst burnt the
+#         StartLimit budget faster than RestartSec= could pace.
+#   #256: internal 90s poll → multi-user blocked 90s, vector burnt its
+#         own restart budget, cloud-final still hadn't run.
+#   #257: internal 600s poll → boot deadlock (multi-user ↔ cloud-final),
+#         every new Azure worker reaped at exactly 600s by pendingWorkerTTL.
 #
-# The fix lives in populate-vector-env.sh: when neither worker.env nor
-# server.env exists, the script exits 1, Restart=on-failure here retries
-# (10s × 5 = 50s budget) until cloud-init writes the file. No new
-# systemd dependencies needed → no cycle.
+# Current design (populate-vector-env.sh):
+#   - If worker.env/server.env exists → populate synchronously, exit 0.
+#   - If both missing → write stub vector.env, start
+#     populate-vector-env-wait.service asynchronously, exit 0 in ~1s.
+#   The wait unit polls in the background and re-runs the populator +
+#   restarts vector once worker.env appears. Boot proceeds either way.
 
 [Unit]
 Description=Populate /etc/opensandbox/vector.env from Key Vault
@@ -33,11 +36,6 @@ After=network-online.target
 Wants=network-online.target
 Before=vector.service
 DefaultDependencies=no
-# Retry budget for the Restart= below. StartLimit* belongs in [Unit] per
-# systemd 229+; in [Service] systemd-255 logs an "Unknown key" warning
-# and ignores them (then Restart=on-failure can crash-loop without a cap).
-StartLimitBurst=5
-StartLimitIntervalSec=120
 
 [Service]
 Type=oneshot
@@ -45,11 +43,11 @@ EnvironmentFile=-/etc/opensandbox/worker.env
 EnvironmentFile=-/etc/opensandbox/server.env
 ExecStart=/usr/local/bin/populate-vector-env.sh
 RemainAfterExit=yes
-# Retry a few times if KV is briefly unreachable at boot. The script
-# itself exits 0 on graceful failure paths (no IMDS, no secret, etc.) so
-# this only fires on truly unexpected errors.
-Restart=on-failure
-RestartSec=10s
+# Script exits 0 on every graceful path (missing role env → stub + kick
+# waiter; missing IMDS / vault / secret → log + skip). Restart= would only
+# fire on truly unexpected errors (set -e tripping), and even then the
+# right move is to leave the unit in failed state for an operator to
+# inspect rather than crash-loop.
 
 [Install]
 WantedBy=multi-user.target

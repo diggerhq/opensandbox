@@ -55,11 +55,16 @@ install -m 0644 "$CONFIG_SRC" /etc/vector/vector.yaml
 chown -R vector:vector /var/lib/vector
 
 # --- Install the KV → env-file populator (oneshot, runs Before=vector.service) ---
-# Both the script and the unit file are tracked in this dir so they roll
-# atomically with config changes.
+# Plus a companion wait unit that polls for worker.env asynchronously when
+# the main populator races ahead of cloud-init on Azure first boot. All
+# four files are tracked in this dir so they roll atomically with config
+# changes.
 install -m 0755 "$SCRIPT_DIR/populate-vector-env.sh" /usr/local/bin/populate-vector-env.sh
+install -m 0755 "$SCRIPT_DIR/populate-vector-env-wait.sh" /usr/local/bin/populate-vector-env-wait.sh
 install -m 0644 "$SCRIPT_DIR/populate-vector-env.service" \
     /etc/systemd/system/populate-vector-env.service
+install -m 0644 "$SCRIPT_DIR/populate-vector-env-wait.service" \
+    /etc/systemd/system/populate-vector-env-wait.service
 
 # --- Wire env file + KV oneshot into the vector.service unit ---
 # Use a drop-in instead of editing the package file so a Vector upgrade
@@ -98,6 +103,9 @@ fi
 
 # --- Start ---
 systemctl daemon-reload
+# The wait unit is started imperatively by populate-vector-env.sh only
+# when role env is missing — don't enable it for boot, just have it
+# present so the populator can `systemctl start` it on demand.
 systemctl enable populate-vector-env.service vector.service
 
 # In a Packer image bake, systemd may not actually run units (the image is
