@@ -30,12 +30,13 @@ import (
 // Reads OPENSANDBOX_GLOBAL_BLOB_* env vars for endpoint + creds. Fails loud
 // if blobstore isn't configured.
 func uploadGolden(path string) error {
-	// Bootstrap from KV the same way the main worker does — so this
-	// subcommand picks up worker-global-blob-* secrets when run on a
-	// host whose worker.env points at a KV. Without this, the user
-	// would have to manually export every Tigris env var inline.
-	if err := config.LoadSecretsFromKeyVault(); err != nil {
-		return fmt.Errorf("keyvault bootstrap: %w", err)
+	// Bootstrap from the configured secret store the same way the main
+	// worker does — so this subcommand picks up worker-global-blob-* secrets
+	// when run on a host whose worker.env points at a KV / SM prefix.
+	// Without this, the user would have to manually export every Tigris env
+	// var inline.
+	if err := config.LoadSecrets(); err != nil {
+		return fmt.Errorf("secrets bootstrap: %w", err)
 	}
 	cfg, err := config.Load()
 	if err != nil {

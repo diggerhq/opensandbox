@@ -22,6 +22,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/obslog"
+	"github.com/opensandbox/opensandbox/internal/preemption"
 	"github.com/opensandbox/opensandbox/internal/proxy"
 	qm "github.com/opensandbox/opensandbox/internal/qemu"
 	"github.com/opensandbox/opensandbox/internal/sandbox"
@@ -40,7 +41,7 @@ var WorkerVersion = "dev"
 
 func main() {
 	// Subcommands that don't need config/secrets. Must short-circuit before
-	// LoadSecretsFromKeyVault, which is slow and would fail outside Azure.
+	// LoadSecrets, which is slow and would fail without cloud credentials.
 	//
 	// "golden-version <path>" prints the full-file hash used for golden-image
 	// archive keys. Packer invokes this so the archive key matches what
@@ -79,7 +80,7 @@ func main() {
 	}
 
 	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
-	if err := config.LoadSecretsFromKeyVault(); err != nil {
+	if err := config.LoadSecrets(); err != nil {
 		log.Fatalf("failed to load secrets from Key Vault: %v", err)
 	}
 
@@ -644,6 +645,31 @@ func main() {
 			}
 			defer hb.Stop()
 			log.Println("opensandbox-worker: Redis heartbeat started")
+
+			// Spot-preemption monitor. NewMonitor returns a no-op on
+			// non-cloud deployments — the goroutine still spins but
+			// never fires. When OPENSANDBOX_CLOUD=aws the AWS monitor
+			// polls IMDSv2 every 5s for /latest/meta-data/spot/instance-action.
+			//
+			// On a Notice we drain in the most minimal way possible for
+			// the PoC: stop the heartbeat so the CP sees us as gone and
+			// re-schedules our sandboxes. The hibernate-each-sandbox path
+			// is the next iteration — for now, sandboxes on a preempted
+			// host fail and the customer re-creates. This matches the
+			// "PoC accepts sandbox state loss on reclaim" risk in the plan.
+			preemptMon := preemption.NewMonitor()
+			go func() {
+				notices := preemptMon.Watch(ctx)
+				for notice := range notices {
+					log.Printf("opensandbox-worker: PREEMPTION notice from %s — action=%s eta=%s, draining now",
+						preemptMon.Name(), notice.Action, notice.ETA.Format(time.RFC3339))
+					hb.Stop()
+					// TODO: hibernate live sandboxes via mgr to S3 within
+					// the ETA budget before exiting. Until then the
+					// kernel/systemd terminates us when the cloud reclaims.
+					return
+				}
+			}()
 		}
 	}
 

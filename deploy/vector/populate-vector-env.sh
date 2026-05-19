@@ -114,42 +114,102 @@ fi
 [ -f /etc/opensandbox/worker.env ] && . /etc/opensandbox/worker.env
 # shellcheck disable=SC1091
 [ -f /etc/opensandbox/server.env ] && . /etc/opensandbox/server.env
-VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
 
-if [ -z "$VAULT_NAME" ]; then
-    log "OPENSANDBOX_AZURE_KEY_VAULT_NAME unset — host has no KV configured (e.g. dev VM without managed identity); skipping (Vector will use whatever vector.env is on disk)"
-    exit 0
-fi
-
-# IMDS → AAD token for Key Vault
-IMDS_RESP=$(curl -sf -H 'Metadata: true' \
-    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \
-    || true)
-AAD_TOKEN=$(echo "$IMDS_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-if [ -z "$AAD_TOKEN" ]; then
-    log "failed to acquire IMDS token (managed identity not attached?); skipping"
-    exit 0
-fi
-
-# Helper: fetch one secret value or empty string.
-kv_get() {
-    local name=$1
-    local resp
-    resp=$(curl -sf -H "Authorization: Bearer $AAD_TOKEN" \
-        "https://${VAULT_NAME}.vault.azure.net/secrets/${name}?api-version=7.4" \
-        || true)
-    echo "$resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("value",""))' 2>/dev/null
+# Cloud detection — explicit OPENSANDBOX_CLOUD wins, else probe IMDS endpoints.
+detect_cloud() {
+    if [ -n "${OPENSANDBOX_CLOUD:-}" ]; then
+        echo "$OPENSANDBOX_CLOUD"; return
+    fi
+    # AWS IMDSv2 token PUT — succeeds only on AWS.
+    if curl -fsS -X PUT --max-time 2 \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        http://169.254.169.254/latest/api/token >/dev/null 2>&1; then
+        echo "aws"; return
+    fi
+    # Azure IMDS — requires Metadata: true header and api-version.
+    if curl -fsS -H 'Metadata: true' --max-time 2 \
+        "http://169.254.169.254/metadata/instance?api-version=2018-02-01" \
+        >/dev/null 2>&1; then
+        echo "azure"; return
+    fi
+    echo "none"
 }
+CLOUD=$(detect_cloud)
+log "detected cloud: $CLOUD"
+
+# kv_get is the cloud-agnostic secret-fetch front. The provider-specific
+# setup happens once below (Azure: get an AAD token; AWS: nothing — aws CLI
+# uses the EC2 instance profile via the SDK's default chain) and then each
+# logical secret name is dereferenced the same way regardless of cloud.
+
+case "$CLOUD" in
+azure)
+    VAULT_NAME="${OPENSANDBOX_AZURE_KEY_VAULT_NAME:-}"
+    if [ -z "$VAULT_NAME" ]; then
+        log "OPENSANDBOX_AZURE_KEY_VAULT_NAME unset — host has no KV configured (e.g. dev VM without managed identity); skipping (Vector will use whatever vector.env is on disk)"
+        exit 0
+    fi
+    IMDS_RESP=$(curl -sf -H 'Metadata: true' \
+        "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \
+        || true)
+    AAD_TOKEN=$(echo "$IMDS_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+    if [ -z "$AAD_TOKEN" ]; then
+        log "failed to acquire IMDS token (managed identity not attached?); skipping"
+        exit 0
+    fi
+    kv_get() {
+        local name=$1
+        local resp
+        resp=$(curl -sf -H "Authorization: Bearer $AAD_TOKEN" \
+            "https://${VAULT_NAME}.vault.azure.net/secrets/${name}?api-version=7.4" \
+            || true)
+        echo "$resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("value",""))' 2>/dev/null
+    }
+    ;;
+
+aws)
+    SECRETS_PREFIX="${OPENSANDBOX_AWS_SECRETS_PREFIX:-}"
+    if [ -z "$SECRETS_PREFIX" ]; then
+        log "OPENSANDBOX_AWS_SECRETS_PREFIX unset — host has no Secrets Manager prefix configured; skipping (Vector will use whatever vector.env is on disk)"
+        exit 0
+    fi
+    if ! command -v aws >/dev/null 2>&1; then
+        log "aws CLI not installed in AMI — populator can't fetch from Secrets Manager. Bake awscli into the worker image (see deploy/packer/worker-ami-aws.pkr.hcl)."
+        exit 0
+    fi
+    # Auto-detect region from IMDSv2 so we don't have to plumb it via env.
+    AWS_IMDS_TOKEN=$(curl -fsS -X PUT --max-time 2 \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        http://169.254.169.254/latest/api/token 2>/dev/null || true)
+    AWS_REGION_DETECTED=$(curl -fsS --max-time 2 \
+        -H "X-aws-ec2-metadata-token: $AWS_IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || true)
+    export AWS_REGION="${OPENSANDBOX_REGION:-${AWS_REGION_DETECTED:-us-east-2}}"
+
+    kv_get() {
+        local name=$1
+        aws secretsmanager get-secret-value \
+            --secret-id "${SECRETS_PREFIX}${name}" \
+            --query SecretString \
+            --output text 2>/dev/null || echo ""
+    }
+    ;;
+
+*)
+    log "no recognized cloud detected and OPENSANDBOX_CLOUD is empty — skipping. Vector will use whatever vector.env is on disk."
+    exit 0
+    ;;
+esac
 
 TOKEN_VALUE=$(kv_get "$TOKEN_SECRET")
 if [ -z "$TOKEN_VALUE" ]; then
-    log "secret $TOKEN_SECRET not found in $VAULT_NAME (or no access); skipping"
+    log "secret $TOKEN_SECRET not found in $CLOUD secret store (or no access); skipping"
     exit 0
 fi
 
 DATASET_VALUE=$(kv_get "$DATASET_SECRET")
 if [ -z "$DATASET_VALUE" ]; then
-    log "secret $DATASET_SECRET not found in $VAULT_NAME (or no access); skipping — Vector won't have a dataset to ship to"
+    log "secret $DATASET_SECRET not found in $CLOUD secret store (or no access); skipping — Vector won't have a dataset to ship to"
     exit 0
 fi
 
@@ -169,7 +229,7 @@ fi
 CELL_ID_VALUE=$(kv_get "$CELL_ID_SECRET")
 if [ -z "$CELL_ID_VALUE" ]; then
     CELL_ID_VALUE="${OPENCOMPUTER_CELL_ID:-unknown}"
-    log "secret $CELL_ID_SECRET not found in $VAULT_NAME — falling back to OPENCOMPUTER_CELL_ID=$CELL_ID_VALUE"
+    log "secret $CELL_ID_SECRET not found in $CLOUD secret store — falling back to OPENCOMPUTER_CELL_ID=$CELL_ID_VALUE"
 fi
 
 # Auto-detect HOST_IP via the kernel's source-address selection (skips link-local).
@@ -194,4 +254,4 @@ metrics_status="absent"
 if [ -n "$METRICS_TOKEN_VALUE" ] && [ -n "$METRICS_DATASET_VALUE" ]; then
     metrics_status="present"
 fi
-log "populated $ENV_FILE (logs token+dataset from $VAULT_NAME, metrics=$metrics_status, cell_id=$CELL_ID_VALUE, host_ip=${HOST_IP:-unknown})"
+log "populated $ENV_FILE (logs token+dataset from $CLOUD, metrics=$metrics_status, cell_id=$CELL_ID_VALUE, host_ip=${HOST_IP:-unknown})"
