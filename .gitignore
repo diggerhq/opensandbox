@@ -29,6 +29,9 @@ __pycache__/
 # Node
 node_modules/
 
+# api-edge Workers Assets — copied from web/dist at deploy time. Source of truth lives in web/.
+cloudflare-workers/api-edge/assets/
+
 # Build artifacts
 dist/
 

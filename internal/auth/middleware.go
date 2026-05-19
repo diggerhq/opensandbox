@@ -54,12 +54,18 @@ func GetUserID(c echo.Context) *uuid.UUID {
 // PGAPIKeyMiddleware validates API keys against PostgreSQL.
 // Falls back to static API key comparison if store is nil (combined/dev mode).
 //
-// Also accepts an identity JWT (aud=opencomputer-api) when jwtIssuer is non-nil.
-// The JWT can arrive either in `Authorization: Bearer <jwt>` or as the X-API-Key
-// value (JWTs are detected by the two-dot signature: "header.payload.signature").
-// This lets sessions-api act on behalf of a dashboard user without holding a
-// long-lived API key — see internal/auth/jwt.go for the audience constants.
-func PGAPIKeyMiddleware(store *db.Store, staticKey string, jwtIssuer *JWTIssuer) echo.MiddlewareFunc {
+// Also accepts:
+//   - Identity JWT (aud=opencomputer-api) signed by jwtIssuer (used by
+//     sessions-api when acting on behalf of a dashboard user — see jwt.go
+//     for the audience constants);
+//   - Capability JWT (iss=opensandbox-edge) signed by capTokenIssuer when
+//     present. The api-edge Worker mints these on the SDK proxy path so it
+//     doesn't need to mirror per-org API keys to every cell. cellID in the
+//     claims must match this CP's own cell for the token to be accepted.
+//
+// The JWT can arrive in `Authorization: Bearer <jwt>` or as the X-API-Key
+// value (detected by the two-dot signature pattern).
+func PGAPIKeyMiddleware(store *db.Store, staticKey string, jwtIssuer *JWTIssuer, capTokenIssuer *JWTIssuer, cellID string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			// Try static API key first (backward compat for combined mode)
@@ -74,6 +80,34 @@ func PGAPIKeyMiddleware(store *db.Store, staticKey string, jwtIssuer *JWTIssuer)
 					tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
 					if claims, err := jwtIssuer.ValidateIdentityToken(tokenStr, AudOpenComputerAPI); err == nil {
 						return applyIdentityClaims(c, claims, next)
+					}
+				}
+			}
+
+			// Capability-token path: edge-minted JWT (iss=opensandbox-edge).
+			// Cell must match the token's cell_id; this guards against a
+			// token minted for cell A being replayed against cell B.
+			if capTokenIssuer != nil {
+				authHeader := c.Request().Header.Get("Authorization")
+				if strings.HasPrefix(authHeader, "Bearer ") {
+					tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+					if claims, err := capTokenIssuer.ValidateCapabilityToken(tokenStr); err == nil {
+						if cellID != "" && claims.CellID != cellID {
+							return c.JSON(http.StatusForbidden, map[string]string{
+								"error": "capability token is for cell " + claims.CellID + ", this is " + cellID,
+							})
+						}
+						orgID, err := uuid.Parse(claims.OrgID)
+						if err != nil {
+							return c.JSON(http.StatusForbidden, map[string]string{"error": "capability token: invalid org_id"})
+						}
+						SetOrgID(c, orgID)
+						if claims.UserID != nil {
+							if uid, err := uuid.Parse(*claims.UserID); err == nil {
+								SetUserID(c, uid)
+							}
+						}
+						return next(c)
 					}
 				}
 			}

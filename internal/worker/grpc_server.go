@@ -243,6 +243,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 				}
 				s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 			}
+			s.initSandboxDB(sb.ID, cfg.Template)
 			s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 			s.configureLogshipForSandbox(ctx, sb.ID)
 			return &pb.CreateSandboxResponse{
@@ -292,6 +293,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 			}
 			s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 		}
+		s.initSandboxDB(sb.ID, cfg.Template)
 		s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 		s.configureLogshipForSandbox(ctx, sb.ID)
 		return &pb.CreateSandboxResponse{
@@ -325,16 +327,7 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		s.router.Register(sb.ID, time.Duration(timeout)*time.Second)
 	}
 
-	// Initialize per-sandbox SQLite
-	if s.sandboxDBs != nil {
-		sdb, err := s.sandboxDBs.Get(sb.ID)
-		if err == nil {
-			_ = sdb.LogEvent("created", map[string]string{
-				"sandbox_id": sb.ID,
-				"template":   cfg.Template,
-			})
-		}
-	}
+	s.initSandboxDB(sb.ID, cfg.Template)
 
 	s.recordInitialScaleEvent(ctx, sb.ID, cfg)
 
@@ -344,6 +337,36 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *pb.CreateSandboxReq
 		SandboxId: sb.ID,
 		Status:    string(sb.Status),
 	}, nil
+}
+
+// initSandboxDB opens the per-sandbox SQLite (creating + schema-initing it
+// if missing) and logs a "created" event. Called from every CreateSandbox
+// success path — including the fast-path ForkFromCheckpoint returns — so
+// the UsageTicker and the destroy/hibernate terminal events always have a
+// well-formed events table to write into.
+//
+// Pre-fix the ForkFromCheckpoint paths returned early without this init,
+// so golden-fork-created sandboxes had no state.db until something else
+// (usage_ticker.Get) lazily created an empty file. usage_tick LogEvents
+// then failed silently because the schema wasn't applied.
+func (s *GRPCServer) initSandboxDB(sandboxID, template string) {
+	if s.sandboxDBs == nil {
+		log.Printf("initSandboxDB: %s: sandboxDBs is nil — skipping", sandboxID)
+		return
+	}
+	sdb, err := s.sandboxDBs.Get(sandboxID)
+	if err != nil {
+		log.Printf("initSandboxDB: %s: Get failed: %v", sandboxID, err)
+		return
+	}
+	if err := sdb.LogEvent("created", map[string]string{
+		"sandbox_id": sandboxID,
+		"template":   template,
+	}); err != nil {
+		log.Printf("initSandboxDB: %s: LogEvent failed: %v", sandboxID, err)
+		return
+	}
+	log.Printf("initSandboxDB: %s: created event logged", sandboxID)
 }
 
 // recordInitialScaleEvent writes a sandbox_scale_events row marking the start
@@ -398,8 +421,15 @@ func (s *GRPCServer) DestroySandbox(ctx context.Context, req *pb.DestroySandboxR
 		s.router.Unregister(req.SandboxId)
 	}
 
-	// Clean up SQLite
+	// Emit terminal lifecycle event BEFORE removing the per-sandbox SQLite.
+	// The SandboxDBManager's OnRemove hook synchronously flushes any unsynced
+	// events to Redis, so this event makes it upstream to events-ingest, which
+	// updates D1 sandboxes_index. Without this, terminations leak as phantoms
+	// in the global view.
 	if s.sandboxDBs != nil {
+		if sdb, dbErr := s.sandboxDBs.Get(req.SandboxId); dbErr == nil {
+			_ = sdb.LogEvent("stopped", map[string]string{"sandbox_id": req.SandboxId})
+		}
 		_ = s.sandboxDBs.Remove(req.SandboxId)
 	}
 
@@ -684,8 +714,16 @@ func (s *GRPCServer) HibernateSandbox(ctx context.Context, req *pb.HibernateSand
 		s.router.MarkHibernated(req.SandboxId, 600*time.Second)
 	}
 
-	// Clean up per-sandbox SQLite
+	// Emit hibernated lifecycle event BEFORE removing the per-sandbox SQLite.
+	// The SandboxDBManager's OnRemove hook flushes synchronously so this event
+	// reaches events-ingest and updates D1 sandboxes_index.
 	if s.sandboxDBs != nil {
+		if sdb, dbErr := s.sandboxDBs.Get(req.SandboxId); dbErr == nil {
+			_ = sdb.LogEvent("hibernated", map[string]string{
+				"sandbox_id":     req.SandboxId,
+				"checkpoint_key": result.HibernationKey,
+			})
+		}
 		_ = s.sandboxDBs.Remove(req.SandboxId)
 	}
 

@@ -22,6 +22,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/cloudflare"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/edgeclient"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/observability"
 	"github.com/opensandbox/opensandbox/internal/obslog"
@@ -43,6 +44,8 @@ type Server struct {
 	store      *db.Store               // nil in combined/dev mode without PG
 	jwtIssuer  *auth.JWTIssuer         // nil if JWT not configured
 	capTokenIssuer *auth.JWTIssuer     // verifies edge→CP capability tokens; nil if SESSION_JWT_SECRET unset
+	cfAdminSecret  string              // HMAC shared with CreditAccount DO for /admin/halt-org and /admin/resume-org; empty disables auth (dev only)
+	cfEventSecret  string              // HMAC shared with the api-edge Worker for /internal/secret-refresh and other edge-→cell push paths
 	cellID     string                  // this control plane's cell_id (for the cap-token cell check)
 	mode       string                  // "server", "worker", "combined"
 	workerID   string                  // this worker's ID
@@ -66,6 +69,18 @@ type Server struct {
 	// Empty token = endpoint returns 503.
 	axiomQueryToken string
 	axiomDataset    string
+
+	// CF api-edge HTTP client — HMAC-signed calls to /internal/templates and
+	// /internal/secret-stores. nil when the edge isn't configured (legacy
+	// single-PG mode or tests); resolveSecretStoreInto + template lookup fall
+	// back to s.store in that case.
+	edge *edgeclient.Client
+}
+
+// SetEdgeClient wires the api-edge HTTP client. Caller is responsible for
+// constructing it with the right base URL + HMAC secret (CFEventSecret).
+func (s *Server) SetEdgeClient(c *edgeclient.Client) {
+	s.edge = c
 }
 
 // SetAxiomQueryConfig wires the read-only Axiom token and dataset for
@@ -87,6 +102,8 @@ type ServerOpts struct {
 	Store       *db.Store
 	JWTIssuer   *auth.JWTIssuer
 	SessionJWTSecret string // shared edge↔CP HMAC secret; enables /internal/sandboxes/create
+	CFAdminSecret    string // HMAC shared with CF CreditAccount DO; enables /admin/halt-org and /admin/resume-org
+	CFEventSecret    string // HMAC shared with the api-edge Worker; enables /internal/secret-refresh and other edge-→cell push paths
 	CellID      string // this control plane's cell_id
 	Mode        string // "server", "worker", "combined"
 	WorkerID    string
@@ -125,6 +142,8 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 		if opts.SessionJWTSecret != "" {
 			s.capTokenIssuer = auth.NewJWTIssuer(opts.SessionJWTSecret)
 		}
+		s.cfAdminSecret = opts.CFAdminSecret
+		s.cfEventSecret = opts.CFEventSecret
 		s.cellID = opts.CellID
 		s.mode = opts.Mode
 		s.workerID = opts.WorkerID
@@ -262,11 +281,74 @@ func NewServer(mgr sandbox.Manager, ptyMgr *sandbox.PTYManager, apiKey string, o
 	if s.capTokenIssuer != nil && s.workerRegistry != nil {
 		internal := e.Group("/internal", s.capTokenMiddleware)
 		internal.POST("/sandboxes/create", s.internalCreateSandbox)
+
+		// Edge-proxied dashboard routes. Same handler functions as
+		// /api/dashboard/* (gated below by WorkOS session cookie), exposed
+		// under /internal/dashboard/* gated by the edge's cap-token instead.
+		// This lets api-edge forward sandbox-runtime ops (PTY, stats, reboot,
+		// logs) without requiring users to have a WorkOS cookie on every cell.
+		//
+		// The dashboard handlers read auth via auth.GetOrgID(c), which both
+		// middlewares set — so the same functions work under either auth
+		// chain. We only mount the sandbox-runtime subset here; the data-
+		// authority routes (api-keys, org settings, checkpoints list) belong
+		// on the edge proper, where D1 is the source of truth.
+		idash := internal.Group("/dashboard")
+		idash.GET("/sessions/:sandboxId", s.dashboardGetSession)
+		idash.GET("/sessions/:sandboxId/stats", s.dashboardGetSessionStats)
+		idash.POST("/sessions/:sandboxId/reboot", s.dashboardRebootSession)
+		idash.POST("/sessions/:sandboxId/power-cycle", s.dashboardPowerCycleSession)
+		idash.POST("/sessions/:sandboxId/pty", s.dashboardCreatePTY)
+		idash.GET("/sessions/:sandboxId/pty/:sessionId", s.dashboardPTYWebSocket)
+		idash.POST("/sessions/:sandboxId/pty/:sessionId/resize", s.dashboardResizePTY)
+		idash.DELETE("/sessions/:sandboxId/pty/:sessionId", s.dashboardKillPTY)
+		// /images is cell-local (image_cache table lives in each cell's PG).
+		// Proxy these here so dashboard can render per-cell image lists.
+		idash.GET("/images", s.dashboardListImages)
+		idash.DELETE("/images/:id", s.dashboardDeleteImage)
+		// Agents — currently proxied to an external service from each cell.
+		// Easier to keep that wiring intact than reimplement on the edge.
+		idash.Any("/agents", s.dashboardAgentsProxy)
+		idash.Any("/agents/*", s.dashboardAgentsProxy)
+		idash.GET("/agents/:agentId/entitlements", s.dashboardListAgentEntitlements)
+		idash.POST("/agents/:agentId/subscriptions/:feature", s.dashboardSubscribeAgentFeature)
+		idash.DELETE("/agents/:agentId/subscriptions/:feature", s.dashboardCancelAgentFeature)
+		idash.GET("/sessions/:sandboxId/logs", s.getSandboxLogs)
+	}
+
+	// CF admin webhooks — dispatched by the CreditAccount DO on free-tier
+	// halt/resume events. HMAC-authenticated via the shared CF_ADMIN_SECRET.
+	// Routes live under /admin/ to match the DO's hard-coded path, but use a
+	// distinct middleware chain from the human-API-key /admin group above.
+	// Echo treats route registrations independently — there's no conflict.
+	//
+	// Only mounted when this CP can actually halt sandboxes (workers registry
+	// present); a server-only CP without workers has no work to do here.
+	if s.workerRegistry != nil {
+		if s.cfAdminSecret == "" {
+			log.Printf("api: WARNING: CF admin webhooks mounted without CF_ADMIN_SECRET — anyone can halt/resume orgs. Set OPENSANDBOX_CF_ADMIN_SECRET in production.")
+		}
+		cfAdmin := e.Group("/admin", controlplane.AdminAuth(s.cfAdminSecret))
+		ah := controlplane.NewAdminHandlers(s)
+		cfAdmin.POST("/halt-org", ah.HaltOrg)
+		cfAdmin.POST("/resume-org", ah.ResumeOrg)
+	}
+
+	// Edge-→cell push: secret-refresh fan-in. The api-edge Worker posts here
+	// after writing a new secret entry to D1 so this cell can update any
+	// running sandboxes that bind the store. HMAC-authenticated with the
+	// shared event secret (same one the forwarder uses, same one the edge
+	// signs internal lookups with). Mounted only when both a workerRegistry
+	// exists (otherwise there's nothing to fan out to) AND the event secret
+	// is configured.
+	if s.workerRegistry != nil && s.cfEventSecret != "" {
+		cfEdge := e.Group("/internal", controlplane.AdminAuth(s.cfEventSecret))
+		cfEdge.POST("/secret-refresh", s.internalSecretRefresh)
 	}
 
 	// API routes (with API key auth)
 	api := e.Group("/api")
-	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey, s.jwtIssuer))
+	api.Use(auth.PGAPIKeyMiddleware(s.store, apiKey, s.jwtIssuer, s.capTokenIssuer, s.cellID))
 
 	// Identity
 	api.POST("/auth/token", s.createAuthToken)

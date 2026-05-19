@@ -37,8 +37,18 @@ WK_NAME="${NAME_PREFIX}-worker-1"
 
 # Instance sizing — NVMe-equipped, cost-optimised for a dev testbed
 CP_TYPE="t3.medium"   # 2 vCPU / 4GB / EBS only — postgres + redis + CP at dev scale
-WK_TYPE="m6id.large"  # 2 vCPU / 8GB / 118GB local NVMe — small worker for cross-region tests
+WK_TYPE="c5d.metal"   # 96 vCPU / 192GB / 4x900GB local NVMe — bare metal for nested KVM
+                       # (virtualized HVM instances like m6id.large can't expose /dev/kvm to
+                       # the guest, forcing QEMU into TCG software emulation. Only .metal
+                       # SKUs on AWS support nested virt, so the worker must be one of them.)
 WK_DATA_GB=128         # Additional persistent EBS volume mounted at /data
+# Root EBS — must be generous enough that /var/cache/apt + /var/lib/containerd
+# + journald + kernel updates don't fill it after a few days of uptime.
+# 8GB default (AMI snapshot) is too small for a worker that runs Docker for
+# rootfs builds; we observed root hitting 95% within ~48h and breaking
+# `docker build` with disk-space errors. 30GB matches what production cells
+# would use.
+ROOT_GB=30
 
 # Ubuntu 24.04 LTS amd64 (latest from Canonical's account 099720109477) — overridable
 AMI_OWNER="099720109477"
@@ -235,6 +245,7 @@ CPUD
         --security-group-ids "$SG_CP" \
         --associate-public-ip-address \
         --iam-instance-profile "Name=$ROLE_NAME" \
+        --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$ROOT_GB,VolumeType=gp3,DeleteOnTermination=true}" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$CP_NAME},{Key=opensandbox:role,Value=controlplane}]" \
         --user-data "$CP_USERDATA" \
         --query 'Instances[0].InstanceId' --output text)
@@ -257,7 +268,9 @@ CPUD
         --security-group-ids "$SG_WK" \
         --associate-public-ip-address \
         --iam-instance-profile "Name=$ROLE_NAME" \
-        --block-device-mappings "DeviceName=/dev/sdb,Ebs={VolumeSize=$WK_DATA_GB,VolumeType=gp3,DeleteOnTermination=true}" \
+        --block-device-mappings \
+            "DeviceName=/dev/sda1,Ebs={VolumeSize=$ROOT_GB,VolumeType=gp3,DeleteOnTermination=true}" \
+            "DeviceName=/dev/sdb,Ebs={VolumeSize=$WK_DATA_GB,VolumeType=gp3,DeleteOnTermination=true}" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$WK_NAME},{Key=opensandbox:role,Value=worker}]" \
         --query 'Instances[0].InstanceId' --output text)
     save_state "WK_ID" "$WK_ID"

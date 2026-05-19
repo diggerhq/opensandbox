@@ -163,6 +163,81 @@ func (p *RedisEventPublisher) run(ctx context.Context) {
 	}
 }
 
+// FlushSandbox synchronously publishes all unsynced events for a single
+// sandbox. Used as the SandboxDBManager.OnRemove hook so terminal events
+// (stopped, hibernated) make it to Redis before the per-sandbox SQLite file
+// is deleted by the destroy / hibernate gRPC handler. Pre-fix, the 2s
+// polling flush would race the Remove and silently drop terminal events,
+// leaving the global view (D1 sandboxes_index) thinking the sandbox is
+// still running.
+//
+// Synchronous on purpose: the caller (Remove) intentionally waits before
+// closing the SQLite handle. A 10s timeout caps that wait so a Redis hiccup
+// can't block destroy forever.
+func (p *RedisEventPublisher) FlushSandbox(ctx context.Context, sandboxID string) {
+	db, err := p.sandboxDBs.Get(sandboxID)
+	if err != nil {
+		log.Printf("redis_event_publisher: FlushSandbox %s: Get failed: %v", sandboxID, err)
+		return
+	}
+	events, err := db.GetUnsyncedEvents(1000)
+	if err != nil {
+		log.Printf("redis_event_publisher: FlushSandbox %s: GetUnsyncedEvents: %v", sandboxID, err)
+		return
+	}
+	if len(events) == 0 {
+		return
+	}
+
+	xaddCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	orgID, plan := "", ""
+	if p.resolver != nil {
+		if o, pl, ok := p.resolver(sandboxID); ok {
+			orgID, plan = o, pl
+		}
+	}
+
+	var syncedIDs []int64
+	for _, e := range events {
+		ts, err := time.Parse(time.RFC3339Nano, e.CreatedAt)
+		if err != nil {
+			ts = time.Now()
+		}
+		envelope := SandboxEventEnvelope{
+			ID:        uuid.NewString(),
+			Type:      e.Type,
+			SandboxID: sandboxID,
+			OrgID:     orgID,
+			Plan:      plan,
+			WorkerID:  p.workerID,
+			CellID:    p.cellID,
+			Payload:   json.RawMessage(e.Payload),
+			Timestamp: ts,
+		}
+		body, mErr := json.Marshal(envelope)
+		if mErr != nil {
+			log.Printf("redis_event_publisher: FlushSandbox %s: marshal: %v", sandboxID, mErr)
+			continue
+		}
+		if xErr := p.rdb.XAdd(xaddCtx, &redis.XAddArgs{
+			Stream: p.streamKey,
+			MaxLen: p.maxLen,
+			Approx: true,
+			Values: map[string]interface{}{"event": string(body)},
+		}).Err(); xErr != nil {
+			log.Printf("redis_event_publisher: FlushSandbox %s: XADD: %v", sandboxID, xErr)
+			break
+		}
+		syncedIDs = append(syncedIDs, e.ID)
+	}
+	if len(syncedIDs) > 0 {
+		_ = db.MarkEventsSynced(syncedIDs)
+		log.Printf("redis_event_publisher: FlushSandbox %s: flushed %d event(s) before remove", sandboxID, len(syncedIDs))
+	}
+}
+
 // flush reads up to BatchSize unsynced events per sandbox DB, XADDs each,
 // then marks them synced. On XADD failure, leaves them unsynced for retry.
 func (p *RedisEventPublisher) flush(ctx context.Context) {

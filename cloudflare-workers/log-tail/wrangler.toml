@@ -1,0 +1,12 @@
+name = "opensandbox-log-tail"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+account_id = "1241f114453e32d292197e3fb36210b2"
+workers_dev = false
+
+# Secrets (set via `wrangler secret put`):
+#   AXIOM_TOKEN    — xaat-... ingest token
+# Other config lives here in plain text — dataset name + host aren't sensitive.
+[vars]
+AXIOM_HOST = "https://api.axiom.co"
+AXIOM_DATASET = "cf-dev"

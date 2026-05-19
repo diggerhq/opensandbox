@@ -22,6 +22,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/crypto"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/edgeclient"
 	"github.com/opensandbox/opensandbox/internal/metrics"
 	"github.com/opensandbox/opensandbox/internal/obslog"
 	"github.com/opensandbox/opensandbox/internal/observability"
@@ -87,6 +88,8 @@ func main() {
 		HTTPAddr:         cfg.HTTPAddr,
 		CellID:           cfg.CellID,
 		SessionJWTSecret: cfg.SessionJWTSecret,
+		CFAdminSecret:    cfg.CFAdminSecret,
+		CFEventSecret:    cfg.CFEventSecret,
 	}
 
 	// Initialize PostgreSQL if configured
@@ -562,6 +565,15 @@ func main() {
 	// Create API server
 	server := api.NewServer(mgr, ptyMgr, cfg.APIKey, opts)
 
+	// Wire the CF api-edge HTTP client. Used by resolveSecretStoreInto +
+	// resolveTemplate to read from D1 over HMAC instead of local PG once
+	// migration 041 strips the global tables. Falls back to s.store if
+	// either CFEdgeBaseURL or CFEventSecret is unset (combined dev mode).
+	if cfg.CFEdgeBaseURL != "" && cfg.CFEventSecret != "" {
+		server.SetEdgeClient(edgeclient.New(cfg.CFEdgeBaseURL, cfg.CFEventSecret))
+		log.Printf("opensandbox: edge client wired (base=%s)", cfg.CFEdgeBaseURL)
+	}
+
 	// Wire Axiom read-only token for the sandbox session logs API.
 	// Token never leaves this process; the UI proxies its queries through
 	// /api/sandboxes/:id/logs. Empty token disables the endpoint (503).
@@ -616,9 +628,38 @@ func main() {
 			workers = redisRegistry
 		}
 		reporter := billing.NewUsageReporter(opts.Store, stripeClient, workers)
+		// CF billing mode: when this CP is wired into the CF event pipe, the
+		// CreditAccount DO is authoritative on free-tier balance. Disable
+		// the local free-tier deduction pass so both sides don't race.
+		if cfg.CFEventEndpoint != "" {
+			reporter.SetCFBillingMode(true)
+			log.Println("opensandbox: usage reporter CF-billing mode ON (free-tier deduction deferred to CreditAccount DO)")
+		}
 		reporter.Start()
 		defer reporter.Stop()
 		log.Println("opensandbox: usage reporter started (interval=5m)")
+	}
+
+	// Halt reconciler — safety net for missed CF halt webhooks. Pulls the
+	// authoritative halt-list from api-edge every 60s and re-issues halts
+	// for anything that should be halted but isn't. Inert unless
+	// OPENSANDBOX_HALT_LIST_URL is set.
+	if cfg.HaltListURL != "" && cfg.CFEventSecret != "" && server != nil {
+		reconciler := controlplane.NewHaltReconciler(controlplane.HaltReconcilerConfig{
+			CellID:  cfg.CellID,
+			ListURL: cfg.HaltListURL,
+			Secret:  cfg.CFEventSecret,
+			Halter:  server,
+		})
+		if reconciler != nil {
+			reconciler.Start(ctx)
+			defer func() {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stopCancel()
+				_ = reconciler.Stop(stopCtx)
+			}()
+			log.Printf("opensandbox: halt reconciler started (list_url=%s, period=60s)", cfg.HaltListURL)
+		}
 	}
 
 	// Phase-2 capacity allocator. Writes outbox rows for unified-mode

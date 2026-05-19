@@ -73,6 +73,7 @@ var kvMapping = map[string]string{
 	"server-cf-event-secret":    "OPENSANDBOX_CF_EVENT_SECRET",
 	"server-cf-admin-secret":    "OPENSANDBOX_CF_ADMIN_SECRET",
 	"server-session-jwt-secret": "OPENSANDBOX_SESSION_JWT_SECRET",
+	"server-halt-list-url":      "OPENSANDBOX_HALT_LIST_URL",
 
 	// Worker secrets
 	"worker-jwt-secret":         "OPENSANDBOX_JWT_SECRET",
@@ -146,6 +147,14 @@ var kvMapping = map[string]string{
 	// the Go binary reads it from cfg.CellID (which falls back to
 	// "<region>-default" when this isn't in KV — see config.go).
 	"shared-cell-id": "OPENSANDBOX_CELL_ID",
+
+	// Edge integration (mode-agnostic — both server and worker need them).
+	// cf-edge-base-url is consumed by the CP's edgeclient for HMAC'd
+	// /internal/templates + /internal/secret-stores lookups; secret-encryption-key
+	// is the AES-256-GCM key shared with the api-edge Worker so the edge can
+	// encrypt secret-store entries and any cell can decrypt them.
+	"shared-cf-edge-base-url":      "OPENSANDBOX_CF_EDGE_BASE_URL",
+	"shared-secret-encryption-key": "OPENSANDBOX_SECRET_ENCRYPTION_KEY",
 }
 
 // LoadSecretsFromKeyVault fetches secrets from Azure Key Vault and sets them

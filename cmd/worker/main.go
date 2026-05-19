@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/opensandbox/opensandbox/internal/analytics"
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/blobstore"
@@ -132,6 +134,10 @@ func main() {
 	var doGracefulShutdown func(checkpointStore *storage.CheckpointStore, store *db.Store)
 	// Metadata server (set by QEMU backend, wired to store later)
 	var metadataSrv *worker.MetadataServer
+	// Forward-declared so doGracefulShutdown's closure (built in the QEMU
+	// init block below) can capture it; the actual NewSandboxDBManager call
+	// happens after backend init.
+	var sandboxDBMgr *sandbox.SandboxDBManager
 
 	// Initialize secrets proxy for MITM token substitution.
 	// Runs on :3128 — VMs route HTTPS through this to keep real secrets off-VM.
@@ -319,7 +325,7 @@ func main() {
 				log.Printf("opensandbox-worker: %d VMs failed to hibernate: %v", len(failed), failed)
 			}
 
-			processHibernateResults(results, store, checkpointStore, func(r interface{}) (string, string, error) {
+			processHibernateResults(results, store, checkpointStore, sandboxDBMgr, func(r interface{}) (string, string, error) {
 				hr := r.(qm.HibernateAllResult)
 				return hr.SandboxID, hr.HibernationKey, hr.Err
 			})
@@ -346,8 +352,9 @@ func main() {
 	ptyMgr := sandbox.NewAgentPTYManager(ptySessionFactory)
 	defer ptyMgr.CloseAll()
 
-	// Initialize per-sandbox SQLite manager
-	sandboxDBMgr := sandbox.NewSandboxDBManager(cfg.DataDir)
+	// Initialize per-sandbox SQLite manager (forward-declared above so the
+	// graceful-shutdown closure can capture it).
+	sandboxDBMgr = sandbox.NewSandboxDBManager(cfg.DataDir)
 	defer sandboxDBMgr.Close()
 
 	// JWT issuer
@@ -647,38 +654,61 @@ func main() {
 		}
 	}
 
-	// NATS
-	if cfg.NATSURL != "" {
-		pub, err := worker.NewEventPublisher(cfg.NATSURL, cfg.Region, cfg.WorkerID, sandboxDBMgr)
-		if err != nil {
-			log.Printf("opensandbox-worker: NATS not available: %v (continuing without event sync)", err)
-		} else {
-			pub.Start()
-			if qemuMgr != nil {
-				pub.SetGoldenVersion(qemuMgr.GoldenVersion())
-			}
-			pub.StartHeartbeat(func() (int, int, float64, float64, float64) {
-				count, _ := mgr.Count(context.Background())
-				cpuPct, memPct, diskPct := worker.SystemStats()
-				return cfg.MaxCapacity, count, cpuPct, memPct, diskPct
-			})
-			defer pub.Stop()
-			log.Println("opensandbox-worker: NATS event publisher started")
-		}
-	}
-
 	// CF-parallel: Redis Streams event publisher. Inert unless CellID is set.
-	// Runs in addition to (not replacing) the NATS publisher during cutover.
+	// (The legacy NATS publisher used to run alongside this; it was removed
+	// once Redis Streams covered all event types end-to-end. NATSURL in the
+	// env file is ignored.)
 	if cfg.CellID != "" && cfg.RedisURL != "" {
+		// Resolver: look up sandbox → org → plan via cell-local PG. Called
+		// per event during flush; sandbox_sessions has an indexed lookup on
+		// sandbox_id and orgs is keyed by org_id, so each call is two index
+		// hits. usage_tick volume is sandboxes × ~30s, so cost is bounded.
+		// nil store (no PG) leaves the fields blank — events-ingest then
+		// treats them as "unknown plan" and skips DO debit, which is the
+		// safe fallback.
+		var planResolver worker.MetadataResolver
+		if store != nil {
+			st := store
+			planResolver = func(sandboxID string) (string, string, bool) {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				orgIDStr, err := st.GetSandboxOrgID(ctx, sandboxID)
+				if err != nil || orgIDStr == "" {
+					return "", "", false
+				}
+				orgID, err := uuid.Parse(orgIDStr)
+				if err != nil {
+					return "", "", false
+				}
+				org, err := st.GetOrg(ctx, orgID)
+				if err != nil {
+					// Org row may not exist yet (new app2 user, lazy upsert
+					// hasn't run from this sandbox's create). Return the
+					// org_id so events-ingest can still archive; leave plan
+					// blank so it skips DO debit until the row exists.
+					return orgIDStr, "", true
+				}
+				return orgIDStr, org.Plan, true
+			}
+		}
 		redisPub, err := worker.NewRedisEventPublisher(worker.RedisEventPublisherConfig{
 			RedisURL:   cfg.RedisURL,
 			SandboxDBs: sandboxDBMgr,
 			CellID:     cfg.CellID,
 			WorkerID:   cfg.WorkerID,
+			Resolver:   planResolver,
 		})
 		if err != nil {
 			log.Printf("opensandbox-worker: Redis event publisher init failed: %v (continuing)", err)
 		} else {
+			// Wire the publisher as the SandboxDBManager's OnRemove hook so
+			// terminal events (stopped, hibernated) are synchronously flushed
+			// to Redis BEFORE the SQLite file is deleted. The destroy /
+			// hibernate gRPC handlers LogEvent + then call Remove; this hook
+			// closes the race that previously dropped those events.
+			sandboxDBMgr.SetOnRemove(func(sandboxID string) {
+				redisPub.FlushSandbox(context.Background(), sandboxID)
+			})
 			redisPub.Start(context.Background())
 			defer func() {
 				stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -692,6 +722,25 @@ func main() {
 	// Periodic SyncFS
 	autosaver := worker.NewWorkspaceAutosaver(mgr, autosaverSyncer, 5*time.Minute)
 	autosaver.Start()
+
+	// Usage ticker — drives the free-tier billing loop. Emits a usage_tick
+	// per running sandbox every 20s; events-ingest fans out to per-org
+	// CreditAccount DOs, which debit balance + dispatch halt when it
+	// hits zero. Without this the free-tier balance never decrements.
+	// Inert unless CellID is set (combined-mode dev without Redis stream
+	// would write events to /dev/null since there's no consumer).
+	if cfg.CellID != "" && mgr != nil {
+		usageTicker := worker.NewUsageTicker(mgr, sandboxDBMgr, 20*time.Second, 10)
+		if usageTicker != nil {
+			usageTicker.Start(context.Background())
+			defer func() {
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer stopCancel()
+				_ = usageTicker.Stop(stopCtx)
+			}()
+			log.Println("opensandbox-worker: usage ticker started (interval=20s, 10¢/tick)")
+		}
+	}
 
 	// Segment analytics — ships per-org GB-seconds memory usage. nil if SEGMENT_WRITE_KEY unset.
 	segmentClient := analytics.New(cfg.SegmentWriteKey)
@@ -1003,7 +1052,15 @@ func deleteOldHibernation(store *storage.CheckpointStore, key string) {
 }
 
 // processHibernateResults handles results from HibernateAll for both backends.
-func processHibernateResults(results interface{}, store *db.Store, checkpointStore *storage.CheckpointStore, extract func(interface{}) (string, string, error)) {
+//
+// In addition to updating cell-local PG, we LogEvent("hibernated") into the
+// per-sandbox SQLite then call sandboxDBs.Remove — the Remove hook flushes
+// any unsynced events (including this one) to Redis Streams synchronously.
+// events-ingest then mirrors the state to D1, keeping the dashboard list in
+// sync. Without this, the bulk-shutdown path silently skipped the lifecycle
+// event the gRPC HibernateSandbox handler emits per call, and D1 stayed
+// "running" until something else nudged it.
+func processHibernateResults(results interface{}, store *db.Store, checkpointStore *storage.CheckpointStore, sandboxDBs *sandbox.SandboxDBManager, extract func(interface{}) (string, string, error)) {
 	switch rs := results.(type) {
 	case []qm.HibernateAllResult:
 		for _, r := range rs {
@@ -1012,6 +1069,12 @@ func processHibernateResults(results interface{}, store *db.Store, checkpointSto
 				if store != nil {
 					errMsg := "hibernate failed on shutdown: " + r.Err.Error()
 					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "stopped", &errMsg)
+				}
+				if sandboxDBs != nil {
+					if sdb, err := sandboxDBs.Get(r.SandboxID); err == nil {
+						_ = sdb.LogEvent("stopped", map[string]string{"reason": "hibernate failed on shutdown"})
+					}
+					_ = sandboxDBs.Remove(r.SandboxID)
 				}
 				continue
 			}
@@ -1024,6 +1087,12 @@ func processHibernateResults(results interface{}, store *db.Store, checkpointSto
 					deleteOldHibernation(checkpointStore, superseded)
 					_ = store.UpdateSandboxSessionStatus(context.Background(), r.SandboxID, "hibernated", nil)
 				}
+			}
+			if sandboxDBs != nil {
+				if sdb, err := sandboxDBs.Get(r.SandboxID); err == nil {
+					_ = sdb.LogEvent("hibernated", map[string]string{"key": r.HibernationKey, "reason": "graceful_shutdown"})
+				}
+				_ = sandboxDBs.Remove(r.SandboxID)
 			}
 		}
 	}

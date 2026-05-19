@@ -212,6 +212,13 @@ type Config struct {
 	// to catch missed halt webhooks. Empty disables the reconciler.
 	HaltListURL string
 
+	// CF edge base URL — root of the api-edge Worker (e.g.
+	// "https://app.dev.opensandbox.ai"). Used to construct /internal/*
+	// HMAC endpoints for stateless template + secret-store lookup at
+	// sandbox-create time. HMAC secret is CFEventSecret (same one used
+	// for the event forwarder + halt-list).
+	CFEdgeBaseURL string
+
 	// Multi-cloud abstraction. Selects which compute pool the autoscaler uses.
 	// Valid values: "azure", "aws", "" (autodetect from existing fields).
 	// Adding a new cloud means a new compute.Pool implementation + a new
@@ -372,6 +379,7 @@ func Load() (*Config, error) {
 		CFAdminSecret:    os.Getenv("OPENSANDBOX_CF_ADMIN_SECRET"),
 		SessionJWTSecret: os.Getenv("OPENSANDBOX_SESSION_JWT_SECRET"),
 		HaltListURL:      os.Getenv("OPENSANDBOX_HALT_LIST_URL"),
+		CFEdgeBaseURL:    os.Getenv("OPENSANDBOX_CF_EDGE_BASE_URL"),
 
 		ComputeProvider: os.Getenv("OPENSANDBOX_COMPUTE_PROVIDER"),
 		SecretsProvider: envOrDefault("OPENSANDBOX_SECRETS_PROVIDER", "env"),

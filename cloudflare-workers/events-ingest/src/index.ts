@@ -3,18 +3,17 @@
 // Pipeline:
 //   1. Verify HMAC signature + X-Timestamp freshness (±5 min)
 //   2. Parse batch (JSON array of SandboxEvent envelopes)
-//   3. KV dedup via seen:{event_id}
-//   4. D1 batch insert into events table
-//   5. R2 archive raw batch at raw/{cell_id}/{yyyy-mm-dd}/{batch_id}.json.gz
-//   6. KV put seen:{event_id} TTL 24h for each accepted event
-//   7. Return 202 {accepted, deduped}
-//
-// Stage 1 stops here. The DO /debit fan-out for free-tier usage_tick events
-// is added in Stage 2.
+//   3. D1 batch insert into events table (events.id PRIMARY KEY +
+//      ON CONFLICT DO NOTHING is the dedup — KV was redundant and the
+//      get() volume blew the daily KV quota, taking down ingest)
+//   4. R2 archive raw batch at raw/{cell_id}/{yyyy-mm-dd}/{batch_id}.json.gz
+//   5. DO /debit fan-out for free-tier usage_tick events (out-of-band via
+//      waitUntil — never blocks the ack so CP forwarder isn't stalled by
+//      cross-DO traffic latency)
+//   6. Return 202 {accepted}
 
 export interface Env {
   OPENCOMPUTER_DB: D1Database;
-  SESSIONS_KV: KVNamespace;
   EVENTS_ARCHIVE: R2Bucket;
   CREDIT_ACCOUNT: DurableObjectNamespace;
   EVENT_SECRET: string;
@@ -35,10 +34,9 @@ interface SandboxEventEnvelope {
 }
 
 const SIGNATURE_WINDOW_SEC = 5 * 60;
-const KV_DEDUP_TTL_SEC = 24 * 60 * 60;
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
 
     if (url.pathname === "/health") {
@@ -85,31 +83,15 @@ export default {
       return jsonResponse({ error: "invalid JSON" }, 400);
     }
     if (envelopes.length === 0) {
-      return jsonResponse({ accepted: 0, deduped: 0 }, 202);
+      return jsonResponse({ accepted: 0 }, 202);
     }
 
-    // KV dedup — but skip it for cell_capacity events. Those are idempotent
-    // UPDATEs (writing the same values twice has no effect), and they're high
-    // volume (one per cell per ~30s), so deduping them just burns KV reads.
-    // Sandbox lifecycle events still get the dedup because they're sometimes
-    // not idempotent at the downstream consumer (e.g. DO /debit calls).
-    const needsDedup = envelopes.map((e) => e.type !== "cell_capacity");
-    const seenChecks = await Promise.all(
-      envelopes.map((e, i) => (needsDedup[i] ? env.SESSIONS_KV.get(`seen:${e.id}`) : Promise.resolve(null))),
-    );
-    const fresh: SandboxEventEnvelope[] = [];
-    let deduped = 0;
-    for (let i = 0; i < envelopes.length; i++) {
-      if (seenChecks[i]) {
-        deduped++;
-      } else {
-        fresh.push(envelopes[i]);
-      }
-    }
-
-    if (fresh.length === 0) {
-      return jsonResponse({ accepted: 0, deduped }, 202);
-    }
+    // Dedup is handled by D1: events.id is PRIMARY KEY and the INSERT uses
+    // ON CONFLICT(id) DO NOTHING, so replays are silently dropped at the
+    // storage layer. We used to also gate behind a KV `seen:{id}` lookup,
+    // but the per-request get() spent ~95% of the workers-KV daily cap and
+    // ended up failing every single ingest call. Trust D1.
+    const fresh = envelopes;
 
     // D1 batch insert. 11 columns: id, cell_id, type, org_id, sandbox_id,
     // user_id (null for now — not in envelope), worker_id, ts (unix ms), payload.
@@ -147,6 +129,32 @@ export default {
          WHERE cell_id = ?5
            AND (capacity_updated_at IS NULL OR capacity_updated_at < ?4)`,
     );
+
+    // Sandbox lifecycle events: keep sandboxes_index in sync with cell-side
+    // state changes so the dashboard's cross-cell view is accurate without a
+    // separate reconciler. monotonic WHERE clause guards against out-of-order
+    // delivery (XAUTOCLAIM replays, network retries) — last_event_at can only
+    // move forward.
+    //
+    // - stopped:    terminal; stamp stopped_at.
+    // - hibernated: not terminal; stopped_at stays null so wake works.
+    // - running:    create/wake; clear stopped_at to handle the
+    //               hibernated → running flip after a wake.
+    const lifecycleStopped = env.OPENCOMPUTER_DB.prepare(
+      `UPDATE sandboxes_index
+          SET status = 'stopped', stopped_at = ?1, last_event_at = ?1
+        WHERE id = ?2 AND (last_event_at IS NULL OR last_event_at < ?1)`,
+    );
+    const lifecycleHibernated = env.OPENCOMPUTER_DB.prepare(
+      `UPDATE sandboxes_index
+          SET status = 'hibernated', last_event_at = ?1
+        WHERE id = ?2 AND (last_event_at IS NULL OR last_event_at < ?1)`,
+    );
+    const lifecycleRunning = env.OPENCOMPUTER_DB.prepare(
+      `UPDATE sandboxes_index
+          SET status = 'running', stopped_at = NULL, last_event_at = ?1
+        WHERE id = ?2 AND (last_event_at IS NULL OR last_event_at < ?1)`,
+    );
     const capacityBatches = fresh
       .filter((e) => e.type === "cell_capacity")
       .map((e) => {
@@ -166,8 +174,20 @@ export default {
         );
       });
 
+    const lifecycleBatches = fresh
+      .filter((e) => e.sandbox_id && (e.type === "stopped" || e.type === "hibernated" || e.type === "running" || e.type === "woke" || e.type === "created"))
+      .map((e) => {
+        const tsSec = Math.floor((Date.parse(e.timestamp) || Date.now()) / 1000);
+        if (e.type === "stopped") return lifecycleStopped.bind(tsSec, e.sandbox_id);
+        if (e.type === "hibernated") return lifecycleHibernated.bind(tsSec, e.sandbox_id);
+        // "running", "woke", "created" all set the row to running (created
+        // is handled by the edge on POST, but accept here for redundancy
+        // in case of replay against a future cell-only create path).
+        return lifecycleRunning.bind(tsSec, e.sandbox_id);
+      });
+
     try {
-      await env.OPENCOMPUTER_DB.batch([...batches, ...capacityBatches]);
+      await env.OPENCOMPUTER_DB.batch([...batches, ...capacityBatches, ...lifecycleBatches]);
     } catch (err) {
       // Database errors are retryable — return 5xx so the CP forwarder
       // leaves the batch in the PEL.
@@ -189,18 +209,52 @@ export default {
       console.error("events-ingest: R2 archive failed (continuing)", err);
     }
 
-    // KV dedup markers (24h TTL) — fire and forget per event. Skip cell_capacity
-    // events for the same reason we skipped them on the read path: idempotent,
-    // high volume, KV writes are quota-bound.
-    await Promise.all(
-      fresh
-        .filter((e) => e.type !== "cell_capacity")
-        .map((e) => env.SESSIONS_KV.put(`seen:${e.id}`, "1", { expirationTtl: KV_DEDUP_TTL_SEC })),
-    );
+    // DO /debit fan-out — for free-tier usage_tick events only. Each event
+    // routes to a per-org DO instance; we hand off to waitUntil so cross-DO
+    // latency never holds the CP forwarder's ack.
+    //
+    // Pro orgs are filtered here (cheap) rather than in the DO so we avoid
+    // even allocating the DO stub for orgs that don't need debit accounting.
+    // Events without plan="free" are silently skipped — the CP forwarder
+    // populates `plan` from PG at emit time.
+    const debitTargets = fresh.filter((e) => e.type === "usage_tick" && e.plan === "free" && e.org_id);
+    if (debitTargets.length > 0) {
+      ctx.waitUntil(fanoutDebits(env, debitTargets));
+    }
 
-    return jsonResponse({ accepted: fresh.length, deduped }, 202);
+    return jsonResponse({ accepted: fresh.length }, 202);
   },
 } satisfies ExportedHandler<Env>;
+
+// fanoutDebits dispatches one /debit per usage_tick event to its org's DO.
+// Per-event errors are swallowed — DO is idempotent on event_id (LRU dedup)
+// so the CP forwarder's automatic retry covers transient DO unavailability
+// without risking double-debit.
+async function fanoutDebits(env: Env, events: SandboxEventEnvelope[]): Promise<void> {
+  await Promise.all(
+    events.map(async (e) => {
+      try {
+        const id = env.CREDIT_ACCOUNT.idFromName(e.org_id!);
+        const stub = env.CREDIT_ACCOUNT.get(id);
+        const payload = (e.payload ?? {}) as { cost_cents?: number };
+        const body = JSON.stringify({
+          event_id: e.id,
+          amount_cents: payload.cost_cents ?? 0,
+        });
+        const resp = await stub.fetch(`https://do/debit?org_id=${encodeURIComponent(e.org_id!)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+        if (resp.status >= 400) {
+          console.error(`events-ingest: DO /debit ${e.org_id} returned ${resp.status} (event ${e.id})`);
+        }
+      } catch (err) {
+        console.error(`events-ingest: DO /debit ${e.org_id} threw`, err);
+      }
+    }),
+  );
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -230,8 +284,14 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-async function gzip(input: string): Promise<ReadableStream<Uint8Array>> {
-  const stream = new Response(input).body;
-  if (!stream) throw new Error("body stream null");
-  return stream.pipeThrough(new CompressionStream("gzip"));
+// Returns gzipped bytes as a Uint8Array. R2 requires a known length on
+// the body — a raw pipeThrough(CompressionStream) ReadableStream has
+// unknown length and trips "Provided readable stream must have a known
+// length". Buffering into a Uint8Array gives R2 a length without a
+// streaming primitive.
+async function gzip(input: string): Promise<Uint8Array> {
+  const body = new Response(input).body;
+  if (!body) throw new Error("body stream null");
+  const compressed = body.pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(compressed).arrayBuffer());
 }

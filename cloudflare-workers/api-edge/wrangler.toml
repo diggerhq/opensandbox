@@ -15,30 +15,40 @@ compatibility_date = "2026-04-28"
 compatibility_flags = ["nodejs_compat"]
 account_id = "1241f114453e32d292197e3fb36210b2"
 
-# Routes (production binding — left off until cert strategy is settled):
+# Preview URL routing. Sandboxes expose ports via stable hostnames of the form
+#   sb-{sandboxID}-p{port}.sb.opensandbox.ai
+# regardless of which cell the sandbox is on; the Worker resolves
+# sandboxes_index.cell_id at request time and forwards via that cell's CF
+# Tunnel, so cell migration is invisible to the user.
 #
-#   Sandbox preview URLs match by hostname (sb-{id}-p{port}.<host>) in Worker
-#   code regardless of how the request reaches us, so the smoke test works
-#   today via Host-header override against the workers.dev URL. For real
-#   public traffic, we need a route binding + matching wildcard DNS + cert.
+# Wildcards in CF Worker routes must be at the start of the hostname, so
+# `sb-*.opensandbox.ai/*` is invalid. We use `*.sb.opensandbox.ai/*` instead:
+# the `.sb.` middle label creates a namespace that ONLY preview URLs use,
+# isolating this rule from cp-*.opensandbox.ai (tunnels), app2.opensandbox.ai
+# (dashboard), and events-app2.opensandbox.ai (events-ingest).
 #
-#   CF Workers routes only allow `*` at the START of the hostname, so
-#   `sb-*.opensandbox.ai/*` is invalid. Options for production:
-#     (a) "*.opensandbox.ai/*" with code that 404s non-sb-prefix hosts —
-#         would also intercept cp-dev2.opensandbox.ai (the tunnels), which
-#         breaks the edge→cell path. Don't do this.
-#     (b) Dedicated subdomain "*.sb.opensandbox.ai/*" — clean separation
-#         from cp-*, app, events. But two-level wildcard isn't covered by
-#         Cloudflare Universal SSL — needs Advanced Certificate Manager
-#         (~$10/mo) OR a self-uploaded wildcard cert.
-#     (c) Separate zone for previews (e.g. opensandbox.run) — clean but
-#         requires owning + provisioning another domain.
-#
-# Recommended end state: option (b) with Advanced Cert Manager. Until then
-# preview URLs work through code, not DNS — fine for dev validation.
-# routes = [
-#   { pattern = "*.sb.opensandbox.ai/*", zone_name = "opensandbox.ai" },
-# ]
+# Two-level wildcards aren't covered by CF Universal SSL — needs Advanced
+# Certificate Manager ($10/mo, RSA-2048 via Google Trust Services). Cert
+# ordered 2026-05-18 for *.sb.opensandbox.ai + sb.opensandbox.ai.
+routes = [
+  { pattern = "*.sb.opensandbox.ai/*", zone_name = "opensandbox.ai" },
+]
+
+# Static assets — the dashboard SPA. Built from `web/` by the deploy script
+# (web/dist/ → cloudflare-workers/api-edge/assets/). The Worker handles
+# explicit API/auth/webhook paths; anything else falls through to the SPA's
+# index.html so client-side routing works.
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Run Worker first for EVERY request. The Worker dispatches by hostname
+# (e.g. sb-*-p*.sb.opensandbox.ai → preview URL forwarder) AND by path
+# (/api/*, /auth/*, /internal/*), then explicitly delegates to env.ASSETS
+# at the bottom for anything unhandled — typically the dashboard SPA. Without
+# this, the assets binding short-circuits hostname-based dispatch and returns
+# index.html for / on every hostname, including preview URLs.
+run_worker_first = true
 
 [[d1_databases]]
 binding = "OPENCOMPUTER_DB"
@@ -74,3 +84,9 @@ WORKER_ENV = "dev"
 # the D1 `cells` table (see schema.sql + scripts/seed_dev_xcell.sh).
 # Cross-cell testbed: dev2 (Azure westus2) + dev3 (AWS us-east-1).
 CELLS = "azure-us-west-2-b,aws-us-east-1-a"
+
+# Ship console output + exceptions to opensandbox-log-tail, which forwards
+# to Axiom dataset cf-dev. Keeps CF Worker logs durable in the same store
+# as the VM journald stream so we can cross-correlate edge ↔ cell.
+[[tail_consumers]]
+service = "opensandbox-log-tail"

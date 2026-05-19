@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -544,12 +545,16 @@ func (s *HTTPServer) ptyWebSocket(c echo.Context) error {
 	id := c.Param("id")
 	sessionID := c.Param("sessionID")
 
+	log.Printf("worker PTY: WS request for sandbox=%s session=%s", id, sessionID)
+
 	session, err := s.ptyManager.GetSession(sessionID)
 	if err != nil {
+		log.Printf("worker PTY: GetSession(%s) failed: %v", sessionID, err)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
 	}
 
 	if session.SandboxID != id {
+		log.Printf("worker PTY: session.SandboxID=%s does not match path id=%s", session.SandboxID, id)
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "session not found"})
 	}
 
@@ -560,42 +565,57 @@ func (s *HTTPServer) ptyWebSocket(c echo.Context) error {
 
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
+		log.Printf("worker PTY: upgrade failed: %v", err)
 		return err
 	}
 	defer ws.Close()
+	log.Printf("worker PTY: WS upgraded for sandbox=%s session=%s", id, sessionID)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
+		var totalBytes int64
+		var firstLogged bool
 		for {
 			n, err := session.PTY.Read(buf)
 			if n > 0 {
+				if !firstLogged {
+					log.Printf("worker PTY: first PTY read for session=%s, %d bytes: %q", sessionID, n, string(buf[:min(n, 80)]))
+					firstLogged = true
+				}
+				totalBytes += int64(n)
 				// Touch on PTY output to keep sandbox alive
 				if s.router != nil {
 					s.router.Touch(id)
 				}
 				if writeErr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
+					log.Printf("worker PTY: ws write failed (sent %d bytes): %v", totalBytes, writeErr)
 					return
 				}
 			}
 			if err != nil {
+				log.Printf("worker PTY: PTY read closed (sent %d bytes): %v", totalBytes, err)
 				return
 			}
 		}
 	}()
 
 	go func() {
+		var totalBytes int64
 		for {
 			_, msg, err := ws.ReadMessage()
 			if err != nil {
+				log.Printf("worker PTY: ws read closed (received %d bytes): %v", totalBytes, err)
 				return
 			}
+			totalBytes += int64(len(msg))
 			// Touch on PTY input to keep sandbox alive
 			if s.router != nil {
 				s.router.Touch(id)
 			}
 			if _, err := session.PTY.Write(msg); err != nil {
+				log.Printf("worker PTY: PTY write failed (received %d bytes): %v", totalBytes, err)
 				return
 			}
 		}

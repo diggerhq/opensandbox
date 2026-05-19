@@ -184,7 +184,8 @@ func (b *SecretsManagerBackend) LoadAllByNameList(ctx context.Context, names []s
 			}
 			if b.ModePrefixFilter != "" &&
 				!strings.HasPrefix(name, b.ModePrefixFilter+"-") &&
-				!strings.HasPrefix(name, "pg-") {
+				!strings.HasPrefix(name, "pg-") &&
+				!strings.HasPrefix(name, "shared-") {
 				continue
 			}
 			if os.Getenv(envVar) != "" {

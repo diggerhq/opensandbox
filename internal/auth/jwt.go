@@ -137,15 +137,25 @@ type CapabilityClaims struct {
 	OrgID  string  `json:"org_id"`
 	CellID string  `json:"cell_id"`
 	UserID *string `json:"user_id,omitempty"`
+	// Plan is the org's billing plan ("free" | "pro") at token-mint time.
+	// The CP forwards this to the worker so it can tag usage_tick events
+	// without a per-event PG lookup. Plan may go stale (org upgrades while
+	// a sandbox is running) — that's fine: the events-ingest fan-out is
+	// idempotent, and the DO knows the current plan from D1 so it no-ops
+	// debits for a now-pro org.
+	Plan string `json:"plan,omitempty"`
 }
 
 // CapabilityIssuer is the Issuer string on capability tokens — lets the CP
 // reject a session JWT presented where a capability token is expected.
 const CapabilityIssuer = "opensandbox-edge"
 
-// IssueCapabilityToken mints a capability token for (orgID, cellID). userID may
-// be nil (API-key-authenticated callers have no user).
-func (j *JWTIssuer) IssueCapabilityToken(orgID, cellID string, userID *string, ttl time.Duration) (string, error) {
+// IssueCapabilityToken mints a capability token for (orgID, cellID, plan).
+// userID may be nil (API-key-authenticated callers have no user). plan may
+// be empty when the caller doesn't have it handy — the cell will then
+// fall back to a PG lookup, which is a small performance hit but never
+// incorrect.
+func (j *JWTIssuer) IssueCapabilityToken(orgID, cellID, plan string, userID *string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := CapabilityClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -157,6 +167,7 @@ func (j *JWTIssuer) IssueCapabilityToken(orgID, cellID string, userID *string, t
 		OrgID:  orgID,
 		CellID: cellID,
 		UserID: userID,
+		Plan:   plan,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(j.secret)

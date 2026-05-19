@@ -37,6 +37,21 @@ func (s *Server) capTokenMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			})
 		}
 		c.Set(capClaimsKey, claims)
+		// Set the standard auth context fields too — dashboard handlers (and
+		// many others) call auth.GetOrgID(c) / c.Get("user_id") rather than
+		// digging out the cap-claims directly. internalCreateSandbox sets
+		// these itself for back-compat (the original capTokenMiddleware did
+		// not set them), but every other capTokenMiddleware-gated route
+		// would 401 without this — including the /internal/dashboard/*
+		// routes the api-edge proxies to.
+		if orgID, perr := uuid.Parse(claims.OrgID); perr == nil {
+			auth.SetOrgID(c, orgID)
+		}
+		if claims.UserID != nil {
+			if uid, perr := uuid.Parse(*claims.UserID); perr == nil {
+				auth.SetUserID(c, uid)
+			}
+		}
 		return next(c)
 	}
 }
@@ -63,6 +78,30 @@ func (s *Server) internalCreateSandbox(c echo.Context) error {
 		}
 	}
 
+	// Ensure the cell-local orgs row exists. The edge is authoritative on
+	// org identity (it just minted this cap-token), so we trust the claims
+	// and lazily materialize the row here. Plan comes from the cap-token so
+	// the worker's event resolver can tag usage_tick events correctly.
+	if s.store != nil {
+		if upErr := s.store.UpsertOrgFromCapToken(c.Request().Context(), orgID, claims.Plan); upErr != nil {
+			// Non-fatal — the create may still succeed; downstream gates fall through
+			// when the row is missing. Logged so ops can investigate persistent failures.
+			c.Logger().Errorf("upsert org from cap-token: %v", upErr)
+		}
+		// Also upsert the user. sandbox_sessions.user_id has an FK to users(id),
+		// so without this the session insert in createSandboxRemote silently
+		// fails (the errors are discarded with `_, _ =`) and the sandbox ends
+		// up only in D1 sandboxes_index — never in cell PG, so subsequent
+		// exec/wake/etc requests return "sandbox not found".
+		if claims.UserID != nil {
+			if uid, err := uuid.Parse(*claims.UserID); err == nil {
+				if upErr := s.store.UpsertUserFromCapToken(c.Request().Context(), uid, orgID); upErr != nil {
+					c.Logger().Errorf("upsert user from cap-token: %v", upErr)
+				}
+			}
+		}
+	}
+
 	var cfg types.SandboxConfig
 	if err := c.Bind(&cfg); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
@@ -80,9 +119,21 @@ func (s *Server) internalCreateSandbox(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
+	// Resolve secret store binding (if cfg.SecretStore is set). The edge-first
+	// path puts the user's POST /api/sandboxes body through this handler
+	// verbatim, so any caller passing {"secretStore": "<name>"} expects it to
+	// be resolved here. resolveSecretStoreInto consults the edge over HMAC
+	// when s.edge is configured, decrypts entries with the shared key, and
+	// populates cfg.SecretEnvs + cfg.EgressAllowlist. Pre-fix this was nil,
+	// silently dropping the binding and leaving sandboxes without their
+	// requested secrets.
+	secretStoreID, err := s.resolveSecretStoreInto(c.Request().Context(), orgID, &cfg)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
+	}
+
 	// Reuse the normal remote-create path — picks a worker, dispatches via
 	// gRPC, persists the session, writes the {sandboxID, token, status, ...}
-	// response body. secretStoreID is nil here — cap-token callers don't
-	// reference an org-uploaded secret store (that's a /api/sandboxes feature).
-	return s.createSandboxRemote(c, c.Request().Context(), cfg, orgID, true, nil)
+	// response body.
+	return s.createSandboxRemote(c, c.Request().Context(), cfg, orgID, true, secretStoreID)
 }
