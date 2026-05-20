@@ -31,6 +31,13 @@ func (s *Store) SetEncryptor(enc *crypto.Encryptor) {
 	s.encryptor = enc
 }
 
+// Encryptor exposes the configured encryption helper so callers outside the
+// db package (edgeclient.LookupSecretStore, etc.) can decrypt with the same
+// shared SECRET_ENCRYPTION_KEY without holding their own copy.
+func (s *Store) Encryptor() *crypto.Encryptor {
+	return s.encryptor
+}
+
 // NewStore creates a new Store with a connection pool.
 func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	poolCfg, err := pgxpool.ParseConfig(databaseURL)
@@ -133,6 +140,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{40, "migrations/040_add_updated_at.up.sql"},
 		{41, "migrations/041_updated_at_triggers_remaining.up.sql"},
 		{42, "migrations/042_global_sync_outbox.up.sql"},
+		{43, "migrations/043_credit_halt.up.sql"},
 	}
 
 	for _, m := range migrations {
@@ -210,6 +218,13 @@ type Org struct {
 	// today's tiered rates — the column controls *how* events are
 	// emitted, not what the customer pays.
 	BillingMode string `json:"billingMode"`
+
+	// Cell-local mirror of the CreditAccount DO's halt status. Written by
+	// the /admin/halt-org webhook handler and cleared by /admin/resume-org.
+	// The wake handler gates on this column when CF billing is enabled;
+	// FreeCreditsRemainingCents is preserved but no longer authoritative.
+	IsHalted bool       `json:"isHalted"`
+	HaltedAt *time.Time `json:"haltedAt,omitempty"`
 }
 
 // orgColumns is the list of columns returned by all Org queries.
@@ -218,7 +233,7 @@ const orgColumns = `id, name, slug, plan, max_concurrent_sandboxes, max_sandbox_
 	verification_txt_name, verification_txt_value, ssl_txt_name, ssl_txt_value,
 	workos_org_id, is_personal, owner_user_id, credit_balance_cents,
 	stripe_customer_id, stripe_subscription_id, last_usage_reported_at, price_locked,
-	free_credits_remaining_cents, billing_mode`
+	free_credits_remaining_cents, billing_mode, is_halted, halted_at`
 
 // scanOrg scans a row into an Org struct.
 func scanOrg(row pgx.Row) (*Org, error) {
@@ -232,8 +247,121 @@ func scanOrg(row pgx.Row) (*Org, error) {
 		&org.StripeCustomerID, &org.StripeSubscriptionID, &org.LastUsageReportedAt,
 		&org.PriceLocked,
 		&org.FreeCreditsRemainingCents, &org.BillingMode,
+		&org.IsHalted, &org.HaltedAt,
 	)
 	return org, err
+}
+
+// UpsertUserFromCapToken inserts a minimal users row if one doesn't exist
+// for the given user_id + org_id. sandbox_sessions.user_id has an FK to
+// users(id), so without this the session insert silently fails (the existing
+// createSandboxRemote discards CreateSandboxSession errors) and the SDK gets
+// a misleading 200 from the create endpoint with a sandbox that doesn't
+// actually exist in PG. Called alongside UpsertOrgFromCapToken.
+//
+// We don't know the user's email here (cap-token doesn't carry it), so we
+// stamp a placeholder that the WorkOS auth path on the edge would normally
+// fill in. The placeholder is keyed on user_id so a future real WorkOS row
+// for the same email doesn't collide.
+func (s *Store) UpsertUserFromCapToken(ctx context.Context, userID, orgID uuid.UUID) error {
+	placeholderEmail := "user-" + userID.String()[:8] + "@edge.opensandbox"
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO users (id, org_id, email, name, role)
+		 VALUES ($1, $2, $3, $4, 'member')
+		 ON CONFLICT (id) DO NOTHING`,
+		userID, orgID, placeholderEmail, "edge user",
+	)
+	if err != nil {
+		return fmt.Errorf("upsert user from cap-token: %w", err)
+	}
+	return nil
+}
+
+// UpsertOrgFromCapToken inserts a minimal orgs row if one doesn't exist for the
+// given org_id, so the rest of the cell-local code (free-tier checks, halt
+// state mirror, etc.) has something to look at. Called by the cap-token path
+// before sandbox create — when the edge has authoritatively decided this org
+// is valid, but the cell PG may not have seen it yet (no backfill).
+//
+// Plan from the cap-token wins on insert; on conflict we update plan so a
+// pro-upgrade reflected at the edge propagates to the cell on the next
+// sandbox-create round-trip without a separate sync job.
+func (s *Store) UpsertOrgFromCapToken(ctx context.Context, orgID uuid.UUID, plan string) error {
+	if plan != "pro" {
+		plan = "free"
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO orgs (id, name, slug, plan)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (id) DO UPDATE SET plan = EXCLUDED.plan, updated_at = NOW()
+		 WHERE orgs.plan IS DISTINCT FROM EXCLUDED.plan`,
+		orgID, "org-"+orgID.String()[:8], orgID.String(), plan,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert org from cap-token: %w", err)
+	}
+	return nil
+}
+
+// UpdateOrgHaltState mirrors the CreditAccount DO's halt decision to the
+// cell-local orgs table. Called by /admin/halt-org and /admin/resume-org
+// handlers. If the row doesn't exist (org never created a sandbox here),
+// we no-op rather than insert — there's no sandbox to halt anyway.
+func (s *Store) UpdateOrgHaltState(ctx context.Context, orgID uuid.UUID, halted bool) error {
+	var ts interface{}
+	if halted {
+		ts = time.Now()
+	} else {
+		ts = nil
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE orgs SET is_halted = $1, halted_at = $2, updated_at = NOW() WHERE id = $3`,
+		halted, ts, orgID,
+	)
+	if err != nil {
+		return fmt.Errorf("update org halt state: %w", err)
+	}
+	return nil
+}
+
+// SetSandboxHaltReason stamps halt_reason on a sandbox_session, used to
+// distinguish credit-driven halts (which ResumeOrg should wake) from
+// user-initiated hibernations (which it should leave alone).
+func (s *Store) SetSandboxHaltReason(ctx context.Context, sandboxID, reason string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE sandbox_sessions SET halt_reason = $1 WHERE sandbox_id = $2`,
+		reason, sandboxID,
+	)
+	if err != nil {
+		return fmt.Errorf("set halt reason: %w", err)
+	}
+	return nil
+}
+
+// ListSandboxSessionsByHaltReason returns hibernated sandboxes for an org
+// filtered by halt_reason — used by ResumeOrg to wake only credit-halts and
+// leave manual hibernations alone.
+func (s *Store) ListSandboxSessionsByHaltReason(ctx context.Context, orgID uuid.UUID, reason string) ([]SandboxSession, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, sandbox_id, org_id, user_id, template, region, worker_id, status, config, metadata, started_at, stopped_at, error_msg, based_on_checkpoint_id, last_patch_sequence, patch_error, golden_version
+		 FROM sandbox_sessions WHERE org_id = $1 AND status = 'hibernated' AND halt_reason = $2`,
+		orgID, reason,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list halted sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []SandboxSession
+	for rows.Next() {
+		var sess SandboxSession
+		if err := rows.Scan(&sess.ID, &sess.SandboxID, &sess.OrgID, &sess.UserID, &sess.Template,
+			&sess.Region, &sess.WorkerID, &sess.Status, &sess.Config, &sess.Metadata,
+			&sess.StartedAt, &sess.StoppedAt, &sess.ErrorMsg, &sess.BasedOnCheckpointID, &sess.LastPatchSequence, &sess.PatchError, &sess.GoldenVersion); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) CreateOrg(ctx context.Context, name, slug string) (*Org, error) {

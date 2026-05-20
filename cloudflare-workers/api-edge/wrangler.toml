@@ -1,0 +1,92 @@
+# api-edge Worker — global API entry point at app.opencomputer.dev / app.dev.opensandbox.ai
+#
+# Routes:
+#   POST /auth/login, /auth/refresh, /auth/logout — WorkOS flow + session JWT
+#   POST /webhooks/stripe                          — Stripe webhook (DO /mark-pro)
+#   POST /api/sandboxes                            — create flow (auth + credit check + cell select + cap-token mint + proxy to CP)
+#   GET  /api/sandboxes                            — cross-region list (D1 sandboxes_index)
+#   GET  /api/sandboxes/{id}                       — metadata with cell_endpoint
+#   ANY  /api/sandboxes/{id}/*                     — 307 redirect to {cell_id}.app.opensandbox.ai (dumb-client fallback)
+#   GET  /internal/halt-list                       — HMAC-auth, called by CP halt_reconciler
+
+name = "opensandbox-edge-dev"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "1241f114453e32d292197e3fb36210b2"
+
+# Preview URL routing. Sandboxes expose ports via stable hostnames of the form
+#   sb-{sandboxID}-p{port}.sb.opensandbox.ai
+# regardless of which cell the sandbox is on; the Worker resolves
+# sandboxes_index.cell_id at request time and forwards via that cell's CF
+# Tunnel, so cell migration is invisible to the user.
+#
+# Wildcards in CF Worker routes must be at the start of the hostname, so
+# `sb-*.opensandbox.ai/*` is invalid. We use `*.sb.opensandbox.ai/*` instead:
+# the `.sb.` middle label creates a namespace that ONLY preview URLs use,
+# isolating this rule from cp-*.opensandbox.ai (tunnels), app2.opensandbox.ai
+# (dashboard), and events-app2.opensandbox.ai (events-ingest).
+#
+# Two-level wildcards aren't covered by CF Universal SSL — needs Advanced
+# Certificate Manager ($10/mo, RSA-2048 via Google Trust Services). Cert
+# ordered 2026-05-18 for *.sb.opensandbox.ai + sb.opensandbox.ai.
+routes = [
+  { pattern = "*.sb.opensandbox.ai/*", zone_name = "opensandbox.ai" },
+]
+
+# Static assets — the dashboard SPA. Built from `web/` by the deploy script
+# (web/dist/ → cloudflare-workers/api-edge/assets/). The Worker handles
+# explicit API/auth/webhook paths; anything else falls through to the SPA's
+# index.html so client-side routing works.
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Run Worker first for EVERY request. The Worker dispatches by hostname
+# (e.g. sb-*-p*.sb.opensandbox.ai → preview URL forwarder) AND by path
+# (/api/*, /auth/*, /internal/*), then explicitly delegates to env.ASSETS
+# at the bottom for anything unhandled — typically the dashboard SPA. Without
+# this, the assets binding short-circuits hostname-based dispatch and returns
+# index.html for / on every hostname, including preview URLs.
+run_worker_first = true
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-dev"
+database_id = "f9e534bf-a9f3-4b30-81cd-f9eb9087e96d"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "694f22abd551461da4ad99839f161b2f"
+
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+script_name = "opensandbox-edge-dev"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CreditAccount"]
+
+# Secrets (set via `wrangler secret put`):
+#   SESSION_JWT_SECRET     — HMAC for session JWT (shared with all CPs in cell fleet)
+#   CF_ADMIN_SECRET        — HMAC for /admin/halt-org and /admin/resume-org callbacks to CPs
+#   STRIPE_WEBHOOK_SECRET  — verifies inbound Stripe webhook signatures
+#   STRIPE_API_KEY         — for creating Stripe customer + subscription on /mark-pro
+#   WORKOS_API_KEY         — server-side WorkOS API for /auth/login
+#   WORKOS_CLIENT_ID       — WorkOS client identifier
+#   EVENT_SECRET           — HMAC for /internal/halt-list endpoint (shared with CP halt_reconciler)
+
+[vars]
+WORKER_ENV = "dev"
+# Cells available in this deployment — comma-separated cell_ids. The edge
+# validates cell selections against this list; each cell's base_url comes from
+# the D1 `cells` table (see schema.sql + scripts/seed_dev_xcell.sh).
+# Cross-cell testbed: dev2 (Azure westus2) + dev3 (AWS us-east-1).
+CELLS = "azure-us-west-2-b,aws-us-east-1-a"
+
+# Ship console output + exceptions to opensandbox-log-tail, which forwards
+# to Axiom dataset cf-dev. Keeps CF Worker logs durable in the same store
+# as the VM journald stream so we can cross-correlate edge ↔ cell.
+[[tail_consumers]]
+service = "opensandbox-log-tail"

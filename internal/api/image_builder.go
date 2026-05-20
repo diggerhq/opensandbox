@@ -226,6 +226,7 @@ func (s *Server) resolveImageManifest(ctx context.Context, orgID uuid.UUID, mani
 				log.Printf("image-builder: cache hit for hash %s but checkpoint %s is invalid, rebuilding",
 					contentHash[:12], cached.CheckpointID)
 				_ = s.store.DeleteImageCache(ctx, orgID, cached.ID)
+				s.publishImageCacheEvent(ctx, "image_cache_deleted", cached.ID, orgID, nil)
 			} else {
 				validHit := s.checkpointStore == nil
 				if !validHit {
@@ -334,6 +335,11 @@ func (s *Server) resolveImageManifest(ctx context.Context, orgID uuid.UUID, mani
 	build.checkpointID = checkpointID
 	if s.store != nil {
 		_ = s.store.SetImageCacheReady(ctx, cacheID, checkpointID)
+		// Sync to D1 images_index. Read back the now-ready row so the event
+		// carries the same data the dashboard expects (manifest, timestamps).
+		if ic, err := s.store.GetImageCacheByHash(ctx, orgID, contentHash); err == nil {
+			s.publishImageCacheReadyFrom(ctx, ic)
+		}
 	}
 
 	log.Printf("image-builder: built image hash=%s checkpoint=%s (%d steps)", contentHash[:12], checkpointID, len(manifest.Steps))

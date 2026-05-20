@@ -16,7 +16,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v6"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"github.com/opensandbox/opensandbox/internal/secrets"
 )
 
 // azureQuotaCodes are the error-message fragments the Azure ARM API uses for
@@ -71,15 +71,15 @@ const (
 
 // AzurePoolConfig configures the Azure compute pool.
 type AzurePoolConfig struct {
-	SubscriptionID     string
-	ResourceGroup      string
-	Region             string // e.g. "westus2"
-	VMSize             string // e.g. "Standard_D16s_v5"
-	ImageID            string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
-	SubnetID           string // full resource ID of the subnet
-	AdminUsername      string // SSH username (default: "azureuser")
-	SSHPublicKey       string // SSH public key content
-	DataDiskSizeGB     int    // data disk size (default: 256)
+	SubscriptionID  string
+	ResourceGroup   string
+	Region          string // e.g. "westus2"
+	VMSize          string // e.g. "Standard_D16s_v5"
+	ImageID         string // custom image ID or URN (e.g. "Canonical:ubuntu-24_04-lts:server:latest")
+	SubnetID        string // full resource ID of the subnet
+	AdminUsername   string // SSH username (default: "azureuser")
+	SSHPublicKey    string // SSH public key content
+	DataDiskSizeGB  int    // data disk size (default: 256)
 	WorkerEnvBase64 string // base64-encoded worker.env content (injected via cloud-init)
 	KeyVaultName    string // Azure Key Vault name for dynamic image ID refresh (e.g. "opensandbox-prod")
 	// WorkerIdentityID is the full resource ID of a UserAssigned managed
@@ -95,13 +95,27 @@ type AzurePoolConfig struct {
 }
 
 // AzurePool implements compute.Pool using Azure VMs.
+//
+// Worker bring-up: the CP injects a WorkerSpec via SetWorkerSpec at startup.
+// CreateMachine combines the spec with Azure-specific cloud-init (NVMe RAID,
+// AMI image-layout assumptions, Azure metadata fetches) to produce userdata.
 type AzurePool struct {
 	vmClient   *armcompute.VirtualMachinesClient
 	diskClient *armcompute.DisksClient
 	nicClient  *armnetwork.InterfacesClient
-	mu         sync.RWMutex // protects cfg.ImageID
+	mu         sync.RWMutex // protects cfg.ImageID + spec
 	cfg        AzurePoolConfig
-	kvClient   *azsecrets.Client // Key Vault client for dynamic image refresh (nil if not configured)
+	spec       WorkerSpec               // injected via SetWorkerSpec; copied into worker env on every CreateMachine
+	kvBackend  *secrets.KeyVaultBackend // Key Vault for dynamic image refresh (nil if not configured)
+}
+
+// SetWorkerSpec injects the cloud-neutral worker config the CP wants every
+// new worker VM to use. Idempotent — overwrites any previous spec.
+// Implements compute.WorkerSpecHolder.
+func (p *AzurePool) SetWorkerSpec(spec WorkerSpec) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.spec = spec
 }
 
 // NewAzurePool creates an Azure compute pool using default credentials (managed identity, CLI, env vars).
@@ -140,14 +154,16 @@ func NewAzurePool(cfg AzurePoolConfig) (*AzurePool, error) {
 		cfg:        cfg,
 	}
 
-	// Initialize Key Vault client for dynamic image refresh
+	// Initialize Key Vault backend for dynamic image refresh. Empty name map +
+	// empty mode prefix means we only use the Get() path; no bulk-load happens
+	// from this backend (server/worker bootstrap their own backend separately
+	// via internal/config/keyvault.go).
 	if cfg.KeyVaultName != "" {
-		vaultURL := fmt.Sprintf("https://%s.vault.azure.net/", cfg.KeyVaultName)
-		kvClient, err := azsecrets.NewClient(vaultURL, cred, nil)
+		be, err := secrets.NewKeyVaultBackend(cfg.KeyVaultName, nil, "")
 		if err != nil {
-			log.Printf("azure: Key Vault client failed (image refresh disabled): %v", err)
-		} else {
-			pool.kvClient = kvClient
+			log.Printf("azure: Key Vault backend failed (image refresh disabled): %v", err)
+		} else if be != nil {
+			pool.kvBackend = be
 			log.Printf("azure: Key Vault image refresh enabled (vault=%s)", cfg.KeyVaultName)
 		}
 	}
@@ -480,25 +496,27 @@ func (p *AzurePool) CleanupOrphanedResources(_ context.Context) (int, error) {
 // Satisfies the controlplane.AMIRefresher interface.
 // If Key Vault is not configured, returns the static image ID with no error.
 func (p *AzurePool) RefreshAMI(ctx context.Context) (imageID string, version string, err error) {
-	if p.kvClient == nil {
+	if p.kvBackend == nil {
 		p.mu.RLock()
 		defer p.mu.RUnlock()
 		return p.cfg.ImageID, "", nil
 	}
 
-	// Fetch image ID from Key Vault
-	resp, err := p.kvClient.GetSecret(ctx, "worker-image-id", "", nil)
+	newImageID, err := p.kvBackend.Get(ctx, "worker-image-id")
 	if err != nil {
 		return "", "", fmt.Errorf("azure: Key Vault get worker-image-id: %w", err)
 	}
-	if resp.Value == nil || *resp.Value == "" {
+	if newImageID == "" {
 		return "", "", fmt.Errorf("azure: Key Vault worker-image-id is empty")
 	}
-	newImageID := *resp.Value
 
-	// Fetch version
-	if vResp, vErr := p.kvClient.GetSecret(ctx, "worker-image-version", "", nil); vErr == nil && vResp.Value != nil {
-		version = *vResp.Value
+	// Version is optional — a missing key here just means "version unknown",
+	// not a failure. Any other error (network, perm) is also non-fatal because
+	// the image-id is what actually drives the refresh.
+	if v, vErr := p.kvBackend.Get(ctx, "worker-image-version"); vErr == nil {
+		version = v
+	} else if !errors.Is(vErr, secrets.ErrNotFound) {
+		log.Printf("azure: Key Vault worker-image-version fetch failed: %v (continuing)", vErr)
 	}
 
 	p.mu.Lock()
@@ -606,31 +624,67 @@ func (p *AzurePool) vmToMachine(vm *armcompute.VirtualMachine, nic *armnetwork.I
 }
 
 func (p *AzurePool) buildUserData(opts MachineOpts) string {
+	_ = opts // opts.Region/Size honored at VM-create level; cloud-init is cell-uniform
 	var sb strings.Builder
 	sb.WriteString("#!/bin/bash\nset -euo pipefail\n\n")
 
 	// Mount data disk as XFS with reflink (required for QEMU snapshot copies).
 	// v7 VMs have multiple local NVMe temp disks — RAID 0 them for max throughput.
-	sb.WriteString("# Mount data disk (RAID 0 across local NVMe, XFS with reflink)\n")
+	// SCSI-only SKUs (D-series, B-series, etc.) fall through to /dev/sdc+ probe.
+	//
+	// Two robustness guards baked in:
+	//  1. After successful mount, persist via /etc/fstab so /data survives
+	//     kernel-update reboots. UUID-based entry — robust against device-name
+	//     re-ordering across boots.
+	//  2. SCSI fallback skips any disk that looks like Azure's ephemeral
+	//     resource disk (mounted at /mnt by the Azure agent). On SCSI-only
+	//     SKUs the resource disk lives at /dev/sdb — overwriting it would
+	//     destroy the worker's swap area and confuse the Azure agent.
+	sb.WriteString("# Mount data disk (RAID 0 across local NVMe, XFS with reflink, fstab-persisted)\n")
 	sb.WriteString("if ! mountpoint -q /data 2>/dev/null; then\n")
 	sb.WriteString("  mkdir -p /data\n")
 	sb.WriteString("  ROOT_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /) 2>/dev/null | head -1)\n")
+	// Identify any disk currently used as Azure's ephemeral resource disk
+	// (Azure waagent typically mounts it at /mnt). We refuse to mkfs over it.
+	sb.WriteString("  RESOURCE_DEV=\"\"\n")
+	sb.WriteString("  if findmnt -n -o SOURCE /mnt >/dev/null 2>&1; then\n")
+	sb.WriteString("    RESOURCE_DEV=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /mnt) 2>/dev/null | head -1)\n")
+	sb.WriteString("    [ -n \"$RESOURCE_DEV\" ] && RESOURCE_DEV=\"/dev/$RESOURCE_DEV\"\n")
+	sb.WriteString("  fi\n")
 	sb.WriteString("  NVME_DISKS=()\n")
 	sb.WriteString("  for d in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1; do\n")
 	sb.WriteString("    [ -b \"$d\" ] || continue\n")
 	sb.WriteString("    [ \"$(basename $d)\" = \"$ROOT_DEV\" ] && continue\n")
+	sb.WriteString("    [ \"$d\" = \"$RESOURCE_DEV\" ] && continue\n")
 	sb.WriteString("    NVME_DISKS+=(\"$d\")\n")
 	sb.WriteString("  done\n")
+	// DATA_DEV holds the device that ends up mounted at /data (used to write
+	// the fstab entry below).
+	sb.WriteString("  DATA_DEV=\"\"\n")
 	sb.WriteString("  if [ ${#NVME_DISKS[@]} -gt 1 ]; then\n")
 	sb.WriteString("    mdadm --create /dev/md0 --level=0 --raid-devices=${#NVME_DISKS[@]} \"${NVME_DISKS[@]}\" --run --force\n")
-	sb.WriteString("    mkfs.xfs -f -m reflink=1 /dev/md0 && mount /dev/md0 /data\n")
+	sb.WriteString("    mkfs.xfs -f -m reflink=1 /dev/md0 && mount /dev/md0 /data && DATA_DEV=/dev/md0\n")
 	sb.WriteString("  elif [ ${#NVME_DISKS[@]} -eq 1 ]; then\n")
-	sb.WriteString("    mkfs.xfs -f -m reflink=1 \"${NVME_DISKS[0]}\" && mount \"${NVME_DISKS[0]}\" /data\n")
+	sb.WriteString("    mkfs.xfs -f -m reflink=1 \"${NVME_DISKS[0]}\" && mount \"${NVME_DISKS[0]}\" /data && DATA_DEV=\"${NVME_DISKS[0]}\"\n")
 	sb.WriteString("  else\n")
+	// SCSI fallback. /dev/sdb LAST is intentional: it's typically the Azure
+	// resource disk on machines without local NVMe. The RESOURCE_DEV guard
+	// above will skip it if /mnt is currently using it, so the loop only
+	// formats /dev/sdb when no /mnt mount exists (i.e., truly unused).
 	sb.WriteString("    for d in /dev/sdc /dev/sdd /dev/sdb; do\n")
 	sb.WriteString("      [ -b \"$d\" ] || continue\n")
-	sb.WriteString("      mkfs.xfs -f -m reflink=1 \"$d\" && mount \"$d\" /data && break\n")
+	sb.WriteString("      [ \"$d\" = \"$RESOURCE_DEV\" ] && continue\n")
+	sb.WriteString("      mkfs.xfs -f -m reflink=1 \"$d\" && mount \"$d\" /data && DATA_DEV=\"$d\" && break\n")
 	sb.WriteString("    done\n")
+	sb.WriteString("  fi\n")
+	// Persist the mount via fstab so kernel-update reboots don't lose /data.
+	// Use UUID rather than device path — device naming can shift across
+	// reboots. `nofail` so a failed-disk boot still reaches single-user mode.
+	sb.WriteString("  if [ -n \"$DATA_DEV\" ]; then\n")
+	sb.WriteString("    DATA_UUID=$(blkid -s UUID -o value \"$DATA_DEV\" 2>/dev/null || true)\n")
+	sb.WriteString("    if [ -n \"$DATA_UUID\" ] && ! grep -q \"UUID=$DATA_UUID\" /etc/fstab 2>/dev/null; then\n")
+	sb.WriteString("      echo \"UUID=$DATA_UUID /data xfs defaults,nofail 0 2\" >> /etc/fstab\n")
+	sb.WriteString("    fi\n")
 	sb.WriteString("  fi\n")
 	sb.WriteString("fi\n")
 	sb.WriteString("mkdir -p /data/sandboxes /data/firecracker/images\n")
@@ -648,11 +702,15 @@ func (p *AzurePool) buildUserData(opts MachineOpts) string {
 	sb.WriteString("  echo 'Copied retained bases from /opt/opensandbox/images/bases to /data/firecracker/images/bases'\n")
 	sb.WriteString("fi\n\n")
 
-	// Write worker env file from base64-encoded config
-	if p.cfg.WorkerEnvBase64 != "" {
-		sb.WriteString("# Write worker env (from control plane config)\n")
+	// Write worker env file from injected WorkerSpec.
+	p.mu.RLock()
+	envContent := BuildWorkerEnv(p.spec)
+	p.mu.RUnlock()
+	if envContent != "" {
+		envB64 := base64.StdEncoding.EncodeToString([]byte(envContent))
+		sb.WriteString("# Write worker env (from control plane WorkerSpec)\n")
 		sb.WriteString("mkdir -p /etc/opensandbox\n")
-		sb.WriteString(fmt.Sprintf("echo '%s' | base64 -d > /etc/opensandbox/worker.env\n\n", p.cfg.WorkerEnvBase64))
+		sb.WriteString(fmt.Sprintf("echo '%s' | base64 -d > /etc/opensandbox/worker.env\n\n", envB64))
 
 		// Patch in the VM's own private IP and identity
 		sb.WriteString("# Patch worker identity with this VM's private IP and hostname\n")

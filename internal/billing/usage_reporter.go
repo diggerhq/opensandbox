@@ -24,6 +24,13 @@ type UsageReporter struct {
 	interval time.Duration
 	stop     chan struct{}
 	stopped  chan struct{}
+
+	// cfBillingEnabled disables the free-tier deduction pass (and eventually
+	// the pro Stripe meter pass) when CF-edge billing is the authority. The
+	// CreditAccount DO debits free orgs based on events-ingest fan-out; if
+	// we also debited here we'd double-charge. Set via SetCFBillingMode at
+	// startup based on OPENSANDBOX_CF_EVENT_ENDPOINT being non-empty.
+	cfBillingEnabled bool
 }
 
 func NewUsageReporter(store *db.Store, stripe *StripeClient, workers WorkerClientSource) *UsageReporter {
@@ -35,6 +42,17 @@ func NewUsageReporter(store *db.Store, stripe *StripeClient, workers WorkerClien
 		stop:     make(chan struct{}),
 		stopped:  make(chan struct{}),
 	}
+}
+
+// SetCFBillingMode flips this reporter to CF-billing mode. In that mode the
+// free-tier deduction pass is skipped because the CF CreditAccount DO is
+// authoritative — it debits free orgs based on events-ingest /debit fan-out.
+// The pro-tier Stripe pass currently still runs (cells emit billable_events
+// and the reporter ships them to Stripe meters); once the unified-events
+// billing sender is deployed end-to-end on CF too, that pass can also be
+// gated here.
+func (r *UsageReporter) SetCFBillingMode(enabled bool) {
+	r.cfBillingEnabled = enabled
 }
 
 func (r *UsageReporter) Start() { go r.loop() }
@@ -84,6 +102,12 @@ func (r *UsageReporter) reportAll() {
 	}
 
 	// Free-tier pass: deduct the same usage from trial credits; hibernate on empty.
+	// SKIPPED when CF billing is enabled — the CreditAccount DO is the authority
+	// and debits free orgs via events-ingest /debit fan-out. Running both would
+	// double-debit, which makes free trials end ~2x faster than the user expects.
+	if r.cfBillingEnabled {
+		return
+	}
 	freeIDs, err := r.store.ListFreeOrgIDsWithOpenUsage(ctx)
 	if err != nil {
 		log.Printf("usage-reporter: failed to list free orgs: %v", err)

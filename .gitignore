@@ -29,6 +29,9 @@ __pycache__/
 # Node
 node_modules/
 
+# api-edge Workers Assets — copied from web/dist at deploy time. Source of truth lives in web/.
+cloudflare-workers/api-edge/assets/
+
 # Build artifacts
 dist/
 # Built dashboard SPA bundle served by the api-edge Worker — produced by
@@ -70,3 +73,5 @@ deploy/azure/.dev-env-secrets*
 !deploy/azure/.dev-env-secrets.example
 deploy/azure/.dev-vector-token-*
 /server
+/seed-dev-secrets
+/backfill

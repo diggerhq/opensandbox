@@ -868,25 +868,29 @@ func (s *Server) dashboardPTYWebSocketRemote(c echo.Context, sandboxID, sessionI
 		HandshakeTimeout: 10 * time.Second,
 	}
 
+	log.Printf("dashboard PTY: dialing worker %s", workerWSURL)
 	workerWS, resp, err := dialer.Dial(workerWSURL, header)
 	if err != nil {
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		log.Printf("dashboard: failed to dial worker PTY WebSocket %s (status=%d): %v", workerWSURL, status, err)
+		log.Printf("dashboard PTY: failed to dial worker WebSocket %s (status=%d): %v", workerWSURL, status, err)
 		return c.JSON(http.StatusBadGateway, map[string]string{
 			"error": "failed to connect to worker terminal",
 		})
 	}
 	defer workerWS.Close()
+	log.Printf("dashboard PTY: worker WS dial OK for sandbox=%s session=%s", sandboxID, sessionID)
 
 	// Upgrade the dashboard client connection
 	clientWS, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
+		log.Printf("dashboard PTY: client upgrade failed: %v", err)
 		return err
 	}
 	defer clientWS.Close()
+	log.Printf("dashboard PTY: client WS upgraded for sandbox=%s session=%s", sandboxID, sessionID)
 
 	// Bidirectional pipe: dashboard ↔ worker
 	done := make(chan struct{}, 2)
@@ -894,12 +898,21 @@ func (s *Server) dashboardPTYWebSocketRemote(c echo.Context, sandboxID, sessionI
 	// worker → dashboard
 	go func() {
 		defer func() { done <- struct{}{} }()
+		var totalBytes int64
+		var firstLogged bool
 		for {
 			msgType, msg, err := workerWS.ReadMessage()
 			if err != nil {
+				log.Printf("dashboard PTY: worker→client closed (bytes=%d): %v", totalBytes, err)
 				return
 			}
+			if !firstLogged {
+				log.Printf("dashboard PTY: worker→client first msg type=%d len=%d", msgType, len(msg))
+				firstLogged = true
+			}
+			totalBytes += int64(len(msg))
 			if err := clientWS.WriteMessage(msgType, msg); err != nil {
+				log.Printf("dashboard PTY: client write failed (forwarded %d bytes): %v", totalBytes, err)
 				return
 			}
 		}
@@ -908,12 +921,16 @@ func (s *Server) dashboardPTYWebSocketRemote(c echo.Context, sandboxID, sessionI
 	// dashboard → worker
 	go func() {
 		defer func() { done <- struct{}{} }()
+		var totalBytes int64
 		for {
 			msgType, msg, err := clientWS.ReadMessage()
 			if err != nil {
+				log.Printf("dashboard PTY: client→worker closed (bytes=%d): %v", totalBytes, err)
 				return
 			}
+			totalBytes += int64(len(msg))
 			if err := workerWS.WriteMessage(msgType, msg); err != nil {
+				log.Printf("dashboard PTY: worker write failed (forwarded %d bytes): %v", totalBytes, err)
 				return
 			}
 		}
@@ -1245,8 +1262,14 @@ func (s *Server) dashboardDeleteCheckpoint(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid checkpoint ID"})
 	}
 
+	// Read the row first so we can include sandbox_id in the deletion event
+	// — events-ingest needs both to scope the D1 update.
+	cp, getErr := s.store.GetCheckpoint(c.Request().Context(), cpID)
 	if err := s.store.DeleteCheckpoint(c.Request().Context(), orgID, cpID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+	if getErr == nil && cp != nil {
+		s.publishCheckpointEvent(c.Request().Context(), "checkpoint_deleted", cpID, cp.SandboxID, orgID, "", nil)
 	}
 
 	return c.NoContent(http.StatusNoContent)

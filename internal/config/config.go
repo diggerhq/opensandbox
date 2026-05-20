@@ -37,16 +37,17 @@ type Config struct {
 	WorkerID string // Unique worker ID (e.g., "w-iad-1")
 	HTTPAddr string // Public HTTP address for direct SDK access
 
-	// Platform observability identity (used by internal/obslog for log
-	// envelope so all logs in Axiom can be sliced by cell, host, and service
-	// ID). CellID is "<region>-<pool>"; default to "<region>-default" when
-	// unset. HostIP is auto-detected from the first non-loopback IPv4 at
-	// startup if OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
+	// Platform observability host identity (used by internal/obslog for log
+	// envelope so all Axiom records carry host + service ID). HostIP is
+	// auto-detected from the first non-loopback IPv4 at startup if
+	// OPENCOMPUTER_HOST_IP is not provisioned via cloud-init.
 	//
-	// These use the OPENCOMPUTER_* prefix (vs the rest of the file's
-	// OPENSANDBOX_*) intentionally — they're new fields scoped to the
-	// product-named observability envelope.
-	CellID string
+	// CellID — the cell this process belongs to — is declared further down
+	// as part of the cf-cutover block. Same field, dual purpose: obslog
+	// reads it for log envelope, routing/event_forwarder reads it for cell
+	// identity. Falls back to "<region>-default" at the bottom of Load() so
+	// legacy paths still log a sensible label when OPENSANDBOX_CELL_ID is
+	// unset.
 	HostIP string
 
 	// WorkOS
@@ -181,6 +182,54 @@ type Config struct {
 	SentrySampleRate       float64 // 0.0–1.0, default 1.0 (capture every error)
 	SentryTracesSampleRate float64 // 0.0–1.0, default 0.0 (tracing off)
 
+	// Distributed-architecture cutover (CF-parallel mode). Each block below is
+	// inert when the corresponding endpoint/secret is empty — current behavior
+	// is fully preserved until env vars are set.
+
+	// Cell identity. Full deployment identifier used in Redis stream keys, event
+	// envelopes, and CF routing. Replaces Region for cell-aware code paths.
+	// Format: "{cloud}-{region}-{slot}", with region in AWS-style hyphenated
+	// form (Azure's westus2 normalizes to us-west-2) so cells parse identically
+	// across clouds. Example: "azure-us-west-2-b". The slot (a/b/c/...)
+	// distinguishes multiple cells in the same region.
+	CellID string
+
+	// CF events-ingest endpoint. When set, the regional control plane runs an
+	// event_forwarder goroutine that drains the local Redis stream and POSTs
+	// HMAC-signed batches here.
+	CFEventEndpoint string
+	CFEventSecret   string // HMAC secret shared with events-ingest Worker
+
+	// CF admin callback secret. Verifies HMAC signatures on /admin/halt-org and
+	// /admin/resume-org webhooks dispatched from the CreditAccount DO.
+	CFAdminSecret string
+
+	// Session JWT secret. HMAC-SHA256 verifies session tokens minted by the
+	// api-edge Worker. Shared across all regional CPs in the cell fleet.
+	SessionJWTSecret string
+
+	// CF halt-list endpoint. The halt_reconciler goroutine pulls this every 60s
+	// to catch missed halt webhooks. Empty disables the reconciler.
+	HaltListURL string
+
+	// CF edge base URL — root of the api-edge Worker (e.g.
+	// "https://app.dev.opensandbox.ai"). Used to construct /internal/*
+	// HMAC endpoints for stateless template + secret-store lookup at
+	// sandbox-create time. HMAC secret is CFEventSecret (same one used
+	// for the event forwarder + halt-list).
+	CFEdgeBaseURL string
+
+	// Multi-cloud abstraction. Selects which compute pool the autoscaler uses.
+	// Valid values: "azure", "aws", "" (autodetect from existing fields).
+	// Adding a new cloud means a new compute.Pool implementation + a new
+	// case in cmd/server/main.go pool selection.
+	ComputeProvider string
+
+	// SecretsProvider selects the runtime secrets backend.
+	// Valid values: "keyvault" (Azure), "secretsmanager" (AWS), "env" (env-var only).
+	// Defaults to "env" if unset.
+	SecretsProvider string
+
 	// Global blob store — abstract S3-compatible backend for canonical golden
 	// rootfs blobs, template blobs, and the events archive. Currently Tigris
 	// (Region Earth global replication) but works with any S3-compatible
@@ -237,7 +286,6 @@ func Load() (*Config, error) {
 		WorkerID:    envOrDefault("OPENSANDBOX_WORKER_ID", "w-local-1"),
 		HTTPAddr:    envOrDefault("OPENSANDBOX_HTTP_ADDR", "http://localhost:8080"),
 
-		CellID: os.Getenv("OPENCOMPUTER_CELL_ID"),
 		HostIP: os.Getenv("OPENCOMPUTER_HOST_IP"),
 
 		WorkOSAPIKey:       os.Getenv("WORKOS_API_KEY"),
@@ -324,6 +372,17 @@ func Load() (*Config, error) {
 		SentryEnvironment:      os.Getenv("OPENSANDBOX_SENTRY_ENVIRONMENT"),
 		SentrySampleRate:       envOrDefaultFloat("OPENSANDBOX_SENTRY_SAMPLE_RATE", 1.0),
 		SentryTracesSampleRate: envOrDefaultFloat("OPENSANDBOX_SENTRY_TRACES_SAMPLE_RATE", 0.0),
+
+		CellID:           os.Getenv("OPENSANDBOX_CELL_ID"),
+		CFEventEndpoint:  os.Getenv("OPENSANDBOX_CF_EVENT_ENDPOINT"),
+		CFEventSecret:    os.Getenv("OPENSANDBOX_CF_EVENT_SECRET"),
+		CFAdminSecret:    os.Getenv("OPENSANDBOX_CF_ADMIN_SECRET"),
+		SessionJWTSecret: os.Getenv("OPENSANDBOX_SESSION_JWT_SECRET"),
+		HaltListURL:      os.Getenv("OPENSANDBOX_HALT_LIST_URL"),
+		CFEdgeBaseURL:    os.Getenv("OPENSANDBOX_CF_EDGE_BASE_URL"),
+
+		ComputeProvider: os.Getenv("OPENSANDBOX_COMPUTE_PROVIDER"),
+		SecretsProvider: envOrDefault("OPENSANDBOX_SECRETS_PROVIDER", "env"),
 
 		GlobalBlobName:            envOrDefault("OPENSANDBOX_GLOBAL_BLOB_NAME", "tigris"),
 		GlobalBlobEndpoint:        os.Getenv("OPENSANDBOX_GLOBAL_BLOB_ENDPOINT"),

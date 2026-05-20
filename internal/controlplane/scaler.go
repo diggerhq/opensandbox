@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/opensandbox/opensandbox/internal/compute"
 	"github.com/opensandbox/opensandbox/internal/db"
@@ -82,6 +86,13 @@ type ScalerConfig struct {
 	MaxWorkers     int        // maximum workers per region (0 = default 10). Hard cap to prevent runaway launches.
 	IdleReserve    int        // target idle (0 sandbox) workers for burst absorption (0 = default 1). Separate from MinWorkers.
 
+	// Event emit for D1 sandboxes_index sync. After a scaler-triggered
+	// migration succeeds (rolling replace, evacuation), XADD a "migrated"
+	// event so events-ingest updates D1's worker_id. Without these, D1
+	// silently drifts from cell PG on every rolling replace.
+	RedisClient *redis.Client
+	CellID      string
+
 	// MachineSizes is a ranked list of provider-specific machine sizes the
 	// scaler tries in order on each scale-up. On a quota or capacity error
 	// (compute.ErrQuotaExceeded), the scaler falls through to the next size.
@@ -116,6 +127,9 @@ type Scaler struct {
 	minWorkers   int
 	maxWorkers   int
 	idleReserve  int
+
+	rdb     *redis.Client
+	cellID  string
 
 	mu       sync.Mutex     // protects stop/cancel
 	cancel   context.CancelFunc
@@ -168,6 +182,44 @@ func NewScaler(cfg ScalerConfig) *Scaler {
 		maxWorkers:   maxWorkers,
 		idleReserve:  idleReserve,
 		machineSizes: cfg.MachineSizes,
+		rdb:          cfg.RedisClient,
+		cellID:       cfg.CellID,
+	}
+}
+
+// publishMigrated XADDs a "migrated" event to events:{cell_id} so events-
+// ingest updates D1 sandboxes_index.worker_id. Required for rolling-replace
+// + evacuation paths — without it, the dashboard's cross-cell view drifts
+// from cell-PG truth on every scaler-driven migration. Best-effort; failures
+// are logged but don't block the migration itself.
+func (s *Scaler) publishMigrated(ctx context.Context, sandboxID, newWorkerID string, orgID uuid.UUID, reason string) {
+	if s.rdb == nil || s.cellID == "" || sandboxID == "" {
+		return
+	}
+	envelope := map[string]any{
+		"id":         uuid.NewString(),
+		"type":       "migrated",
+		"sandbox_id": sandboxID,
+		"org_id":     orgID.String(),
+		"worker_id":  newWorkerID,
+		"cell_id":    s.cellID,
+		"payload":    map[string]any{"reason": reason},
+		"timestamp":  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		log.Printf("scaler: publishMigrated marshal: %v", err)
+		return
+	}
+	xaddCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := s.rdb.XAdd(xaddCtx, &redis.XAddArgs{
+		Stream: "events:" + s.cellID,
+		MaxLen: 100000,
+		Approx: true,
+		Values: map[string]any{"event": string(body)},
+	}).Err(); err != nil {
+		log.Printf("scaler: publishMigrated XADD: %v", err)
 	}
 }
 
@@ -1547,6 +1599,7 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 
 	// Step 5: Complete migration — update DB status and worker_id atomically.
 	// Use background context in case the drain context is close to expiry.
+	var migratedOrgID uuid.UUID
 	if s.store != nil {
 		dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := s.store.CompleteMigration(dbCtx, sandboxID, targetWorkerID); err != nil {
@@ -1558,9 +1611,16 @@ func (s *Scaler) liveMigrateSandbox(ctx context.Context, sandboxID, sourceWorker
 		if targetWorker != nil && targetWorker.GoldenVersion != "" {
 			_ = s.store.SetSandboxGoldenVersion(dbCtx, sandboxID, targetWorker.GoldenVersion)
 		}
+		// Read org for the D1 sync event below.
+		if sess, err := s.store.GetSandboxSession(dbCtx, sandboxID); err == nil && sess != nil {
+			migratedOrgID = sess.OrgID
+		}
 		dbCancel()
 	}
 	migrationCompleted = true
+	// Mirror the worker_id change to D1 sandboxes_index so the dashboard's
+	// cross-cell view + proxyToCellSDK routing reflect the new home worker.
+	s.publishMigrated(context.Background(), sandboxID, targetWorkerID, migratedOrgID, "scaler_migrate")
 
 	elapsed := time.Since(t0).Milliseconds()
 	log.Printf("scaler: migrate %s: complete in %dms (source=%s target=%s)", sandboxID, elapsed, sourceWorkerID, targetWorkerID)

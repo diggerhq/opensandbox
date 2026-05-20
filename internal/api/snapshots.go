@@ -92,6 +92,7 @@ func (s *Server) createSnapshotCore(ctx context.Context, orgID uuid.UUID, name s
 		if createErr := s.store.CreateImageCache(ctx, ic); createErr != nil {
 			return nil, fmt.Errorf("failed to save snapshot: %w", createErr)
 		}
+		s.publishImageCacheReadyFrom(ctx, ic)
 		return ic, nil
 	}
 
@@ -114,6 +115,7 @@ func (s *Server) createSnapshotCore(ctx context.Context, orgID uuid.UUID, name s
 		}
 		return nil, fmt.Errorf("failed to save snapshot: %w", createErr)
 	}
+	s.publishImageCacheReadyFrom(ctx, ic)
 
 	log.Printf("snapshot: created %q (checkpoint=%s)", name, checkpointID)
 	return ic, nil
@@ -231,8 +233,14 @@ func (s *Server) deleteSnapshot(c echo.Context) error {
 	}
 
 	name := c.Param("name")
+	// Read the row first so we can publish a deletion event with the same id
+	// the dashboard's images_index entry is keyed on.
+	ic, _ := s.store.GetImageCacheByName(c.Request().Context(), orgID, name)
 	if err := s.store.DeleteImageCacheByName(c.Request().Context(), orgID, name); err != nil {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": err.Error()})
+	}
+	if ic != nil {
+		s.publishImageCacheEvent(c.Request().Context(), "image_cache_deleted", ic.ID, orgID, nil)
 	}
 
 	return c.NoContent(http.StatusNoContent)

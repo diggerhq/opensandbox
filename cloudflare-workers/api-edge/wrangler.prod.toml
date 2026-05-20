@@ -1,0 +1,68 @@
+# api-edge Worker — PROD on opencomputer.dev zone.
+# Mirrors wrangler.toml (dev) but targets Mo's CF account.
+# Deploy: `wrangler deploy -c wrangler.prod.toml`
+#
+# Final cutover hostname will be app.opencomputer.dev; during parallel run
+# we serve at app2.opencomputer.dev so the legacy app at opencomputer.dev
+# (opencomputer-site-v1 worker) keeps serving.
+
+name = "opencomputer-edge-prod"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "b8f23cb87a7a6c64040d3134643da448"
+
+# Preview URL routing — same scheme as dev (`*.sb.<zone>/*`).
+# Requires an Advanced Certificate Manager cert for *.sb.opencomputer.dev
+# + sb.opencomputer.dev (two-level wildcard isn't covered by Universal SSL).
+# Order the ACM cert BEFORE the first deploy or the route will 525-error.
+routes = [
+  { pattern = "*.sb.opencomputer.dev/*", zone_name = "opencomputer.dev" },
+]
+
+# Static assets — the dashboard SPA. Built from `web/` by the deploy script.
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-prod"
+database_id = "8329e0f0-100d-445a-bf89-95c065f15dbb"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "b496f905ce634f94b6ac1d4f619825e0"
+
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+script_name = "opencomputer-edge-prod"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CreditAccount"]
+
+# Secrets (set via `wrangler secret put --config wrangler.prod.toml`):
+#   SESSION_JWT_SECRET     — fresh prod HMAC (DO NOT reuse dev secret)
+#   CF_ADMIN_SECRET        — fresh prod HMAC, shared with prod CPs
+#   STRIPE_WEBHOOK_SECRET  — Stripe LIVE mode webhook signing secret
+#   STRIPE_API_KEY         — Stripe LIVE mode API key (sk_live_...)
+#   WORKOS_API_KEY         — prod WorkOS app API key
+#   WORKOS_CLIENT_ID       — prod WorkOS client identifier
+#   EVENT_SECRET           — fresh prod HMAC, shared with prod CPs + events-ingest
+#   SECRET_ENCRYPTION_KEY  — envelope-encryption key for D1 secret_store_entries
+#                            (must match Infisical /shared/ key the CPs use, so
+#                            plaintext stays in sync across edge ↔ cells)
+
+[vars]
+WORKER_ENV = "prod"
+# No prod cells registered yet. Populate when prod CPs come online and
+# their rows are written to the D1 `cells` table.
+CELLS = ""
+
+# Ship Worker logs to opencomputer-log-tail-prod → Axiom dataset cf-prod.
+[[tail_consumers]]
+service = "opencomputer-log-tail-prod"

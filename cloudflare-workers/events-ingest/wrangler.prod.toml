@@ -1,0 +1,39 @@
+# events-ingest Worker — PROD on opencomputer.dev zone.
+# Mirrors wrangler.toml (dev) but targets Mo's CF account.
+# Deploy: `wrangler deploy -c wrangler.prod.toml`
+#
+# Route at events.opencomputer.dev (set up as a Workers Custom Domain after
+# first deploy) or use the workers.dev URL until DNS is live. Prod CPs hit
+# this directly via OPENSANDBOX_CF_EVENT_ENDPOINT.
+
+name = "opencomputer-events-ingest-prod"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "b8f23cb87a7a6c64040d3134643da448"
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-prod"
+database_id = "8329e0f0-100d-445a-bf89-95c065f15dbb"
+
+[[r2_buckets]]
+binding = "EVENTS_ARCHIVE"
+bucket_name = "events-archive-prod"
+
+# CreditAccount DO is owned by api-edge prod; reference it here for /debit.
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+script_name = "opencomputer-edge-prod"
+
+# Secrets (set via `wrangler secret put --config wrangler.prod.toml`):
+#   EVENT_SECRET    — fresh prod HMAC, shared with prod CPs + api-edge prod
+#   CF_ADMIN_SECRET — fresh prod HMAC, shared with api-edge prod + CPs
+
+[vars]
+WORKER_ENV = "prod"
+
+# Ship Worker logs to opencomputer-log-tail-prod → Axiom dataset cf-prod.
+[[tail_consumers]]
+service = "opencomputer-log-tail-prod"

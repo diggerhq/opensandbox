@@ -17,6 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.41.2
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.68.4
 	github.com/creack/pty v1.1.24
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/getsentry/sentry-go v0.46.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
@@ -61,7 +62,6 @@ require (
 	github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

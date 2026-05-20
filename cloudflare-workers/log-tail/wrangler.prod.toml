@@ -1,0 +1,16 @@
+# log-tail Worker — PROD on Mo's CF account.
+# Tail consumer for opencomputer-edge-prod + opencomputer-events-ingest-prod.
+# Forwards console output + exceptions to Axiom dataset cf-prod.
+# Deploy: `wrangler deploy -c wrangler.prod.toml`
+
+name = "opencomputer-log-tail-prod"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+account_id = "b8f23cb87a7a6c64040d3134643da448"
+workers_dev = false
+
+# Secrets (set via `wrangler secret put --config wrangler.prod.toml`):
+#   AXIOM_TOKEN — xaat-... ingest token for the cf-prod dataset
+[vars]
+AXIOM_HOST = "https://api.axiom.co"
+AXIOM_DATASET = "oc-platform-edge"

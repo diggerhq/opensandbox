@@ -73,6 +73,20 @@ func (p *ControlPlaneProxy) Middleware() echo.MiddlewareFunc {
 	}
 }
 
+// HandleSandboxRequest is the exported entry point for proxying a sandbox
+// HTTP/WebSocket request when sandbox_id + port are already known from
+// somewhere other than the request's Host header — e.g. the api-edge Worker
+// has resolved the public preview hostname against D1 and forwarded the
+// request to this CP via /internal/preview/:id/:port/* on the cell tunnel.
+//
+// Callers must have already (a) stripped the /internal/preview prefix from
+// the URL path, and (b) synthesized a Host header the downstream worker
+// proxy expects (e.g. "{id}-p{port}.{sandbox_domain}"), so the worker's
+// SandboxProxy.Middleware can parse it correctly.
+func (p *ControlPlaneProxy) HandleSandboxRequest(c echo.Context, sandboxID string, port int) error {
+	return p.doProxy(c, sandboxID, port)
+}
+
 // doProxy looks up the worker that owns this sandbox and reverse-proxies to it.
 // If the sandbox is hibernated, it triggers a wake-on-request: picks the least
 // loaded worker, wakes the sandbox via gRPC, updates the DB, then proxies.

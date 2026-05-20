@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/opensandbox/opensandbox/internal/auth"
 	"github.com/opensandbox/opensandbox/internal/controlplane"
 	"github.com/opensandbox/opensandbox/internal/db"
+	"github.com/opensandbox/opensandbox/internal/edgeclient"
 	"github.com/opensandbox/opensandbox/pkg/types"
 	pb "github.com/opensandbox/opensandbox/proto/worker"
 )
@@ -324,7 +326,30 @@ func (s *Server) createSandboxWithSSE(c echo.Context, ctx context.Context, orgID
 // secret_store_id gets populated — required for the secret-refresh fanout
 // (ListRunningSandboxesByStore filters on this column).
 func (s *Server) resolveSecretStoreInto(ctx context.Context, orgID [16]byte, cfg *types.SandboxConfig) (*uuid.UUID, error) {
-	if cfg.SecretStore == "" || s.store == nil {
+	if cfg.SecretStore == "" {
+		return nil, nil
+	}
+
+	// Edge-first path. With migration 041 the per-cell PG no longer holds
+	// `secret_stores`/`secret_store_entries`, so when s.edge is configured we
+	// fetch the bundle from D1 over HMAC and decrypt locally with the shared
+	// SECRET_ENCRYPTION_KEY (same key the edge used to encrypt).
+	if s.edge != nil && s.store != nil && s.store.Encryptor() != nil {
+		bundle, err := s.edge.LookupSecretStore(ctx, uuid.UUID(orgID), cfg.SecretStore, s.store.Encryptor())
+		if err != nil {
+			if errors.Is(err, edgeclient.ErrNotFound) {
+				return nil, fmt.Errorf("secret store not found: %s", cfg.SecretStore)
+			}
+			return nil, fmt.Errorf("edge lookup secret store %q: %w", cfg.SecretStore, err)
+		}
+		applySecretBundle(cfg, bundle)
+		return &bundle.Store.ID, nil
+	}
+
+	// Legacy single-PG path — retained while the edge isn't wired (combined
+	// dev mode, tests). Deleted once migration 041 is the only deployed
+	// shape.
+	if s.store == nil {
 		return nil, nil
 	}
 	store, err := s.store.GetSecretStoreByName(ctx, orgID, cfg.SecretStore)
@@ -354,6 +379,57 @@ func (s *Server) resolveSecretStoreInto(ctx context.Context, orgID [16]byte, cfg
 		}
 	}
 	return &store.ID, nil
+}
+
+// resolveTemplate is the edge-first equivalent of the inline
+// `s.store.GetTemplateByName` call createSandbox used to do. Same return
+// shape (the existing db.DBTemplate); same semantics (org-scoped first,
+// public fallback). Returns (nil, nil) when no template name was supplied
+// or no source is configured — caller should treat that as "no template".
+func (s *Server) resolveTemplate(ctx context.Context, orgID [16]byte, hasOrg bool, name string) (*db.DBTemplate, error) {
+	if name == "" {
+		return nil, nil
+	}
+	if s.edge != nil {
+		var oid uuid.UUID
+		if hasOrg {
+			oid = uuid.UUID(orgID)
+		}
+		t, err := s.edge.LookupTemplate(ctx, oid, name)
+		if err != nil {
+			if errors.Is(err, edgeclient.ErrNotFound) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		return t, nil
+	}
+	if s.store == nil || !hasOrg {
+		return nil, nil
+	}
+	return s.store.GetTemplateByName(ctx, orgID, name)
+}
+
+// applySecretBundle is the shared post-processing step both the edge and
+// legacy paths feed cfg through: copy egress allowlist + per-entry host
+// restrictions + plaintext values into the sandbox config.
+func applySecretBundle(cfg *types.SandboxConfig, bundle *edgeclient.SecretStoreBundle) {
+	cfg.EgressAllowlist = bundle.Store.EgressAllowlist
+	if len(bundle.Entries) == 0 {
+		return
+	}
+	if cfg.SecretEnvs == nil {
+		cfg.SecretEnvs = make(map[string]string, len(bundle.Entries))
+	}
+	for _, secret := range bundle.Entries {
+		cfg.SecretEnvs[secret.Name] = secret.Value
+		if len(secret.AllowedHosts) > 0 {
+			if cfg.SecretAllowedHosts == nil {
+				cfg.SecretAllowedHosts = make(map[string][]string)
+			}
+			cfg.SecretAllowedHosts[secret.Name] = secret.AllowedHosts
+		}
+	}
 }
 
 // cfgForPersistence returns a copy of cfg suitable for marshaling into PG
@@ -441,22 +517,22 @@ func (s *Server) createSandboxRemote(c echo.Context, ctx context.Context, cfg ty
 		log.Printf("sandbox: worker became available after queuing (region=%s)", region)
 	}
 
-	// Resolve template from DB (org-scoped lookup with public fallback)
+	// Resolve template (org-scoped lookup with public fallback).
+	// Edge-first when s.edge is configured (post-migration 041), local PG
+	// otherwise. Same return shape so the rest of the create flow doesn't
+	// care which path produced it.
 	var templateRootfsKey, templateWorkspaceKey string
 	var templateID *uuid.UUID
-	if s.store != nil && hasOrg {
-		tmpl, err := s.store.GetTemplateByName(ctx, orgID, cfg.Template)
-		if err == nil {
-			templateID = &tmpl.ID
-			log.Printf("sandbox: resolved template %q (type=%s, id=%s)", cfg.Template, tmpl.TemplateType, tmpl.ID)
-			// Sandbox-type templates provide S3 drive keys instead of ECR image refs
-			if tmpl.TemplateType == "sandbox" && tmpl.RootfsS3Key != nil && tmpl.WorkspaceS3Key != nil {
-				templateRootfsKey = *tmpl.RootfsS3Key
-				templateWorkspaceKey = *tmpl.WorkspaceS3Key
-				log.Printf("sandbox: using snapshot template drives: rootfs=%s, workspace=%s", templateRootfsKey, templateWorkspaceKey)
-			}
-		} else {
-			log.Printf("sandbox: template %q lookup failed: %v", cfg.Template, err)
+	tmpl, err := s.resolveTemplate(ctx, orgID, hasOrg, cfg.Template)
+	if err != nil {
+		log.Printf("sandbox: template %q lookup failed: %v", cfg.Template, err)
+	} else if tmpl != nil {
+		templateID = &tmpl.ID
+		log.Printf("sandbox: resolved template %q (type=%s, id=%s)", cfg.Template, tmpl.TemplateType, tmpl.ID)
+		if tmpl.TemplateType == "sandbox" && tmpl.RootfsS3Key != nil && tmpl.WorkspaceS3Key != nil {
+			templateRootfsKey = *tmpl.RootfsS3Key
+			templateWorkspaceKey = *tmpl.WorkspaceS3Key
+			log.Printf("sandbox: using snapshot template drives: rootfs=%s, workspace=%s", templateRootfsKey, templateWorkspaceKey)
 		}
 	}
 
@@ -744,6 +820,11 @@ func (s *Server) killSandboxRemote(c echo.Context, sandboxID string) error {
 	client, err := s.workerRegistry.GetWorkerClient(session.WorkerID)
 	if err != nil {
 		log.Printf("sandbox: worker %s unreachable for destroy: %v", session.WorkerID, err)
+		// Worker never received the destroy call — its LogEvent("stopped") path
+		// won't run, so D1 sandboxes_index would otherwise stay at "running"
+		// while cell PG says "stopped". Emit a CP-side fallback to close the
+		// drift. status is already marked stopped on cell PG above.
+		s.publishSandboxLifecycleEvent(c.Request().Context(), "stopped", sandboxID, session.OrgID, session.WorkerID, "worker_unreachable")
 		return c.NoContent(http.StatusNoContent)
 	}
 
@@ -752,6 +833,10 @@ func (s *Server) killSandboxRemote(c echo.Context, sandboxID string) error {
 
 	if _, err := client.DestroySandbox(grpcCtx, &pb.DestroySandboxRequest{SandboxId: sandboxID}); err != nil {
 		log.Printf("sandbox: gRPC destroy failed for %s: %v", sandboxID, err)
+		// Same drift-prevention as above: worker's emit path may not have run
+		// (timeout, transient gRPC error, worker dying mid-destroy). Fallback
+		// emit so D1 reflects the cell-PG truth.
+		s.publishSandboxLifecycleEvent(c.Request().Context(), "stopped", sandboxID, session.OrgID, session.WorkerID, "grpc_destroy_failed")
 	}
 
 	_ = s.store.UpdateSandboxSessionStatus(c.Request().Context(), sandboxID, "stopped", nil)
@@ -762,6 +847,10 @@ func (s *Server) killSandboxRemote(c echo.Context, sandboxID string) error {
 	}
 
 	s.emitEvent("destroy", sandboxID, session.WorkerID, "destroyed")
+	// Note: the worker emits the "stopped" lifecycle event via sdb.LogEvent
+	// in its DestroySandbox handler, and the SandboxDBManager.OnRemove hook
+	// synchronously flushes it to Redis before the per-sandbox SQLite is
+	// removed. events-ingest sees that event and updates D1 sandboxes_index.
 
 	return c.NoContent(http.StatusNoContent)
 }
@@ -1031,6 +1120,14 @@ func (s *Server) migrateSandbox(c echo.Context) error {
 			log.Printf("migrate %s: WARNING: CompleteMigration DB update failed: %v", id, err)
 		}
 		completeDBCancel()
+		// Mirror to D1 sandboxes_index so the dashboard's cross-cell view and
+		// the proxyToCellSDK routing reflect the new worker immediately. The
+		// new worker's `created` event would eventually sync it, but emitting
+		// here closes the window where stale routing would re-target the
+		// vanished source worker. Reads org from the existing session.
+		if session, err := s.store.GetSandboxSession(context.Background(), id); err == nil {
+			s.publishSandboxLifecycleEvent(context.Background(), "migrated", id, session.OrgID, req.TargetWorker, "user_migrate")
+		}
 	}
 	migrationDone = true
 
@@ -1641,6 +1738,9 @@ func (s *Server) hibernateSandboxRemote(c echo.Context, sandboxID string) error 
 		"sizeBytes":      grpcResp.SizeBytes,
 	}
 
+	// Worker emits the "hibernated" lifecycle event before removing the
+	// per-sandbox SQLite — events-ingest picks it up and updates D1.
+
 	return c.JSON(http.StatusOK, resp)
 }
 
@@ -1651,16 +1751,10 @@ func (s *Server) wakeSandbox(c echo.Context) error {
 	var req types.WakeRequest
 	_ = c.Bind(&req)
 
-	// Free-tier credits gate: refuse to wake if trial credits are exhausted.
-	if orgID, ok := auth.GetOrgID(c); ok && s.store != nil {
-		if org, err := s.store.GetOrg(ctx, orgID); err == nil {
-			if org.Plan == "free" && org.FreeCreditsRemainingCents <= 0 {
-				return c.JSON(http.StatusPaymentRequired, map[string]string{
-					"error": "free trial credits exhausted — upgrade to pro to resume sandboxes",
-				})
-			}
-		}
-	}
+	// Halt-gate moved to the edge (proxyToCellSDK on /wake) post-041 — the
+	// cell-PG orgs table this used to read is gone, and D1 is authoritative.
+	// halt_reconciler still enforces against running sandboxes; this wake
+	// path is reached only after the edge has gated on D1.is_halted.
 
 	// Server mode: pick any worker, dispatch via gRPC
 	if s.workerRegistry != nil {
@@ -1818,6 +1912,9 @@ func (s *Server) wakeSandboxRemote(c echo.Context, sandboxID string, req types.W
 	if s.sandboxAPIProxy != nil {
 		s.sandboxAPIProxy.InvalidateRouteCache(sandboxID)
 	}
+
+	// Worker emits the "woke" lifecycle event in its WakeSandbox handler;
+	// events-ingest flips D1 sandboxes_index back to running.
 
 	// Apply pending checkpoint patches in background
 	go s.applyPendingPatches(sandboxID, worker.ID)
@@ -2060,6 +2157,11 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 			// Pre-fix this was hardcoded to 0, leaving size_bytes meaningless.
 			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, grpcResp.RootfsS3Key, grpcResp.WorkspaceS3Key, grpcResp.SizeBytes)
 			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, grpcResp.SizeBytes)
+			s.publishCheckpointEvent(context.Background(), "checkpoint_ready", checkpointID, sandboxID, orgID, session.WorkerID, map[string]any{
+				"rootfs_s3_key":    grpcResp.RootfsS3Key,
+				"workspace_s3_key": grpcResp.WorkspaceS3Key,
+				"size_bytes":       grpcResp.SizeBytes,
+			})
 		}()
 	} else if s.manager != nil {
 		go func() {
@@ -2079,6 +2181,11 @@ func (s *Server) createCheckpoint(c echo.Context) error {
 			}
 			_ = s.store.SetCheckpointReady(context.Background(), checkpointID, rootfsKey, workspaceKey, sizeBytes)
 			log.Printf("api: checkpoint %s ready (size=%d bytes)", checkpointID, sizeBytes)
+			s.publishCheckpointEvent(context.Background(), "checkpoint_ready", checkpointID, sandboxID, orgID, session.WorkerID, map[string]any{
+				"rootfs_s3_key":    rootfsKey,
+				"workspace_s3_key": workspaceKey,
+				"size_bytes":       sizeBytes,
+			})
 		}()
 	} else {
 		s.pendingCreates.Delete(sandboxID)
@@ -2627,6 +2734,8 @@ func (s *Server) deleteCheckpoint(c echo.Context) error {
 	if err := s.store.DeleteCheckpoint(ctx, orgID, checkpointID); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+	// Mirror the deletion to D1 checkpoints_index via events-ingest.
+	s.publishCheckpointEvent(ctx, "checkpoint_deleted", checkpointID, sandboxID, orgID, "", nil)
 
 	// Best-effort: delete S3 objects if checkpoint store is configured
 	if s.checkpointStore != nil && cp.RootfsS3Key != nil && cp.WorkspaceS3Key != nil {
