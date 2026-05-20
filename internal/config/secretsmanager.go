@@ -39,7 +39,22 @@ type awsSecretsManagerProvider struct {
 func (p *awsSecretsManagerProvider) Name() string { return "aws-secretsmanager" }
 
 func (p *awsSecretsManagerProvider) Load(ctx context.Context, mode string) (int, int, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx)
+	// Region: explicit env var wins (matches the cell config), else AWS_REGION,
+	// else fall through to the default chain (IMDS on EC2). Passing nothing
+	// when LoadDefaultConfig can't resolve a region anywhere makes the first
+	// API call return "Missing Region", which surfaces unclearly — prefer the
+	// explicit env-var path even on EC2.
+	region := os.Getenv("OPENSANDBOX_REGION")
+	if region == "" {
+		region = os.Getenv("AWS_REGION")
+	}
+
+	var loadOpts []func(*awsconfig.LoadOptions) error
+	if region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(region))
+	}
+
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return 0, 0, fmt.Errorf("secretsmanager: load aws config: %w", err)
 	}
