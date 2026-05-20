@@ -82,6 +82,12 @@ variable "rootfs_context" {
   description = "Pre-built tarball of rootfs + agent wrapper sources."
 }
 
+variable "vector_context" {
+  type        = string
+  default     = "/tmp/packer-vector-ctx.tar.gz"
+  description = "Pre-built tarball of deploy/vector/ (config + populator + units). Pre-create with: tar czf /tmp/packer-vector-ctx.tar.gz deploy/vector/"
+}
+
 variable "golden_cache_bucket" {
   type        = string
   default     = ""
@@ -174,10 +180,20 @@ build {
     destination = "/tmp/opensandbox-worker.service"
   }
 
-  # 4. Upload Vector config + populator.
+  # 4. Upload Vector config + populator. Packer's file provisioner doesn't
+  #    do recursive directory upload reliably across SSH clients, so we
+  #    tar/extract the same way we do the rootfs context above. See
+  #    var.vector_context for the pre-build command.
   provisioner "file" {
-    source      = "deploy/vector/"
-    destination = "/tmp/vector/"
+    source      = var.vector_context
+    destination = "/tmp/vector-ctx.tar.gz"
+  }
+  provisioner "shell" {
+    inline = [
+      "mkdir -p /tmp/vector",
+      "tar xzf /tmp/vector-ctx.tar.gz -C /tmp/vector --strip-components=2", # strip deploy/vector/ prefix
+      "rm /tmp/vector-ctx.tar.gz",
+    ]
   }
 
   # 5. Run the (misleadingly-named-but-cloud-agnostic) setup script. Installs
