@@ -1,0 +1,60 @@
+---
+title: "Rust SDK"
+description: "Complete Rust SDK reference"
+---
+
+## Installation
+
+```toml
+# Cargo.toml
+[dependencies]
+opencomputer = "0.1"
+tokio = { version = "1", features = ["full"] }
+```
+
+```rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+```
+
+The SDK is async and built on `tokio` + `reqwest`. WebSocket streaming
+(used by `exec.start` / `exec.attach`) goes through `tokio-tungstenite`.
+
+## Quick Example
+
+```rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+
+#[tokio::main]
+async fn main() -> opencomputer::Result<()> {
+    let sandbox = Sandbox::create(SandboxOpts::new().template("base")).await?;
+
+    let result = sandbox.commands().run("echo hello", RunOpts::new()).await?;
+    println!("{}", result.stdout);
+
+    sandbox.files().write("/tmp/hi.txt", "hello").await?;
+    let _ = sandbox.files().read("/tmp/hi.txt").await?;
+
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
+## Modules
+
+<CardGroup cols={2}>
+  <Card title="Sandbox" icon="box" href="/reference/rust-sdk/sandbox">
+    Create, connect, and manage sandbox lifecycle
+  </Card>
+  <Card title="Exec" icon="terminal" href="/reference/rust-sdk/exec">
+    Run commands and stream output
+  </Card>
+  <Card title="Filesystem" icon="folder" href="/reference/rust-sdk/filesystem">
+    Read, write, and manage files
+  </Card>
+</CardGroup>
+
+<Note>
+  Agent / PTY / shell / secret-store / usage modules are not yet exposed in
+  the Rust SDK. Track the [Rust SDK milestone on
+  GitHub](https://github.com/diggerhq/opencomputer/issues) for parity progress.
+</Note>

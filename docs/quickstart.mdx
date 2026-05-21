@@ -45,6 +45,25 @@ async def main():
 asyncio.run(main())
 ```
 
+```rust Rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+
+#[tokio::main]
+async fn main() -> opencomputer::Result<()> {
+    let sandbox = Sandbox::create(SandboxOpts::new()).await?;
+
+    // Run a command inside the sandbox
+    let result = sandbox
+        .commands()
+        .run("echo 'Hello World from OpenSandbox!'", RunOpts::new())
+        .await?;
+    println!("{}", result.stdout);
+
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
 </CodeGroup>
 
 Running this will print:

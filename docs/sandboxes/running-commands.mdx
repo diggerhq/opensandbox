@@ -38,6 +38,15 @@ async with await Sandbox.create() as sandbox:
     print(result.stdout)  # "Hello, World!\n"
 ```
 
+```rust Rust
+use opencomputer::{RunOpts, Sandbox, SandboxOpts};
+
+let sandbox = Sandbox::create(SandboxOpts::new()).await?;
+let result = sandbox.exec().run("echo Hello, World!", RunOpts::new()).await?;
+println!("{}", result.stdout); // "Hello, World!\n"
+sandbox.kill().await?;
+```
+
 </CodeGroup>
 
 ## Quick Commands: `exec.run()`
@@ -69,6 +78,25 @@ result = await sandbox.exec.run(
 
 if result.exit_code != 0:
     print("Build failed:", result.stderr)
+```
+
+```rust Rust
+use opencomputer::RunOpts;
+
+let result = sandbox
+    .exec()
+    .run(
+        "npm run build",
+        RunOpts::new()
+            .cwd("/app")
+            .env("NODE_ENV", "production")
+            .timeout(120),
+    )
+    .await?;
+
+if result.exit_code != 0 {
+    eprintln!("Build failed: {}", result.stderr);
+}
 ```
 
 </CodeGroup>

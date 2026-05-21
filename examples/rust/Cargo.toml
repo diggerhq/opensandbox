@@ -1,0 +1,13 @@
+[package]
+name = "opencomputer-examples"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+opencomputer = { path = "../../sdks/rust" }
+tokio = { version = "1", features = ["full"] }
+
+[[bin]]
+name = "test"
+path = "src/main.rs"
