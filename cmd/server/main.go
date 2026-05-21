@@ -35,9 +35,10 @@ import (
 var ServerVersion = "dev"
 
 func main() {
-	// Load secrets from Azure Key Vault if configured (before config.Load reads env vars).
-	if err := config.LoadSecretsFromKeyVault(); err != nil {
-		log.Fatalf("failed to load secrets from Key Vault: %v", err)
+	// Load secrets from the configured cloud secret store (Azure KV or AWS SM)
+	// before config.Load reads env vars. No-op if neither is configured.
+	if err := config.LoadSecrets(); err != nil {
+		log.Fatalf("failed to load secrets: %v", err)
 	}
 
 	cfg, err := config.Load()

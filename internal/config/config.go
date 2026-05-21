@@ -170,6 +170,25 @@ type Config struct {
 	// Env vars take precedence over secret values (for local overrides).
 	SecretsARN string
 
+	// AWSSecretsPrefix is the per-cell secret name prefix in AWS Secrets
+	// Manager, e.g. "opencomputer/aws-us-east-2-poc/". When set, LoadSecrets
+	// selects the AWS Secrets Manager provider and lists+loads everything
+	// under this prefix. Mirrors AzureKeyVaultName for the AWS path.
+	AWSSecretsPrefix string
+
+	// Cloud is a short identifier for the cloud the binary is running on
+	// ("aws", "azure", or empty for local/dev). Set by cloud-init from
+	// terraform — preferred over runtime probing for fast startup.
+	Cloud string
+
+	// CPUOvercommitRatio multiplies the worker's physical vCPU count when
+	// publishing capacity in the Redis heartbeat. 1 = no overcommit
+	// (matches Azure default). 2 = recommended for agent workloads on AWS
+	// — roughly halves $/sandbox without measurable UX impact for
+	// LLM-bound sandboxes. Memory is never overcommitted because host OOM
+	// is a worse failure mode than CPU contention.
+	CPUOvercommitRatio int
+
 	// Secret encryption key (hex-encoded 32 bytes / 64 hex chars) for encrypting
 	// project secrets at rest in PostgreSQL. Required if using project secrets.
 	SecretEncryptionKey string
@@ -294,6 +313,9 @@ func Load() (*Config, error) {
 		AzureSubnetID:       os.Getenv("OPENSANDBOX_AZURE_SUBNET_ID"),
 		AzureSSHPublicKey:   os.Getenv("OPENSANDBOX_AZURE_SSH_PUBLIC_KEY"),
 		AzureKeyVaultName:   os.Getenv("OPENSANDBOX_AZURE_KEY_VAULT_NAME"),
+		AWSSecretsPrefix:    os.Getenv("OPENSANDBOX_AWS_SECRETS_PREFIX"),
+		Cloud:               os.Getenv("OPENSANDBOX_CLOUD"),
+		CPUOvercommitRatio:  envOrDefaultInt("OPENSANDBOX_CPU_OVERCOMMIT_RATIO", 1),
 		AzureWorkerIdentityID: os.Getenv("OPENSANDBOX_AZURE_WORKER_IDENTITY_ID"),
 
 		CFAPIToken: os.Getenv("OPENSANDBOX_CF_API_TOKEN"),
@@ -357,6 +379,20 @@ func Load() (*Config, error) {
 	// var explicitly at provisioning time.
 	if cfg.CellID == "" {
 		cfg.CellID = cfg.Region + "-default"
+	}
+
+	// CPU overcommit: multiply the physical-capacity ceiling by the
+	// configured ratio so the worker advertises (and the CP places onto)
+	// the inflated slot count. Ratio < 1 is treated as 1 (the operator
+	// cannot under-commit via this knob — set MaxCapacity directly for
+	// that). Applied after all loading so callers see one consistent
+	// number; the heartbeat, gRPC capacity guard, and any future consumer
+	// all agree.
+	if cfg.CPUOvercommitRatio < 1 {
+		cfg.CPUOvercommitRatio = 1
+	}
+	if cfg.CPUOvercommitRatio > 1 && cfg.MaxCapacity > 0 {
+		cfg.MaxCapacity = cfg.MaxCapacity * cfg.CPUOvercommitRatio
 	}
 
 	if portStr := os.Getenv("OPENSANDBOX_PORT"); portStr != "" {

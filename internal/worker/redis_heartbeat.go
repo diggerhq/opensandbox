@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -65,6 +66,7 @@ type RedisHeartbeat struct {
 	workerVersion string
 	wasDown       bool   // true if the last publish failed (used to detect reconnect)
 	stop          chan struct{}
+	stopOnce      sync.Once // guards close(stop) + rdb.Del — Stop() may be called from preemption handler and defer
 }
 
 // NewRedisHeartbeat creates a new heartbeat publisher.
@@ -218,14 +220,18 @@ func (h *RedisHeartbeat) publish() {
 }
 
 // Stop stops the heartbeat publisher and closes the Redis connection.
+// Idempotent — safe to call from both the preemption-handler goroutine and
+// the normal `defer hb.Stop()` shutdown path.
 func (h *RedisHeartbeat) Stop() {
-	close(h.stop)
+	h.stopOnce.Do(func() {
+		close(h.stop)
 
-	// Remove the key so the server knows we're gone immediately
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	h.rdb.Del(ctx, "worker:"+h.workerID)
+		// Remove the key so the server knows we're gone immediately
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		h.rdb.Del(ctx, "worker:"+h.workerID)
 
-	h.rdb.Close()
-	log.Println("redis_heartbeat: stopped")
+		h.rdb.Close()
+		log.Println("redis_heartbeat: stopped")
+	})
 }
