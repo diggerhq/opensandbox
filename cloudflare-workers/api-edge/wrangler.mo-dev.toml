@@ -1,0 +1,87 @@
+# api-edge — `mo-dev` stack edge in the dev CF account (10a2123d).
+#
+# Reconstructed from the LIVE deployed `opencomputer-edge-mo-dev` worker
+# (which had no config in the repo). Mirrors its exact bindings so a redeploy
+# preserves the stack's Autumn/Stripe billing and all secrets.
+#
+# Secrets are NOT declared here: `wrangler deploy` preserves secrets already
+# set on the worker. The live worker carries (all secret_text):
+#   WORKOS_API_KEY, WORKOS_CLIENT_ID, SESSION_JWT_SECRET, EVENT_SECRET,
+#   AUTUMN_SECRET_KEY, AUTUMN_WEBHOOK_SECRET, STRIPE_API_KEY,
+#   STRIPE_WEBHOOK_SECRET, SESSIONS_API_URL, OC_MANAGED_AGENTS_SECRET,
+#   OC_MANAGED_CRED_HMAC_SECRET, OC_ORG_TOKEN_SECRET, OC_PROVISION_SECRET,
+#   OPENROUTER_PROVISIONING_KEY, SECRET_ENCRYPTION_KEY, SECRET… (see CF).
+#
+# Deploy:
+#   cd web && npm run build
+#   rm -rf cloudflare-workers/api-edge/assets \
+#     && cp -R web/dist/. cloudflare-workers/api-edge/assets/
+#   cd cloudflare-workers/api-edge \
+#     && CLOUDFLARE_ACCOUNT_ID=10a2123d1440c5fbf090968ca59bfb28 \
+#        wrangler deploy --config wrangler.mo-dev.toml
+
+name = "opencomputer-edge-mo-dev"
+main = "src/index.ts"
+compatibility_date = "2026-04-28"
+compatibility_flags = ["nodejs_compat"]
+account_id = "10a2123d1440c5fbf090968ca59bfb28"
+
+[[routes]]
+pattern = "mo-oc-dev.com"
+custom_domain = true
+
+# Autumn usage sync (matches the live worker's */5 cron).
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Dashboard SPA, built from web/ and staged into ./assets (gitignored).
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "OPENCOMPUTER_DB"
+database_name = "opencomputer-mo-dev"
+database_id = "a6f5b117-29ee-4507-a755-af38bd6684b0"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "49fbfad5bb37401a823b9939eb267c29"
+
+[[ratelimits]]
+name = "CLI_AUTH_START_RATE_LIMIT"
+namespace_id = "2026072431"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[ratelimits]]
+name = "CLI_AUTH_EXCHANGE_RATE_LIMIT"
+namespace_id = "2026072432"
+
+  [ratelimits.simple]
+  limit = 180
+  period = 60
+
+# CreditAccount DO is self-hosted by this worker (script_name defaults to self).
+[[durable_objects.bindings]]
+name = "CREDIT_ACCOUNT"
+class_name = "CreditAccount"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CreditAccount"]
+
+[vars]
+WORKER_ENV = "mo-dev"
+BURST_CELL_ID = "azure-korea-central-dev"
+MANAGED_AGENTS_API_URL = "https://manage-agents.mo-oc-dev.com"
+AUTUMN_NEW_ORGS = "true"
+BROWSER_API_URL = "https://browser.mo-oc-dev.com"
+VENDO_BASE_URL = "https://mo-oc-dev.com"
+DEV_SCALE_BILLING_BYPASS_AGENT_ID = "scale-demo-million-dev@development"
+DEV_SCALE_BILLING_BYPASS_ORG_ID = "50f3895f-a6ad-4d36-9e48-3e9f3f70b3e7"
